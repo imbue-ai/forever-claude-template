@@ -1,0 +1,38 @@
+version = 1
+revision = 2
+requires-python = ">=3.11"
+
+[manifest]
+members = [
+    "bootstrap",
+    "forever-claude-template",
+    "telegram-bot",
+]
+
+[[package]]
+name = "bootstrap"
+version = "0.1.0"
+source = { editable = "libs/bootstrap" }
+
+[package.metadata]
+requires-dist = [{ name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" }]
+
+[[package]]
+name = "forever-claude-template"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "bootstrap" },
+    { name = "telegram-bot" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bootstrap", editable = "libs/bootstrap" },
+    { name = "telegram-bot", editable = "libs/telegram_bot" },
+]
+
+[[package]]
+name = "telegram-bot"
+version = "0.1.0"
+source = { editable = "libs/telegram_bot" }

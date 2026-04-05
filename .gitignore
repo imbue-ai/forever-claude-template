@@ -1,3 +1,7 @@
+# Forever Claude runtime state
+.runtime/
+memory/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

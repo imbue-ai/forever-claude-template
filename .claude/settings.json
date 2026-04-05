@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(command:mngr *)",
+      "Bash(command:uv run telegram-send *)",
+      "Bash(command:uv run telegram-history *)",
+      "Bash(command:scripts/*)",
+      "Bash(command:git *)"
+    ]
+  },
+  "autoMemoryDirectory": "memory"
+}

@@ -1,0 +1,6 @@
+# Background services managed by the bootstrap service manager.
+# Each [services.<name>] entry runs in its own tmux window (named svc-<name>).
+# See the edit-services skill for details.
+
+[services.web]
+command = "python3 -m http.server 8080"

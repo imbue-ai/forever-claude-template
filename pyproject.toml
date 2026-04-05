@@ -1,0 +1,19 @@
+[project]
+name = "forever-claude-template"
+version = "0.1.0"
+description = "Template repo for a persistent Claude agent"
+requires-python = ">=3.11"
+dependencies = [
+    "telegram-bot",
+    "bootstrap",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["libs/*"]
+
+[tool.uv.sources]
+telegram-bot = { workspace = true }
+bootstrap = { workspace = true }
