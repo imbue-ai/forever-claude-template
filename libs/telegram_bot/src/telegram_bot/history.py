@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 
-HISTORY_FILE = Path(".runtime/telegram/history.jsonl")
+HISTORY_FILE = Path("runtime/telegram/history.jsonl")
 
 
 def _format_entry(obj: dict) -> str | None:

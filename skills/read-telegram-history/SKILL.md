@@ -5,7 +5,7 @@ description: Read recent Telegram conversation history. Use this to understand c
 
 # Reading telegram history
 
-The conversation history is stored in `.runtime/telegram/history.jsonl`. Each line is a raw Telegram update JSON object for incoming messages, or a JSON object with `"direction": "out"` for outgoing messages.
+The conversation history is stored in `runtime/telegram/history.jsonl`. Each line is a raw Telegram update JSON object for incoming messages, or a JSON object with `"direction": "out"` for outgoing messages.
 
 ## Quick commands
 
@@ -18,13 +18,13 @@ uv run telegram-history --last 20
 Or read the raw JSONL directly:
 
 ```bash
-tail -n 20 .runtime/telegram/history.jsonl
+tail -n 20 runtime/telegram/history.jsonl
 ```
 
 Extract just the text of recent messages:
 
 ```bash
-tail -n 20 .runtime/telegram/history.jsonl | python3 -c "
+tail -n 20 runtime/telegram/history.jsonl | python3 -c "
 import json, sys
 for line in sys.stdin:
     line = line.strip()

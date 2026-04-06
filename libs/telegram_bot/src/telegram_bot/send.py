@@ -18,7 +18,7 @@ from urllib.request import Request
 from urllib.request import urlopen
 
 
-HISTORY_FILE = Path(".runtime/telegram/history.jsonl")
+HISTORY_FILE = Path("runtime/telegram/history.jsonl")
 
 
 def _get_env(name: str) -> str:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idle backoff wait script for the event processor.
 #
-# Reads a counter from .runtime/wait_counter, looks up a sleep duration
+# Reads a counter from runtime/wait_counter, looks up a sleep duration
 # from a schedule, sleeps, then increments the counter.
 #
 # The counter file is deleted by the UserPromptSubmit and Notification[idle_prompt]
@@ -11,9 +11,9 @@
 # The last value repeats forever.
 SCHEDULE=(1 1 5 10 30 60)
 
-COUNTER_FILE=".runtime/wait_counter"
+COUNTER_FILE="runtime/wait_counter"
 
-mkdir -p .runtime
+mkdir -p runtime
 
 # Read current counter (default 0)
 if [ -f "$COUNTER_FILE" ]; then

@@ -52,4 +52,4 @@ If something unexpected happens -- errors, confusing state, things not working a
 
 ## Git
 
-Commit your changes locally. `.runtime/` and `memory/` are gitignored. Do not push to remote.
+Commit your changes locally. `runtime/` and `memory/` are gitignored. Do not push to remote.

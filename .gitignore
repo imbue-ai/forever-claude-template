@@ -1,5 +1,5 @@
 # Forever Claude runtime state
-.runtime/
+runtime/
 memory/
 
 # Byte-compiled / optimized / DLL files

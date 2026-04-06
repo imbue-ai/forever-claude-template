@@ -1,7 +1,7 @@
 """Telegram bot that long-polls for messages and delivers them via mngr message.
 
 Filters messages by TELEGRAM_USER_NAME. Appends raw update JSON to
-.runtime/telegram/history.jsonl. Calls mngr message for each new text message.
+runtime/telegram/history.jsonl. Calls mngr message for each new text message.
 
 Environment:
     TELEGRAM_BOT_TOKEN  - Telegram Bot API token
@@ -22,7 +22,7 @@ from urllib.request import Request
 from urllib.request import urlopen
 
 
-HISTORY_FILE = Path(".runtime/telegram/history.jsonl")
+HISTORY_FILE = Path("runtime/telegram/history.jsonl")
 POLL_TIMEOUT = 30  # seconds (Telegram long polling)
 ERROR_BACKOFF_SECONDS = 5
 
