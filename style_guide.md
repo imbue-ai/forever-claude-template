@@ -1,1 +1,1 @@
-libs/mngr/style_guide.md
+vendor/mngr/style_guide.md

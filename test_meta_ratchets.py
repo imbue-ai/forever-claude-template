@@ -9,8 +9,8 @@ from inline_snapshot import snapshot
 
 _REPO_ROOT = Path(__file__).parent
 
-# Vendored projects that are excluded from ratchet requirements
-_EXCLUDED_DIRS: frozenset[str] = frozenset({"mngr"})
+# Directories excluded from scanning (vendored code)
+_VENDORED_DIR = _REPO_ROOT / "vendor"
 
 _SELF_EXCLUSION: tuple[str, ...] = ("test_meta_ratchets.py",)
 
@@ -18,17 +18,13 @@ pytestmark = pytest.mark.xdist_group(name="meta_ratchets")
 
 
 def _get_all_project_dirs() -> list[Path]:
-    """Return all project directories (libs/*) that are not excluded."""
+    """Return all project directories (libs/*) excluding vendored code."""
     project_dirs: list[Path] = []
     libs_dir = _REPO_ROOT / "libs"
     if not libs_dir.is_dir():
         return project_dirs
     for child in sorted(libs_dir.iterdir()):
-        if (
-            child.is_dir()
-            and (child / "pyproject.toml").exists()
-            and child.name not in _EXCLUDED_DIRS
-        ):
+        if child.is_dir() and (child / "pyproject.toml").exists():
             project_dirs.append(child)
     return project_dirs
 
@@ -113,9 +109,9 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
 
 
 def _find_bash_scripts_without_strict_mode() -> list[str]:
-    """Find bash scripts missing 'set -euo pipefail', excluding vendored libs/mngr/."""
+    """Find bash scripts missing 'set -euo pipefail', excluding vendored code."""
     violations: list[str] = []
-    vendored_prefix = str(_REPO_ROOT / "libs" / "mngr")
+    vendored_prefix = str(_VENDORED_DIR)
     for script in _REPO_ROOT.rglob("*.sh"):
         if str(script).startswith(vendored_prefix):
             continue

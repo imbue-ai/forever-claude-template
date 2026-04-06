@@ -23,7 +23,7 @@ mngr create my-mind main -t local \
 - `services.toml` - Background services managed by bootstrap
 - `libs/telegram_bot/` - Telegram bot, send CLI, and history viewer
 - `libs/bootstrap/` - Service manager (reconciles services.toml with tmux windows)
-- `libs/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command
+- `vendor/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command
 
 ## Create templates
 

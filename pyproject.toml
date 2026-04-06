@@ -29,23 +29,23 @@ members = ["libs/telegram_bot", "libs/bootstrap"]
 [tool.uv.sources]
 telegram-bot = { workspace = true }
 bootstrap = { workspace = true }
-imbue-common = { path = "libs/mngr/libs/imbue_common" }
+imbue-common = { path = "vendor/mngr/libs/imbue_common" }
 
 [tool.pytest.ini_options]
 testpaths = ["."]
 timeout_func_only = true
 addopts = [
     "--timeout=10",
-    "--ignore=libs/mngr",
+    "--ignore=vendor/mngr",
 ]
 
 [tool.ruff]
 target-version = "py311"
-exclude = ["libs/mngr"]
+exclude = ["vendor/mngr"]
 
 [tool.ruff.lint]
 select = ["F", "I", "UP006", "UP007"]
 
 [tool.pyright]
 pythonVersion = "3.11"
-exclude = ["libs/mngr"]
+exclude = ["vendor/mngr"]

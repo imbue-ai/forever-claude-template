@@ -1944,7 +1944,9 @@ class Host(BaseHost, OnlineHostInterface):
             with log_span("Updating git worktree", path=str(work_dir_path), branch=branch_label):
                 git_wt = f"git -C {shlex.quote(str(work_dir_path))}"
                 if new_branch_name:
-                    checkout_cmd = f"{git_wt} checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch or 'HEAD')}"
+                    checkout_cmd = (
+                        f"{git_wt} checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch or 'HEAD')}"
+                    )
                 else:
                     checkout_cmd = f"{git_wt} checkout {shlex.quote(base_branch or 'HEAD')}"
                 result = self.execute_idempotent_command(checkout_cmd)

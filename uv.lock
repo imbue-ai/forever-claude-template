@@ -126,7 +126,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "bootstrap", editable = "libs/bootstrap" },
-    { name = "imbue-common", directory = "libs/mngr/libs/imbue_common" },
+    { name = "imbue-common", directory = "vendor/mngr/libs/imbue_common" },
     { name = "telegram-bot", editable = "libs/telegram_bot" },
 ]
 
@@ -283,7 +283,7 @@ wheels = [
 [[package]]
 name = "imbue-common"
 version = "0.1.10"
-source = { directory = "libs/mngr/libs/imbue_common" }
+source = { directory = "vendor/mngr/libs/imbue_common" }
 dependencies = [
     { name = "click" },
     { name = "cowsay-python" },

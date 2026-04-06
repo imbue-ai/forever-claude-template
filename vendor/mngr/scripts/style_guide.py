@@ -71,8 +71,6 @@ class TodoId(RandomId):
 # === Example block 3 ===
 
 
-
-
 class TodoStorageConfiguration(FrozenModel):
     """Configuration for todo storage."""
 
@@ -92,7 +90,6 @@ def write_todo_file(file_path: Path, content: str) -> None:
 
 
 # === Example block 4 ===
-
 
 
 class TodoSyncConfiguration(FrozenModel):
@@ -152,13 +149,10 @@ class TodoSyncCredentials(FrozenModel):
 
     username: UserName = Field(description="Sync server username")
     api_key: SecretStr = Field(description="API key for authentication")
-    encryption_key: SecretStr = Field(
-        description="Key used to encrypt todo data in transit"
-    )
+    encryption_key: SecretStr = Field(description="Key used to encrypt todo data in transit")
 
 
 # === Example block 8 ===
-
 
 
 @pure
@@ -169,7 +163,6 @@ def get_current_utc_timestamp() -> datetime:
 # === Example block 9 ===
 
 
-
 class TodoCostEstimate(FrozenModel):
     """Describes how much a todo item may cost to accomplish."""
 
@@ -178,7 +171,6 @@ class TodoCostEstimate(FrozenModel):
 
 
 # === Example block 10 ===
-
 
 
 class TodoStatus(UpperCaseStrEnum):
@@ -254,7 +246,6 @@ def categorize_todo_by_priority_and_age(
 # === Example block 13 ===
 
 
-
 class TodoTitle(str):
     """A non-empty title for a todo item with length constraints."""
 
@@ -280,15 +271,11 @@ class TodoTitle(str):
 # === Example block 14 ===
 
 
-
-
 class TodoAppConfiguration(FrozenModel):
     """Configuration settings for the todo application."""
 
     max_todos_per_list: PositiveInt = Field(description="Maximum todos per list")
-    max_title_length: Annotated[int, Field(gt=0, le=500)] = Field(
-        description="Maximum length for todo titles"
-    )
+    max_title_length: Annotated[int, Field(gt=0, le=500)] = Field(description="Maximum length for todo titles")
 
 
 # === Example block 15 ===
@@ -353,16 +340,11 @@ def example_exception_handling_with_chaining() -> None:
 # === Example block 18 ===
 
 
-
 class TodoCostLedgerEntry(FrozenModel):
     """An entry in the expected cost ledger for todos."""
 
-    todo_cost_estimate: TodoCostEstimate = Field(
-        description="The cost estimate associated with this ledger entry"
-    )
-    execution_probability: Probability = Field(
-        description="The probability that this cost will be incurred"
-    )
+    todo_cost_estimate: TodoCostEstimate = Field(description="The cost estimate associated with this ledger entry")
+    execution_probability: Probability = Field(description="The probability that this cost will be incurred")
 
 
 class CostLedgerImportResult(FrozenModel):
@@ -423,9 +405,7 @@ class TodoNotificationService(MutableModel):
         try:
             self._send_notification(reminder)
         except ConnectionError as e:
-            raise TodoNotificationError(
-                f"Cannot send reminder: {reminder.reminder_id}"
-            ) from e
+            raise TodoNotificationError(f"Cannot send reminder: {reminder.reminder_id}") from e
 
 
 # === Example block 20 ===
@@ -442,10 +422,10 @@ def filter_todos_by_status(
 @pure
 def walk_todo_tree(
     root_todo: TodoItem,
-    # A callback function to invoke on each todo item as it is visited. If it returns a non-None result, 
+    # A callback function to invoke on each todo item as it is visited. If it returns a non-None result,
     # the original todo item will be replaced with the returned item in the tree.
     visit_callback: Callable[[TodoItem], TodoItem | None],
-# the (possibly new) root created by the traversal
+    # the (possibly new) root created by the traversal
 ) -> TodoItem:
     """Traverse the todo tree in depth-first order, invoking a callback on each todo item."""
     ...
@@ -464,7 +444,7 @@ def archive_todos_completed_before(
     todo_list: TodoList,
     archive_before_date: datetime,
 ) -> ArchiveCompletedTodosResult:
-    
+
     # Separate todos into those to keep and those to archive
     todos_to_keep: list[TodoItem] = []
     todos_to_archive: list[TodoItem] = []
@@ -530,8 +510,7 @@ class TodoListStatistics(FrozenModel):
     overdue_todo_count: int = Field(description="Number of overdue todos")
 
 
-def get_todo_at_display_idx(self, display_idx: int) -> TodoItem:
-    ...
+def get_todo_at_display_idx(self, display_idx: int) -> TodoItem: ...
 
 
 # === Example block 26 ===
@@ -545,8 +524,7 @@ def find_todos_matching_title_or_description(
     todo_list: TodoList,
     search_text: str,
     max_result_count: int,
-) -> list[TodoItem]:
-    ...
+) -> list[TodoItem]: ...
 
 
 # === Example block 27 ===
@@ -557,10 +535,7 @@ def find_todos_with_any_tag(
     todos: Sequence[TodoItem],
     allowed_tags: Mapping[str, TagPriority],
 ) -> tuple[TodoItem, ...]:
-    return tuple(
-        todo for todo in todos
-        if any(tag in allowed_tags for tag in todo.tags)
-    )
+    return tuple(todo for todo in todos if any(tag in allowed_tags for tag in todo.tags))
 
 
 # === Example block 28 ===
@@ -642,7 +617,6 @@ class TodoReminder(FrozenModel):
 # === Example block 32 ===
 
 
-
 class TodoBatch(FrozenModel):
     """A batch of todos for bulk processing."""
 
@@ -656,8 +630,6 @@ class TodoBatch(FrozenModel):
 
 
 # === Example block 33 ===
-
-
 
 
 class TodoRepositoryInterface(MutableModel, ABC):
@@ -692,7 +664,7 @@ class TodoChange(FrozenModel):
 
 class TodoSyncServiceInterface(MutableModel, ABC):
     """Defines the contract for synchronizing todos with a remote server."""
-    
+
     @abstractmethod
     def connect(self, server_url: str) -> None:
         """Establish a connection to the sync server."""
@@ -713,7 +685,6 @@ class TodoSyncServiceInterface(MutableModel, ABC):
 # === Example block 35 ===
 
 
-
 class FileTodoRepository(TodoRepositoryInterface):
     """File-based implementation of the todo repository."""
 
@@ -725,9 +696,7 @@ class FileTodoRepository(TodoRepositoryInterface):
         try:
             self.storage_directory.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            raise StorageInitializationError(
-                f"Cannot create storage directory: {self.storage_directory}"
-            ) from e
+            raise StorageInitializationError(f"Cannot create storage directory: {self.storage_directory}") from e
         self.is_initialized = True
 
     def shutdown(self) -> None:
@@ -771,10 +740,7 @@ def generate_todo_summary_report(
     pending_todos = tuple(t for t in todo_list.todos if not t.is_completed)
 
     # Identify overdue items
-    overdue_todos = tuple(
-        t for t in pending_todos
-        if t.due_date is not None and t.due_date < report_date
-    )
+    overdue_todos = tuple(t for t in pending_todos if t.due_date is not None and t.due_date < report_date)
 
     # Build the summary statistics
     statistics = TodoStatistics(
@@ -831,8 +797,6 @@ def main() -> None:
     configuration = load_todo_app_configuration()
     todo_repository = create_todo_repository(configuration)
     run_todo_app(configuration, todo_repository)
-
-
 
 
 # === Example block 40 ===
@@ -892,10 +856,9 @@ MAX_TODO_TITLE_LENGTH: Final[int] = 200
 # === Example block 44 ===
 
 
-
 def save_todo_to_repository(
-        todo_repository: TodoRepositoryInterface,
-        todo_item: TodoItem,
+    todo_repository: TodoRepositoryInterface,
+    todo_item: TodoItem,
 ) -> None:
     with log_span("Saving todo to repository"):
         todo_repository.save_todo(todo_item)
@@ -950,10 +913,7 @@ def main() -> None:
     ...
 
 
-
 # === Example block 49 ===
-
-
 
 
 class TodoAppConfigurationError(TodoAppError):
@@ -1005,9 +965,6 @@ def load_todo_app_configuration() -> TodoAppConfiguration:
 
 
 # === Example block 50 ===
-
-
-
 
 
 class TodoCliArguments(FrozenModel):
@@ -1111,8 +1068,6 @@ def test_format_todo_for_display_shows_completed_marker_when_done() -> None:
 # === Example block 54 ===
 
 
-
-
 def test_export_large_todo_dataset_to_json_produces_expected_output() -> None:
     """Test that exporting a large dataset produces the expected content."""
     # Create a large dataset with many todos
@@ -1143,9 +1098,7 @@ def test_export_large_todo_dataset_to_json_produces_expected_output() -> None:
 
     # Compare hash instead of the full content
     content_hash = hashlib.sha256(exported_json.encode()).hexdigest()
-    assert content_hash == snapshot(
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    )
+    assert content_hash == snapshot("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
 
 
 # === Example block 55 ===
@@ -1162,10 +1115,6 @@ def test_add_todo_to_list_appends_todo_to_end_of_list() -> None:
 # === Example block 56 ===
 
 
-
-
-
-
 def test_sync_todo_list_to_remote_server_handles_response_correctly(
     request: pytest.FixtureRequest,
 ) -> None:
@@ -1174,9 +1123,7 @@ def test_sync_todo_list_to_remote_server_handles_response_correctly(
     is_updating = inline_snapshot_is_updating(request.config)
 
     # Use a repo-root-relative path for the response file
-    response_file_path = snapshot(
-        Path("tests/http_responses/sync_todo_list_response.json")
-    )
+    response_file_path = snapshot(Path("tests/http_responses/sync_todo_list_response.json"))
 
     if is_updating:
         # Make a live HTTP request when updating snapshots
@@ -1250,5 +1197,3 @@ def sync_todo_list_to_remote_server(
     response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
     response.raise_for_status()
     return SyncResponse.model_validate(response.json())
-
-
