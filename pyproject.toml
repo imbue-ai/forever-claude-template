@@ -31,7 +31,7 @@ bootstrap = { workspace = true }
 imbue-common = { path = "libs/mngr/libs/imbue_common" }
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["libs/telegram_bot", "libs/bootstrap"]
 timeout_func_only = true
 addopts = [
     "--timeout=10",
@@ -39,9 +39,11 @@ addopts = [
 
 [tool.ruff]
 target-version = "py311"
+exclude = ["libs/mngr"]
 
 [tool.ruff.lint]
 select = ["F", "I", "UP006", "UP007"]
 
 [tool.pyright]
 pythonVersion = "3.11"
+exclude = ["libs/mngr"]
