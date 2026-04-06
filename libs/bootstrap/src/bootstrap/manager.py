@@ -9,7 +9,6 @@ Environment:
     Expects to run inside a tmux session (uses the current session name).
 """
 
-import os
 import subprocess
 import sys
 import time
@@ -52,7 +51,7 @@ def _list_managed_windows(session: str) -> dict[str, str]:
     windows = {}
     for name in result.stdout.strip().split("\n"):
         if name.startswith(SVC_PREFIX):
-            service_name = name[len(SVC_PREFIX):]
+            service_name = name[len(SVC_PREFIX) :]
             windows[service_name] = name
     return windows
 

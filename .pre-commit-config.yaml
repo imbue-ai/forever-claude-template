@@ -1,0 +1,13 @@
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+    -   id: check-added-large-files
+        exclude: 'uv.lock'
+-   repo: local
+    hooks:
+    -   id: ruff
+        name: "Python formatter + import sorter (ruff)"
+        entry: bash -c 'uvx ruff check --select UP006,UP007,I,F401 --fix "$@" && uvx ruff format "$@"' --
+        language: system
+        types: [python]
