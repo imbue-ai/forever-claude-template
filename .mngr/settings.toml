@@ -61,7 +61,7 @@ extra_window = [
 provider = "local"
 extra_provision_command = "uv tool install -e vendor/mngr/libs/mngr && mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude"
 # also needs to set UV_TOOL_BIN_DIR and UV_TOOL_DIR to actually set to the correct mngr tool for that instance
-pass_env = ["UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
+pass_env = ["MIND_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
 
 # template for docker provider
 [create_templates.docker]
