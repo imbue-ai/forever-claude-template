@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # Stop hook: always prevent the event processor from exiting.
 # Exit code 2 tells Claude Code to block the stop.
 

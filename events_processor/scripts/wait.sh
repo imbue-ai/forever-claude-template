@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # Idle backoff wait script for the event processor.
 #
 # Reads a counter from runtime/wait_counter, looks up a sleep duration
