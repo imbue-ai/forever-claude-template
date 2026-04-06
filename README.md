@@ -12,20 +12,9 @@ mngr create my-mind main -t local \
     --pass-env TELEGRAM_USER_NAME
 ```
 
-## Setup
-
-1. Create a Telegram bot via [@BotFather](https://t.me/botfather) and get the token
-2. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_USER_NAME` in your environment
-3. Run `uv sync` in this repo to install dependencies
-4. Create the agent with `mngr create`
-
-The agent will start, read its PURPOSE.md (which asks it to figure out what to do), and message you on Telegram.
-
 ## Structure
 
 - `CLAUDE.md` - Agent instructions
-- `PURPOSE.md` - Current purpose (agent modifies this)
-- `SOUL.md` - Personality and values
 - `parent.toml` - Upstream repo for pulling updates
 - `.mngr/settings.toml` - Agent types, create templates, command defaults
 - `skills/` - Agent skills (telegram, task delegation, services, self-update)
@@ -34,10 +23,8 @@ The agent will start, read its PURPOSE.md (which asks it to figure out what to d
 - `services.toml` - Background services managed by bootstrap
 - `libs/telegram_bot/` - Telegram bot, send CLI, and history viewer
 - `libs/bootstrap/` - Service manager (reconciles services.toml with tmux windows)
+- `libs/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command
 
 ## Create templates
 
-- `local` - Run locally with bootstrap service manager
-- `modal` - Run on Modal with bootstrap and GitHub setup
-- `docker` - Run in Docker with bootstrap
 - `worker` - For sub-agents created via the launch-task skill (includes code review)
