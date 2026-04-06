@@ -1,12 +1,59 @@
 {
-  "permissions": {
-    "allow": [
-      "Bash(command:mngr *)",
-      "Bash(command:uv run telegram-send *)",
-      "Bash(command:uv run telegram-history *)",
-      "Bash(command:scripts/*)",
-      "Bash(command:git *)"
+  "autoMemoryDirectory": "memory",
+  "env": {
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv sync --all-packages"
+          },
+          {
+            "type": "command",
+            "command": "./scripts/claude_update_plugin.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_prevent_commit_rewrite.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e .git ] || { echo \"Be sure to return to the repo root when you finish! Otherwise the other stop hooks cannot run correctly.\" >&2; exit 2; }"
+          }
+        ]
+      }
     ]
   },
-  "autoMemoryDirectory": "memory"
+  "extraKnownMarketplaces": {
+    "imbue-code-guardian": {
+      "source": {
+        "source": "github",
+        "repo": "imbue-ai/code-guardian"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "imbue-code-guardian@imbue-code-guardian": true
+  },
+  "model": "opus[1m]",
+  "effortLevel": "high",
+  "statusLine": {
+    "type": "command",
+    "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_status_line.sh"
+  }
 }
