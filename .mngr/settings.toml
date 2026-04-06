@@ -1,0 +1,43 @@
+# Agent type defaults -- apply to all claude agents created from this repo
+[agent_types.claude]
+cli_args = "--dangerously-skip-permissions"
+trust_working_directory = true
+model = "opus[1m]"
+is_fast = true
+
+# The "main" agent type -- inherits everything from claude
+[agent_types.main]
+parent_type = "claude"
+
+# Default create command settings -- apply to all mngr create from this repo
+[commands.create]
+pass_env = ["MIND_NAME"]
+connect = false
+ensure_clean = false
+
+# --- Create templates ---
+
+# Worker template: for sub-agents created by the launch-task skill
+[create_templates.worker]
+type = "claude"
+extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"]
+env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
+agent_args = ["--dangerously-skip-permissions",
+    """--append-system-prompt "You were launched by a mind agent. Your work will be reviewed via transcript and git diff. Commit your changes when done. Do not ask the user questions about your initial request -- just execute the task as best you can. If you need more information, make a best guess and proceed. List any questions at the end of your final response, along with the assumptions you made." """]
+
+# Local template: run on the local machine with bootstrap service manager
+[create_templates.local]
+extra_window = ["bootstrap='uv run bootstrap'"]
+
+# Modal template: run on Modal with bootstrap
+[create_templates.modal]
+provider = "modal"
+target_path = "/root/workspace"
+idle_timeout = "30s"
+extra_window = ["bootstrap='uv run bootstrap'", "github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+
+# Docker template: run in Docker with bootstrap
+[create_templates.docker]
+provider = "docker"
+target_path = "/workspace"
+extra_window = ["bootstrap='uv run bootstrap'"]

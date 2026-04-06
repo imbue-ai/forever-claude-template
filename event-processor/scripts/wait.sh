@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idle backoff wait script.
+# Idle backoff wait script for the event processor.
 #
 # Reads a counter from .runtime/wait_counter, looks up a sleep duration
 # from a schedule, sleeps, then increments the counter.
@@ -18,7 +18,6 @@ mkdir -p .runtime
 # Read current counter (default 0)
 if [ -f "$COUNTER_FILE" ]; then
     counter=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
-    # Validate it's a number
     if ! [[ "$counter" =~ ^[0-9]+$ ]]; then
         counter=0
     fi
@@ -29,7 +28,6 @@ fi
 # Look up sleep duration from schedule
 schedule_len=${#SCHEDULE[@]}
 if [ "$counter" -ge "$schedule_len" ]; then
-    # Past the end of the schedule: use the last value
     sleep_minutes=${SCHEDULE[$((schedule_len - 1))]}
 else
     sleep_minutes=${SCHEDULE[$counter]}
