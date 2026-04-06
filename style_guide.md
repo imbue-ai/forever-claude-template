@@ -1,0 +1,1 @@
+libs/mngr/style_guide.md
