@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.error import URLError
@@ -38,7 +39,7 @@ def _telegram_api(token: str, method: str, params: dict | None = None) -> dict:
     """Call the Telegram Bot API."""
     url = f"https://api.telegram.org/bot{token}/{method}"
     if params:
-        url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
+        url += "?" + urllib.parse.urlencode(params)
     request = Request(url)
     with urlopen(request, timeout=POLL_TIMEOUT + 10) as response:
         return json.loads(response.read().decode())

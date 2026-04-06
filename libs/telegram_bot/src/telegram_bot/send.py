@@ -57,15 +57,10 @@ def _find_chat_id(username: str) -> int | None:
 
 
 def _send_message(token: str, chat_id: int, text: str) -> dict:
-    """Send a message via the Telegram Bot API."""
-    import urllib.parse
-
-    url = (
-        f"https://api.telegram.org/bot{token}/sendMessage"
-        f"?chat_id={chat_id}"
-        f"&text={urllib.parse.quote(text)}"
-    )
-    request = Request(url)
+    """Send a message via the Telegram Bot API using POST with JSON body."""
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
+    request = Request(url, data=payload, headers={"Content-Type": "application/json"})
     with urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode())
 
