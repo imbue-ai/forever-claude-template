@@ -1,0 +1,92 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 0.1.0). Must match the mngr version in pyproject.toml.'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Install build dependencies
+        run: uv tool install build
+
+      - name: Verify versions and pin consistency
+        run: |
+          # Determine expected mngr version from tag or workflow_dispatch input
+          EXPECTED=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            EXPECTED="${{ github.ref_name }}"
+            EXPECTED="${EXPECTED#v}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            EXPECTED="${{ inputs.version }}"
+          fi
+
+          if [ -n "$EXPECTED" ]; then
+            uv run scripts/verify_publish.py --expected-mngr-version "$EXPECTED"
+          else
+            uv run scripts/verify_publish.py
+          fi
+
+      - name: Build resource-guards
+        run: pyproject-build libs/resource_guards -o dist/
+
+      - name: Build imbue-common
+        run: pyproject-build libs/imbue_common -o dist/
+
+      - name: Build concurrency-group
+        run: pyproject-build libs/concurrency_group -o dist/
+
+      - name: Build imbue-mngr
+        run: pyproject-build libs/mngr -o dist/
+
+      - name: Build modal-proxy
+        run: pyproject-build libs/modal_proxy -o dist/
+
+      - name: Build imbue-mngr-modal
+        run: pyproject-build libs/mngr_modal -o dist/
+
+      - name: Build imbue-mngr-claude
+        run: pyproject-build libs/mngr_claude -o dist/
+
+      - name: Build imbue-mngr-pair
+        run: pyproject-build libs/mngr_pair -o dist/
+
+      - name: Build imbue-mngr-opencode
+        run: pyproject-build libs/mngr_opencode -o dist/
+
+      - name: Build imbue-mngr-kanpan
+        run: pyproject-build libs/mngr_kanpan -o dist/
+
+      - name: Build imbue-mngr-tutor
+        run: pyproject-build libs/mngr_tutor -o dist/
+
+      - name: Publish packages to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
