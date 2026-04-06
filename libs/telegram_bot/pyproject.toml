@@ -3,6 +3,9 @@ name = "telegram-bot"
 version = "0.1.0"
 description = "Telegram bot and send CLI for forever-claude"
 requires-python = ">=3.11"
+dependencies = [
+    "loguru>=0.7.0",
+]
 
 [project.scripts]
 telegram-bot = "telegram_bot.bot:main"

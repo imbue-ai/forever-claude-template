@@ -14,9 +14,9 @@ import json
 import os
 import sys
 from pathlib import Path
-from urllib.request import Request
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
+from loguru import logger
 
 HISTORY_FILE = Path("runtime/telegram/history.jsonl")
 
@@ -24,7 +24,7 @@ HISTORY_FILE = Path("runtime/telegram/history.jsonl")
 def _get_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        print(f"Error: {name} environment variable is required", file=sys.stderr)
+        logger.error("{} environment variable is required", name)
         sys.exit(1)
     return value
 
@@ -79,7 +79,7 @@ def _append_to_history(text: str, chat_id: int) -> None:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: telegram-send <message>", file=sys.stderr)
+        logger.error("Usage: telegram-send <message>")
         sys.exit(1)
 
     text = " ".join(sys.argv[1:])
@@ -88,20 +88,19 @@ def main() -> None:
 
     chat_id = _find_chat_id(username)
     if chat_id is None:
-        print(
-            f"Error: no chat_id found for @{username} in history. "
-            "The user must send a message to the bot first.",
-            file=sys.stderr,
+        logger.error(
+            "No chat_id found for @{} in history. The user must send a message to the bot first.",
+            username,
         )
         sys.exit(1)
 
     result = _send_message(token, chat_id, text)
     if not result.get("ok"):
-        print(f"Error: sendMessage failed: {result}", file=sys.stderr)
+        logger.error("sendMessage failed: {}", result)
         sys.exit(1)
 
     _append_to_history(text, chat_id)
-    print(f"Message sent to @{username}")
+    logger.info("Message sent to @{}", username)
 
 
 if __name__ == "__main__":

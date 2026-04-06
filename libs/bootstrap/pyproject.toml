@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Service manager for forever-claude"
 requires-python = ">=3.11"
 dependencies = [
+    "loguru>=0.7.0",
     "tomli>=2.0; python_version < '3.11'",
 ]
 

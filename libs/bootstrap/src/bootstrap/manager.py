@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+from loguru import logger
+
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -85,7 +87,7 @@ def _load_services() -> dict[str, dict]:
 def _start_service(session: str, name: str, command: str) -> None:
     """Start a service in a new tmux window."""
     window_name = f"{SVC_PREFIX}{name}"
-    print(f"Starting service: {name} ({command})")
+    logger.info("Starting service: {} ({})", name, command)
     subprocess.run(
         ["tmux", "new-window", "-t", session, "-n", window_name, "-d", command],
         check=False,
@@ -95,7 +97,7 @@ def _start_service(session: str, name: str, command: str) -> None:
 def _stop_service(session: str, name: str) -> None:
     """Stop a service by killing its tmux window."""
     window_name = f"{SVC_PREFIX}{name}"
-    print(f"Stopping service: {name}")
+    logger.info("Stopping service: {}", name)
     subprocess.run(
         ["tmux", "kill-window", "-t", f"{session}:{window_name}"],
         check=False,
@@ -125,10 +127,10 @@ def _reconcile(session: str, desired: dict[str, dict], current: dict[str, str]) 
 def main() -> None:
     session = _get_session_name()
     if not session:
-        print("Error: not running inside a tmux session", file=sys.stderr)
+        logger.error("Not running inside a tmux session")
         sys.exit(1)
 
-    print(f"Bootstrap service manager started (session: {session})")
+    logger.info("Bootstrap service manager started (session: {})", session)
 
     last_mtime = None
 

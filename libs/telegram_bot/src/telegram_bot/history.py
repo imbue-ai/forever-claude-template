@@ -7,7 +7,6 @@ import json
 import sys
 from pathlib import Path
 
-
 HISTORY_FILE = Path("runtime/telegram/history.jsonl")
 
 

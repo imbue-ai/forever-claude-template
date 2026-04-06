@@ -16,11 +16,10 @@ import sys
 import time
 import urllib.parse
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.error import URLError
-from urllib.request import Request
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
+from loguru import logger
 
 HISTORY_FILE = Path("runtime/telegram/history.jsonl")
 POLL_TIMEOUT = 30  # seconds (Telegram long polling)
@@ -30,7 +29,7 @@ ERROR_BACKOFF_SECONDS = 5
 def _get_env(name: str) -> str:
     value = os.environ.get(name)
     if not value:
-        print(f"Error: {name} environment variable is required", file=sys.stderr)
+        logger.error("{} environment variable is required", name)
         sys.exit(1)
     return value
 
@@ -63,7 +62,7 @@ def _send_to_agent(agent_name: str, username: str, text: str) -> None:
             text=True,
         )
     except subprocess.CalledProcessError as e:
-        print(f"Warning: mngr message failed: {e.stderr}", file=sys.stderr)
+        logger.warning("mngr message failed: {}", e.stderr)
 
 
 def main() -> None:
@@ -73,8 +72,8 @@ def main() -> None:
 
     offset = 0
 
-    print(f"Telegram bot started. Accepting messages from @{expected_username}")
-    print(f"Delivering to agent: {agent_name}")
+    logger.info("Telegram bot started. Accepting messages from @{}", expected_username)
+    logger.info("Delivering to agent: {}", agent_name)
 
     while True:
         try:
@@ -88,7 +87,7 @@ def main() -> None:
             result = _telegram_api(token, "getUpdates", params)
 
             if not result.get("ok"):
-                print(f"Warning: getUpdates returned not ok: {result}", file=sys.stderr)
+                logger.warning("getUpdates returned not ok: {}", result)
                 time.sleep(ERROR_BACKOFF_SECONDS)
                 continue
 
@@ -112,14 +111,14 @@ def main() -> None:
                 if not text:
                     continue
 
-                print(f"Message from @{username}: {text[:100]}...")
+                logger.info("Message from @{}: {}...", username, text[:100])
                 _send_to_agent(agent_name, username, text)
 
         except (HTTPError, URLError, TimeoutError) as e:
-            print(f"Network error: {e}", file=sys.stderr)
+            logger.warning("Network error: {}", e)
             time.sleep(ERROR_BACKOFF_SECONDS)
         except json.JSONDecodeError as e:
-            print(f"JSON decode error: {e}", file=sys.stderr)
+            logger.warning("JSON decode error: {}", e)
             time.sleep(ERROR_BACKOFF_SECONDS)
 
 
