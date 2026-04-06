@@ -67,7 +67,8 @@ RUN mkdir -p /worktree
 RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
 
 # add tk and mngr as a tool
-RUN ln -s "/code/vendor/tk/ticket" ~/.local/bin/tk && uv tool install -e /code/vendor/mngr/libs/mngr && \
+# RUN ln -s "/code/vendor/tk/ticket" ~/.local/bin/tk && uv tool install -e /code/vendor/mngr/libs/mngr && \
+RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     mngr plugin add \
     --path vendor/mngr/libs/mngr_modal/ \
     --path vendor/mngr/libs/mngr_claude
