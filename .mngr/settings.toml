@@ -19,7 +19,6 @@ include = ["""has(labels.mind)"""]
 # Agent type defaults -- apply to all claude agents created from this repo
 [agent_types.claude]
 trust_working_directory = true
-command = "mkdir -p $ROLE/.claude && cp .claude/settings.local.json $ROLE/.claude/settings.local.json && cd $ROLE && claude"
 cli_args = """--dangerously-skip-permissions"""
 model = "opus[1m]"
 is_fast = true
