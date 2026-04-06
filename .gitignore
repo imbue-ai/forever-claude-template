@@ -142,6 +142,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv-*
 env/
 venv/
 ENV/
@@ -177,7 +178,7 @@ cython_debug/
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+.idea/
 
 # Abstra
 # Abstra is an AI-powered process automation framework.
@@ -186,9 +187,9 @@ cython_debug/
 .abstra/
 
 # Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
+#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore
 #  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
+#  and can be added to the global gitignore or merged into this file. However, if you prefer,
 #  you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 
@@ -197,9 +198,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-
-# pycharm
-.idea/
 
 # Cursor
 #  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
@@ -212,3 +210,69 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# task folders for local custom claude workflow
+*/*/_tasks/
+.sesskey
+
+# Node.js
+node_modules/
+
+# Frontend build artifacts
+frontend-dist/
+
+# Claude Code local settings (session-specific permissions)
+.claude/settings.local.json
+
+# PR status and URL files written by main_claude_stop_hook.sh for status line display
+.claude/pr_url
+.claude/pr_status
+
+# Local Claude settings backup files
+.claude/*.bak
+
+# Local mngr settings (not committed)
+.mngr/settings.local.toml
+
+# so the user can make their own notification script
+scripts/notify_user.local.sh
+
+# Test output files (slow tests, coverage summaries)
+.test_output/
+
+# TMR output directories (reports + test outputs)
+tmr_*/
+
+# Active session marker file (used to detect interrupted sessions)
+.claude/active
+
+# we stick the image build artifacts here
+.mngr/dev/build/
+.mngr/dev/secrets/
+
+# Offload caches and local files
+.offload/**
+test-results
+current.tar.gz
+
+# Minds deploy-time build artifacts
+.minds/
+
+# Autofix session artifacts
+.autofix/
+.reviewer/outputs/
+.reviewer/settings.local.json
+**/.reviewer/.stop_hook_consecutive_blocks
+.reviews/
+
+# Stuck agent tracking (stop hook escape valve)
+.claude/blocked_stop_commits
+
+# Demo recordings (asciinema .cast, .txt, and scripts)
+.demos/
+
+# ignore coverage files generated within subprojects
+cov.xml
+
+# ignore demos
+recordings
