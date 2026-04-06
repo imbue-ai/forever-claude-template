@@ -1,7 +1,26 @@
+# --- Command defaults ---
+
+# Default create command settings -- apply to all mngr create from this repo
+[commands.create]
+connect = false
+ensure_clean = false
+pass_env = ["MIND_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME"]
+env = ["IS_SANDBOX=1", "IS_AUTONOMOUS=1"]
+worktree_base_folder = "/worktree/"
+disable_plugin = ["recursive", "ttyd"]
+yes = true
+
+# for the list command -- ensures that we don't see other agents when we're listing, even if we happen to list remote agents
+[commands.list]
+include = ["""has(labels.mind)"""]
+
+# --- Agent types ---
+
 # Agent type defaults -- apply to all claude agents created from this repo
 [agent_types.claude]
-cli_args = "--dangerously-skip-permissions"
 trust_working_directory = true
+command = "mkdir -p $ROLE/.claude && cp .claude/settings.local.json $ROLE/.claude/settings.local.json && cd $ROLE && claude"
+cli_args = """--dangerously-skip-permissions"""
 model = "opus[1m]"
 is_fast = true
 
@@ -9,35 +28,56 @@ is_fast = true
 [agent_types.main]
 parent_type = "claude"
 
-# Default create command settings -- apply to all mngr create from this repo
-[commands.create]
-pass_env = ["MIND_NAME"]
-connect = false
-ensure_clean = false
+# the "worker" agent type -- the default for delegated tasks
+[agent_types.worker]
+parent_type = "claude"
+
+# --- Provider configurations ---
+
+# all disabled for now, since we don't want the agents to be able to launch mngr agents anywhere except within their own containers
+
+[providers.modal]
+is_enabled = false
+
+[providers.docker]
+is_enabled = false
 
 # --- Create templates ---
 
-# Worker template: for sub-agents created by the launch-task skill
-[create_templates.worker]
-type = "claude"
-extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"]
-env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
-agent_args = ["--dangerously-skip-permissions",
-    """--append-system-prompt "You were launched by a mind agent. Your work will be reviewed via transcript and git diff. Commit your changes when done. Do not ask the user questions about your initial request -- just execute the task as best you can. If you need more information, make a best guess and proceed. List any questions at the end of your final response, along with the assumptions you made." """]
+## these are all for launching the original agent (from outside the sandbox, in the first place)
 
-# Local template: run on the local machine with bootstrap service manager
+# the template that is shared across all agent types
+[create_templates.main]
+type = "main"
+env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
+extra_window = [
+    "bootstrap='uv run bootstrap'",
+    "telegram='uv run telegram-bot'",
+    "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"
+]
+
+# template for local provider
 [create_templates.local]
-extra_window = ["bootstrap='uv run bootstrap'"]
+provider = "local"
+extra_provision_command = "uv tool install -e vendor/mngr/libs/mngr && mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude"
+# also needs to set UV_TOOL_BIN_DIR and UV_TOOL_DIR to actually set to the correct mngr tool for that instance
+pass_env = ["UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
 
-# Modal template: run on Modal with bootstrap
-[create_templates.modal]
-provider = "modal"
-target_path = "/root/workspace"
-idle_timeout = "30s"
-extra_window = ["bootstrap='uv run bootstrap'", "github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
-
-# Docker template: run in Docker with bootstrap
+# template for docker provider
 [create_templates.docker]
 provider = "docker"
-target_path = "/workspace"
-extra_window = ["bootstrap='uv run bootstrap'"]
+target_path = "/code/"
+setting = ["providers.docker.is_enabled=true"]
+build_arg = ["--file=Dockerfile", "."]
+# I guess it can pass a volume in too if you want
+
+## and these templates are for sub-agents created within the sandbox
+
+# Worker template: general purpose sub agent for doing tasks reliably (and ensuring that they are verified)
+[create_templates.worker]
+type = "worker"
+extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"]
+env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
+agent_args = [
+    "--dangerously-skip-permissions",
+    """--append-system-prompt "You were launched by another agent. List any questions at the end of your final response, along with the assumptions you made." """]
