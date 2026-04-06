@@ -51,9 +51,9 @@ def _append_to_history(update: dict) -> None:
         f.write(json.dumps(update) + "\n")
 
 
-def _send_to_agent(agent_name: str, username: str, text: str) -> None:
+def _send_to_agent(agent_name: str, username: str, text: str, chat_id: int) -> None:
     """Send a telegram message to the agent via mngr message."""
-    message = f"telegram message from @{username}: {text}"
+    message = f"telegram message from @{username} (chat_id={chat_id}): {text}"
     try:
         subprocess.run(
             ["mngr", "message", agent_name, "-m", message],
@@ -111,8 +111,11 @@ def main() -> None:
                 if not text:
                     continue
 
-                logger.info("Message from @{}: {}...", username, text[:100])
-                _send_to_agent(agent_name, username, text)
+                chat_id = message["chat"]["id"]
+                logger.info(
+                    "Message from @{} in chat {}: {}...", username, chat_id, text[:100]
+                )
+                _send_to_agent(agent_name, username, text, chat_id)
 
         except (HTTPError, URLError, TimeoutError) as e:
             logger.warning("Network error: {}", e)
