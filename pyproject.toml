@@ -31,10 +31,11 @@ bootstrap = { workspace = true }
 imbue-common = { path = "libs/mngr/libs/imbue_common" }
 
 [tool.pytest.ini_options]
-testpaths = ["libs/telegram_bot", "libs/bootstrap"]
+testpaths = ["."]
 timeout_func_only = true
 addopts = [
     "--timeout=10",
+    "--ignore=libs/mngr",
 ]
 
 [tool.ruff]
