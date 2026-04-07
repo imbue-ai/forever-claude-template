@@ -30,6 +30,12 @@ RUN ARCH=$(uname -m) && \
     -o /usr/local/bin/ttyd && \
     chmod +x /usr/local/bin/ttyd
 
+# Install cloudflared for Cloudflare tunnel support
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}" \
+    -o /usr/local/bin/cloudflared && \
+    chmod +x /usr/local/bin/cloudflared
+
 RUN mkdir -p -m 755 /etc/apt/keyrings \
 	&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 	&& cat $out | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
