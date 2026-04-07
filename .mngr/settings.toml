@@ -68,6 +68,7 @@ provider = "docker"
 target_path = "/code/"
 setting = ["providers.docker.is_enabled=true"]
 build_arg = ["--file=Dockerfile", "."]
+idle_timeout = 604800
 # I guess it can pass a volume in too if you want
 
 ## and these templates are for sub-agents created within the sandbox
