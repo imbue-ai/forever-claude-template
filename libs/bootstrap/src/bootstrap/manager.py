@@ -85,11 +85,22 @@ def _load_services() -> dict[str, dict]:
 
 
 def _start_service(session: str, name: str, command: str) -> None:
-    """Start a service in a new tmux window."""
+    """Start a service in a new tmux window.
+
+    Creates the window without a command so it uses the session's default-command
+    (which sources env files), then sends the service command via send-keys.
+    This ensures the service process inherits MNGR_AGENT_STATE_DIR and other
+    agent environment variables.
+    """
     window_name = f"{SVC_PREFIX}{name}"
+    window_target = f"{session}:{window_name}"
     logger.info("Starting service: {} ({})", name, command)
     subprocess.run(
-        ["tmux", "new-window", "-t", session, "-n", window_name, "-d", command],
+        ["tmux", "new-window", "-t", session, "-n", window_name, "-d"],
+        check=False,
+    )
+    subprocess.run(
+        ["tmux", "send-keys", "-t", window_target, command, "Enter"],
         check=False,
     )
 
