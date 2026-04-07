@@ -64,7 +64,7 @@ WORKDIR /code/
 RUN mkdir -p /worktree
 
 # extract our code into the project directory
-RUN git config --global --add safe.directory /code/ 2>/dev/null || true && chown -R root:root /code/
+RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
 
 # add tk and mngr as a tool
 # RUN ln -s "/code/vendor/tk/ticket" ~/.local/bin/tk && uv tool install -e /code/vendor/mngr/libs/mngr && \
