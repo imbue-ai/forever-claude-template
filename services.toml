@@ -3,4 +3,15 @@
 # See the edit-services skill for details.
 
 [services.web]
-command = "python3 -m http.server 8080"
+command = "python3 scripts/forward_port.py --url http://localhost:8080 --name web && python3 -m http.server 8080"
+
+[services.terminal]
+command = "bash scripts/run_ttyd.sh"
+
+[services.cloudflared]
+command = "uv run cloudflare-tunnel"
+restart = "on-failure"
+
+[services.app-watcher]
+command = "uv run app-watcher"
+restart = "on-failure"

@@ -1,0 +1,18 @@
+[project]
+name = "app-watcher"
+version = "0.1.0"
+description = "Watches applications.toml and reconciles with Cloudflare forwarding API"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+app-watcher = "app_watcher.watcher:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/app_watcher"]

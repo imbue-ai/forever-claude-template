@@ -4,7 +4,7 @@
 [commands.create]
 connect = false
 ensure_clean = false
-pass_env = ["MIND_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME"]
+pass_env = ["MIND_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "CLOUDFLARE_FORWARDING_URL"]
 env = ["IS_SANDBOX=1", "IS_AUTONOMOUS=1"]
 worktree_base_folder = "/worktree/"
 disable_plugin = ["recursive", "ttyd"]
@@ -55,8 +55,8 @@ extra_window = [
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"
 ]
 
-# template for local provider
-[create_templates.local]
+# template for dev mode (runs in-place on local provider)
+[create_templates.dev]
 provider = "local"
 extra_provision_command = "uv tool install -e vendor/mngr/libs/mngr && mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude"
 # also needs to set UV_TOOL_BIN_DIR and UV_TOOL_DIR to actually set to the correct mngr tool for that instance
