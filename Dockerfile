@@ -79,9 +79,12 @@ RUN cd /code/vendor/mngr/apps/claude_web_chat/frontend && \
     npm ci && \
     npm run build
 
-# add mngr and claude-web-chat as tools
+# add mngr and claude-web-chat as tools (both need the plugin packages
+# so they can parse plugin-specific config fields like auto_dismiss_dialogs)
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
-    uv tool install -e /code/vendor/mngr/apps/claude_web_chat && \
+    uv tool install -e /code/vendor/mngr/apps/claude_web_chat \
+        --with /code/vendor/mngr/libs/mngr_claude \
+        --with /code/vendor/mngr/libs/mngr_modal && \
     mngr plugin add \
     --path vendor/mngr/libs/mngr_modal/ \
     --path vendor/mngr/libs/mngr_claude
