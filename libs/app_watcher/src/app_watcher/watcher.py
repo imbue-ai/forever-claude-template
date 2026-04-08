@@ -254,29 +254,36 @@ def _reconcile_with_cloudflare(
 
 
 def _try_setup_inotify(path: Path) -> object | None:
-    """Try to set up inotify on the applications file's parent directory."""
-    try:
-        import inotifyx  # type: ignore[import-untyped]
+    """Try to set up inotify on the applications file's parent directory.
 
-        fd = inotifyx.init()
+    Uses inotify_simple (pure Python, Linux only). Returns the INotify
+    instance on success, or None on non-Linux platforms or errors.
+    """
+    try:
+        from inotify_simple import INotify
+        from inotify_simple import flags as inotify_flags
+
+        inotify = INotify()
         parent = path.parent
         parent.mkdir(parents=True, exist_ok=True)
-        inotifyx.add_watch(
-            fd,
+        inotify.add_watch(
             str(parent),
-            inotifyx.IN_MODIFY | inotifyx.IN_CREATE | inotifyx.IN_MOVED_TO,
+            inotify_flags.MODIFY | inotify_flags.CREATE | inotify_flags.MOVED_TO,
         )
-        return fd
+        return inotify
     except (ImportError, OSError):
         return None
 
 
-def _wait_for_change_inotify(fd: object, timeout_seconds: float) -> bool:
+def _wait_for_change_inotify(inotify: object, timeout_seconds: float) -> bool:
     """Wait for an inotify event, with timeout."""
     try:
-        import inotifyx  # type: ignore[import-untyped]
+        from inotify_simple import INotify
 
-        events = inotifyx.get_events(fd, timeout_seconds)
+        if not isinstance(inotify, INotify):
+            return False
+        timeout_ms = int(timeout_seconds * 1000)
+        events = inotify.read(timeout=timeout_ms)
         return len(events) > 0
     except (ImportError, OSError):
         return False

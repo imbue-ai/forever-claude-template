@@ -57,8 +57,10 @@ extra_window = [
 # template for dev mode (runs in-place on local provider)
 [create_templates.dev]
 provider = "local"
-extra_provision_command = "uv tool install -e vendor/mngr/libs/mngr && mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude"
-# also needs to set UV_TOOL_BIN_DIR and UV_TOOL_DIR to actually set to the correct mngr tool for that instance
+worktree_base_folder = "/tmp/mngr-worktrees/"
+extra_provision_command = [
+    "uv tool install -e vendor/mngr/libs/mngr && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
+]
 pass_env = ["MIND_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
 
 # template for docker provider
