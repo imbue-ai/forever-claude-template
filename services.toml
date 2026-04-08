@@ -3,7 +3,7 @@
 # See the edit-services skill for details.
 
 [services.web]
-command = "python3 scripts/forward_port.py --url http://localhost:8080 --name web && python3 -m http.server 8080"
+command = "python3 scripts/forward_port.py --url http://localhost:8000 --name web && claude-web-chat"
 
 [services.terminal]
 command = "bash scripts/run_ttyd.sh"

@@ -72,9 +72,9 @@ RUN mkdir -p /worktree
 # extract our code into the project directory
 RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
 
-# add tk and mngr as a tool
-# RUN ln -s "/code/vendor/tk/ticket" ~/.local/bin/tk && uv tool install -e /code/vendor/mngr/libs/mngr && \
+# add mngr and claude-web-chat as tools
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
+    uv tool install -e /code/vendor/mngr/apps/claude_web_chat && \
     mngr plugin add \
     --path vendor/mngr/libs/mngr_modal/ \
     --path vendor/mngr/libs/mngr_claude
