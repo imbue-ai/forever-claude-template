@@ -964,6 +964,7 @@ class Host(BaseHost, OnlineHostInterface):
                 # must write atomically, otherwise we can get in trouble
                 self.write_file,
                 kwargs=dict(path=data_path, content=serialized_data.encode("utf-8"), mode=None, is_atomic=True),
+                name="write_certified_data",
             )
             # Notify the provider so it can update any external storage (e.g., Modal volume)
             if self.on_updated_host_data:
@@ -1944,7 +1945,9 @@ class Host(BaseHost, OnlineHostInterface):
             with log_span("Updating git worktree", path=str(work_dir_path), branch=branch_label):
                 git_wt = f"git -C {shlex.quote(str(work_dir_path))}"
                 if new_branch_name:
-                    checkout_cmd = f"{git_wt} checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch or 'HEAD')}"
+                    checkout_cmd = (
+                        f"{git_wt} checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch or 'HEAD')}"
+                    )
                 else:
                     checkout_cmd = f"{git_wt} checkout {shlex.quote(base_branch or 'HEAD')}"
                 result = self.execute_idempotent_command(checkout_cmd)
@@ -2016,7 +2019,15 @@ class Host(BaseHost, OnlineHostInterface):
 
             state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
             # _mkdirs uses mkdir -p, which is idempotent for existing directories
-            self._mkdirs([state_dir, state_dir / "events", state_dir / "activity", state_dir / "commands"])
+            events_dir = state_dir / "events"
+            servers_events_dir = events_dir / "servers"
+            self._mkdirs([state_dir, events_dir, servers_events_dir, state_dir / "activity", state_dir / "commands"])
+
+            # Pre-create empty events.jsonl so that `mngr events --follow` finds
+            # the source immediately on startup, rather than waiting for a 10-second
+            # rescan after the agent's services start writing events.
+            servers_events_file = servers_events_dir / "events.jsonl"
+            self.execute_idempotent_command(f"touch '{servers_events_file}'")
 
             # In update mode, preserve the original create_time from existing data.json
             if options.is_update:
