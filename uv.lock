@@ -39,10 +39,14 @@ version = "0.1.0"
 source = { editable = "libs/app_watcher" }
 dependencies = [
     { name = "httpx" },
+    { name = "inotify-simple" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "httpx", specifier = ">=0.27.0" }]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "inotify-simple", specifier = ">=2.0.0" },
+]
 
 [[package]]
 name = "asttokens"
@@ -306,7 +310,7 @@ wheels = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.10"
+version = "0.1.11"
 source = { directory = "vendor/mngr/libs/imbue_common" }
 dependencies = [
     { name = "click" },
@@ -367,6 +371,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ca/87/62b78b49042c533038ab1bf0931a7b70fdb78d07a11c9bf159be04027df8/inline_snapshot-0.32.5.tar.gz", hash = "sha256:5025074eab5c82a88504975e2655beeb5e96fd57ed2d9ebb38538473748f2065", size = 2626796, upload-time = "2026-03-13T18:35:54.891Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/09/d3/73426dd3da75095fd071ce5c1f8e520e879a582ca04df861575c6feb9166/inline_snapshot-0.32.5-py3-none-any.whl", hash = "sha256:ac617c273e811ed5ca15abd8f8dbd3fa268296bb0642ccb1403a5df61ce2e39e", size = 84993, upload-time = "2026-03-13T18:35:52.955Z" },
+]
+
+[[package]]
+name = "inotify-simple"
+version = "2.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/5c/bfe40e15d684bc30b0073aa97c39be410a5fbef3d33cad6f0bf2012571e0/inotify_simple-2.0.1.tar.gz", hash = "sha256:f010bbbd8283bd71a9f4eb2de94765804ede24bd47320b0e6ef4136e541cdc2c", size = 7101, upload-time = "2025-08-25T06:28:20.998Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e3/86/8be1ac7e90f80b413e81f1e235148e8db771218886a2353392f02da01be3/inotify_simple-2.0.1-py3-none-any.whl", hash = "sha256:e5da495f2064889f8e68b67f9358b0d102e03b783c2d42e5b8e132ab859a5d8a", size = 7449, upload-time = "2025-08-25T06:28:19.919Z" },
 ]
 
 [[package]]
