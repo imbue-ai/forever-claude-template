@@ -204,6 +204,7 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--context` | path | Project context directory (for build context and loading project-specific config) [default: local .git root] | None |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Agent Limits
@@ -260,6 +261,16 @@ Provider: ssh
     user = "root"
     key_file = "~/.ssh/id_ed25519"
   No start arguments are supported for the SSH provider.
+
+Provider: vultr
+  VPS-specific args (--vps- prefix, consumed by provider):
+    --vps-region=REGION  Vultr region (default: ewr)
+    --vps-plan=PLAN      Vultr plan (default: vc2-1c-1gb)
+    --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
+
+  All other build args are passed to 'docker build' on the VPS.
+  Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 
 ## See Also
