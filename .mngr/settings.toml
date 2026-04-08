@@ -18,10 +18,9 @@ include = ["""has(labels.mind)"""]
 
 # Agent type defaults -- apply to all claude agents created from this repo
 [agent_types.claude]
-trust_working_directory = true
+auto_dismiss_dialogs = true
 cli_args = """--dangerously-skip-permissions"""
-model = "opus[1m]"
-is_fast = true
+settings_overrides = {model = "opus[1m]", fastMode = true}
 
 # The "main" agent type -- inherits everything from claude
 [agent_types.main]
