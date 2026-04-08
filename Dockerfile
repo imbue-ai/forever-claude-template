@@ -54,11 +54,8 @@ ARG CLAUDE_CODE_VERSION=""
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
-# without this, there are some annoying bugs on modal's side with snapshotting
-ENV UV_LINK_MODE=copy
-
 # install python dependencies
-RUN unset UV_INDEX_URL && uv tool install modal
+RUN uv tool install modal
 
 # copy in all of our code:
 COPY . /code/
@@ -71,6 +68,16 @@ RUN mkdir -p /worktree
 
 # extract our code into the project directory
 RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
+
+# Install Node.js for building the claude-web-chat frontend
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# Build the claude-web-chat frontend
+RUN cd /code/vendor/mngr/apps/claude_web_chat/frontend && \
+    npm ci && \
+    npm run build
 
 # add mngr and claude-web-chat as tools
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
