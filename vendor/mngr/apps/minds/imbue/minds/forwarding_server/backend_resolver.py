@@ -292,8 +292,12 @@ class MngrStreamManager(MutableModel):
        - AGENT_DISCOVERED: incrementally adds or updates a single agent
        - AGENT_DESTROYED: incrementally removes a single agent
        - HOST_DESTROYED: removes all agents on a destroyed host
-    2. `mngr events <agent-id> servers/events.jsonl --follow --quiet` (one per agent)
+    2. `mngr events <agent-id> servers --follow --quiet` (one per mind agent)
        to discover each agent's servers.
+
+    Only agents with the ``mind`` label get events streams -- non-mind agents
+    are tracked in the resolver for completeness but their server events are
+    not streamed.
     """
 
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Backend resolver to update with streaming data")
@@ -311,9 +315,12 @@ class MngrStreamManager(MutableModel):
     def start(self) -> None:
         """Start the streaming subprocess for continuous agent discovery."""
         self._cg.__enter__()
+        # Run from $HOME so mngr uses its global config, not any project-specific
+        # .mngr/settings.toml that might restrict behavior (e.g. is_allowed_in_pytest).
         self._cg.run_process_in_background(
             command=[self.mngr_binary, "observe", "--discovery-only", "--quiet"],
             on_output=self._on_discovery_stream_output,
+            cwd=Path.home(),
         )
 
     def stop(self) -> None:
@@ -360,6 +367,11 @@ class MngrStreamManager(MutableModel):
         else:
             logger.trace("Ignoring discovery event: {}", type(event).__name__)
 
+    @staticmethod
+    def _is_mind_agent(agent: DiscoveredAgent) -> bool:
+        """Check whether a discovered agent has the ``mind`` label."""
+        return "mind" in agent.labels
+
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Update agent list and agent-to-host mapping from a full snapshot."""
         agent_ids: list[AgentId] = []
@@ -373,8 +385,8 @@ class MngrStreamManager(MutableModel):
 
         self._update_resolver(tuple(agent_ids), event.agents)
 
-        new_ids = {str(agent_id) for agent_id in agent_ids}
-        self._sync_events_streams(new_ids)
+        mind_ids = {str(agent.agent_id) for agent in event.agents if self._is_mind_agent(agent)}
+        self._sync_events_streams(mind_ids)
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         """Update SSH info for a host and refresh the resolver."""
@@ -401,9 +413,9 @@ class MngrStreamManager(MutableModel):
             updated_agents = [a for a in self._discovered_agents if str(a.agent_id) != aid_str]
             updated_agents.append(agent)
             self._discovered_agents = tuple(updated_agents)
-            # Start events stream if this is a newly discovered agent
+            # Start events stream if this is a newly discovered mind agent
             is_new = aid_str not in self._known_agent_ids
-            if is_new:
+            if is_new and self._is_mind_agent(agent):
                 self._known_agent_ids.add(aid_str)
                 self._start_events_stream(agent.agent_id)
             agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
@@ -514,12 +526,13 @@ class MngrStreamManager(MutableModel):
             logger.error("Failed to parse server log line for {}: {} (line: {})", agent_id, e, stripped[:200])
 
     def _start_events_stream(self, agent_id: AgentId) -> None:
-        """Start mngr events <agent-id> servers/events.jsonl --follow for a single agent."""
+        """Start mngr events <agent-id> servers --follow for a single mind agent."""
         aid_str = str(agent_id)
         self._events_servers[aid_str] = {}
 
         process = self._cg.run_process_in_background(
             command=[self.mngr_binary, "events", aid_str, SERVERS_EVENT_SOURCE_NAME, "--follow", "--quiet"],
             on_output=lambda line, is_stdout: self._on_events_stream_output(line, is_stdout, agent_id),
+            cwd=Path.home(),
         )
         self._events_processes[aid_str] = process

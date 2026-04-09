@@ -516,12 +516,15 @@ def test_stream_manager_on_events_stream_output_later_entry_overrides_earlier() 
 def _make_discovery_full_line(
     agents: list[tuple[str, str]],
     hosts: list[str],
+    labels: dict[str, str] | None = None,
 ) -> str:
     """Build a DISCOVERY_FULL event JSON line.
 
     agents: list of (agent_id, host_id) tuples.
     hosts: list of host_id strings.
+    labels: optional labels applied to all agents in this snapshot.
     """
+    effective_labels = labels if labels is not None else {}
     return json.dumps(
         {
             "type": "DISCOVERY_FULL",
@@ -534,7 +537,7 @@ def _make_discovery_full_line(
                     "agent_id": agent_id,
                     "agent_name": f"agent-{agent_id[-4:]}",
                     "provider_name": "modal",
-                    "certified_data": {},
+                    "certified_data": {"labels": effective_labels},
                 }
                 for agent_id, host_id in agents
             ],
@@ -799,6 +802,7 @@ def test_stream_manager_agent_destroyed_clears_servers() -> None:
         full_line = _make_discovery_full_line(
             agents=[(str(_AGENT_A), host_id)],
             hosts=[host_id],
+            labels={"mind": "true"},
         )
         manager._handle_discovery_line(full_line)
 
