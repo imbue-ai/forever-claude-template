@@ -19,6 +19,7 @@ include = ["""has(labels.mind)"""]
 # Agent type defaults -- apply to all claude agents created from this repo
 [agent_types.claude]
 auto_dismiss_dialogs = true
+auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions"""
 settings_overrides = {model = "opus[1m]", fastMode = true}
 
