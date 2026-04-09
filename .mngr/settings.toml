@@ -74,6 +74,13 @@ build_arg = ["--file=Dockerfile", "."]
 idle_timeout = "2147483647"
 # I guess it can pass a volume in too if you want
 
+# template for lima VM provider
+[create_templates.lima]
+provider = "lima"
+target_path = "/code/"
+idle_timeout = "2147483647"
+start_arg = ["--cpus=2", "--memory=4GiB", "--disk=5GiB"]
+
 ## and these templates are for sub-agents created within the sandbox
 
 # Worker template: general purpose sub agent for doing tasks reliably (and ensuring that they are verified)
