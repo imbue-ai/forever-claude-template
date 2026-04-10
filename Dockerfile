@@ -54,7 +54,7 @@ ARG CLAUDE_CODE_VERSION=""
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
-# Install Node.js for building the claude-web-chat frontend
+# Install Node.js for building the minds-workspace-server frontend
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
@@ -74,15 +74,15 @@ RUN mkdir -p /worktree
 # extract our code into the project directory
 RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
 
-# Build the claude-web-chat frontend
-RUN cd /code/vendor/mngr/apps/claude_web_chat/frontend && \
+# Build the minds-workspace-server frontend
+RUN cd /code/vendor/mngr/apps/minds_workspace_server/frontend && \
     npm ci && \
     npm run build
 
-# add mngr and claude-web-chat as tools (both need the plugin packages
+# add mngr and minds-workspace-server as tools (both need the plugin packages
 # so they can parse plugin-specific config fields like auto_dismiss_dialogs)
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
-    uv tool install -e /code/vendor/mngr/apps/claude_web_chat \
+    uv tool install -e /code/vendor/mngr/apps/minds_workspace_server \
         --with /code/vendor/mngr/libs/mngr_claude \
         --with /code/vendor/mngr/libs/mngr_modal && \
     mngr plugin add \

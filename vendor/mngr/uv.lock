@@ -9,7 +9,7 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "claude-web-chat",
+    "minds-workspace-server",
     "cloudflare-forwarding",
     "concurrency-group",
     "flexmux",
@@ -473,9 +473,9 @@ wheels = [
 ]
 
 [[package]]
-name = "claude-web-chat"
+name = "minds-workspace-server"
 version = "0.1.0"
-source = { editable = "apps/claude_web_chat" }
+source = { editable = "apps/minds_workspace_server" }
 dependencies = [
     { name = "fastapi" },
     { name = "imbue-common" },

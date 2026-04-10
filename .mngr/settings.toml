@@ -60,7 +60,7 @@ extra_window = [
 provider = "local"
 worktree_base_folder = "/tmp/mngr-worktrees/"
 extra_provision_command = [
-    "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/claude_web_chat && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
+    "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/minds_workspace_server && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
 ]
 pass_env = ["MIND_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
 
