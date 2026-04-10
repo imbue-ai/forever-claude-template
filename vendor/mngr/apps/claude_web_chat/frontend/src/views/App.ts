@@ -8,7 +8,7 @@ export function App(): m.Component {
     view() {
       const selectedAgentId = getSelectedAgentId();
 
-      return m("div", { class: "app-layout flex h-full" }, [
+      return m("div", { class: "app-layout flex", style: "height: calc(100vh - var(--minds-titlebar-height, 0px))" }, [
         m("div", { class: "minds-titlebar-spacer" }),
         m(Sidebar),
         m("div", { class: "app-main flex flex-1 flex-col min-w-80" }, [
