@@ -1,0 +1,551 @@
+import os
+from collections.abc import Sequence
+from typing import Final
+
+from jinja2 import Environment
+from jinja2 import select_autoescape
+
+from imbue.imbue_common.pure import pure
+from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.primitives import LaunchMode
+from imbue.minds.primitives import OneTimeCode
+from imbue.minds.primitives import ServerName
+from imbue.mngr.primitives import AgentId
+
+_JINJA_ENV: Final[Environment] = Environment(autoescape=select_autoescape(default=True))
+
+_COMMON_STYLES: Final[str] = """
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; background: whitesmoke; }
+    h1 { margin-bottom: 24px; color: rgb(26, 26, 46); }
+    .btn {
+      display: inline-block; padding: 12px 20px;
+      background: rgb(26, 26, 46); color: white; text-decoration: none;
+      border-radius: 6px; font-size: 16px; border: none; cursor: pointer;
+    }
+    .btn:hover { background: rgb(42, 42, 78); }
+"""
+
+_LANDING_PAGE_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Workspaces</title>
+  <style>
+    """
+    + _COMMON_STYLES
+    + """
+    .agent-list { list-style: none; }
+    .agent-list li {
+      margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+    }
+    .agent-list a { """
+    + """
+      display: inline-block; padding: 12px 20px;
+      background: rgb(26, 26, 46); color: white; text-decoration: none;
+      border-radius: 6px; font-size: 16px;
+    }
+    .agent-list a:hover { background: rgb(42, 42, 78); }
+    .telegram-btn {
+      padding: 8px 14px; border-radius: 6px; font-size: 13px;
+      border: 1px solid rgb(200, 200, 210); cursor: pointer;
+      background: white; color: rgb(60, 60, 80);
+    }
+    .telegram-btn:hover { background: rgb(240, 240, 245); }
+    .telegram-btn.active {
+      background: rgb(220, 252, 231); border-color: rgb(134, 239, 172);
+      color: rgb(22, 101, 52); cursor: default;
+    }
+    .telegram-btn:disabled { cursor: wait; opacity: 0.7; }
+    .empty-state { color: gray; font-size: 16px; }
+    .create-section { margin-top: 32px; }
+    .create-section a { color: rgb(26, 26, 46); text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Your Workspaces</h1>
+  {% if agent_ids %}
+  <ul class="agent-list">
+    {% for agent_id in agent_ids %}
+    <li>
+      <a href="/agents/{{ agent_id }}/">{{ agent_id }}</a>
+      {% if telegram_enabled %}
+        {% if telegram_status_by_agent_id.get(agent_id | string, false) %}
+      <span class="telegram-btn active">Telegram active</span>
+        {% else %}
+      <button class="telegram-btn" id="tg-btn-{{ agent_id }}"
+              onclick="setupTelegram('{{ agent_id }}')">Setup Telegram</button>
+        {% endif %}
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="create-section">
+    <a href="/create">Create another workspace</a>
+  </div>
+  <script>
+  async function setupTelegram(agentId) {
+    var btn = document.getElementById('tg-btn-' + agentId);
+    btn.disabled = true;
+    btn.textContent = 'Setting up...';
+    try {
+      var resp = await fetch('/api/agents/' + agentId + '/telegram/setup', {method: 'POST'});
+      if (!resp.ok) {
+        var data = await resp.json();
+        alert('Failed to start Telegram setup: ' + (data.error || resp.statusText));
+        btn.disabled = false;
+        btn.textContent = 'Setup Telegram';
+        return;
+      }
+      pollTelegramStatus(agentId, btn);
+    } catch (e) {
+      alert('Failed: ' + e.message);
+      btn.disabled = false;
+      btn.textContent = 'Setup Telegram';
+    }
+  }
+
+  function pollTelegramStatus(agentId, btn) {
+    var interval = setInterval(async function() {
+      try {
+        var resp = await fetch('/api/agents/' + agentId + '/telegram/status');
+        if (!resp.ok) { return; }
+        var data = await resp.json();
+        btn.textContent = formatStatus(data.status);
+        if (data.status === 'DONE') {
+          clearInterval(interval);
+          btn.className = 'telegram-btn active';
+          btn.textContent = 'Telegram active' + (data.bot_username ? ' (@' + data.bot_username + ')' : '');
+          btn.disabled = false;
+        } else if (data.status === 'FAILED') {
+          clearInterval(interval);
+          btn.textContent = 'Setup failed';
+          btn.disabled = false;
+          btn.className = 'telegram-btn';
+          alert('Telegram setup failed: ' + (data.error || 'unknown error'));
+        }
+      } catch (e) {
+        // Ignore polling errors
+      }
+    }, 2000);
+  }
+
+  function formatStatus(status) {
+    var labels = {
+      'CHECKING_CREDENTIALS': 'Checking credentials...',
+      'WAITING_FOR_LOGIN': 'Waiting for browser login...',
+      'CREATING_BOT': 'Creating bot...',
+      'INJECTING_CREDENTIALS': 'Injecting credentials...',
+      'DONE': 'Done',
+      'FAILED': 'Failed'
+    };
+    return labels[status] || status;
+  }
+  </script>
+  {% else %}
+    {% if is_discovering %}
+  <p class="empty-state">Discovering agents...</p>
+  <script>setTimeout(function() { location.reload(); }, 2000);</script>
+    {% else %}
+  <p class="empty-state">
+    No workspaces are accessible. Use a login link to authenticate with a workspace.
+  </p>
+    {% endif %}
+  {% endif %}
+</body>
+</html>"""
+)
+
+_CREATE_FORM_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Create a Workspace</title>
+  <style>
+    """
+    + _COMMON_STYLES
+    + """
+    .form-group { margin-bottom: 16px; }
+    label { display: block; margin-bottom: 6px; font-size: 14px; color: rgb(60, 60, 80); }
+    input[type="text"], select {
+      width: 100%; max-width: 500px; padding: 10px 14px;
+      border: 1px solid rgb(200, 200, 210); border-radius: 6px; font-size: 16px;
+    }
+    input[type="text"]:focus, select:focus { outline: none; border-color: rgb(26, 26, 46); }
+    .help-text { margin-top: 4px; font-size: 13px; color: gray; }
+    .back-link { margin-top: 24px; }
+    .back-link a { color: rgb(26, 26, 46); text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>Create a Workspace</h1>
+  <form action="/create" method="post">
+    <div class="form-group">
+      <label for="agent_name">Name</label>
+      <input type="text" id="agent_name" name="agent_name" value="{{ agent_name }}"
+             placeholder="selene" required>
+    </div>
+    <div class="form-group">
+      <label for="git_url">Git repository URL or local path</label>
+      <input type="text" id="git_url" name="git_url" value="{{ git_url }}"
+             placeholder="https://github.com/user/repo.git or /path/to/repo" required>
+      <p class="help-text">A git URL will be cloned to a temp directory. A local path will be used directly.</p>
+    </div>
+    <div class="form-group">
+      <label for="branch">Branch</label>
+      <input type="text" id="branch" name="branch" value="{{ branch }}"
+             placeholder="main">
+      <p class="help-text">The branch to check out after cloning. Leave empty to use the repository's default branch.</p>
+    </div>
+    <div class="form-group">
+      <label for="launch_mode">Launch mode</label>
+      <select id="launch_mode" name="launch_mode">
+        {% for mode in launch_modes %}
+        <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}>{{ mode.value | lower }}</option>
+        {% endfor %}
+      </select>
+      <p class="help-text">Local: run in a Docker container. Lima: run in a Lima VM. Dev: run directly on this host. Cloud: run on a cloud provider (not yet supported).</p>
+    </div>
+    <button type="submit" class="btn">Create</button>
+  </form>
+  <div class="back-link"><a href="/">Back</a></div>
+</body>
+</html>"""
+)
+
+_CREATING_PAGE_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Creating your workspace...</title>
+  <style>
+    """
+    + _COMMON_STYLES
+    + """
+    .status { margin-top: 16px; font-size: 16px; color: rgb(60, 60, 80); }
+    .error { margin-top: 16px; color: darkred; }
+    .spinner {
+      display: inline-block; width: 20px; height: 20px;
+      border: 3px solid rgb(200, 200, 210); border-top: 3px solid rgb(26, 26, 46);
+      border-radius: 50%; animation: spin 1s linear infinite;
+      vertical-align: middle; margin-right: 8px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #logs {
+      margin-top: 16px; padding: 12px; background: rgb(26, 26, 46); color: rgb(200, 210, 220);
+      font-family: monospace; font-size: 13px; border-radius: 6px;
+      max-height: 400px; overflow-y: auto; white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <h1>Creating your workspace...</h1>
+  <p class="status" id="status"><span class="spinner"></span> {{ status_text }}</p>
+  <div id="logs"></div>
+  <script>
+    const agentId = '{{ agent_id }}';
+    const logsEl = document.getElementById('logs');
+    const statusEl = document.getElementById('status');
+    const source = new EventSource('/api/create-agent/' + agentId + '/logs');
+
+    var pendingLines = [];
+    var flushScheduled = false;
+
+    function flushLogs() {
+      flushScheduled = false;
+      if (pendingLines.length === 0) return;
+      var fragment = document.createDocumentFragment();
+      fragment.appendChild(document.createTextNode(pendingLines.join('\\n') + '\\n'));
+      pendingLines = [];
+      logsEl.appendChild(fragment);
+      logsEl.scrollTop = logsEl.scrollHeight;
+    }
+
+    source.onmessage = function(event) {
+      try {
+        var data = JSON.parse(event.data);
+        if (data._type === 'done') {
+          source.close();
+          flushLogs();
+          if (data.status === 'DONE' && data.redirect_url) {
+            statusEl.textContent = 'Done! Redirecting...';
+            window.location.href = data.redirect_url;
+          } else if (data.status === 'FAILED') {
+            statusEl.textContent = 'Failed: ' + (data.error || 'unknown error');
+            statusEl.classList.add('error');
+          }
+        } else if (data.log) {
+          pendingLines.push(data.log);
+          if (!flushScheduled) {
+            flushScheduled = true;
+            requestAnimationFrame(flushLogs);
+          }
+        }
+      } catch(e) {
+        // Ignore parse errors for keepalive comments
+      }
+    };
+
+    source.onerror = function() {
+      source.close();
+    };
+  </script>
+</body>
+</html>"""
+)
+
+_LOGIN_PAGE_TEMPLATE: Final[str] = (
+    """<!DOCTYPE html>
+<html>
+<head>
+  <title>Login - Workspaces</title>
+  <style>
+    """
+    + _COMMON_STYLES
+    + """
+    .login-message { color: gray; font-size: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Workspaces</h1>
+  <p class="login-message">
+    Please use the login URL printed in the terminal where the server is running.
+  </p>
+</body>
+</html>"""
+)
+
+_LOGIN_REDIRECT_TEMPLATE: Final[str] = """<!DOCTYPE html>
+<html>
+<head><title>Authenticating...</title></head>
+<body>
+<p>Authenticating...</p>
+<script>
+window.location.href = '/authenticate?one_time_code={{ one_time_code }}';
+</script>
+</body>
+</html>"""
+
+_AUTH_ERROR_TEMPLATE: Final[str] = """<!DOCTYPE html>
+<html>
+<head>
+  <title>Authentication Error</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; background: whitesmoke; }
+    .error { background: rgb(255, 238, 238); border: 1px solid rgb(255, 204, 204); padding: 20px; border-radius: 6px; color: darkred; }
+  </style>
+</head>
+<body>
+  <div class="error">
+    <h2>Authentication Failed</h2>
+    <p>{{ message }}</p>
+    <p>Each login URL can only be used once. Please use the login URL printed in the terminal where the server is running, or restart the server to generate a new one.</p>
+  </div>
+</body>
+</html>"""
+
+
+@pure
+def render_landing_page(
+    accessible_agent_ids: Sequence[AgentId],
+    telegram_status_by_agent_id: dict[str, bool] | None = None,
+    is_discovering: bool = False,
+) -> str:
+    """Render the landing page listing accessible workspaces.
+
+    telegram_status_by_agent_id maps agent ID strings to whether they have
+    active Telegram bot credentials. When None, no telegram buttons are shown.
+
+    When is_discovering is True, the page shows a "Discovering agents..." message
+    with auto-refresh instead of the empty state. This is used when the stream
+    manager hasn't completed initial agent discovery yet.
+    """
+    template = _JINJA_ENV.from_string(_LANDING_PAGE_TEMPLATE)
+    return template.render(
+        agent_ids=accessible_agent_ids,
+        telegram_enabled=telegram_status_by_agent_id is not None,
+        telegram_status_by_agent_id=telegram_status_by_agent_id or {},
+        is_discovering=is_discovering,
+    )
+
+
+_DEFAULT_GIT_URL: Final[str] = os.getenv(
+    "MINDS_WORKSPACE_GIT_URL", "https://github.com/imbue-ai/forever-claude-template.git"
+)
+
+
+_DEFAULT_AGENT_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "selene")
+
+
+_DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "main")
+
+
+@pure
+def render_create_form(
+    git_url: str = "",
+    agent_name: str = "",
+    branch: str = "",
+    launch_mode: LaunchMode = LaunchMode.LOCAL,
+) -> str:
+    """Render the agent creation form page.
+
+    When git_url is provided, the form field is pre-filled with that value.
+    Defaults to the forever-claude-template repository URL when empty.
+    """
+    effective_url = git_url if git_url else _DEFAULT_GIT_URL
+    effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
+    effective_branch = branch if branch else _DEFAULT_BRANCH
+    template = _JINJA_ENV.from_string(_CREATE_FORM_TEMPLATE)
+    return template.render(
+        git_url=effective_url,
+        agent_name=effective_name,
+        branch=effective_branch,
+        launch_modes=list(LaunchMode),
+        selected_launch_mode=launch_mode.value,
+    )
+
+
+@pure
+def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
+    """Render the progress page shown while an agent is being created.
+
+    The page streams logs from /api/create-agent/{agent_id}/logs via SSE
+    and auto-redirects to the agent when creation completes.
+    """
+    status_text_map = {
+        "CLONING": "Cloning repository...",
+        "CREATING": "Creating agent...",
+        "DONE": "Done! Redirecting...",
+        "FAILED": "Failed: {}".format(info.error or "unknown error"),
+    }
+    status_text = status_text_map.get(str(info.status), "Working...")
+    template = _JINJA_ENV.from_string(_CREATING_PAGE_TEMPLATE)
+    return template.render(agent_id=agent_id, status_text=status_text)
+
+
+@pure
+def render_login_page() -> str:
+    """Render the login prompt page for unauthenticated users."""
+    template = _JINJA_ENV.from_string(_LOGIN_PAGE_TEMPLATE)
+    return template.render()
+
+
+@pure
+def render_login_redirect_page(
+    one_time_code: OneTimeCode,
+) -> str:
+    """Render the JS redirect page that forwards to /authenticate."""
+    template = _JINJA_ENV.from_string(_LOGIN_REDIRECT_TEMPLATE)
+    return template.render(one_time_code=one_time_code)
+
+
+@pure
+def render_auth_error_page(message: str) -> str:
+    """Render an error page for failed authentication."""
+    template = _JINJA_ENV.from_string(_AUTH_ERROR_TEMPLATE)
+    return template.render(message=message)
+
+
+_AGENT_SERVERS_TEMPLATE: Final[str] = """<!DOCTYPE html>
+<html>
+<head>
+  <title>Servers - {{ agent_id }}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; padding: 40px; background: whitesmoke; }
+    h1 { margin-bottom: 8px; color: rgb(26, 26, 46); }
+    .subtitle { margin-bottom: 24px; color: gray; font-size: 14px; }
+    .server-list { list-style: none; }
+    .server-list li {
+      margin-bottom: 12px; padding: 12px 16px;
+      background: white; border: 1px solid rgb(220, 220, 230); border-radius: 8px;
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    }
+    .server-name {
+      font-weight: bold; font-size: 16px; color: rgb(26, 26, 46);
+      min-width: 100px;
+    }
+    .server-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .server-links a {
+      display: inline-block; padding: 6px 12px;
+      background: rgb(26, 26, 46); color: white; text-decoration: none;
+      border-radius: 4px; font-size: 13px;
+    }
+    .server-links a:hover { background: rgb(42, 42, 78); }
+    .server-links a.global-link {
+      background: rgb(37, 99, 235);
+    }
+    .server-links a.global-link:hover { background: rgb(29, 78, 216); }
+    .toggle-btn {
+      padding: 4px 10px; border-radius: 4px; font-size: 12px;
+      border: 1px solid rgb(200, 200, 210); cursor: pointer;
+      background: white; color: rgb(60, 60, 80);
+    }
+    .toggle-btn:hover { background: rgb(240, 240, 245); }
+    .toggle-btn.enabled { background: rgb(220, 252, 231); border-color: rgb(134, 239, 172); color: rgb(22, 101, 52); }
+    .empty-state { color: gray; font-size: 16px; }
+    .back-link { margin-top: 24px; }
+    .back-link a { color: rgb(26, 26, 46); text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>{{ agent_id }}</h1>
+  <p class="subtitle">Available servers</p>
+  {% if server_names %}
+  <ul class="server-list">
+    {% for server_name in server_names %}
+    <li>
+      <span class="server-name">{{ server_name }}</span>
+      <div class="server-links">
+        <a href="/agents/{{ agent_id }}/{{ server_name }}/">Local</a>
+        {% if cf_services and server_name in cf_services %}
+        <a href="https://{{ cf_services[server_name] }}" class="global-link" target="_blank">Global</a>
+        <button class="toggle-btn enabled" onclick="toggleGlobal('{{ agent_id }}', '{{ server_name }}', false)">Disable global</button>
+        {% else %}
+        <button class="toggle-btn" onclick="toggleGlobal('{{ agent_id }}', '{{ server_name }}', true)">Enable global</button>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty-state">
+    No servers are currently running for this agent.
+  </p>
+  {% endif %}
+  <div class="back-link"><a href="/">Back to all workspaces</a></div>
+  <script>
+  async function toggleGlobal(agentId, serverName, enable) {
+    try {
+      const resp = await fetch('/agents/' + agentId + '/servers/' + serverName + '/global', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: enable})
+      });
+      if (resp.ok) {
+        window.location.reload();
+      } else {
+        const data = await resp.json();
+        alert('Failed: ' + (data.error || resp.statusText));
+      }
+    } catch (e) {
+      alert('Failed: ' + e.message);
+    }
+  }
+  </script>
+</body>
+</html>"""
+
+
+@pure
+def render_agent_servers_page(
+    agent_id: AgentId,
+    server_names: Sequence[ServerName],
+    cf_services: dict[str, str] | None = None,
+) -> str:
+    """Render a page listing all available servers for a specific agent.
+
+    cf_services maps server names to their cloudflare hostnames (if globally forwarded).
+    """
+    template = _JINJA_ENV.from_string(_AGENT_SERVERS_TEMPLATE)
+    return template.render(agent_id=agent_id, server_names=server_names, cf_services=cf_services or {})

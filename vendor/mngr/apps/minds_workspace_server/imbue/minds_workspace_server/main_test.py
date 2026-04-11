@@ -40,7 +40,18 @@ def test_main_passes_filters() -> None:
         patch("imbue.minds_workspace_server.main.load_config") as mock_load_config,
         patch("imbue.minds_workspace_server.main.create_application") as mock_create_app,
         patch("imbue.minds_workspace_server.main.uvicorn"),
-        patch("sys.argv", ["minds-workspace-server", "--provider", "local", "--include", 'state == "RUNNING"', "--exclude", 'name == "test"']),
+        patch(
+            "sys.argv",
+            [
+                "minds-workspace-server",
+                "--provider",
+                "local",
+                "--include",
+                'state == "RUNNING"',
+                "--exclude",
+                'name == "test"',
+            ],
+        ),
     ):
         mock_load_config.return_value = Config()
         mock_create_app.return_value = "fake_app"

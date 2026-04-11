@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.config import Config
 from imbue.minds_workspace_server.server import create_application
 
@@ -59,8 +60,6 @@ def test_index_returns_not_built_when_no_static(client: TestClient, tmp_path: Pa
 def test_list_agents_endpoint(client: TestClient) -> None:
     """The agents endpoint returns agent data."""
     with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
-        from imbue.minds_workspace_server.agent_discovery import AgentInfo
-
         mock_discover.return_value = [
             AgentInfo(
                 id="agent-123",
@@ -107,25 +106,29 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
     session_id = "test-session-id"
     session_file = projects_dir / f"{session_id}.jsonl"
     session_file.write_text(
-        json.dumps({
-            "type": "user",
-            "uuid": "uuid-1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {"role": "user", "content": "Hello"},
-        })
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "uuid-1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": "Hello"},
+            }
+        )
         + "\n"
-        + json.dumps({
-            "type": "assistant",
-            "uuid": "uuid-2",
-            "timestamp": "2026-01-01T00:00:01Z",
-            "message": {
-                "role": "assistant",
-                "model": "claude-opus-4-6",
-                "content": [{"type": "text", "text": "Hi!"}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 10, "output_tokens": 5},
-            },
-        })
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "uuid-2",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [{"type": "text", "text": "Hi!"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            }
+        )
         + "\n"
     )
 
@@ -133,8 +136,6 @@ def test_get_events_with_session_files(client: TestClient, tmp_path: Path) -> No
     (agent_state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
 
     with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
-        from imbue.minds_workspace_server.agent_discovery import AgentInfo
-
         mock_discover.return_value = [
             AgentInfo(
                 id="agent-123",
@@ -161,8 +162,6 @@ def test_send_message_success(client: TestClient) -> None:
         patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover,
         patch("imbue.minds_workspace_server.server.send_message", return_value=True) as mock_send,
     ):
-        from imbue.minds_workspace_server.agent_discovery import AgentInfo
-
         mock_discover.return_value = [
             AgentInfo(
                 id="agent-123",
@@ -177,3 +176,154 @@ def test_send_message_success(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     mock_send.assert_called_once_with("test-agent", "hello")
+
+
+def test_get_layout_returns_404_for_unknown_agent(client: TestClient) -> None:
+    """Getting layout for a nonexistent agent returns 404."""
+    with patch("imbue.minds_workspace_server.server.discover_agents", return_value=[]):
+        response = client.get("/api/agents/nonexistent/layout")
+    assert response.status_code == 404
+
+
+def test_get_layout_returns_404_when_no_layout_saved(client: TestClient, tmp_path: Path) -> None:
+    """Getting layout returns 404 when no layout file exists."""
+    agent_state_dir = tmp_path / "agent_state"
+    agent_state_dir.mkdir()
+
+    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
+        mock_discover.return_value = [
+            AgentInfo(
+                id="agent-123",
+                name="test-agent",
+                state="RUNNING",
+                agent_state_dir=agent_state_dir,
+                claude_config_dir=Path("/tmp/.claude"),
+            )
+        ]
+        response = client.get("/api/agents/agent-123/layout")
+
+    assert response.status_code == 404
+
+
+def test_save_and_get_layout(client: TestClient, tmp_path: Path) -> None:
+    """Saving and retrieving a layout round-trips correctly."""
+    agent_state_dir = tmp_path / "agent_state"
+    agent_state_dir.mkdir()
+
+    layout_data = {"dockview": {"panels": {}}, "panelParams": {"chat-1": {"panelType": "chat"}}}
+
+    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
+        mock_discover.return_value = [
+            AgentInfo(
+                id="agent-123",
+                name="test-agent",
+                state="RUNNING",
+                agent_state_dir=agent_state_dir,
+                claude_config_dir=Path("/tmp/.claude"),
+            )
+        ]
+
+        save_response = client.post("/api/agents/agent-123/layout", json=layout_data)
+        assert save_response.status_code == 200
+        assert save_response.json()["status"] == "ok"
+
+        get_response = client.get("/api/agents/agent-123/layout")
+        assert get_response.status_code == 200
+        assert get_response.json() == layout_data
+
+
+def test_save_layout_creates_directory(client: TestClient, tmp_path: Path) -> None:
+    """Saving a layout creates the workspace_layout directory if needed."""
+    agent_state_dir = tmp_path / "agent_state"
+    agent_state_dir.mkdir()
+
+    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
+        mock_discover.return_value = [
+            AgentInfo(
+                id="agent-123",
+                name="test-agent",
+                state="RUNNING",
+                agent_state_dir=agent_state_dir,
+                claude_config_dir=Path("/tmp/.claude"),
+            )
+        ]
+        client.post("/api/agents/agent-123/layout", json={"test": True})
+
+    assert (agent_state_dir / "workspace_layout" / "layout.json").exists()
+
+
+def test_save_layout_rejects_invalid_json(client: TestClient, tmp_path: Path) -> None:
+    """Saving invalid JSON returns 400."""
+    agent_state_dir = tmp_path / "agent_state"
+    agent_state_dir.mkdir()
+
+    with patch("imbue.minds_workspace_server.server.discover_agents") as mock_discover:
+        mock_discover.return_value = [
+            AgentInfo(
+                id="agent-123",
+                name="test-agent",
+                state="RUNNING",
+                agent_state_dir=agent_state_dir,
+                claude_config_dir=Path("/tmp/.claude"),
+            )
+        ]
+        response = client.post(
+            "/api/agents/agent-123/layout",
+            content=b"not valid json",
+            headers={"Content-Type": "application/json"},
+        )
+
+    assert response.status_code == 400
+
+
+def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
+    """The index page includes a hostname meta tag."""
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html><head></head><body>test</body></html>")
+
+    with patch("imbue.minds_workspace_server.server.STATIC_DIRECTORY", static_dir):
+        test_app = create_application()
+        test_client = TestClient(test_app)
+        response = test_client.get("/")
+        assert response.status_code == 200
+        assert "minds-workspace-server-hostname" in response.text
+
+
+def test_random_name_endpoint(client: TestClient) -> None:
+    """The random name endpoint returns a non-empty name."""
+    response = client.get("/api/random-name")
+    assert response.status_code == 200
+    data = response.json()
+    assert "name" in data
+    assert len(data["name"]) > 0
+
+
+def test_create_chat_agent_missing_parent(client: TestClient) -> None:
+    """Creating a chat agent with an unknown parent returns 400."""
+    response = client.post(
+        "/api/agents/create-chat",
+        json={"name": "test-chat", "parent_agent_id": "nonexistent"},
+    )
+    assert response.status_code == 400
+
+
+def test_create_worktree_agent_missing_agent(client: TestClient) -> None:
+    """Creating a worktree agent with an unknown selected agent returns 400."""
+    response = client.post(
+        "/api/agents/create-worktree",
+        json={"name": "test-worktree", "selected_agent_id": "nonexistent"},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.timeout(10)
+def test_websocket_endpoint_sends_initial_snapshot(client: TestClient) -> None:
+    """The WebSocket endpoint sends agents_updated and applications_updated on connect."""
+    with client.websocket_connect("/api/ws") as ws:
+        msg1 = json.loads(ws.receive_text())
+        msg2 = json.loads(ws.receive_text())
+
+        types = {msg1["type"], msg2["type"]}
+        assert "agents_updated" in types
+        assert "applications_updated" in types

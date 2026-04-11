@@ -66,9 +66,7 @@ def auth_key_to_string_session(dc_id: int, auth_key_hex: str) -> str:
         raise TelegramCredentialError(f"auth_key is not valid hex: {exc}") from exc
 
     if len(auth_key_bytes) != _AUTH_KEY_BYTE_LENGTH:
-        raise TelegramCredentialError(
-            f"auth_key must be {_AUTH_KEY_BYTE_LENGTH} bytes, got {len(auth_key_bytes)}"
-        )
+        raise TelegramCredentialError(f"auth_key must be {_AUTH_KEY_BYTE_LENGTH} bytes, got {len(auth_key_bytes)}")
 
     fmt = f">B{len(ip_packed)}sH{_AUTH_KEY_BYTE_LENGTH}s"
     packed = struct.pack(fmt, dc_id, ip_packed, _DEFAULT_PORT, auth_key_bytes)
@@ -146,7 +144,7 @@ def create_telegram_bot(
         client.connect()  # ty: ignore[unused-awaitable]
 
         try:
-            if not client.is_user_authorized():  # ty: ignore[unused-awaitable]
+            if not client.is_user_authorized():
                 raise TelegramCredentialError(
                     "Telegram session is not authorized. The auth key may have been "
                     "revoked. Please log in again via the Setup Telegram button."
@@ -154,7 +152,7 @@ def create_telegram_bot(
 
             # telethon.sync patches async methods to return synchronous values at runtime,
             # but the type stubs still show coroutine return types
-            me = client.get_me()  # ty: ignore[unused-awaitable]
+            me = client.get_me()
             logger.debug("Connected as: {} (id={})", me.first_name, me.id)  # ty: ignore[unresolved-attribute]
 
             bot_token, actual_username = _converse_with_botfather(
@@ -163,7 +161,7 @@ def create_telegram_bot(
                 bot_username=bot_username,
             )
         finally:
-            client.disconnect()  # ty: ignore[unused-awaitable]
+            client.disconnect()
 
     return TelegramBotCredentials(
         bot_token=SecretStr(bot_token),
@@ -180,24 +178,20 @@ def _converse_with_botfather(
 
     Returns (bot_token, actual_username).
     """
-    botfather = client.get_entity("@BotFather")  # ty: ignore[unused-awaitable]
+    botfather = client.get_entity("@BotFather")
 
     with client.conversation(botfather) as conv:  # ty: ignore[invalid-argument-type]
         # Step 1: initiate bot creation
         conv.send_message("/newbot")
         resp = conv.get_response()
         if "choose a name" not in resp.text.lower():
-            raise TelegramBotCreationError(
-                f"Unexpected BotFather response to /newbot:\n{resp.text}"
-            )
+            raise TelegramBotCreationError(f"Unexpected BotFather response to /newbot:\n{resp.text}")
 
         # Step 2: send the display name
         conv.send_message(bot_display_name)
         resp = conv.get_response()
         if "username" not in resp.text.lower():
-            raise TelegramBotCreationError(
-                f"Unexpected BotFather response to bot name:\n{resp.text}"
-            )
+            raise TelegramBotCreationError(f"Unexpected BotFather response to bot name:\n{resp.text}")
 
         # Step 3: send the username
         conv.send_message(bot_username)
@@ -205,16 +199,12 @@ def _converse_with_botfather(
         response_text = resp.text
 
         if "sorry" in response_text.lower() or "error" in response_text.lower():
-            raise TelegramBotCreationError(
-                f"BotFather rejected the username:\n{response_text}"
-            )
+            raise TelegramBotCreationError(f"BotFather rejected the username:\n{response_text}")
 
         # Extract the bot token from the response
         token_match = _BOT_TOKEN_PATTERN.search(response_text)
         if not token_match:
-            raise TelegramBotCreationError(
-                f"Could not extract bot token from BotFather response:\n{response_text}"
-            )
+            raise TelegramBotCreationError(f"Could not extract bot token from BotFather response:\n{response_text}")
 
         bot_token = token_match.group(1)
 
