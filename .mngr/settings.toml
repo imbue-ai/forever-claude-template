@@ -83,6 +83,14 @@ start_arg = ["--cpus=2", "--memory=4GiB", "--disk=5GiB"]
 
 ## and these templates are for sub-agents created within the sandbox
 
+# Chat template: minimal agent for additional chat sessions in the same work directory
+[create_templates.chat]
+type = "claude"
+
+# Worktree template: agent in a new git worktree, no services by default -- creates its own as needed
+[create_templates.worktree]
+type = "main"
+
 # Worker template: general purpose sub agent for doing tasks reliably (and ensuring that they are verified)
 [create_templates.worker]
 type = "worker"
