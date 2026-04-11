@@ -32,7 +32,7 @@ git add events_processor/PURPOSE.md && git commit -m "Configure event processor 
 ```bash
 mngr create <name> --type claude \
     --transfer none \
-    --label mind=$MIND_NAME \
+    --label workspace=$MINDS_WORKSPACE_NAME \
     --message "Read PURPOSE.md and begin executing on your purpose."
 ```
 

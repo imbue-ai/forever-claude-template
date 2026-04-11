@@ -28,7 +28,7 @@ TASK_EOF
 
 ```bash
 mngr create <task-name> -t worker \
-    --label mind=$MIND_NAME \
+    --label workspace=$MINDS_WORKSPACE_NAME \
     --message-file /tmp/task-<name>.md
 ```
 
@@ -55,7 +55,7 @@ When the wait completes, check what happened:
 
 ```bash
 # See current state
-mngr list --label mind=$MIND_NAME --format jsonl
+mngr list --label workspace=$MINDS_WORKSPACE_NAME --format jsonl
 
 # Read the agent's conversation
 mngr transcript <task-name> --role=user --role=assistant | tail -n 30

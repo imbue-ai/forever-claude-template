@@ -5,8 +5,8 @@ A self-contained template for running a persistent Claude agent that communicate
 ## Usage
 
 ```bash
-mngr create my-mind main -t local \
-    --host-env MIND_NAME=my-mind \
+mngr create my-workspace main -t local \
+    --host-env MINDS_WORKSPACE_NAME=my-workspace \
     --project ~/project/forever-claude-template \
     --pass-env TELEGRAM_BOT_TOKEN \
     --pass-env TELEGRAM_USER_NAME

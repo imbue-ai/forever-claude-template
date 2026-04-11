@@ -128,7 +128,7 @@ To understand the conversation context before replying, use the `read-telegram-h
 # Work delegation
 
 You can delegate larger tasks to sub-agents using the `launch-task` skill.
-Sub-agents work on separate git branches and are labeled with `mind=$MIND_NAME` so you can track them.
+Sub-agents work on separate git branches and are labeled with `workspace=$MINDS_WORKSPACE_NAME` so you can track them.
 
 Use your judgment on when to do work directly vs delegating. Delegation is useful for:
 - Tasks large enough to warrant a separate context

@@ -4,7 +4,7 @@
 [commands.create]
 connect = false
 ensure_clean = false
-pass_env = ["MIND_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "CLOUDFLARE_FORWARDING_URL"]
+pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "CLOUDFLARE_FORWARDING_URL"]
 env = ["IS_SANDBOX=1", "IS_AUTONOMOUS=1"]
 worktree_base_folder = "/worktree/"
 disable_plugin = ["recursive", "ttyd"]
@@ -12,7 +12,7 @@ yes = true
 
 # for the list command -- ensures that we don't see other agents when we're listing, even if we happen to list remote agents
 [commands.list]
-include = ["""has(labels.mind)"""]
+include = ["""has(labels.workspace)"""]
 
 # --- Agent types ---
 
@@ -62,7 +62,7 @@ worktree_base_folder = "/tmp/mngr-worktrees/"
 extra_provision_command = [
     "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/minds_workspace_server && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
 ]
-pass_env = ["MIND_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
+pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
 
 # template for docker provider
 [create_templates.docker]
