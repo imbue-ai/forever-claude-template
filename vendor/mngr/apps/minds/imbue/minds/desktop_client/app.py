@@ -25,15 +25,19 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from websockets import ClientConnection
 
+from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.deps import BackendResolverDep
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.proxy import generate_backend_loading_html
 from imbue.minds.desktop_client.proxy import generate_bootstrap_html
 from imbue.minds.desktop_client.proxy import generate_browser_info_bar_html
@@ -104,12 +108,7 @@ def _get_auth_store(request: Request) -> AuthStoreInterface:
     return request.app.state.auth_store
 
 
-def _get_backend_resolver(request: Request) -> BackendResolverInterface:
-    return request.app.state.backend_resolver
-
-
 AuthStoreDep = Annotated[AuthStoreInterface, Depends(_get_auth_store)]
-BackendResolverDep = Annotated[BackendResolverInterface, Depends(_get_backend_resolver)]
 
 
 # -- Auth helpers --
@@ -279,9 +278,18 @@ def _handle_landing_page(
         telegram_status: dict[str, bool] | None = None
         if telegram_orchestrator is not None:
             telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
+        agent_names: dict[str, str] = {}
+        for aid in all_agent_ids:
+            ws_name = backend_resolver.get_workspace_name(aid)
+            if ws_name:
+                agent_names[str(aid)] = ws_name
+            else:
+                info = backend_resolver.get_agent_display_info(aid)
+                agent_names[str(aid)] = info.agent_name if info else str(aid)
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             telegram_status_by_agent_id=telegram_status,
+            agent_names=agent_names,
         )
         return HTMLResponse(content=html)
 
@@ -521,6 +529,20 @@ def _build_proxy_response(
     return response
 
 
+def _make_loading_html(
+    agent_id: AgentId,
+    server_name: ServerName,
+    backend_resolver: BackendResolverInterface,
+) -> str:
+    """Build loading-page HTML with fallback links to other available servers."""
+    other_servers = tuple(s for s in backend_resolver.list_servers_for_agent(agent_id) if s != server_name)
+    return generate_backend_loading_html(
+        agent_id=agent_id,
+        current_server=server_name,
+        other_servers=other_servers,
+    )
+
+
 async def _handle_proxy_http(
     agent_id: str,
     server_name: str,
@@ -573,7 +595,7 @@ async def _handle_proxy_http(
         # when a stale tab is pointed at an unavailable backend.
         request_accept = request.headers.get("accept", "")
         if "text/html" in request_accept:
-            return HTMLResponse(content=generate_backend_loading_html())
+            return HTMLResponse(content=_make_loading_html(parsed_id, parsed_server, backend_resolver))
         return Response(
             status_code=502,
             content="Backend unavailable for agent {}, server {}".format(agent_id, server_name),
@@ -598,7 +620,7 @@ async def _handle_proxy_http(
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
         logger.warning("SSH tunnel setup failed for {} server {}: {}", agent_id, server_name, e)
         if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content=generate_backend_loading_html())
+            return HTMLResponse(content=_make_loading_html(parsed_id, parsed_server, backend_resolver))
         return Response(status_code=502, content=f"SSH tunnel to remote backend failed: {e}")
 
     # Check if this request expects a streaming response (SSE).
@@ -632,7 +654,7 @@ async def _handle_proxy_http(
     # dead-end 502 that requires manual reload.
     if isinstance(result, Response):
         if result.status_code >= 500 and "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content=generate_backend_loading_html())
+            return HTMLResponse(content=_make_loading_html(parsed_id, parsed_server, backend_resolver))
         return result
 
     return _build_proxy_response(
@@ -778,22 +800,22 @@ def _get_tunnel_http_client(
     backend_url: str,
     backend_resolver: BackendResolverInterface,
 ) -> httpx.AsyncClient | None:
-    """Get an httpx client configured for SSH tunneling, or None for direct connection."""
+    """Get an httpx client configured for SSH tunneling, or None for direct connection.
+
+    Creates a fresh client each time to avoid stale connections when SSH
+    tunnels are recreated after a broken pipe.
+    """
     tunnel_manager: SSHTunnelManager | None = app.state.tunnel_manager
     socket_path = _get_tunnel_socket_path(tunnel_manager, agent_id, backend_url, backend_resolver)
     if socket_path is None:
         return None
 
-    clients: dict[str, httpx.AsyncClient] = app.state.ssh_http_clients
-    key = str(socket_path)
-    if key not in clients:
-        transport = httpx.AsyncHTTPTransport(uds=key)
-        clients[key] = httpx.AsyncClient(
-            transport=transport,
-            follow_redirects=False,
-            timeout=_PROXY_TIMEOUT_SECONDS,
-        )
-    return clients[key]
+    transport = httpx.AsyncHTTPTransport(uds=str(socket_path))
+    return httpx.AsyncClient(
+        transport=transport,
+        follow_redirects=False,
+        timeout=_PROXY_TIMEOUT_SECONDS,
+    )
 
 
 # -- Agent creation route handlers --
@@ -1092,6 +1114,8 @@ def create_desktop_client(
     agent_creator: AgentCreator | None = None,
     cloudflare_client: CloudflareForwardingClient | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
+    notification_dispatcher: NotificationDispatcher | None = None,
+    paths: WorkspacePaths | None = None,
 ) -> FastAPI:
     """Create the desktop client FastAPI application.
 
@@ -1106,6 +1130,11 @@ def create_desktop_client(
 
     When telegram_orchestrator is provided, the landing page shows Telegram setup
     buttons and the /api/agents/{agent_id}/telegram/* endpoints are available.
+
+    When paths is provided, the /api/v1/ REST API router is mounted with API
+    key authentication. The notification endpoint within the router additionally
+    requires notification_dispatcher to be provided; without it that endpoint
+    returns 501.
     """
     is_externally_managed_client = http_client is not None
 
@@ -1127,8 +1156,16 @@ def create_desktop_client(
     app.state.agent_creator = agent_creator
     app.state.cloudflare_client = cloudflare_client
     app.state.telegram_orchestrator = telegram_orchestrator
+    app.state.notification_dispatcher = notification_dispatcher
+    if paths is not None:
+        app.state.api_v1_paths = paths
     if http_client is not None:
         app.state.http_client = http_client
+
+    # Mount the REST API v1 router
+    if paths is not None:
+        api_v1_router = create_api_v1_router()
+        app.include_router(api_v1_router, prefix="/api/v1")
 
     # Register routes
     app.get("/login")(_handle_login)

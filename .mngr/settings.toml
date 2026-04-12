@@ -52,6 +52,7 @@ env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CON
 extra_window = [
     "bootstrap='uv run bootstrap'",
     "telegram='uv run telegram-bot'",
+    "terminal='bash scripts/run_ttyd.sh'",
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"
 ]
 
