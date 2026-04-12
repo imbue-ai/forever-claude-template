@@ -81,6 +81,14 @@ target_path = "/code/"
 idle_timeout = "2147483647"
 start_arg = ["--cpus=2", "--memory=4GiB", "--disk=5GiB"]
 
+# template for vultr VPS provider (cloud mode)
+[create_templates.vultr]
+provider = "vultr"
+target_path = "/code/"
+build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "."]
+# 2^31 seconds is about 68 years, so, probably fine
+idle_timeout = "2147483647"
+
 ## and these templates are for sub-agents created within the sandbox
 
 # Chat template: minimal agent for additional chat sessions in the same work directory
