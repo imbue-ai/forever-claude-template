@@ -95,7 +95,7 @@ idle_timeout = "2147483647"
 # Chat template: minimal agent for additional chat sessions in the same work directory
 [create_templates.chat]
 type = "claude"
-env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
+env = ["IS_SANDBOX=1", "IS_AUTONOMOUS=1", "REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
 extra_window = [
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"
 ]
