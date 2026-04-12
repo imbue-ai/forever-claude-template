@@ -17,7 +17,7 @@ import { SubagentView } from "./SubagentView";
 // ProtoAgentLogView is no longer used as a separate panel type.
 // Build logs are now shown inline by ChatPanel when the agent is a proto-agent.
 import { CreateAgentModal } from "./CreateAgentModal";
-import { apiUrl, getBasePath } from "../base-path";
+import { apiUrl } from "../base-path";
 import {
   getAgentById,
   getChatAgentsForParent,
@@ -28,7 +28,7 @@ import {
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
 
-function getApplicationUrl(appName: string, rawUrl: string): string {
+function getApplicationUrl(appName: string, rawUrl: string, agentId: string): string {
   const hostname = window.location.hostname;
 
   // Cloudflare proxy: server--agentid--username.domain
@@ -39,10 +39,10 @@ function getApplicationUrl(appName: string, rawUrl: string): string {
     return `${proto}//${appName}--${cfMatch[1]}${port}/`;
   }
 
-  // Forwarding server: basePath is "/agents/{id}/web", swap "web" for the app name
-  const basePath = getBasePath();
-  if (basePath) {
-    return `${basePath.replace(/\/[^/]+$/, "")}/${appName}/`;
+  // Local forwarding server: /agents/{id}/{server_name}/
+  const pathMatch = window.location.pathname.match(/^(.*\/agents\/[^/]+)\//);
+  if (pathMatch) {
+    return `${pathMatch[1]}/${appName}/`;
   }
 
   // Dev mode (no forwarding server): use the raw URL from applications.toml
@@ -151,7 +151,7 @@ function buildDropdownItems(
   // (e.g., worktree agents) are kept so you can preview their changes.
   const apps = getApplicationsForAgent(agentId).filter((app) => app.name !== "web");
   for (const app of apps) {
-    const proxyUrl = getApplicationUrl(app.name, app.url);
+    const proxyUrl = getApplicationUrl(app.name, app.url, agentId);
     items.push({
       label: app.name,
       action: () => openIframeTab(agentId, dockviewState, proxyUrl, app.name),
@@ -579,10 +579,11 @@ export const DockviewWorkspace: m.Component<{ agentId: string | null }> = {
     const agentId = vnode.attrs.agentId;
 
     if (!agentId) {
-      // Don't show anything while waiting for the WebSocket to deliver
-      // the agent list and auto-select. This avoids a flash of
-      // "Select an agent" text on initial page load.
-      return m("div", { class: "dockview-workspace", style: "width: 100%; height: 100%;" });
+      return m(
+        "div",
+        { class: "dockview-workspace flex items-center justify-center h-full" },
+        m("p", { class: "text-text-secondary" }, "Select an agent to view its conversation."),
+      );
     }
 
     return m("div", {
