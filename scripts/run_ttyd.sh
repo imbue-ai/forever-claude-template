@@ -42,6 +42,13 @@ exec tmux attach -t "$_SESSION":0
 AGENT_SCRIPT
         chmod +x "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh"
     fi
+    if [ ! -f "$MNGR_AGENT_STATE_DIR/commands/ttyd/workdir.sh" ]; then
+        cat > "$MNGR_AGENT_STATE_DIR/commands/ttyd/workdir.sh" << 'WORKDIR_SCRIPT'
+#!/bin/bash
+cd "$1" 2>/dev/null && exec bash
+WORKDIR_SCRIPT
+        chmod +x "$MNGR_AGENT_STATE_DIR/commands/ttyd/workdir.sh"
+    fi
 fi
 
 # Register the terminal port before starting ttyd (port is known ahead of time)
