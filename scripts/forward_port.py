@@ -6,7 +6,6 @@ on startup to declare the ports they expose.
 
 Usage:
     python3 scripts/forward_port.py --name web --url http://localhost:8080
-    python3 scripts/forward_port.py --name web --url http://localhost:8080 --no-global
     python3 scripts/forward_port.py --remove --name web
 """
 
@@ -34,7 +33,7 @@ def _save_applications(path: Path, doc: tomlkit.TOMLDocument) -> None:
         tomlkit.dump(doc, f)
 
 
-def _upsert(path: Path, name: str, url: str, global_forward: bool) -> None:
+def _upsert(path: Path, name: str, url: str) -> None:
     doc = _load_applications(path)
     apps = doc.get("applications", [])
 
@@ -42,7 +41,6 @@ def _upsert(path: Path, name: str, url: str, global_forward: bool) -> None:
     for app in apps:
         if app.get("name") == name:
             app["url"] = url
-            app["global"] = global_forward
             _save_applications(path, doc)
             return
 
@@ -50,7 +48,6 @@ def _upsert(path: Path, name: str, url: str, global_forward: bool) -> None:
     entry = tomlkit.table()
     entry.add("name", name)
     entry.add("url", url)
-    entry.add("global", global_forward)
     apps.append(entry)
     _save_applications(path, doc)
 
@@ -83,19 +80,6 @@ def main() -> None:
         help="Full URL where the application is accessible (e.g. http://localhost:8080)",
     )
     parser.add_argument(
-        "--global",
-        dest="global_forward",
-        action="store_true",
-        default=True,
-        help="Enable global cloudflare forwarding (default: true)",
-    )
-    parser.add_argument(
-        "--no-global",
-        dest="global_forward",
-        action="store_false",
-        help="Disable global cloudflare forwarding",
-    )
-    parser.add_argument(
         "--remove",
         action="store_true",
         help="Remove the named application instead of adding it",
@@ -114,7 +98,7 @@ def main() -> None:
             if args.remove:
                 _remove(APPLICATIONS_FILE, args.name)
             else:
-                _upsert(APPLICATIONS_FILE, args.name, args.url, args.global_forward)
+                _upsert(APPLICATIONS_FILE, args.name, args.url)
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
