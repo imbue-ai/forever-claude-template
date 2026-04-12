@@ -45,7 +45,7 @@ AGENT_SCRIPT
 fi
 
 # Register the terminal port before starting ttyd (port is known ahead of time)
-python3 "$REPO_ROOT/scripts/forward_port.py" --name terminal --url "http://localhost:$TTYD_PORT"
+uv run python3 "$REPO_ROOT/scripts/forward_port.py" --name terminal --url "http://localhost:$TTYD_PORT"
 
 # Write server events for discovery
 if [ -n "${MNGR_AGENT_STATE_DIR:-}" ]; then
