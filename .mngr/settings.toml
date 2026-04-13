@@ -71,15 +71,16 @@ provider = "docker"
 target_path = "/code/"
 setting = ["providers.docker.is_enabled=true"]
 build_arg = ["--file=Dockerfile", "."]
-# 2^31 seconds is about 68 years, so, probably fine
-idle_timeout = "2147483647"
+# Disable idle detection entirely -- the host should never auto-shutdown.
+# This also prevents shutdown when all agent tmux sessions exit.
+idle_mode = "disabled"
 # I guess it can pass a volume in too if you want
 
 # template for lima VM provider
 [create_templates.lima]
 provider = "lima"
 target_path = "/code/"
-idle_timeout = "2147483647"
+idle_mode = "disabled"
 start_arg = ["--cpus=2", "--memory=4GiB", "--disk=5GiB"]
 
 # template for vultr VPS provider (cloud mode)
@@ -87,8 +88,9 @@ start_arg = ["--cpus=2", "--memory=4GiB", "--disk=5GiB"]
 provider = "vultr"
 target_path = "/code/"
 build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "."]
-# 2^31 seconds is about 68 years, so, probably fine
-idle_timeout = "2147483647"
+# Disable idle detection entirely -- the host should never auto-shutdown.
+# This also prevents shutdown when all agent tmux sessions exit.
+idle_mode = "disabled"
 
 ## and these templates are for sub-agents created within the sandbox
 
