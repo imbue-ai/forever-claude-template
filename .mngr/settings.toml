@@ -73,8 +73,6 @@ setting = ["providers.docker.is_enabled=true"]
 build_arg = ["--file=Dockerfile", "."]
 # 2^31 seconds is about 68 years, so, probably fine
 idle_timeout = "2147483647"
-# Keep the host running even when all agent sessions exit
-disable_session_shutdown = true
 # I guess it can pass a volume in too if you want
 
 # template for lima VM provider
@@ -82,7 +80,6 @@ disable_session_shutdown = true
 provider = "lima"
 target_path = "/code/"
 idle_timeout = "2147483647"
-disable_session_shutdown = true
 start_arg = ["--cpus=2", "--memory=4GiB", "--disk=5GiB"]
 
 # template for vultr VPS provider (cloud mode)
@@ -92,8 +89,6 @@ target_path = "/code/"
 build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "."]
 # 2^31 seconds is about 68 years, so, probably fine
 idle_timeout = "2147483647"
-# Keep the host running even when all agent sessions exit
-disable_session_shutdown = true
 
 ## and these templates are for sub-agents created within the sandbox
 
