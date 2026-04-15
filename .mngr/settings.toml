@@ -81,7 +81,7 @@ idle_mode = "disabled"
 provider = "lima"
 target_path = "/code/"
 idle_mode = "disabled"
-start_arg = ["--cpus=2", "--memory=4GiB", "--disk=5GiB"]
+start_arg = ["--cpus=2", "--memory=4GiB", "--disk=20GiB"]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]
