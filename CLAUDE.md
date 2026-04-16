@@ -144,7 +144,7 @@ You can create a persistent background watcher using the `create-event-processor
 You can (and should) modify your own configuration to improve yourself:
 
 - **CLAUDE.md**: (this file) update these instructions if you discover better ways to operate.
-- **skills/**: Create new skills or modify existing ones. Each skill is a directory with a SKILL.md file.
+- **.agents/skills/**: Create new skills or modify existing ones. Each skill is a directory with a SKILL.md file. (Also symlinked from `.claude/skills/`.)
 - **services.toml**: Add, modify, or remove background services. See the `edit-services` skill.
 - **scripts/**: Add utility scripts that help you accomplish your purpose.
 
@@ -152,7 +152,7 @@ Commit your changes to git after making modifications.
 
 # Updates
 
-Use the `update-self` skill to pull the latest improvements from the upstream template repo.
+Use the `update-self` skill to sync with the upstream template repo -- both pulling improvements and pushing shared changes (skills, scripts, config) back upstream.
 The upstream is defined in `parent.toml`.
 
 # Memory
