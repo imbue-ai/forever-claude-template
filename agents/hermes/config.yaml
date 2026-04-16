@@ -1,0 +1,20 @@
+# Template-specific hermes config overrides.
+#
+# These values are merged on top of the user's seeded HERMES_HOME/config.yaml
+# by agents/hermes/setup.sh during provisioning. Anything not set here is
+# inherited from the user's config (or from hermes defaults if the user has
+# no ~/.hermes/config.yaml).
+
+model:
+  default: "anthropic/claude-opus-4.6"
+
+# Curated toolset for a long-running minds agent: read/write files, run
+# commands, search the web, browse its own skills, manage a todo list.
+platform_toolsets:
+  cli: [terminal, file, web, skills, todo]
+
+# Expose the template's shared skills to hermes. ${MNGR_AGENT_WORK_DIR} is
+# expanded by hermes at config load time to the agent's work directory.
+skills:
+  external_dirs:
+    - ${MNGR_AGENT_WORK_DIR}/.agents/skills

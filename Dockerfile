@@ -54,6 +54,15 @@ ARG CLAUDE_CODE_VERSION=""
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
+# Install hermes-agent CLI. Pinned via HERMES_AGENT_VERSION build arg if set,
+# otherwise the latest pypi release.
+ARG HERMES_AGENT_VERSION=""
+RUN if [ -n "$HERMES_AGENT_VERSION" ]; then \
+        uv tool install "hermes-agent==$HERMES_AGENT_VERSION"; \
+    else \
+        uv tool install hermes-agent; \
+    fi
+
 # Install Node.js for building the minds-workspace-server frontend
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
@@ -84,10 +93,12 @@ RUN cd /code/vendor/mngr/apps/minds_workspace_server/frontend && \
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     uv tool install -e /code/vendor/mngr/apps/minds_workspace_server \
         --with /code/vendor/mngr/libs/mngr_claude \
+        --with /code/vendor/mngr/libs/mngr_hermes \
         --with /code/vendor/mngr/libs/mngr_modal && \
     mngr plugin add \
     --path vendor/mngr/libs/mngr_modal/ \
-    --path vendor/mngr/libs/mngr_claude
+    --path vendor/mngr/libs/mngr_claude \
+    --path vendor/mngr/libs/mngr_hermes
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.

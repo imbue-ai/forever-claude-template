@@ -2,6 +2,11 @@
 runtime/
 memory/
 
+# Generated at provisioning time from AGENTS.md -- see agents/claude/setup.sh
+# and .claude/settings.json SessionStart hook. Claude Code reads CLAUDE.md,
+# so we copy the canonical AGENTS.md to that filename at agent startup.
+/CLAUDE.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -31,6 +31,16 @@ parent_type = "claude"
 [agent_types.worker]
 parent_type = "claude"
 
+# Agent type defaults for hermes-backed agents. The base "hermes" type is
+# registered by the mngr_hermes plugin; this block is the per-repo hook for
+# hermes-specific overrides (currently none beyond the plugin defaults).
+[agent_types.hermes]
+
+# Hermes equivalent of "main" -- the top-level persistent agent that minds
+# spins up when the user picks hermes as the agent type.
+[agent_types.hermes_main]
+parent_type = "hermes"
+
 # --- Provider configurations ---
 
 # all disabled for now, since we don't want the agents to be able to launch mngr agents anywhere except within their own containers
@@ -45,10 +55,11 @@ is_enabled = false
 
 ## these are all for launching the original agent (from outside the sandbox, in the first place)
 
-# the template that is shared across all agent types
+# the template that is shared across all claude agent types
 [create_templates.main]
 type = "main"
 env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0"]
+extra_provision_command = ["bash agents/claude/setup.sh"]
 extra_window = [
     "bootstrap='uv run bootstrap'",
     "telegram='uv run telegram-bot'",
@@ -56,12 +67,24 @@ extra_window = [
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE'"
 ]
 
+# the corresponding template for hermes-backed agents. Composes with a mode
+# template (dev / docker / lima / vultr) the same way "main" does.
+[create_templates.hermes_main]
+type = "hermes_main"
+env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0"]
+extra_provision_command = ["bash agents/hermes/setup.sh"]
+extra_window = [
+    "bootstrap='uv run bootstrap'",
+    "telegram='uv run telegram-bot'",
+    "terminal='bash scripts/run_ttyd.sh'",
+]
+
 # template for dev mode (runs in-place on local provider)
 [create_templates.dev]
 provider = "local"
 worktree_base_folder = "/tmp/mngr-worktrees/"
 extra_provision_command = [
-    "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/minds_workspace_server && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
+    "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/minds_workspace_server && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude --path vendor/mngr/libs/mngr_hermes",
 ]
 pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
 

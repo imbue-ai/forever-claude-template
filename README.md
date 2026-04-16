@@ -14,7 +14,7 @@ mngr create my-workspace main -t local \
 
 ## Structure
 
-- `CLAUDE.md` - Agent instructions
+- `AGENTS.md` - Agent instructions (copied to `CLAUDE.md` at provisioning for claude agents)
 - `parent.toml` - Upstream repo for pulling updates
 - `.mngr/settings.toml` - Agent types, create templates, command defaults
 - `skills/` - Agent skills (telegram, task delegation, services, self-update)

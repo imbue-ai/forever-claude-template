@@ -1,6 +1,6 @@
 ---
 name: update-self
-description: Sync with the upstream template repo. Pull when upstream has new skills, script fixes, or config improvements. Push when you've improved shared infrastructure (skills, scripts, CLAUDE.md scaffolding, Dockerfile) that other agents should benefit from. Do not push agent-specific content (PURPOSE.md, memory, runtime state).
+description: Sync with the upstream template repo. Pull when upstream has new skills, script fixes, or config improvements. Push when you've improved shared infrastructure (skills, scripts, AGENTS.md scaffolding, Dockerfile) that other agents should benefit from. Do not push agent-specific content (PURPOSE.md, memory, runtime state).
 ---
 
 # Syncing with the upstream template
@@ -14,7 +14,7 @@ branch = "main"
 
 ## What this means
 
-The template contains shared infrastructure: skills, scripts, CLAUDE.md scaffolding, Dockerfile, services.toml, etc. Changes to these files may be useful to all repos derived from the template, so they should be pushed back upstream. Changes specific to this agent instance (e.g., custom PURPOSE.md content, agent-specific services, memory) should stay local.
+The template contains shared infrastructure: skills, scripts, AGENTS.md scaffolding, Dockerfile, services.toml, etc. Changes to these files may be useful to all repos derived from the template, so they should be pushed back upstream. Changes specific to this agent instance (e.g., custom PURPOSE.md content, agent-specific services, memory) should stay local.
 
 ## Setup
 
@@ -41,11 +41,11 @@ with open('parent.toml', 'rb') as f:
 git pull upstream "$BRANCH"
 ```
 
-Resolve any merge conflicts if needed. For conflicts in files customized per-agent (PURPOSE.md, agent-specific CLAUDE.md sections), prefer your local version.
+Resolve any merge conflicts if needed. For conflicts in files customized per-agent (PURPOSE.md, agent-specific AGENTS.md sections), prefer your local version.
 
 ## Pushing changes to the template
 
-Use this when you've made improvements to shared infrastructure that other agents should benefit from (e.g., new skills, script fixes, CLAUDE.md improvements).
+Use this when you've made improvements to shared infrastructure that other agents should benefit from (e.g., new skills, script fixes, AGENTS.md improvements).
 
 ```bash
 BRANCH=$(python3 -c "
