@@ -13,10 +13,6 @@
           },
           {
             "type": "command",
-            "command": "cp -f ${MNGR_AGENT_WORK_DIR:-.}/AGENTS.md ${MNGR_AGENT_WORK_DIR:-.}/CLAUDE.md"
-          },
-          {
-            "type": "command",
             "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_update_plugin.sh"
           }
         ]
