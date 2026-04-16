@@ -3,10 +3,8 @@
 # These values are merged on top of the user's seeded HERMES_HOME/config.yaml
 # by agents/hermes/setup.sh during provisioning. Anything not set here is
 # inherited from the user's config (or from hermes defaults if the user has
-# no ~/.hermes/config.yaml).
-
-model:
-  default: "anthropic/claude-opus-4.6"
+# no ~/.hermes/config.yaml). The model is deliberately not pinned here --
+# whatever the user's ~/.hermes/config.yaml specifies wins.
 
 # Curated toolset for a long-running minds agent: read/write files, run
 # commands, search the web, browse its own skills, manage a todo list.
