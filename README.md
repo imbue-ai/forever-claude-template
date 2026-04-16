@@ -24,6 +24,7 @@ mngr create my-workspace main -t local \
 - `libs/telegram_bot/` - Telegram bot, send CLI, and history viewer
 - `libs/bootstrap/` - Service manager (reconciles services.toml with tmux windows)
 - `vendor/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command
+- `vendor/tk/` - A vendored copy of the [tk](https://github.com/wedow/ticket) ticket tracker. The `ticket` script (also callable as `tk`) manages tickets stored as markdown in `.tickets/` (gitignored)
 
 ## Create templates
 

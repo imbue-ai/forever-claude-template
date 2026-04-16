@@ -42,15 +42,16 @@ timeout_func_only = true
 addopts = [
     "--timeout=10",
     "--ignore=vendor/mngr",
+    "--ignore=vendor/tk",
 ]
 
 [tool.ruff]
 target-version = "py311"
-exclude = ["vendor/mngr"]
+exclude = ["vendor/mngr", "vendor/tk"]
 
 [tool.ruff.lint]
 select = ["F", "I", "UP006", "UP007"]
 
 [tool.pyright]
 pythonVersion = "3.11"
-exclude = ["vendor/mngr"]
+exclude = ["vendor/mngr", "vendor/tk"]

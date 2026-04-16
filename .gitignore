@@ -2,6 +2,9 @@
 runtime/
 memory/
 
+# tk tickets (tracker is vendored at vendor/tk; the tickets themselves are local state)
+.tickets/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
