@@ -143,8 +143,8 @@ You can create a persistent background watcher using the `create-event-processor
 
 You can (and should) modify your own configuration to improve yourself:
 
-- **CLAUDE.md**: (this file) update these instructions if you discover better ways to operate.
-- **.agents/skills/**: Create new skills or modify existing ones. Each skill is a directory with a SKILL.md file. (Also symlinked from `.claude/skills/`.)
+- **AGENTS.md**: (this file) update these instructions if you discover better ways to operate.
+- **.agents/skills/**: Create new skills or modify existing ones. Each skill is a directory with a SKILL.md file.
 - **services.toml**: Add, modify, or remove background services. See the `edit-services` skill.
 - **scripts/**: Add utility scripts that help you accomplish your purpose.
 
@@ -157,8 +157,8 @@ The upstream is defined in `parent.toml`.
 
 # Memory
 
-Use Claude's built-in memory system. Your memory directory is `memory/` (configured via autoMemoryDirectory).
-Memory is gitignored -- it persists on the filesystem but is not version controlled.
+Use your agent runtime's built-in memory system to remember things across sessions. The specifics (where memory lives, how it is invoked) depend on the runtime -- check your own configuration.
+Anything the template writes to `memory/` is gitignored -- it persists on the filesystem but is not version controlled.
 
 # Services
 
