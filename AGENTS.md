@@ -152,7 +152,7 @@ Commit your changes to git after making modifications.
 
 # Updates
 
-Use the `update-self` skill to sync with the upstream template repo -- both pulling improvements and pushing shared changes (skills, scripts, config) back upstream.
+Use the `update-self` skill to pull improvements from the upstream template repo, and the `submit-upstream-changes` skill to push shared changes (skills, scripts, config) back upstream.
 The upstream is defined in `parent.toml`.
 
 # Memory
