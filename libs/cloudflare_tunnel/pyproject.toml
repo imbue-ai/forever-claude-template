@@ -2,6 +2,7 @@
 name = "cloudflare-tunnel"
 version = "0.1.0"
 description = "Service that watches for a Cloudflare tunnel token and runs cloudflared"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 

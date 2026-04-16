@@ -32,16 +32,27 @@ exit 1
 # Ensure ttyd commands directory exists and has an agent dispatch script
 if [ -n "${MNGR_AGENT_STATE_DIR:-}" ]; then
     mkdir -p "$MNGR_AGENT_STATE_DIR/commands/ttyd"
-    if [ ! -f "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh" ]; then
-        cat > "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh" << 'AGENT_SCRIPT'
+    # Rewrite agent.sh on every run so old deployments pick up the name-arg
+    # support -- otherwise stale single-session copies keep attaching to the
+    # primary agent regardless of the ?arg=agent&arg=<name> we now pass.
+    cat > "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh" << 'AGENT_SCRIPT'
 #!/bin/bash
+# Attach to a mngr agent's tmux session window 0.
+#
+# If a session name is provided as $1, use "$MNGR_PREFIX$1" as the target
+# session (so the minds chat UI can deep-link to a specific sub-agent's
+# terminal by passing the agent name). Otherwise fall back to the current
+# tmux session -- useful when ttyd is invoked without args.
 set -euo pipefail
-_SESSION=$(tmux display-message -p '#{session_name}')
+if [ $# -gt 0 ] && [ -n "$1" ]; then
+    TARGET_SESSION="${MNGR_PREFIX:-mngr-}$1"
+else
+    TARGET_SESSION=$(tmux display-message -p '#{session_name}')
+fi
 unset TMUX
-exec tmux attach -t "$_SESSION":0
+exec tmux attach -t "$TARGET_SESSION":0
 AGENT_SCRIPT
-        chmod +x "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh"
-    fi
+    chmod +x "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh"
     if [ ! -f "$MNGR_AGENT_STATE_DIR/commands/ttyd/workdir.sh" ]; then
         cat > "$MNGR_AGENT_STATE_DIR/commands/ttyd/workdir.sh" << 'WORKDIR_SCRIPT'
 #!/bin/bash
