@@ -67,11 +67,18 @@ extra_window = [
 ]
 
 # the corresponding template for hermes-backed agents. Composes with a mode
-# template (dev / docker / lima / vultr) the same way "main" does.
+# template (dev / docker / lima / vultr) the same way "main" does. Must be
+# listed before the mode template on the mngr create command line so the
+# `--build-arg INSTALL_HERMES_AGENT=1` below is concatenated before the
+# mode template's Dockerfile + build-context positional args.
 [create_templates.hermes_main]
 type = "hermes_main"
 env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0"]
 extra_provision_command = ["bash agents/hermes/setup.sh"]
+# Opt the Dockerfile into installing hermes-agent + registering mngr_hermes.
+# For non-docker providers (lima, local/dev) the extra build_arg entries are
+# harmless -- those providers don't run docker build.
+build_arg = ["--build-arg", "INSTALL_HERMES_AGENT=1"]
 extra_window = [
     "bootstrap='uv run bootstrap'",
     "telegram='uv run telegram-bot'",
