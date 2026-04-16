@@ -5,6 +5,10 @@
 [services.system_interface]
 command = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && minds-workspace-server"
 
+[services.web]
+command = "python3 scripts/forward_port.py --url http://localhost:8080 --name web && uv run web-server"
+restart = "on-failure"
+
 [services.cloudflared]
 command = "uv run cloudflare-tunnel"
 restart = "on-failure"

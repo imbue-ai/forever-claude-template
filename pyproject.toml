@@ -8,6 +8,7 @@ dependencies = [
     "bootstrap",
     "cloudflare-tunnel",
     "app-watcher",
+    "web-server",
     "imbue-common",
     "tomlkit>=0.12",
 ]
@@ -27,13 +28,14 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher"]
+members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server"]
 
 [tool.uv.sources]
 telegram-bot = { workspace = true }
 bootstrap = { workspace = true }
 cloudflare-tunnel = { workspace = true }
 app-watcher = { workspace = true }
+web-server = { workspace = true }
 imbue-common = { path = "vendor/mngr/libs/imbue_common" }
 
 [tool.pytest.ini_options]
