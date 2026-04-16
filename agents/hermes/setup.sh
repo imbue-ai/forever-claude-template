@@ -25,3 +25,8 @@ uv run --no-project "$SCRIPT_DIR/merge_config.py" \
 # Copy template plugins into HERMES_HOME/plugins/. Hermes discovers
 # plugins under HERMES_HOME/plugins/<name>/ at session start.
 cp -R "$SCRIPT_DIR/plugins/." "$HERMES_HOME/plugins/"
+
+# Sanity-check the merged HERMES_HOME: verifies the config is well-formed,
+# auth and dependencies look right, and auto-repairs common drift (stale
+# provider fields, broken CLI symlinks, oversized WAL, etc.).
+hermes doctor --fix
