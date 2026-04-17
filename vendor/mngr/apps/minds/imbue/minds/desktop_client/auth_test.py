@@ -106,3 +106,41 @@ def test_get_signing_key_reads_existing_key(tmp_path: Path) -> None:
     store = FileAuthStore(data_directory=auth_dir)
     key = store.get_signing_key()
     assert key.get_secret_value() == "my-custom-key-82734"
+
+
+def test_get_signing_key_raises_on_read_error(tmp_path: Path) -> None:
+    """If an existing signing key file is not readable, SigningKeyError is raised."""
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir(parents=True)
+    # Make "signing_key" a directory -- read_text on a directory raises IsADirectoryError
+    # (a subclass of OSError). This triggers a real OS error that works regardless of
+    # whether we're running as root, unlike chmod-based approaches.
+    (auth_dir / "signing_key").mkdir()
+
+    store = FileAuthStore(data_directory=auth_dir)
+    with pytest.raises(SigningKeyError):
+        store.get_signing_key()
+
+
+def test_get_signing_key_raises_on_write_error(tmp_path: Path) -> None:
+    """If the auth directory cannot be written to, SigningKeyError is raised on key generation."""
+    # Make "auth" a regular file instead of a directory. When get_signing_key tries
+    # to write the key file inside it, the OS will raise NotADirectoryError (a subclass
+    # of OSError). Works regardless of root/non-root.
+    auth_path = tmp_path / "auth"
+    auth_path.write_text("not a directory")
+
+    store = FileAuthStore(data_directory=auth_path)
+    with pytest.raises(SigningKeyError):
+        store.get_signing_key()
+
+
+def test_validate_code_returns_false_on_json_decode_error(tmp_path: Path) -> None:
+    """If the codes file contains invalid JSON, code validation returns False without crashing."""
+    auth_dir = tmp_path / "auth"
+    auth_dir.mkdir(parents=True)
+    (auth_dir / "one_time_codes.json").write_text("not valid json {{{")
+
+    store = FileAuthStore(data_directory=auth_dir)
+    result = store.validate_and_consume_code(OneTimeCode("any-code"))
+    assert result is False

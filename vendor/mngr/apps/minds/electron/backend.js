@@ -65,7 +65,7 @@ function waitForPort(host, port, maxAttempts = 50, intervalMs = 200) {
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
  */
-function startBackend(onProgress) {
+function startBackend(onProgress, onNotification, onAuthEvent) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
@@ -82,12 +82,16 @@ function startBackend(onProgress) {
 
       let uvBin, args, cwd, env;
 
+      const mindsRootName = paths.getMindsRootName();
+      const mngrHostDir = paths.getMngrHostDir();
+      const mngrPrefix = paths.getMngrPrefix();
+
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
         uvBin = 'uv';
         args = [
           'run', '--package', 'minds',
-          'mind', '--format', 'jsonl',
+          'minds', '-vv', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'forward',
           '--host', '127.0.0.1',
@@ -95,7 +99,13 @@ function startBackend(onProgress) {
           '--no-browser',
         ];
         cwd = paths.getMonorepoRoot();
-        env = { ...process.env };
+        env = {
+          ...process.env,
+          MINDS_ELECTRON: '1',
+          MINDS_ROOT_NAME: mindsRootName,
+          MNGR_HOST_DIR: mngrHostDir,
+          MNGR_PREFIX: mngrPrefix,
+        };
       } else {
         // Packaged mode: use bundled uv with standalone pyproject
         const uvPath = paths.getUvPath();
@@ -108,7 +118,7 @@ function startBackend(onProgress) {
         uvBin = uvPath;
         args = [
           'run', '--project', pyprojectDir,
-          'mind', '--format', 'jsonl',
+          'minds', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'forward',
           '--host', '127.0.0.1',
@@ -121,6 +131,10 @@ function startBackend(onProgress) {
           PATH: `${uvBinDir}:${gitBinDir}:${process.env.PATH}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
+          MINDS_ELECTRON: '1',
+          MINDS_ROOT_NAME: mindsRootName,
+          MNGR_HOST_DIR: mngrHostDir,
+          MNGR_PREFIX: mngrPrefix,
         };
         // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
         delete env.VIRTUAL_ENV;
@@ -160,6 +174,10 @@ function startBackend(onProgress) {
                   reject(new Error(`Backend emitted login URL but server never became ready: ${err.message}`));
                 });
               }
+            } else if (event.event === 'notification' && event.message && onNotification) {
+              onNotification(event);
+            } else if ((event.event === 'auth_success' || event.event === 'auth_required') && onAuthEvent) {
+              onAuthEvent(event);
             }
           } catch {
             // Not valid JSON -- just log it
@@ -167,9 +185,13 @@ function startBackend(onProgress) {
         }
       });
 
-      // Stderr is human-readable logging -- capture to log file
+      // Stderr is human-readable logging -- capture to log file and console
       child.stderr.on('data', (data) => {
-        logStream.write(data.toString());
+        const text = data.toString();
+        logStream.write(text);
+        if (paths.isDev()) {
+          process.stderr.write(text);
+        }
       });
 
       child.on('error', (err) => {
@@ -200,23 +222,30 @@ function startBackend(onProgress) {
 function shutdown() {
   return new Promise((resolve) => {
     if (!backendProcess) {
+      console.log('[shutdown] No backend process to shut down');
       resolve();
       return;
     }
 
     const child = backendProcess;
     let isExited = false;
+    const startTime = Date.now();
 
-    child.on('exit', () => {
+    child.on('exit', (code, signal) => {
+      const elapsed = Date.now() - startTime;
+      console.log(`[shutdown] Backend exited after ${elapsed}ms (code=${code}, signal=${signal})`);
       isExited = true;
       backendProcess = null;
       resolve();
     });
 
+    console.log(`[shutdown] Sending SIGTERM to backend (PID ${child.pid})`);
     child.kill('SIGTERM');
 
     setTimeout(() => {
       if (!isExited) {
+        const elapsed = Date.now() - startTime;
+        console.log(`[shutdown] Backend still alive after ${elapsed}ms, sending SIGKILL`);
         try {
           child.kill('SIGKILL');
         } catch {
@@ -226,6 +255,8 @@ function shutdown() {
       // Resolve after SIGKILL attempt regardless
       setTimeout(() => {
         if (!isExited) {
+          const elapsed = Date.now() - startTime;
+          console.log(`[shutdown] Backend did not exit after SIGKILL (${elapsed}ms), giving up`);
           backendProcess = null;
           resolve();
         }

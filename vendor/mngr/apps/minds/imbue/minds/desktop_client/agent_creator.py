@@ -11,7 +11,6 @@ via get_log_queue().
 
 import os
 import queue
-import shlex
 import shutil
 import tempfile
 import threading
@@ -32,7 +31,9 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
+from imbue.minds.desktop_client.api_key_store import generate_api_key
+from imbue.minds.desktop_client.api_key_store import hash_api_key
+from imbue.minds.desktop_client.api_key_store import save_api_key_hash
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -170,6 +171,49 @@ def checkout_branch(
         )
 
 
+def _rsync_worktree_over_clone(
+    worktree_dir: Path,
+    clone_dir: Path,
+    on_output: OutputCallback | None = None,
+) -> None:
+    """Rsync a worktree's working directory over a shallow clone.
+
+    Copies all files from the worktree into the clone, preserving the
+    clone's ``.git`` directory (which is a proper standalone git dir,
+    unlike the worktree's ``.git`` file). This ensures uncommitted
+    changes in the worktree are present in the clone.
+    """
+    logger.debug("Rsyncing worktree {} over clone {}", worktree_dir, clone_dir)
+    command = [
+        "rsync",
+        "-a",
+        "--delete",
+        "--exclude=.git",
+        "--exclude=__pycache__",
+        "--exclude=.venv",
+        "--exclude=node_modules",
+        "--exclude=.mypy_cache",
+        "--exclude=.ruff_cache",
+        "--exclude=.pytest_cache",
+        "--exclude=.test_output",
+        f"{worktree_dir}/",
+        f"{clone_dir}/",
+    ]
+    cg = ConcurrencyGroup(name="rsync-worktree")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+    if result.returncode != 0:
+        logger.warning(
+            "rsync worktree over clone exited with code {}: {}",
+            result.returncode,
+            result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+        )
+
+
 def _make_host_name(agent_name: AgentName) -> str:
     """Build the host name for an agent.
 
@@ -178,22 +222,33 @@ def _make_host_name(agent_name: AgentName) -> str:
     return f"{agent_name}-host"
 
 
+WELCOME_INITIAL_MESSAGE: Final[str] = "/welcome"
+
+
 def _build_mngr_create_command(
     launch_mode: LaunchMode,
     agent_name: AgentName,
     agent_id: AgentId,
-) -> list[str]:
-    """Build the mngr create command for the given launch mode.
+    host_env_file: Path | None = None,
+) -> tuple[list[str], str]:
+    """Build the mngr create command and generate an API key for the agent.
+
+    Returns (command_list, api_key) where api_key is a UUID4 string injected
+    as MINDS_API_KEY into the agent's environment via --env.
 
     DEV mode: --template main --template dev (runs in-place on local provider)
     LOCAL mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
-    CLOUD mode: not yet supported
+    CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
 
     For modes that create a separate host (LOCAL, LIMA, CLOUD), the agent address
     uses ``agent_name@{agent_name}-host`` so hosts are clearly attributable.
     ``--reuse`` and ``--update`` are passed so re-deploying resets the agent
     on the same host instead of failing.
+
+    When ``host_env_file`` is supplied, its contents are loaded into the host
+    environment via ``--host-env-file`` so secrets from a local ``.env`` reach
+    the agent without being baked into the template.
     """
     match launch_mode:
         case LaunchMode.DEV:
@@ -203,9 +258,11 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             address = f"{agent_name}@{_make_host_name(agent_name)}.lima"
         case LaunchMode.CLOUD:
-            address = f"{agent_name}@{_make_host_name(agent_name)}"
+            address = f"{agent_name}@{_make_host_name(agent_name)}.vultr"
         case _ as unreachable:
             assert_never(unreachable)
+
+    api_key = generate_api_key()
 
     mngr_command: list[str] = [
         MNGR_BINARY,
@@ -218,25 +275,60 @@ def _build_mngr_create_command(
         "--update",
         "--label",
         f"workspace={agent_name}",
+        "--env",
+        f"MINDS_API_KEY={api_key}",
         "--label",
         "user_created=true",
+        "--label",
+        "is_primary=true",
         "--template",
         "main",
+        "--message",
+        WELCOME_INITIAL_MESSAGE,
     ]
 
     match launch_mode:
         case LaunchMode.DEV:
+            # Local (same-machine) mode: the agent inherits the bootstrap-set
+            # MNGR_HOST_DIR/MNGR_PREFIX via os.environ directly, so no
+            # host-env plumbing is needed.
             mngr_command.extend(["--template", "dev"])
         case LaunchMode.LOCAL:
-            mngr_command.extend(["--new-host", "--template", "docker"])
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "docker"])
+            mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
-            mngr_command.extend(["--new-host", "--template", "lima"])
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "lima"])
+            mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.CLOUD:
-            raise NotImplementedError("Cloud launch mode is not yet supported")
+            mngr_command.extend(["--new-host", "--idle-mode", "disabled", "--template", "vultr"])
+            mngr_command.extend(_remote_host_env_flags())
         case _ as unreachable:
             assert_never(unreachable)
 
-    return mngr_command
+    if host_env_file is not None:
+        mngr_command.extend(["--host-env-file", str(host_env_file)])
+
+    return mngr_command, api_key
+
+
+def _remote_host_env_flags() -> list[str]:
+    """Return the --host-env / --pass-host-env flags for a new remote host.
+
+    Remote containers always store their mngr state under ``/mngr`` (the
+    conventional container-internal path -- this is also what
+    ``_REMOTE_HOST_DIR`` in ``runner.py`` looks for when writing reverse-tunnel
+    API URLs), independent of the local ``MNGR_HOST_DIR`` (which could be
+    ``~/.minds/mngr`` or ``~/.devminds/mngr``). We only propagate
+    ``MNGR_PREFIX`` so the inner mngr's tmux/session names match the local
+    ones, avoiding confusion when the same name has to refer to the "same"
+    thing on both sides.
+    """
+    return [
+        "--host-env",
+        "MNGR_HOST_DIR=/mngr",
+        "--pass-host-env",
+        "MNGR_PREFIX",
+    ]
 
 
 def run_mngr_create(
@@ -245,15 +337,17 @@ def run_mngr_create(
     agent_name: AgentName,
     agent_id: AgentId,
     on_output: OutputCallback | None = None,
-) -> None:
+    host_env_file: Path | None = None,
+) -> str:
     """Create an mngr agent via ``mngr create``.
 
     The repo's own ``.mngr/settings.toml`` defines agent types, templates,
     environment variables, and all other configuration.
 
+    Returns the generated API key for the agent.
     Raises MngrCommandError if the command fails.
     """
-    mngr_command = _build_mngr_create_command(launch_mode, agent_name, agent_id)
+    mngr_command, api_key = _build_mngr_create_command(launch_mode, agent_name, agent_id, host_env_file=host_env_file)
 
     logger.info("Running: {}", " ".join(mngr_command))
 
@@ -274,35 +368,7 @@ def run_mngr_create(
             )
         )
 
-
-def _inject_tunnel_token(
-    agent_id: AgentId,
-    token: str,
-    log_queue: queue.Queue[str],
-) -> None:
-    """Inject the tunnel token into the agent's runtime/secrets file via mngr exec."""
-    log_queue.put("[minds] Injecting tunnel token into agent...")
-    safe_token = shlex.quote(token)
-    cg = ConcurrencyGroup(name="mngr-exec-token")
-    with cg:
-        command = [
-            MNGR_BINARY,
-            "exec",
-            str(agent_id),
-            f"mkdir -p runtime && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\\n' {safe_token} >> runtime/secrets",
-        ]
-        result = cg.run_process_to_completion(
-            command=command,
-            is_checked_after=False,
-        )
-    if result.returncode != 0:
-        log_queue.put(
-            "[minds] WARNING: Failed to inject tunnel token: {}".format(
-                result.stderr.strip() if result.stderr.strip() else result.stdout.strip()
-            )
-        )
-    else:
-        log_queue.put("[minds] Tunnel token injected successfully.")
+    return api_key
 
 
 class AgentCreator(MutableModel):
@@ -315,11 +381,6 @@ class AgentCreator(MutableModel):
     """
 
     paths: WorkspacePaths = Field(frozen=True, description="Filesystem paths for minds data")
-    cloudflare_client: CloudflareForwardingClient | None = Field(
-        default=None,
-        frozen=True,
-        description="Client for Cloudflare tunnel API, or None if not configured",
-    )
 
     _statuses: dict[str, AgentCreationStatus] = PrivateAttr(default_factory=dict)
     _redirect_urls: dict[str, str] = PrivateAttr(default_factory=dict)
@@ -334,8 +395,14 @@ class AgentCreator(MutableModel):
         agent_name: str = "",
         branch: str = "",
         launch_mode: LaunchMode = LaunchMode.LOCAL,
+        include_env_file: bool = False,
     ) -> AgentId:
         """Start creating an agent from a git URL or local path in a background thread.
+
+        When ``include_env_file`` is true and ``repo_source`` resolves to a local
+        directory containing a ``.env`` file, that file is passed to ``mngr create``
+        via ``--host-env-file`` so local secrets reach the new agent's host.
+        The flag is ignored for git URLs (since ``.env`` is gitignored).
 
         Returns the agent ID immediately. Use get_creation_info() to poll status,
         or iter_log_lines() to stream creation logs.
@@ -351,7 +418,7 @@ class AgentCreator(MutableModel):
 
         thread = threading.Thread(
             target=self._create_agent_background,
-            args=(agent_id, repo_source, effective_name, effective_branch, log_queue, launch_mode),
+            args=(agent_id, repo_source, effective_name, effective_branch, log_queue, launch_mode, include_env_file),
             daemon=True,
             name="agent-creator-{}".format(agent_id),
         )
@@ -393,16 +460,25 @@ class AgentCreator(MutableModel):
         branch: str,
         log_queue: queue.Queue[str],
         launch_mode: LaunchMode,
+        include_env_file: bool,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent."""
         aid = str(agent_id)
         emit_log = make_log_callback(log_queue)
+        host_env_file: Path | None = None
         try:
             with log_span("Creating agent {} from {} (mode: {})", agent_id, repo_source, launch_mode):
                 if _is_local_path(repo_source):
                     resolved_path = Path(os.path.expanduser(repo_source)).resolve()
                     if not resolved_path.is_dir():
                         raise MngrCommandError(f"Local path does not exist: {resolved_path}")
+                    if include_env_file:
+                        candidate = resolved_path / ".env"
+                        if candidate.is_file():
+                            host_env_file = candidate
+                            log_queue.put(f"[minds] Including .env file: {candidate}")
+                        else:
+                            log_queue.put(f"[minds] No .env file found at {candidate}; skipping --host-env-file")
 
                     if _is_git_worktree(resolved_path):
                         # Worktrees have a .git file pointing to the parent repo's
@@ -417,6 +493,11 @@ class AgentCreator(MutableModel):
                             shutil.rmtree(clone_target)
                         file_url = GitUrl("file://{}".format(resolved_path))
                         clone_git_repo(file_url, clone_target, on_output=emit_log, is_shallow=True)
+                        # The shallow clone only contains committed content. Rsync
+                        # the worktree's working directory over so that uncommitted
+                        # changes (e.g. a locally-rsynced vendor/mngr/) are included
+                        # in the Docker build context.
+                        _rsync_worktree_over_clone(resolved_path, clone_target, on_output=emit_log)
                         workspace_dir = clone_target
                     else:
                         workspace_dir = resolved_path
@@ -439,23 +520,27 @@ class AgentCreator(MutableModel):
 
                 parsed_name = AgentName(agent_name)
                 log_queue.put("[minds] Creating agent '{}' (mode: {})...".format(agent_name, launch_mode.value))
-                run_mngr_create(
+                api_key = run_mngr_create(
                     launch_mode=launch_mode,
                     workspace_dir=workspace_dir,
                     agent_name=parsed_name,
                     agent_id=agent_id,
                     on_output=emit_log,
+                    host_env_file=host_env_file,
                 )
 
-                self._setup_cloudflare_tunnel(agent_id, log_queue)
+                # Persist the API key hash
+                key_hash = hash_api_key(api_key)
+                save_api_key_hash(self.paths.data_dir, agent_id, key_hash)
+                log_queue.put("[minds] API key generated and hash stored.")
 
                 log_queue.put("[minds] Agent created successfully.")
 
                 with self._lock:
                     self._statuses[aid] = AgentCreationStatus.DONE
-                    self._redirect_urls[aid] = "/agents/{}/".format(agent_id)
+                    self._redirect_urls[aid] = "/forwarding/{}/".format(agent_id)
 
-        except (GitCloneError, GitOperationError, MngrCommandError, NotImplementedError, ValueError, OSError) as e:
+        except (GitCloneError, GitOperationError, MngrCommandError, ValueError, OSError) as e:
             logger.error("Failed to create agent {}: {}", agent_id, e)
             log_queue.put("[minds] ERROR: {}".format(e))
             with self._lock:
@@ -463,25 +548,3 @@ class AgentCreator(MutableModel):
                 self._errors[aid] = str(e)
         finally:
             log_queue.put(LOG_SENTINEL)
-
-    def _setup_cloudflare_tunnel(
-        self,
-        agent_id: AgentId,
-        log_queue: queue.Queue[str],
-    ) -> None:
-        """Create a Cloudflare tunnel and inject its token into the agent.
-
-        Uses the cloudflare_client if configured. Does nothing otherwise.
-        """
-        if self.cloudflare_client is None:
-            log_queue.put("[minds] Cloudflare forwarding not configured, skipping tunnel creation.")
-            return
-
-        log_queue.put("[minds] Creating Cloudflare tunnel...")
-        token, message = self.cloudflare_client.create_tunnel(agent_id)
-        log_queue.put(f"[minds] {message}")
-
-        if token is not None:
-            _inject_tunnel_token(agent_id, token, log_queue)
-        else:
-            log_queue.put("[minds] Skipping tunnel token injection.")
