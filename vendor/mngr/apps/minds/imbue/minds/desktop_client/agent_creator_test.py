@@ -16,11 +16,6 @@ from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import make_log_callback
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingClient
-from imbue.minds.desktop_client.cloudflare_client import CloudflareForwardingUrl
-from imbue.minds.desktop_client.cloudflare_client import CloudflareSecret
-from imbue.minds.desktop_client.cloudflare_client import CloudflareUsername
-from imbue.minds.desktop_client.cloudflare_client import OwnerEmail
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -92,7 +87,7 @@ def test_make_host_name() -> None:
 
 
 def test_build_mngr_create_command_dev_mode() -> None:
-    cmd = _build_mngr_create_command(
+    cmd, api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.DEV,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
@@ -106,10 +101,19 @@ def test_build_mngr_create_command_dev_mode() -> None:
     assert "docker" not in cmd
     # DEV mode: address is just the agent name (no host suffix)
     assert cmd[2] == "test-agent"
+    # API key is injected via --env
+    assert "--env" in cmd
+    env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--env"]
+    assert any(v.startswith("MINDS_API_KEY=") for v in env_values)
+    assert len(api_key) > 0
+    # DEV mode runs on localhost: no host-env flags (the agent inherits the
+    # local bootstrap-set env directly).
+    assert "--host-env" not in cmd
+    assert "--pass-host-env" not in cmd
 
 
 def test_build_mngr_create_command_local_mode() -> None:
-    cmd = _build_mngr_create_command(
+    cmd, _api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.LOCAL,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
@@ -120,12 +124,23 @@ def test_build_mngr_create_command_local_mode() -> None:
     assert "--reuse" in cmd
     assert "--update" in cmd
     assert "--new-host" in cmd
+    assert "--idle-mode" in cmd
+    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # LOCAL mode: address includes host name with docker provider suffix
     assert cmd[2] == "test-agent@test-agent-host.docker"
+    # Remote host: MNGR_HOST_DIR forced to /mngr (container convention),
+    # MNGR_PREFIX forwarded from the local shell for naming consistency.
+    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
+    assert "MNGR_HOST_DIR=/mngr" in host_env_values
+    pass_host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
+    assert "MNGR_PREFIX" in pass_host_env_values
+    # We do NOT forward the local MNGR_HOST_DIR -- that's a local filesystem
+    # path that doesn't exist inside the container.
+    assert "MNGR_HOST_DIR" not in pass_host_env_values
 
 
 def test_build_mngr_create_command_lima_mode() -> None:
-    cmd = _build_mngr_create_command(
+    cmd, _api_key = _build_mngr_create_command(
         launch_mode=LaunchMode.LIMA,
         agent_name=AgentName("test-agent"),
         agent_id=AgentId(),
@@ -136,17 +151,68 @@ def test_build_mngr_create_command_lima_mode() -> None:
     assert "--reuse" in cmd
     assert "--update" in cmd
     assert "--new-host" in cmd
+    assert "--idle-mode" in cmd
+    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
     # LIMA mode: address includes host name with lima provider suffix
     assert cmd[2] == "test-agent@test-agent-host.lima"
+    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
+    assert "MNGR_HOST_DIR=/mngr" in host_env_values
+    assert "MNGR_PREFIX" in [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
 
 
-def test_build_mngr_create_command_cloud_mode_raises() -> None:
-    with pytest.raises(NotImplementedError, match="Cloud launch mode"):
-        _build_mngr_create_command(
-            launch_mode=LaunchMode.CLOUD,
-            agent_name=AgentName("test-agent"),
-            agent_id=AgentId(),
-        )
+def test_build_mngr_create_command_adds_welcome_initial_message() -> None:
+    cmd, _api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.DEV,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+    )
+    assert "--message" in cmd
+    # The welcome message is sent as the very first user prompt so a /welcome
+    # skill can produce a greeting without any other user interaction.
+    assert cmd[cmd.index("--message") + 1] == "/welcome"
+
+
+def test_build_mngr_create_command_with_host_env_file(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("FOO=bar\n")
+    cmd, _api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+        host_env_file=env_path,
+    )
+    assert "--host-env-file" in cmd
+    assert cmd[cmd.index("--host-env-file") + 1] == str(env_path)
+
+
+def test_build_mngr_create_command_omits_host_env_file_by_default() -> None:
+    cmd, _api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.LOCAL,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+    )
+    assert "--host-env-file" not in cmd
+
+
+def test_build_mngr_create_command_cloud_mode() -> None:
+    cmd, _api_key = _build_mngr_create_command(
+        launch_mode=LaunchMode.CLOUD,
+        agent_name=AgentName("test-agent"),
+        agent_id=AgentId(),
+    )
+    assert "--template" in cmd
+    assert "vultr" in cmd
+    assert "main" in cmd
+    assert "--reuse" in cmd
+    assert "--update" in cmd
+    assert "--new-host" in cmd
+    assert "--idle-mode" in cmd
+    assert cmd[cmd.index("--idle-mode") + 1] == "disabled"
+    # CLOUD mode: address includes host name with vultr provider suffix
+    assert cmd[2] == "test-agent@test-agent-host.vultr"
+    host_env_values = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--host-env"]
+    assert "MNGR_HOST_DIR=/mngr" in host_env_values
+    assert "MNGR_PREFIX" in [cmd[i + 1] for i, v in enumerate(cmd) if v == "--pass-host-env"]
 
 
 # -- clone_git_repo tests --
@@ -299,40 +365,7 @@ def test_agent_creator_start_creation_with_local_path(tmp_path: Path) -> None:
     assert info.status == AgentCreationStatus.FAILED
 
 
-def test_setup_cloudflare_tunnel_skips_when_no_client(tmp_path: Path) -> None:
-    """Verify _setup_cloudflare_tunnel does nothing when cloudflare_client is None."""
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-    )
-    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
-    creator._setup_cloudflare_tunnel(AgentId(), log_queue)
-    messages = []
-    while not log_queue.empty():
-        messages.append(log_queue.get_nowait())
-    assert any("not configured" in m for m in messages)
-
-
-def test_setup_cloudflare_tunnel_with_client_logs_creation(tmp_path: Path) -> None:
-    """Verify _setup_cloudflare_tunnel calls the client and logs progress."""
-    client = CloudflareForwardingClient(
-        forwarding_url=CloudflareForwardingUrl("http://127.0.0.1:1"),
-        username=CloudflareUsername("testuser"),
-        secret=CloudflareSecret("testsecret"),
-        owner_email=OwnerEmail("test@example.com"),
-    )
-    creator = AgentCreator(
-        paths=WorkspacePaths(data_dir=tmp_path / "minds"),
-        cloudflare_client=client,
-    )
-    log_queue: queue_mod.Queue[str] = queue_mod.Queue()
-    creator._setup_cloudflare_tunnel(AgentId(), log_queue)
-    messages = []
-    while not log_queue.empty():
-        messages.append(log_queue.get_nowait())
-    assert any("Creating Cloudflare tunnel" in m for m in messages)
-    assert any("WARNING" in m or "failed" in m.lower() for m in messages)
-
-
+@pytest.mark.timeout(30)
 def test_run_mngr_create_raises_on_failure(tmp_path: Path) -> None:
     """Verify run_mngr_create raises MngrCommandError when mngr create fails."""
     with pytest.raises(MngrCommandError, match="mngr create failed"):

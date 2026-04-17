@@ -47,6 +47,7 @@ from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_comman
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_lima.config import LimaProviderConfig
@@ -91,7 +92,6 @@ class LimaProviderInstance(BaseProviderInstance):
 
     config: LimaProviderConfig = Field(frozen=True, description="Lima provider configuration")
 
-    _host_by_id_cache: dict[HostId, HostInterface] = PrivateAttr(default_factory=dict)
     _lima_checked: bool = PrivateAttr(default=False)
 
     def _ensure_lima_available(self) -> None:
@@ -127,7 +127,8 @@ class LimaProviderInstance(BaseProviderInstance):
         return True
 
     def reset_caches(self) -> None:
-        self._host_by_id_cache.clear()
+        for host_id in list(self._host_by_id_cache):
+            self._evict_cached_host(host_id)
         self._host_store.clear_cache()
 
     # =========================================================================
@@ -239,6 +240,7 @@ class LimaProviderInstance(BaseProviderInstance):
             port=ssh_config.port,
             private_key_path=ssh_config.identity_file,
             known_hosts_path=self._known_hosts_path,
+            ssh_user=ssh_config.user,
         )
         connector = PyinfraConnector(pyinfra_host)
 
@@ -253,21 +255,28 @@ class LimaProviderInstance(BaseProviderInstance):
         )
 
     def _scan_and_add_host_key(self, hostname: str, port: int) -> None:
-        """Scan the SSH host key and add it to known_hosts."""
+        """Scan SSH host keys and add all of them to known_hosts.
+
+        First removes any stale keys for this host:port (from previous VMs
+        that may have reused the same port), then adds all key types from
+        ssh-keyscan so paramiko can negotiate any of them.
+        """
+        clear_host_from_known_hosts(self._known_hosts_path, hostname, port)
         result = self.mngr_ctx.concurrency_group.run_process_to_completion(
-            ["ssh-keyscan", "-p", str(port), hostname],
+            ["ssh-keyscan", "-t", "rsa,ecdsa,ed25519", "-p", str(port), hostname],
             timeout=10.0,
         )
         if result.returncode == 0 and result.stdout.strip():
-            # Parse the first key line from ssh-keyscan output
+            added_any = False
             for line in result.stdout.strip().splitlines():
                 if line and not line.startswith("#"):
-                    # Extract just the key type and key data
                     parts = line.split(None, 2)
                     if len(parts) >= 3:
                         key_type_and_data = f"{parts[1]} {parts[2]}"
                         add_host_to_known_hosts(self._known_hosts_path, hostname, port, key_type_and_data)
-                        return
+                        added_any = True
+            if added_any:
+                return
         logger.warning("Could not scan SSH host key for {}:{}", hostname, port)
 
     def _on_certified_host_data_updated(self, host_id: HostId, certified_data: CertifiedHostData) -> None:
@@ -441,7 +450,9 @@ sudo poweroff
             try:
                 limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
             except (LimaCommandError, OSError) as cleanup_err:
-                logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
+                logger.debug(
+                    "Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err
+                )
             self._save_failed_host_record(
                 host_id=host_id,
                 host_name=name,
@@ -526,7 +537,7 @@ sudo poweroff
                 with log_span("Adding {} known_hosts entries to VM", len(known_hosts)):
                     host.execute_stateful_command(f"sh -c '{add_known_hosts_cmd}'")
 
-        self._host_by_id_cache[host_id] = host
+        self._evict_cached_host(host_id, replacement=host)
         return host
 
     def _read_resources_from_config(self, lima_config: dict) -> HostResources:
@@ -557,20 +568,21 @@ sudo poweroff
         logger.info("Stopping Lima VM: {}", host_id)
 
         # Disconnect SSH before stopping
-        cached_host = self._host_by_id_cache.get(host_id)
-        if isinstance(cached_host, Host):
-            cached_host.disconnect()
+        if isinstance(host, Host):
+            host.disconnect()
+        self._evict_cached_host(host_id)
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is not None and host_record.config is not None:
             try:
-                limactl_stop(self.mngr_ctx.concurrency_group, host_record.config.instance_name, timeout=timeout_seconds)
+                limactl_stop(
+                    self.mngr_ctx.concurrency_group, host_record.config.instance_name, timeout=timeout_seconds
+                )
             except LimaCommandError as e:
                 logger.warning("Error stopping Lima VM: {}", e)
         else:
             logger.debug("No host record found for {}", host_id)
 
-        # Update host record with stop reason
         if host_record is not None:
             updated_certified_data = host_record.certified_host_data.model_copy_update(
                 to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.STOPPED.value),
@@ -580,8 +592,6 @@ sudo poweroff
                     to_update(host_record.field_ref().certified_host_data, updated_certified_data),
                 )
             )
-
-        self._host_by_id_cache.pop(host_id, None)
 
     def start_host(
         self,
@@ -642,7 +652,7 @@ sudo poweroff
             start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
             host_obj.execute_stateful_command(f"sh -c '{start_activity_watcher_cmd}'")
 
-        self._host_by_id_cache[host_id] = host_obj
+        self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
@@ -651,9 +661,9 @@ sudo poweroff
         logger.info("Destroying Lima VM: {}", host_id)
 
         # Disconnect SSH
-        cached_host = self._host_by_id_cache.get(host_id)
-        if isinstance(cached_host, Host):
-            cached_host.disconnect()
+        if isinstance(host, Host):
+            host.disconnect()
+        self._evict_cached_host(host_id)
 
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is not None and host_record.config is not None:
@@ -673,8 +683,6 @@ sudo poweroff
                 )
             )
 
-        self._host_by_id_cache.pop(host_id, None)
-
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a destroyed host."""
         host_id = host.id
@@ -693,11 +701,11 @@ sudo poweroff
         if tags_path.exists():
             tags_path.unlink(missing_ok=True)
 
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
     def on_connection_error(self, host_id: HostId) -> None:
         """Handle connection errors by clearing the cache."""
-        self._host_by_id_cache.pop(host_id, None)
+        self._evict_cached_host(host_id)
 
     # =========================================================================
     # Discovery Methods
@@ -733,7 +741,7 @@ sudo poweroff
         # Instance is running -- create online host
         ssh_config = self._get_ssh_config(instance_name)
         host_obj = self._create_host_object(host_id, ssh_config)
-        self._host_by_id_cache[host_id] = host_obj
+        self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
 
     def _get_host_by_name(self, name: HostName) -> HostInterface:
