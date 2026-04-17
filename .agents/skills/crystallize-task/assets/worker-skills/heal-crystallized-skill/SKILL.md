@@ -1,21 +1,20 @@
 ---
 name: heal-crystallized-skill
-description: Worker sub-skill that repairs a failing skill. Invoke at the start of a heal-worker session launched by the main agent's heal-skill skill.
+description: Repair a failing skill. Invoke when your task file asks you to heal a specific skill by pointing at its incident transcript.
 metadata:
   role: worker-sub-skill
 ---
 
-# Healing a skill (worker flow)
+# Healing a skill
 
-You were launched by the main agent's `heal-skill` skill. A crystallized or
-hand-authored skill misbehaved during a real turn; your job is to fix it.
-There is no outline gate -- heal is a tight diagnose-fix-verify loop with
-only a final Gate 2.
+A crystallized or hand-authored skill misbehaved during a real turn; your
+job is to fix it. There is no outline gate -- heal is a tight diagnose-
+fix-verify loop with only a final Gate 2.
 
 ## Stage 1: Replicate
 
 1. Read the task file to learn which skill failed and how.
-2. Read the incident transcript (`runtime/heal/<skill-name>/turn.jsonl`).
+2. Read the incident transcript the task file points at.
 3. Read the skill's current `SKILL.md` and `scripts/run.py`.
 4. Reproduce the failure. If the failure depends on external state you
    cannot recreate, construct a minimal synthetic input that exercises the
@@ -45,9 +44,10 @@ only a final Gate 2.
   to make sure the fix didn't regress anything.
 - Scenarios are ephemeral (run in your transcript, not saved to disk).
 
-## Stage 5: Code-guardian review
+## Stage 5: Code review
 
-Run `/autofix` on your commits. Fix anything the reviewer flags.
+Run `/autofix` on your commits if the harness exposes it. Fix anything the
+reviewer flags.
 
 ## Stage 6: Gate 2 -- approval
 
@@ -64,8 +64,8 @@ Wait for the user's reply.
 
 ## Stage 7: Commit and hand off
 
-Commit on your `mngr/heal-<skill-name>` branch. Confirm the branch name in
-your final response so the main agent knows what to merge.
+Commit on your current branch. In your final response, state the branch
+name so the caller knows what to merge.
 
 ## If you cannot fix it
 
@@ -74,6 +74,6 @@ problem) or the right fix would change the skill's contract in ways the
 user should decide on, end your turn with:
 
 > "I could not heal `<skill-name>` because: <reason>. Recommend:
-> <next step, e.g. invoke update-skill or manual investigation>."
+> <next step, e.g. a create-new-skill update or manual investigation>."
 
 and stop.

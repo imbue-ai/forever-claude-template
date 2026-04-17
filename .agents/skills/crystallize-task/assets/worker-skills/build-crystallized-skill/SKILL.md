@@ -1,27 +1,25 @@
 ---
 name: build-crystallized-skill
-description: Worker sub-skill that turns a crystallization task (replay transcript + task description) into a committed, reviewed, user-approved skill. Invoke at the start of a crystallize-worker session.
+description: Turn a crystallization task (a replay transcript plus a task description) into a committed, reviewed, user-approved skill. Invoke when your task file asks you to crystallize a turn into a new skill.
 metadata:
   role: worker-sub-skill
 ---
 
-# Building a crystallized skill (worker flow)
+# Building a crystallized skill
 
-This skill runs inside a `crystallize-worker` sub-agent launched by the main
-agent's `crystallize-task` skill. Your task file and the replay transcript
-are already on disk; follow these steps to go from "task handed off" to
-"new skill committed to a `mngr/<task-name>` branch".
+Your task file describes a turn of work that should become a reusable skill
+and points at a replay transcript on disk. Follow these stages to go from
+"task handed off" to "new skill committed on your branch".
 
 ## Stage 1: Replicate
 
-1. Read the task file you were launched with.
-2. Read the replay transcript (`runtime/crystallize/<task-name>/turn.jsonl`
-   or the path your task file specifies). Understand what tools were called,
-   with what inputs, and why.
+1. Read the task file.
+2. Read the replay transcript it points at. Understand what tools were
+   called, with what inputs, and why.
 3. Research the relevant APIs, libraries, and existing utilities you will
    need. Prefer reusing existing functions over reimplementing.
-4. If anything is unclear, add your question to the list you will surface in
-   Gate 1.
+4. If anything is unclear, add your question to the list you will surface
+   in Gate 1.
 
 Do NOT re-execute destructive operations from the transcript. Reading the
 transcript is enough.
@@ -50,9 +48,8 @@ End your turn with:
 >
 > Approve this outline? (yes / no with notes)"
 
-The user's reply comes back via `mngr message <your-task-name>`. If they ask
-for changes, iterate -- then ask Gate 1 again. Do not proceed to Stage 3
-without an explicit yes.
+If the user asks for changes, iterate -- then ask Gate 1 again. Do not
+proceed to Stage 3 without an explicit yes.
 
 ## Stage 3: Build the artifact
 
@@ -119,10 +116,10 @@ reproducibility, not on disk. Do NOT write them as files in the skill.
 If a scenario fails, fix the script. If the script is correct but your
 scenario was wrong, update the scenario.
 
-## Stage 5: Code-guardian review
+## Stage 5: Code review
 
-Run `/autofix` on your commits (the `crystallize-worker` template already
-enables it). Fix anything the reviewer flags.
+Run `/autofix` on your commits if the harness exposes it. Fix anything the
+reviewer flags.
 
 ## Stage 6: Gate 2 -- final artifact approval
 
@@ -139,9 +136,8 @@ Wait for the user's reply.
 
 ## Stage 7: Commit and hand off
 
-- Commit to your `mngr/<task-name>` branch.
-- Your final response should confirm the branch name so the main agent can
-  merge it.
+Commit on your current branch. In your final response, state the branch
+name so the caller knows what to merge.
 
 ## If you need to give up
 
@@ -151,4 +147,4 @@ resolve), end your turn with:
 
 > "I could not crystallize this task because: <reason>. No skill was saved."
 
-and stop. The main agent will report this back to the user.
+and stop.

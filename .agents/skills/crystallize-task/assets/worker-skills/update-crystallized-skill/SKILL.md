@@ -1,25 +1,24 @@
 ---
 name: update-crystallized-skill
-description: Worker sub-skill that extends an existing skill or splits a new sibling skill off it. Invoke at the start of an update-worker session launched by the main agent's update-skill skill.
+description: Extend an existing skill or split off a new sibling skill. Invoke when your task file asks you to fold additional deterministic processing into an existing skill (or create a sibling for it).
 metadata:
   role: worker-sub-skill
 ---
 
-# Updating (or splitting) a skill (worker flow)
+# Updating (or splitting) a skill
 
-You were launched by the main agent's `update-skill` skill. An existing
-skill ran successfully on the main agent's last turn, but the main agent
-had to do additional *deterministic* work to satisfy the user's request.
-Your job is to fold that work in.
+An existing skill ran successfully on a prior turn, but additional
+*deterministic* work had to be done by hand to satisfy the user's request.
+Your job is to fold that work in -- either by updating the skill in place
+or by creating a new sibling skill.
 
-Both gates apply here (outline + final artifact). The outline gate doubles
-as the user's chance to veto the update-vs-split decision.
+Both gates apply (outline + final artifact). The outline gate doubles as
+the user's chance to veto the update-vs-split decision.
 
 ## Stage 1: Replicate
 
 1. Read the task file to learn which skill was used and what was missing.
-2. Read the incident transcript
-   (`runtime/update/<skill-name>/turn.jsonl`).
+2. Read the incident transcript the task file points at.
 3. Read the target skill's current `SKILL.md` and `scripts/run.py`.
 
 ## Stage 2: Decide update-in-place vs. create-new
@@ -78,9 +77,9 @@ Keep SKILL.md under ~500 lines; split long content into `references/`.
 - Others should exercise neighbouring or edge paths.
 - Scenarios are ephemeral.
 
-## Stage 6: Code-guardian review
+## Stage 6: Code review
 
-Run `/autofix` on your commits.
+Run `/autofix` on your commits if the harness exposes it.
 
 ## Stage 7: Gate 2 -- final artifact
 
@@ -97,8 +96,8 @@ Wait for the user's reply.
 
 ## Stage 8: Commit and hand off
 
-Commit on your `mngr/update-<skill-name>` branch. Confirm the branch name
-in your final response so the main agent can merge it.
+Commit on your current branch. In your final response, state the branch
+name so the caller knows what to merge.
 
 ## If you decide not to change anything
 
