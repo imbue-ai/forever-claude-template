@@ -81,7 +81,7 @@ idle_mode = "disabled"
 provider = "lima"
 target_path = "/code/"
 idle_mode = "disabled"
-start_arg = ["--cpus=2", "--memory=4GiB", "--disk=20GiB"]
+start_arg = ["--cpus=2", "--memory=4", "--disk=20"]
 extra_provision_command = [
     "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
     "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
