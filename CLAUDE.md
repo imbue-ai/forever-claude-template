@@ -11,6 +11,7 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - Run commands by calling "uv run" from the root of the git checkout (ex: "uv run mngr create ...").
 - NEVER amend commits or rebase--always create new commits.
 - If you ever need to work with another *git* repo that is *outside* of this monorepo, you should do so by adding a git subtree under vendor/
+- This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `.tickets/` (gitignored).
 
 # How to get started on any task:
 
