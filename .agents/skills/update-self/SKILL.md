@@ -14,7 +14,7 @@ branch = "main"
 
 ## What this means
 
-The template contains shared infrastructure: skills, scripts, CLAUDE.md scaffolding, Dockerfile, services.toml, etc. When the template is updated, you can pull those changes in here.
+The template contains shared infrastructure: skills, scripts, AGENTS.md scaffolding, Dockerfile, services.toml, etc. When the template is updated, you can pull those changes in here.
 
 ## Setup
 
@@ -39,7 +39,7 @@ with open('parent.toml', 'rb') as f:
 git pull upstream "$BRANCH"
 ```
 
-Resolve any merge conflicts if needed. For conflicts in files customized per-agent (PURPOSE.md, agent-specific CLAUDE.md sections), prefer your local version.
+Resolve any merge conflicts if needed. For conflicts in files customized per-agent (PURPOSE.md, agent-specific AGENTS.md sections), prefer your local version.
 
 ## When to pull
 

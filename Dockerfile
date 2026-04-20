@@ -89,6 +89,31 @@ RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     --path vendor/mngr/libs/mngr_modal/ \
     --path vendor/mngr/libs/mngr_claude
 
+# Expose the vendored tk ticket tracker on PATH. `tk` is a portable bash
+# script at vendor/tk/ticket; a symlink into /root/.local/bin/ (already on
+# PATH) makes it invocable without bundling an additional install mechanism.
+# Tickets themselves live under .tickets/ (gitignored) at the repo root.
+RUN mkdir -p /root/.local/bin && ln -sf /code/vendor/tk/ticket /root/.local/bin/tk
+
+# Hermes agent type support. Appended at the end so toggling hermes on/off
+# or pinning a different branch doesn't bust the cache for any of the layers
+# above (system deps, claude, node, minds frontend build, mngr install).
+#
+# hermes-agent is not published to pypi, so we use the upstream install
+# script which clones the repo and sets up a uv-managed venv + CLI symlink.
+# The install is gated on INSTALL_HERMES_AGENT so claude-only builds skip
+# it entirely -- the hermes_main create template opts in via
+# `--build-arg INSTALL_HERMES_AGENT=1`.
+ARG INSTALL_HERMES_AGENT=""
+ARG HERMES_AGENT_BRANCH="main"
+RUN if [ -n "$INSTALL_HERMES_AGENT" ]; then \
+        curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh \
+            | bash -s -- --skip-setup --branch "$HERMES_AGENT_BRANCH"; \
+    fi
+RUN if [ -n "$INSTALL_HERMES_AGENT" ]; then \
+        mngr plugin add --path vendor/mngr/libs/mngr_hermes; \
+    fi
+
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.
 # `tail -f /dev/null` does not do this.
