@@ -11,6 +11,8 @@ Usage:
 
 import argparse
 import fcntl
+import os
+import tempfile
 from pathlib import Path
 
 import tomlkit
@@ -28,9 +30,21 @@ def _load_applications(path: Path) -> tomlkit.TOMLDocument:
 
 
 def _save_applications(path: Path, doc: tomlkit.TOMLDocument) -> None:
+    # Atomic write: write to a temp file in the same directory, then os.replace()
+    # into place. This guarantees that readers (like app-watcher) never observe
+    # a truncated/partial file during the write window.
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        tomlkit.dump(doc, f)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent, prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            tomlkit.dump(doc, f)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
 
 def _upsert(path: Path, name: str, url: str) -> None:
