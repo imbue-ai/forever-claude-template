@@ -49,12 +49,14 @@ version = "0.1.0"
 source = { editable = "libs/app_watcher" }
 dependencies = [
     { name = "httpx" },
+    { name = "imbue-common" },
     { name = "inotify-simple" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "imbue-common", directory = "vendor/mngr/libs/imbue_common" },
     { name = "inotify-simple", specifier = ">=2.0.0" },
 ]
 
