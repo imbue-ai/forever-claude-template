@@ -41,13 +41,16 @@ Task names must be unique (git branches are created). Use descriptive names like
 
 ## 3. Wait for completion (background)
 
-Start `mngr wait` as a background task so you can do other work:
+Start `mngr wait` in the background (using the Bash tool with
+`run_in_background: true`) so you can continue working. You will be
+notified when it completes -- do not block on it.
 
 ```bash
-mngr wait <task-name> DONE STOPPED WAITING &
+# Run with Bash run_in_background: true
+mngr wait <task-name> DONE STOPPED WAITING --timeout 30m
 ```
 
-This will return when the agent reaches one of those terminal states.
+This will notify you when the agent reaches one of those terminal states.
 
 ## 4. Check results
 
