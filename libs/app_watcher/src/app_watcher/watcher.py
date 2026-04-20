@@ -7,14 +7,21 @@ events/servers/events.jsonl so the desktop client can discover available servers
 Uses both inotify (when available) and mtime polling (10-second fallback).
 """
 
-import hashlib
-import json
 import os
 import signal
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
+
+from imbue.imbue_common.event_envelope import (
+    EventEnvelope,
+    EventId,
+    EventSource,
+    EventType,
+    IsoTimestamp,
+)
 
 try:
     import tomllib
@@ -23,6 +30,33 @@ except ModuleNotFoundError:
 
 APPLICATIONS_FILE = Path("runtime/applications.toml")
 POLL_INTERVAL_SECONDS = 10
+
+_EVENT_SOURCE = EventSource("servers")
+_EVENT_TYPE_REGISTERED = EventType("server_registered")
+_EVENT_TYPE_DEREGISTERED = EventType("server_deregistered")
+
+
+class ServerRegisteredEvent(EventEnvelope):
+    """A server registered its URL with the agent."""
+
+    server: str
+    url: str
+
+
+class ServerDeregisteredEvent(EventEnvelope):
+    """A server that was previously registered is no longer available."""
+
+    server: str
+
+
+def _new_event_id() -> EventId:
+    return EventId(f"evt-{uuid4().hex}")
+
+
+def _now_iso() -> IsoTimestamp:
+    return IsoTimestamp(
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    )
 
 
 def _get_events_dir() -> Path | None:
@@ -42,12 +76,6 @@ def _load_applications() -> list[dict[str, object]]:
     return data.get("applications", [])
 
 
-def _make_event_id(server: str, url: str) -> str:
-    """Generate a deterministic event ID from server name and URL."""
-    raw = f"{server}:{url}"
-    return "evt-" + hashlib.sha256(raw.encode()).hexdigest()[:32]
-
-
 def _write_events(
     events_dir: Path,
     current_apps: list[dict[str, object]],
@@ -57,38 +85,34 @@ def _write_events(
     events_dir.mkdir(parents=True, exist_ok=True)
     events_path = events_dir / "events.jsonl"
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
-    current_names = set()
+    current_names: set[str] = set()
 
     with open(events_path, "a") as f:
-        # Write registration events for all current applications
         for app in current_apps:
             name = str(app.get("name", ""))
             url = str(app.get("url", ""))
             if not name or not url:
                 continue
             current_names.add(name)
-            event = {
-                "timestamp": timestamp,
-                "type": "server_registered",
-                "event_id": _make_event_id(name, url),
-                "source": "servers",
-                "server": name,
-                "url": url,
-            }
-            f.write(json.dumps(event) + "\n")
+            event = ServerRegisteredEvent(
+                timestamp=_now_iso(),
+                type=_EVENT_TYPE_REGISTERED,
+                event_id=_new_event_id(),
+                source=_EVENT_SOURCE,
+                server=name,
+                url=url,
+            )
+            f.write(event.model_dump_json() + "\n")
 
-        # Write deregistration events for removed applications
-        removed = previous_app_names - current_names
-        for name in sorted(removed):
-            event = {
-                "timestamp": timestamp,
-                "type": "server_deregistered",
-                "event_id": _make_event_id(name, "removed"),
-                "source": "servers",
-                "server": name,
-            }
-            f.write(json.dumps(event) + "\n")
+        for name in sorted(previous_app_names - current_names):
+            event = ServerDeregisteredEvent(
+                timestamp=_now_iso(),
+                type=_EVENT_TYPE_DEREGISTERED,
+                event_id=_new_event_id(),
+                source=_EVENT_SOURCE,
+                server=name,
+            )
+            f.write(event.model_dump_json() + "\n")
 
 
 def _try_setup_inotify(path: Path) -> object | None:

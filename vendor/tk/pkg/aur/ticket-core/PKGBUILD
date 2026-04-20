@@ -1,0 +1,18 @@
+# Maintainer: wedow <wedow@users.noreply.github.com>
+pkgname=ticket-core
+pkgver=0.3.2
+pkgrel=1
+pkgdesc="Minimal ticket tracking in bash (core only)"
+arch=('any')
+url="https://github.com/wedow/ticket"
+license=('MIT')
+depends=('bash' 'coreutils' 'findutils' 'gawk')
+optdepends=('ripgrep: faster searching')
+source=("ticket-$pkgver.tar.gz::https://github.com/wedow/ticket/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    cd "ticket-$pkgver"
+    install -Dm755 ticket "$pkgdir/usr/bin/tk"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

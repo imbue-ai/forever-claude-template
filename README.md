@@ -20,16 +20,17 @@ Hermes agent: swap `main` for `hermes_main`.
 
 - `AGENTS.md` - Agent instructions (canonical). `CLAUDE.md` is a symlink to this file so Claude Code and any tool that expects `CLAUDE.md` still works; edits to either filename hit the same bytes.
 - `parent.toml` - Upstream repo for pulling updates.
-- `.mngr/settings.toml` - Agent types (`main`, `worker`, `hermes_main`, …), create templates, command defaults.
+- `.mngr/settings.toml` - Agent types, create templates, command defaults.
 - `.claude/` - Claude Code-specific config (settings, hooks, plugins). Ignored by hermes.
 - `.agents/skills/` - Shared skills (telegram, task delegation, services, self-update). Hermes loads them via `skills.external_dirs` in its config; Claude Code discovers them via a symlink under `.claude/skills/`.
 - `agents/` - Per-runtime layer resolved at provisioning time. `agents/hermes/` contains hermes' `config.yaml` overrides, plugin hooks, and a `setup.sh` that merges the overrides on top of the user's `~/.hermes/config.yaml`.
-- `scripts/` - Shared hook behaviours invoked from both runtimes: `agent_setup.sh` (SessionStart uv sync), `guard_commit_rewrite.sh` (blocks `git rebase` / `--amend`), `check_repo_root.sh` (reminds the agent to end in the repo root). `claude_update_plugin.sh` and `claude_status_line.sh` are Claude-only. `create_reviewer_settings.sh` writes the `imbue-code-guardian` config, which is a Claude Code marketplace plugin and does not apply to hermes.
-- `events_processor/` - Pre-configured directory for creating persistent sub-agents. Relies on Claude Code's stop-hook exit-code-2 loop; deferred for hermes.
+- `scripts/` - Shared hook behaviours and utility scripts
+- `events_processor/` - Pre-configured directory for creating persistent sub-agents.
 - `services.toml` - Background services managed by bootstrap.
 - `libs/telegram_bot/` - Telegram bot, send CLI, and history viewer.
 - `libs/bootstrap/` - Service manager (reconciles services.toml with tmux windows).
 - `vendor/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command.
+- `vendor/tk/` - A vendored copy of the [tk](https://github.com/wedow/ticket) ticket tracker. The `ticket` script (also callable as `tk`) manages tickets stored as markdown in `.tickets/` (gitignored)
 
 ## Create templates
 

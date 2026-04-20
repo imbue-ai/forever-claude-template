@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract changelog
+        id: changelog
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          # Extract section between this version header and the next
+          CONTENT=$(awk -v ver="$VERSION" '
+            /^## \[/ { if (found) exit; if (index($0, "["ver"]")) found=1; next }
+            found { print }
+          ' CHANGELOG.md)
+          # Handle multiline output
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$CONTENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: ${{ steps.changelog.outputs.body }}
+
+      - name: Get tarball SHA256
+        id: sha
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          curl -sL "https://github.com/${{ github.repository }}/archive/refs/tags/${VERSION}.tar.gz" -o release.tar.gz
+          SHA=$(sha256sum release.tar.gz | cut -d' ' -f1)
+          echo "sha256=$SHA" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew tap
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          chmod +x scripts/publish-homebrew.sh
+          ./scripts/publish-homebrew.sh "${{ steps.sha.outputs.version }}" "${{ steps.sha.outputs.sha256 }}"
+
+      - name: Update AUR packages
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          chmod +x scripts/publish-aur.sh
+          ./scripts/publish-aur.sh "${{ steps.sha.outputs.version }}" "${{ steps.sha.outputs.sha256 }}"

@@ -72,7 +72,6 @@ class CreateChatRequest(FrozenModel):
     """Request body for creating a chat agent."""
 
     name: str = Field(description="Name for the new chat agent")
-    parent_agent_id: str = Field(description="ID of the sidebar agent this chat belongs to")
 
 
 class CreateAgentResponse(FrozenModel):
@@ -85,3 +84,9 @@ class RandomNameResponse(FrozenModel):
     """Response from the random name endpoint."""
 
     name: str = Field(description="A random agent name")
+
+
+class DestroyAgentResponse(FrozenModel):
+    """Response from the agent destroy endpoint."""
+
+    status: str = Field(description="Result of the destroy operation")

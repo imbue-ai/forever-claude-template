@@ -32,16 +32,27 @@ exit 1
 # Ensure ttyd commands directory exists and has an agent dispatch script
 if [ -n "${MNGR_AGENT_STATE_DIR:-}" ]; then
     mkdir -p "$MNGR_AGENT_STATE_DIR/commands/ttyd"
-    if [ ! -f "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh" ]; then
-        cat > "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh" << 'AGENT_SCRIPT'
+    # Rewrite agent.sh on every run so old deployments pick up the name-arg
+    # support -- otherwise stale single-session copies keep attaching to the
+    # primary agent regardless of the ?arg=agent&arg=<name> we now pass.
+    cat > "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh" << 'AGENT_SCRIPT'
 #!/bin/bash
+# Attach to a mngr agent's tmux session window 0.
+#
+# If a session name is provided as $1, use "$MNGR_PREFIX$1" as the target
+# session (so the minds chat UI can deep-link to a specific sub-agent's
+# terminal by passing the agent name). Otherwise fall back to the current
+# tmux session -- useful when ttyd is invoked without args.
 set -euo pipefail
-_SESSION=$(tmux display-message -p '#{session_name}')
+if [ $# -gt 0 ] && [ -n "$1" ]; then
+    TARGET_SESSION="${MNGR_PREFIX:-mngr-}$1"
+else
+    TARGET_SESSION=$(tmux display-message -p '#{session_name}')
+fi
 unset TMUX
-exec tmux attach -t "$_SESSION":0
+exec tmux attach -t "$TARGET_SESSION":0
 AGENT_SCRIPT
-        chmod +x "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh"
-    fi
+    chmod +x "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh"
     if [ ! -f "$MNGR_AGENT_STATE_DIR/commands/ttyd/workdir.sh" ]; then
         cat > "$MNGR_AGENT_STATE_DIR/commands/ttyd/workdir.sh" << 'WORKDIR_SCRIPT'
 #!/bin/bash
@@ -54,7 +65,9 @@ fi
 # Register the terminal port before starting ttyd (port is known ahead of time)
 uv run python3 "$REPO_ROOT/scripts/forward_port.py" --name terminal --url "http://localhost:$TTYD_PORT"
 
-# Write server events for discovery
+# Write server events for discovery. The "agent" sub-URL is intentionally not
+# registered as its own application: the chat UI exposes it via an inline link
+# instead of a top-level application tile.
 if [ -n "${MNGR_AGENT_STATE_DIR:-}" ]; then
     mkdir -p "$MNGR_AGENT_STATE_DIR/events/servers"
     _TS=$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")
@@ -62,14 +75,6 @@ if [ -n "${MNGR_AGENT_STATE_DIR:-}" ]; then
     printf '{"timestamp":"%s","type":"server_registered","event_id":"%s","source":"servers","server":"terminal","url":"http://localhost:%s"}\n' \
         "$_TS" "$_EID" "$TTYD_PORT" \
         >> "$MNGR_AGENT_STATE_DIR/events/servers/events.jsonl"
-
-    # Also register the agent sub-URL
-    if [ -f "$MNGR_AGENT_STATE_DIR/commands/ttyd/agent.sh" ]; then
-        _EID2="evt-$(echo -n "agent:http://localhost:$TTYD_PORT?arg=agent" | sha256sum | cut -c1-32)"
-        printf '{"timestamp":"%s","type":"server_registered","event_id":"%s","source":"servers","server":"agent","url":"http://localhost:%s?arg=agent"}\n' \
-            "$_TS" "$_EID2" "$TTYD_PORT" \
-            >> "$MNGR_AGENT_STATE_DIR/events/servers/events.jsonl"
-    fi
 fi
 
 # Start ttyd on the fixed port (exec replaces this shell for clean process management)

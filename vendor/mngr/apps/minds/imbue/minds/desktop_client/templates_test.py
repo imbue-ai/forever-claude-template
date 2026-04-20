@@ -3,10 +3,12 @@ import pytest
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.templates import render_agent_servers_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
+from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServerName
@@ -19,23 +21,23 @@ _AGENT_B: AgentId = AgentId("agent-00000000000000000000000000000002")
 def test_render_landing_page_with_agents_lists_them_as_links() -> None:
     ids = (_AGENT_A, _AGENT_B)
     html = render_landing_page(accessible_agent_ids=ids)
-    assert f"/agents/{_AGENT_A}/" in html
-    assert f"/agents/{_AGENT_B}/" in html
+    assert f"/forwarding/{_AGENT_A}/" in html
+    assert f"/forwarding/{_AGENT_B}/" in html
     assert str(_AGENT_A) in html
     assert str(_AGENT_B) in html
 
 
 def test_render_landing_page_with_no_agents_shows_empty_state() -> None:
     html = render_landing_page(accessible_agent_ids=())
-    assert "No workspaces are accessible" in html
+    assert "No projects yet" in html
 
 
 def test_render_landing_page_discovering_shows_auto_refresh() -> None:
     html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
     assert "Discovering agents" in html
     assert "reload" in html
-    assert "No workspaces are accessible" not in html
-    assert "/agents/" not in html
+    assert "No projects yet" not in html
+    assert "/forwarding/" not in html
 
 
 def test_render_login_redirect_page_contains_redirect_script() -> None:
@@ -69,8 +71,8 @@ def test_agent_id_accepts_valid_format() -> None:
 def test_render_agent_servers_page_with_servers_lists_them_as_links() -> None:
     server_names = (ServerName("api"), ServerName("web"))
     html = render_agent_servers_page(agent_id=_AGENT_A, server_names=server_names)
-    assert f"/agents/{_AGENT_A}/api/" in html
-    assert f"/agents/{_AGENT_A}/web/" in html
+    assert f"/forwarding/{_AGENT_A}/api/" in html
+    assert f"/forwarding/{_AGENT_A}/web/" in html
     assert "api" in html
     assert "web" in html
     assert str(_AGENT_A) in html
@@ -85,7 +87,7 @@ def test_render_agent_servers_page_with_no_servers_shows_empty_state() -> None:
 def test_render_agent_servers_page_has_back_link() -> None:
     html = render_agent_servers_page(agent_id=_AGENT_A, server_names=())
     assert 'href="/"' in html
-    assert "Back to all workspaces" in html
+    assert "Back to all projects" in html
 
 
 def test_render_agent_servers_page_with_cf_services_shows_global_links() -> None:
@@ -141,3 +143,31 @@ def test_render_create_form_selects_specified_launch_mode() -> None:
 def test_render_login_page_shows_prompt() -> None:
     html = render_login_page()
     assert "login URL" in html.lower() or "Login" in html
+
+
+def test_render_chrome_page_contains_titlebar() -> None:
+    html = render_chrome_page()
+    assert "minds-titlebar" in html
+    assert "sidebar-toggle" in html
+    assert "home-btn" in html
+    assert "back-btn" in html
+    assert "content-frame" in html
+
+
+def test_render_chrome_page_hides_window_controls_on_mac() -> None:
+    """On macOS, the .minds-wc section is hidden (native traffic lights used instead)."""
+    html = render_chrome_page(is_mac=True)
+    assert "display: none" in html
+
+
+def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
+    html = render_chrome_page(is_mac=False)
+    assert "min-btn" in html
+    assert "max-btn" in html
+    assert "close-btn" in html
+
+
+def test_render_sidebar_page_contains_workspace_list() -> None:
+    html = render_sidebar_page()
+    assert "sidebar-workspaces" in html
+    assert "EventSource" in html

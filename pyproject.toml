@@ -8,6 +8,7 @@ dependencies = [
     "bootstrap",
     "cloudflare-tunnel",
     "app-watcher",
+    "web-server",
     "imbue-common",
     "tomlkit>=0.12",
 ]
@@ -27,13 +28,14 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher"]
+members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server"]
 
 [tool.uv.sources]
 telegram-bot = { workspace = true }
 bootstrap = { workspace = true }
 cloudflare-tunnel = { workspace = true }
 app-watcher = { workspace = true }
+web-server = { workspace = true }
 imbue-common = { path = "vendor/mngr/libs/imbue_common" }
 
 [tool.pytest.ini_options]
@@ -42,15 +44,16 @@ timeout_func_only = true
 addopts = [
     "--timeout=10",
     "--ignore=vendor/mngr",
+    "--ignore=vendor/tk",
 ]
 
 [tool.ruff]
 target-version = "py311"
-exclude = ["vendor/mngr"]
+exclude = ["vendor/mngr", "vendor/tk"]
 
 [tool.ruff.lint]
 select = ["F", "I", "UP006", "UP007"]
 
 [tool.pyright]
 pythonVersion = "3.11"
-exclude = ["vendor/mngr"]
+exclude = ["vendor/mngr", "vendor/tk"]
