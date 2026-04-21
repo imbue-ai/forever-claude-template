@@ -42,8 +42,7 @@ Use that same slug everywhere below.
 
 ## Step 1: Confirm and open a tracking ticket
 
-Send a one-line pre-gate question through the deployment's chat channel
-(`send-telegram-message`):
+Send a one-line pre-gate question via the `send-user-message` skill:
 
 > "I just did X and Y. Worth crystallizing into a reusable skill? (yes/no)"
 

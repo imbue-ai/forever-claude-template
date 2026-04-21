@@ -120,11 +120,16 @@ They are inherently flaky due to timing and useless in CI, but valuable for agen
 
 # Communication
 
-You communicate with the user via Telegram.
-Incoming messages arrive automatically via `mngr message` from the telegram bot running in a background tmux window.
+To talk to the user, always go through the `send-user-message` skill. It
+probes for configured channels (telegram, etc.) and dispatches; if none is
+configured, it falls back to writing the message inline in your current
+response. Do NOT hardcode a specific channel from other skills.
 
-To send a message to the user, use the `send-telegram-message` skill.
-To understand the conversation context before replying, use the `read-telegram-history` skill.
+If the deployment happens to use telegram, incoming messages arrive via
+`mngr message` from the telegram bot running in a background tmux window.
+`send-user-message` handles that case; `send-telegram-message` and
+`read-telegram-history` are the telegram-specific implementation details
+it delegates to.
 
 # Work delegation
 
