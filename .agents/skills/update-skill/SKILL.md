@@ -10,7 +10,7 @@ but you had to do additional *deterministic* processing to fully satisfy the
 user's request. The goal is to fold that processing into the skill (or into a
 sibling skill) so it never needs to be redone by hand.
 
-Trigger this via the turn-end reflection in AGENTS.md: "did I do additional
+Trigger this via the turn-end reflection in CLAUDE.md: "did I do additional
 deterministic post-processing the skill could have done itself?" If yes,
 invoke update-skill.
 
