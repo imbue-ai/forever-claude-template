@@ -1,6 +1,3 @@
-import base64
-import json
-
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -28,10 +25,17 @@ from imbue.cloudflare_forwarding.app import web_app
 from imbue.cloudflare_forwarding.testing import make_fake_forwarding_ctx
 from imbue.cloudflare_forwarding.testing import make_fake_tunnel_token
 
+_ADMIN_STUB_TOKEN = "admin-stub-jwt"
+_ADMIN_STUB_USERNAME = "testuser"
 
-def _admin_headers(username: str = "testuser", password: str = "testsecret") -> dict[str, str]:
-    encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {encoded}"}
+
+def _admin_headers() -> dict[str, str]:
+    """Return a Bearer header for a fake SuperTokens admin session.
+
+    Paired with ``_make_test_client`` which stubs ``_authenticate_supertokens``
+    to recognise ``_ADMIN_STUB_TOKEN`` and return a canned ``AdminAuth``.
+    """
+    return {"Authorization": f"Bearer {_ADMIN_STUB_TOKEN}"}
 
 
 def _agent_headers(tunnel_id: str) -> dict[str, str]:
@@ -40,10 +44,21 @@ def _agent_headers(tunnel_id: str) -> dict[str, str]:
 
 
 def _make_test_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    """Create a TestClient with the FastAPI app, injecting a fake context."""
-    monkeypatch.setenv("USER_CREDENTIALS", json.dumps({"testuser": "testsecret"}))
+    """Create a TestClient with the FastAPI app, injecting a fake context.
+
+    Sets up the SuperTokens Bearer auth path so tests calling admin endpoints
+    can authenticate with ``_admin_headers()`` without needing a real JWT.
+    """
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://fake-supertokens.example.com")
     fake_ctx = make_fake_forwarding_ctx()
     monkeypatch.setattr(app_mod, "get_ctx", lambda: fake_ctx)
+
+    def _stub_supertokens(token: str) -> AdminAuth:
+        if token != _ADMIN_STUB_TOKEN:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        return AdminAuth(username=_ADMIN_STUB_USERNAME)
+
+    monkeypatch.setattr(app_mod, "_authenticate_supertokens", _stub_supertokens)
     return TestClient(web_app)
 
 
@@ -413,9 +428,10 @@ def test_route_no_auth_returns_401(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.status_code == 401
 
 
-def test_route_bad_basic_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_rejects_basic_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After removing USER_CREDENTIALS, Basic Auth is no longer a supported scheme."""
     client = _make_test_client(monkeypatch)
-    resp = client.get("/tunnels", headers=_admin_headers(password="wrong"))
+    resp = client.get("/tunnels", headers={"Authorization": "Basic dGVzdDp0ZXN0"})
     assert resp.status_code == 401
 
 
@@ -426,13 +442,18 @@ def test_route_malformed_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_route_create_tunnel_too_long_username_returns_400(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Creating a tunnel with a too-long username returns 400, not 500."""
+    """Creating a tunnel whose authenticated username is too long returns 400, not 500."""
     long_name = "a_very_long_username_exceeds_max"
-    encoded = base64.b64encode(f"{long_name}:secret".encode()).decode()
     client = _make_test_client(monkeypatch)
-    # Override USER_CREDENTIALS to include the long username (supersedes _make_test_client's setting)
-    monkeypatch.setenv("USER_CREDENTIALS", json.dumps({long_name: "secret"}))
-    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers={"Authorization": f"Basic {encoded}"})
+    # Override the stub to return an AdminAuth with an overly-long username,
+    # simulating a SuperTokens session whose user_id_prefix is longer than the
+    # tunnel-naming limit.
+    monkeypatch.setattr(
+        app_mod,
+        "_authenticate_supertokens",
+        lambda _token: AdminAuth(username=long_name),
+    )
+    resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
     assert resp.status_code == 400
 
 
@@ -561,3 +582,85 @@ def test_authenticate_supertokens_raises_401_on_general_error(
         _authenticate_supertokens("bad-token", session_getter=_raise)
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail == "Invalid token"
+
+
+# -- Auth route tests --
+#
+# These are smoke tests that verify the auth routes are wired up and reject
+# calls when SuperTokens is not configured. Exercising the success paths
+# requires a real SuperTokens core and is covered by release-marked E2E tests.
+
+
+def test_auth_signup_returns_503_when_supertokens_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/signup without SUPERTOKENS_CONNECTION_URI returns 503."""
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
+    client = TestClient(web_app)
+    resp = client.post("/auth/signup", json={"email": "a@b.com", "password": "password123"})
+    assert resp.status_code == 503
+
+
+def test_auth_signin_returns_503_when_supertokens_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/signin without SUPERTOKENS_CONNECTION_URI returns 503."""
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
+    client = TestClient(web_app)
+    resp = client.post("/auth/signin", json={"email": "a@b.com", "password": "password123"})
+    assert resp.status_code == 503
+
+
+def test_auth_session_refresh_returns_503_when_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/session/refresh without SUPERTOKENS_CONNECTION_URI returns 503."""
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
+    client = TestClient(web_app)
+    resp = client.post("/auth/session/refresh", json={"refresh_token": "r"})
+    assert resp.status_code == 503
+
+
+def test_auth_session_revoke_returns_503_when_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/session/revoke without SUPERTOKENS_CONNECTION_URI returns 503."""
+    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
+    client = TestClient(web_app)
+    resp = client.post("/auth/session/revoke", headers={"Authorization": "Bearer any-token"})
+    assert resp.status_code == 503
+
+
+def test_auth_session_revoke_requires_bearer_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calling /auth/session/revoke without a Bearer access token returns 401.
+
+    This guards against an anonymous caller terminating arbitrary users'
+    sessions just by knowing (or guessing) their user_id.
+    """
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    client = TestClient(web_app)
+    resp = client.post("/auth/session/revoke")
+    assert resp.status_code == 401
+
+
+def test_auth_verify_email_missing_token_shows_failed_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The verify-email endpoint renders an HTML failure page when the token is missing."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.get("/auth/verify-email")
+    assert resp.status_code == 400
+    assert "Verification failed" in resp.text
+
+
+def test_auth_reset_password_page_renders_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reset-password page renders an HTML form embedding the token."""
+    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st.example.com")
+    client = TestClient(web_app, raise_server_exceptions=False)
+    resp = client.get("/auth/reset-password", params={"token": "tok-xyz"})
+    assert resp.status_code == 200
+    assert "tok-xyz" in resp.text
+    assert "Reset password" in resp.text

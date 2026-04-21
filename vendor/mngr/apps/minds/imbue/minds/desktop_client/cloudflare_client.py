@@ -1,11 +1,11 @@
 """Client for the Cloudflare forwarding API.
 
 Encapsulates authentication, URL construction, and HTTP calls to the
-Modal-hosted cloudflare_forwarding service. Created once in runner.py
-and passed as a dependency to AgentCreator and the desktop client app.
+Modal-hosted cloudflare_forwarding service. Every request authenticates with
+the signed-in user's SuperTokens session: the JWT goes in the ``Authorization:
+Bearer ...`` header, the user-id prefix is used for tunnel naming, and the
+account email backs the default Cloudflare Access policy.
 """
-
-import base64
 
 import httpx
 from loguru import logger
@@ -13,7 +13,6 @@ from pydantic import AnyUrl
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.primitives import AgentId
 
 
@@ -23,38 +22,16 @@ class CloudflareForwardingUrl(AnyUrl):
     ...
 
 
-class CloudflareUsername(NonEmptyStr):
-    """Username for Basic auth to the Cloudflare forwarding API."""
-
-    ...
-
-
-class CloudflareSecret(NonEmptyStr):
-    """Secret for Basic auth to the Cloudflare forwarding API."""
-
-    ...
-
-
-class OwnerEmail(NonEmptyStr):
-    """Email address for the default Google OAuth access policy."""
-
-    ...
-
-
 class CloudflareForwardingClient(FrozenModel):
     """Client for interacting with the Cloudflare forwarding API.
 
-    Supports two auth modes:
-    - Basic auth (admin credentials) via username/secret fields
-    - Bearer auth (SuperTokens JWT) via supertokens_token/supertokens_user_id_prefix fields
-
-    When SuperTokens fields are set, they take priority over Basic auth.
+    All requests authenticate via the caller's SuperTokens session. Callers
+    build one client per request by enriching the shared ``forwarding_url``
+    with the active account's ``supertokens_token`` / ``user_id_prefix`` /
+    ``email`` before issuing Cloudflare operations.
     """
 
     forwarding_url: CloudflareForwardingUrl = Field(description="Base URL of the cloudflare_forwarding API")
-    username: CloudflareUsername | None = Field(default=None, description="Username for admin Basic auth")
-    secret: CloudflareSecret | None = Field(default=None, description="Secret for admin Basic auth")
-    owner_email: OwnerEmail | None = Field(default=None, description="Email for default Google OAuth policy")
     supertokens_token: str | None = Field(default=None, description="SuperTokens JWT access token for Bearer auth")
     supertokens_user_id_prefix: str | None = Field(
         default=None,
@@ -65,25 +42,16 @@ class CloudflareForwardingClient(FrozenModel):
     )
 
     def _auth_header(self) -> str:
-        """Build the auth header value. Prefers SuperTokens Bearer token over Basic auth."""
-        if self.supertokens_token:
-            return f"Bearer {self.supertokens_token}"
-        if self.username and self.secret:
-            credentials = f"{self.username}:{self.secret}"
-            return "Basic " + base64.b64encode(credentials.encode()).decode()
-        raise ValueError("No auth credentials configured for cloudflare_forwarding")
-
-    def effective_owner_email(self) -> str | None:
-        """Return the email to use for default access policies."""
-        return self.supertokens_email or (str(self.owner_email) if self.owner_email else None)
+        """Return the Bearer header for the current SuperTokens session."""
+        if not self.supertokens_token:
+            raise ValueError("No supertokens_token configured for cloudflare_forwarding client")
+        return f"Bearer {self.supertokens_token}"
 
     def _effective_username(self) -> str:
-        """Return the username for tunnel naming."""
-        if self.supertokens_user_id_prefix:
-            return self.supertokens_user_id_prefix
-        if self.username:
-            return str(self.username)
-        raise ValueError("No username configured for tunnel naming")
+        """Return the username used for tunnel naming (derived from the session's user ID)."""
+        if not self.supertokens_user_id_prefix:
+            raise ValueError("No supertokens_user_id_prefix configured for tunnel naming")
+        return self.supertokens_user_id_prefix
 
     @staticmethod
     def _truncate_agent_id(agent_id: AgentId) -> str:
@@ -106,16 +74,16 @@ class CloudflareForwardingClient(FrozenModel):
     def create_tunnel(self, agent_id: AgentId) -> tuple[str | None, str]:
         """Create a Cloudflare tunnel for the agent and return (token, message).
 
-        Sets a default Google OAuth policy for the owner's email.
-        Returns (token, success_message) on success, or (None, error_message) on failure.
+        Sets a default access policy that allows the session's email. Returns
+        ``(token, success_message)`` on success, or ``(None, error_message)``
+        on failure.
         """
         tunnel_name = self.make_tunnel_name(agent_id)
-        owner_email = self.effective_owner_email()
         default_policy: dict[str, object] | None = None
-        if owner_email:
+        if self.supertokens_email:
             default_policy = {
                 "rules": [
-                    {"action": "allow", "include": [{"email": {"email": owner_email}}]},
+                    {"action": "allow", "include": [{"email": {"email": self.supertokens_email}}]},
                 ],
             }
         request_body: dict[str, object] = {"agent_id": str(agent_id)}
@@ -163,7 +131,6 @@ class CloudflareForwardingClient(FrozenModel):
                 )
                 return None
             data = response.json()
-            # The forwarding API may return {"services": [...]} or a bare list
             services = data.get("services", data) if isinstance(data, dict) else data
             if not isinstance(services, list):
                 services = []

@@ -54,7 +54,6 @@ def forward(ctx: click.Context, host: str, port: int, no_browser: bool) -> None:
     logger.info("  MNGR_HOST_DIR: {}", os.environ.get("MNGR_HOST_DIR", "<unset>"))
     logger.info("  MNGR_PREFIX: {}", os.environ.get("MNGR_PREFIX", "<unset>"))
     logger.info("  cloudflare_forwarding_url: {}", minds_config.cloudflare_forwarding_url)
-    logger.info("  supertokens_connection_uri: {}", minds_config.supertokens_connection_uri)
     logger.info("")
     logger.info("Press Ctrl+C to stop.")
     logger.info("")
