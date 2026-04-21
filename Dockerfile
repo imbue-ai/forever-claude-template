@@ -83,8 +83,8 @@ RUN cd /code/vendor/mngr/apps/minds_workspace_server/frontend && \
 # so they can parse plugin-specific config fields like auto_dismiss_dialogs)
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     uv tool install -e /code/vendor/mngr/apps/minds_workspace_server \
-        --with /code/vendor/mngr/libs/mngr_claude \
-        --with /code/vendor/mngr/libs/mngr_modal && \
+        --with-editable /code/vendor/mngr/libs/mngr_claude \
+        --with-editable /code/vendor/mngr/libs/mngr_modal && \
     mngr plugin add \
     --path vendor/mngr/libs/mngr_modal/ \
     --path vendor/mngr/libs/mngr_claude
