@@ -101,7 +101,8 @@ RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
         --with-editable /code/vendor/mngr/libs/mngr_modal && \
     mngr plugin add \
     --path vendor/mngr/libs/mngr_modal/ \
-    --path vendor/mngr/libs/mngr_claude
+    --path vendor/mngr/libs/mngr_claude \
+    --path vendor/mngr/libs/mngr_wait
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.
