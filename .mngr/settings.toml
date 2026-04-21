@@ -5,7 +5,17 @@
 connect = false
 ensure_clean = false
 pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "CLOUDFLARE_FORWARDING_URL"]
-env = ["IS_SANDBOX=1", "IS_AUTONOMOUS=1"]
+env = [
+    "IS_SANDBOX=1",
+    "IS_AUTONOMOUS=1",
+    # Lock Claude Code to the version pinned in agent_types.claude.version and the
+    # Dockerfile's CLAUDE_CODE_VERSION; disable the auto-updater + background
+    # feedback pings so the installed binary cannot silently drift. Tracks the
+    # FIXME on ClaudeAgentConfig.version in libs/mngr_claude/.../plugin.py.
+    "DISABLE_AUTOUPDATER=1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1",
+]
 worktree_base_folder = "/worktree/"
 disable_plugin = ["recursive", "ttyd"]
 yes = true
@@ -22,6 +32,10 @@ auto_dismiss_dialogs = true
 auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions"""
 settings_overrides = {model = "opus[1m]", fastMode = true}
+# Pin Claude Code to a specific version; the provisioning-time version check
+# refuses to start the agent if the installed binary diverges. Bump this in
+# sync with CLAUDE_CODE_VERSION in the Dockerfile.
+version = "2.1.116"
 
 # The "main" agent type -- inherits everything from claude
 [agent_types.main]
