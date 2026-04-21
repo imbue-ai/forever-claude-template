@@ -53,7 +53,8 @@ extra_window = [
     "bootstrap='uv run bootstrap'",
     "telegram='uv run telegram-bot'",
     "terminal='bash scripts/run_ttyd.sh'",
-    "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE'"
+    "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE'",
+    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && gh auth setup-git'"
 ]
 
 # template for dev mode (runs in-place on local provider)
