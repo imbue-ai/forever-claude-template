@@ -22,12 +22,37 @@ logic is factored into a plain function separate from ``main``.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+
+def _load_transcript_parsing() -> Any:
+    """Load the shared transcript_parsing module from the crystallize-task skill.
+
+    The module lives under ``.agents/skills/crystallize-task/scripts/`` so the
+    PEP 723 worker script (``extract_turn.py``) can import it as a sibling.
+    From this top-level hook we load it via importlib because it is not on the
+    default import path.
+    """
+    workdir = os.environ.get("MNGR_AGENT_WORK_DIR")
+    base = Path(workdir) if workdir else Path(__file__).resolve().parent.parent
+    module_path = base / ".agents" / "skills" / "crystallize-task" / "scripts" / "transcript_parsing.py"
+    spec = importlib.util.spec_from_file_location("transcript_parsing", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load transcript_parsing from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_transcript_parsing = _load_transcript_parsing()
+iter_transcript = _transcript_parsing.iter_transcript
+last_user_message_index = _transcript_parsing.last_user_message_index
 
 # Tool names that count as "pure reads" and are excluded from the tally. The
 # spec (concise.md) is explicit about these three names.
@@ -50,56 +75,16 @@ REMINDER_MESSAGE: str = (
 )
 
 
-def _iter_transcript(transcript_path: Path) -> list[dict[str, Any]]:
-    """Return transcript events as a list; tolerates malformed lines."""
-    events: list[dict[str, Any]] = []
-    with transcript_path.open(encoding="utf-8") as handle:
-        for raw_line in handle:
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                parsed = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                events.append(parsed)
-    return events
-
-
 def _last_turn_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Slice the event list to just the events after the most recent user msg.
+    """Events after the most recent human user message.
 
-    The transcript JSONL holds the full session history. "The turn that just
-    finished" is everything after the latest ``type == "user"`` entry that is
-    an actual user message (not a tool_result carrier).
+    "The turn that just finished" is everything after the latest ``type ==
+    "user"`` entry that is an actual user message (not a tool_result carrier).
     """
-    split_index = 0
-    for index in range(len(events) - 1, -1, -1):
-        event = events[index]
-        if event.get("type") != "user":
-            continue
-        if _is_user_tool_result_carrier(event):
-            # Claude Code wraps tool_result blocks in ``type: user`` events; we
-            # want the *human* message boundary, not the tool-result boundary.
-            continue
-        split_index = index + 1
-        break
-    return events[split_index:]
-
-
-def _is_user_tool_result_carrier(event: dict[str, Any]) -> bool:
-    message = event.get("message")
-    if not isinstance(message, dict):
-        return False
-    content = message.get("content")
-    if not isinstance(content, list):
-        return False
-    if not content:
-        return False
-    return all(
-        isinstance(block, dict) and block.get("type") == "tool_result" for block in content
-    )
+    boundary = last_user_message_index(events)
+    if boundary is None:
+        return events
+    return events[boundary + 1 :]
 
 
 def _iter_assistant_tool_uses(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -210,7 +195,7 @@ def evaluate(payload: dict[str, Any], skills_root: Path) -> tuple[bool, str]:
     if not transcript_path.is_file():
         return False, ""
 
-    events = _iter_transcript(transcript_path)
+    events = iter_transcript(transcript_path)
     turn_events = _last_turn_events(events)
     if not turn_events:
         return False, ""
