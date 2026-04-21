@@ -155,6 +155,29 @@ Commit your changes to git after making modifications.
 Use the `update-self` skill to pull improvements from the upstream template repo, and the `submit-upstream-changes` skill to push shared changes (skills, scripts, config) back upstream.
 The upstream is defined in `parent.toml`.
 
+# Using crystallized skills
+
+The skills under `.agents/skills/` fall into two buckets: hand-authored
+built-ins (e.g. `launch-task`, `send-telegram-message`) and *crystallized*
+skills produced by the crystallization lifecycle. Both are used the same
+way; the difference matters only for maintenance.
+
+- **Prefer an applicable skill over reinventing.** Skill descriptions are
+  injected so you can match by purpose, not by name.
+- **After the Stop hook nudges you with a crystallization reminder**, decide
+  whether the turn was cohesive, likely to recur, and mostly deterministic.
+  If yes, invoke `crystallize-task`; otherwise acknowledge the reminder
+  briefly and move on. Do not crystallize judgement-heavy or one-off turns.
+- **If a skill you invoked errored or delivered a wrong result**, fulfil the
+  user's request by working around it, then at turn-end invoke `heal-skill`
+  with the incident context. Never try to patch the skill inline.
+- **After a successful skill use**, reflect: did you have to do additional
+  *deterministic* post-processing to fully satisfy the user? If yes, invoke
+  `update-skill` at turn-end so the skill absorbs the gap.
+- Heal and update are non-blocking follow-ups: the user's immediate request
+  has already been delivered. They spawn workers via the same flow as
+  `launch-task`, with a `crystallize-worker` template.
+
 # Memory
 
 Use Claude's built-in memory system. Your memory directory is `memory/` (configured via autoMemoryDirectory).
