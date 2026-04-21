@@ -1,5 +1,5 @@
 ---
-name: build-crystallized-skill
+name: crystallize-task-worker
 description: Turn a crystallization task (a replay transcript plus a task description) into a committed, reviewed, user-approved skill. Invoke when your task file asks you to crystallize a turn into a new skill.
 metadata:
   role: worker-sub-skill
@@ -10,6 +10,10 @@ metadata:
 Your task file describes a turn of work that should become a reusable skill
 and points at a replay transcript on disk. Follow these stages to go from
 "task handed off" to "new skill committed on your branch".
+
+Consult `references/spec-summary.md` for the agentskills.io layout,
+frontmatter template, PEP 723 script conventions, and the scenario template
+you will use in Stage 4.
 
 ## Stage 1: Replicate
 
@@ -28,8 +32,8 @@ transcript is enough.
 
 Produce a short outline with:
 
-- A kebab-case skill name (1-64 chars, `[a-z0-9-]+`, no leading/trailing or
-  consecutive hyphens -- see the validation helper in `scripts/`).
+- A kebab-case skill name (see the naming rules in
+  `references/spec-summary.md`).
 - A one-paragraph description that states what the skill does AND when to
   use it (this becomes the SKILL.md `description` frontmatter field).
 - Inputs: CLI arguments the script will take.
@@ -53,52 +57,15 @@ proceed to Stage 3 without an explicit yes.
 
 ## Stage 3: Build the artifact
 
-### Layout
-
-```
-.agents/skills/<name>/
-  SKILL.md                  # agentskills.io-compliant; progressive disclosure under ~500 lines
-  scripts/
-    run.py                  # PEP 723 inline deps; argparse interface
-  references/*.md           # optional long-form docs, loaded only when needed
-  assets/...                # optional static resources
-```
-
-### SKILL.md frontmatter (required)
-
-```yaml
----
-name: <skill-name>              # must match parent directory
-description: <what-and-when>    # <= 1024 chars
-metadata:
-  crystallized: true
----
-```
-
-### scripts/run.py (required)
-
-- PEP 723 header with pinned inline deps:
-  ```python
-  # /// script
-  # requires-python = ">=3.11"
-  # dependencies = ["rich>=13"]
-  # ///
-  ```
-- `argparse` entry point -- no interactive prompts.
-- Stateless by default. If the work needs on-disk state, flag it at Gate 2;
-  don't invent a persistence scheme.
-- Fail loudly: exit non-zero on error, write the error to stderr.
-- Document the invocation in SKILL.md: `uv run .agents/skills/<name>/scripts/run.py ...`
-
-### Validation
-
-Before moving to scenarios, run the skill-name validator:
+Follow the layout and frontmatter conventions in
+`references/spec-summary.md`. Then validate structurally:
 
 ```bash
-uv run .agents/skills/build-crystallized-skill/scripts/validate_skill_name.py <name>
+uv run .agents/skills/crystallize-task-worker/scripts/validate_skill_name.py <name>
+uv run .agents/skills/crystallize-task-worker/scripts/validate_skill.py .agents/skills/<name>
 ```
 
-If it fails, fix the name and try again.
+Both must print `ok` before moving on. If either fails, fix and rerun.
 
 ## Stage 4: Hand-craft and run scenarios
 
@@ -109,17 +76,17 @@ Pick 2-3 scenarios that exercise the skill end-to-end:
 3. **Edge case B** (optional): a second non-happy input exercising a
    different code path.
 
-Run each one by invoking `scripts/run.py` with real inputs and inspecting
-the output. Scenarios are *ephemeral* -- they exist in your transcript for
-reproducibility, not on disk. Do NOT write them as files in the skill.
+Use the scenario template in `references/spec-summary.md` to record each
+scenario in your transcript. Run each one by invoking `scripts/run.py` with
+real inputs and inspecting the output. Scenarios are *ephemeral* -- do NOT
+write them as files in the skill.
 
 If a scenario fails, fix the script. If the script is correct but your
 scenario was wrong, update the scenario.
 
 ## Stage 5: Code review
 
-Run `/autofix` on your commits if the harness exposes it. Fix anything the
-reviewer flags.
+Run `/autofix` on your commits. Fix anything the reviewer flags.
 
 ## Stage 6: Gate 2 -- final artifact approval
 
@@ -148,3 +115,10 @@ resolve), end your turn with:
 > "I could not crystallize this task because: <reason>. No skill was saved."
 
 and stop.
+
+## Gotchas
+
+- You run with `MNGR_AGENT_ROLE=worker` in the environment. The
+  crystallization Stop hook detects this and stays silent, so you will NOT
+  see a crystallization reminder after a heavy sub-turn. Don't try to
+  recursively crystallize work you do while building this skill.

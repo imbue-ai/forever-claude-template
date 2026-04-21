@@ -1,5 +1,5 @@
 ---
-name: update-crystallized-skill
+name: update-skill-worker
 description: Extend an existing skill or split off a new sibling skill. Invoke when your task file asks you to fold additional deterministic processing into an existing skill (or create a sibling for it).
 metadata:
   role: worker-sub-skill
@@ -14,6 +14,9 @@ or by creating a new sibling skill.
 
 Both gates apply (outline + final artifact). The outline gate doubles as
 the user's chance to veto the update-vs-split decision.
+
+Consult `../crystallize-task-worker/references/spec-summary.md` for the
+layout, frontmatter, validation helpers, and scenario template.
 
 ## Stage 1: Replicate
 
@@ -41,8 +44,7 @@ its one-line description, that is a signal to split.
 Include:
 
 - **Decision**: update-in-place of `<existing-name>`, or create-new-skill
-  named `<new-name>` (validated against the skill-name rules -- see
-  `build-crystallized-skill/scripts/validate_skill_name.py`).
+  named `<new-name>`.
 - What changes / what the new skill does.
 - Inputs, outputs, step-by-step flow.
 - 2-3 scenarios you will run.
@@ -61,27 +63,43 @@ Wait for the user's reply before coding.
 
 ## Stage 4: Implement
 
-- For update-in-place: edit `scripts/run.py` and `SKILL.md` in place.
-  Preserve the existing contract for current callers unless the outline
-  explicitly calls for a breaking change.
-- For create-new: create `.agents/skills/<new-name>/` following the layout
-  in `build-crystallized-skill`. Set `metadata.crystallized: true` on the
-  new skill's SKILL.md frontmatter.
+### Update-in-place
 
-Keep SKILL.md under ~500 lines; split long content into `references/`.
+- Edit `scripts/run.py` and `SKILL.md` in place. Preserve the existing
+  contract for current callers unless the outline explicitly calls for a
+  breaking change.
+- Keep SKILL.md under ~500 lines; split long content into `references/`.
 
-## Stage 5: Run 2-3 scenarios
+### Create-new-skill
+
+Delegate to `crystallize-task-worker`: follow its Stage 3 (Build the
+artifact) and Stage 4 (Scenarios) using your Gate-1-approved outline as
+the input. This avoids restating the layout/validation rules and keeps a
+single source of truth. Skip its Gate 1 and Gate 2 -- your outline has
+already been approved, and you'll run Gate 2 here.
+
+## Stage 5: Validate
+
+```bash
+uv run .agents/skills/crystallize-task-worker/scripts/validate_skill.py .agents/skills/<name>
+```
+
+Run this for both update-in-place (against the edited skill) and create-new
+(against the new skill). It must print `ok` before moving on.
+
+## Stage 6: Run 2-3 scenarios
 
 - At least one scenario must mimic the original incident (to prove the
   manual work is no longer needed).
 - Others should exercise neighbouring or edge paths.
-- Scenarios are ephemeral.
+- Scenarios are ephemeral. Use the template in
+  `../crystallize-task-worker/references/spec-summary.md`.
 
-## Stage 6: Code review
+## Stage 7: Code review
 
-Run `/autofix` on your commits if the harness exposes it.
+Run `/autofix` on your commits. Fix anything the reviewer flags.
 
-## Stage 7: Gate 2 -- final artifact
+## Stage 8: Gate 2 -- final artifact
 
 End your turn with:
 
@@ -94,7 +112,7 @@ End your turn with:
 
 Wait for the user's reply.
 
-## Stage 8: Commit and hand off
+## Stage 9: Commit and hand off
 
 Commit on your current branch. In your final response, state the branch
 name so the caller knows what to merge.
@@ -107,3 +125,10 @@ processing was genuinely ad-hoc", end your turn with:
 > "No update needed. Reason: <one-sentence>."
 
 and stop. Do not commit a null change.
+
+## Gotchas
+
+- You run with `MNGR_AGENT_ROLE=worker` in the environment. The
+  crystallization Stop hook detects this and stays silent, so you will NOT
+  see a crystallization reminder after a heavy sub-turn. Don't try to
+  recursively crystallize work you do while updating this skill.

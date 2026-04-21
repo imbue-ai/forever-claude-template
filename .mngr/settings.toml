@@ -147,4 +147,4 @@ extra_provision_command = [
 ]
 agent_args = [
     "--dangerously-skip-permissions",
-    """--append-system-prompt "You were launched by the crystallize-task / heal-skill / update-skill flow. Use the bundled build-crystallized-skill / heal-crystallized-skill / update-crystallized-skill skill to drive your work. End your turn with any gate question the sub-skill asks for." """]
+    """--append-system-prompt "You were launched by the crystallize-task / heal-skill / update-skill flow. Use the bundled crystallize-task-worker / heal-skill-worker / update-skill-worker skill to drive your work. End your turn with any gate question the sub-skill asks for." """]

@@ -27,39 +27,53 @@ is *now asking it to do* -- that is an `update-skill` situation.
 
 Heal is a turn-end action -- do not interrupt in-flight work to invoke it.
 
-## Step 1: Capture the incident transcript
+## Conventions
 
-The worker needs a replay of the turn where the skill misbehaved. Use the
-same transcript-extraction helper as `crystallize-task`:
+Use `$TARGET` for the skill you are healing (e.g. `migrate-config`). Then:
+
+- Worker agent name: `heal-$TARGET`
+- Worker branch: `mngr/heal-$TARGET`
+- Runtime path: `runtime/heal/$TARGET/`
+- Task file: `/tmp/task-heal-$TARGET.md`
+
+## Step 1: Open a tracking ticket
+
+```bash
+if command -v tk >/dev/null 2>&1; then
+    TICKET_ID=$(tk create "heal $TARGET" -t bug \
+        --acceptance "incident captured; task file written; worker launched; worker DONE; branch merged")
+    tk start "$TICKET_ID"
+fi
+```
+
+## Step 2: Capture the incident transcript
 
 ```bash
 uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
-    --transcript "$CLAUDE_TRANSCRIPT_PATH" \
-    --output runtime/heal/<skill-name>/turn.jsonl
+    --output runtime/heal/$TARGET/turn.jsonl
 ```
 
-The worker will get the bundled `heal-crystallized-skill` sub-skill
-installed into its own `.agents/skills/` at provision time; no manual
-staging from your side is needed.
+The helper auto-discovers the current session transcript from
+`$CLAUDE_TRANSCRIPT_PATH` or `$MNGR_CLAUDE_SESSION_ID`.
 
-## Step 2: Write the task file
+## Step 3: Write the task file
 
 ```bash
-cat > /tmp/task-heal-<skill-name>.md << 'TASK_EOF'
-# Task: heal the `<skill-name>` skill
+cat > /tmp/task-heal-$TARGET.md << 'TASK_EOF'
+# Task: heal the `$TARGET` skill
 
 ## Incident
-The turn where `<skill-name>` misbehaved is at
-runtime/heal/<skill-name>/turn.jsonl.
+The turn where `$TARGET` misbehaved is at
+runtime/heal/$TARGET/turn.jsonl.
 
 ## What went wrong
 <summarize in 2-5 sentences: what was invoked, what happened, what the user
 actually needed. Quote the key error/output if short.>
 
 ## What to do
-Use the `heal-crystallized-skill` sub-skill to replicate the problem, find
-the root cause, apply a fix to `.agents/skills/<skill-name>/scripts/run.py`
-and/or `.agents/skills/<skill-name>/SKILL.md`, re-run fresh 2-3 scenarios
+Use the `heal-skill-worker` sub-skill to replicate the problem, find
+the root cause, apply a fix to `.agents/skills/$TARGET/scripts/run.py`
+and/or `.agents/skills/$TARGET/SKILL.md`, re-run fresh 2-3 scenarios
 against the fixed script, and push through Gate 2 (user approval of the
 final artifact). There is no outline gate for a heal.
 
@@ -68,41 +82,50 @@ final artifact). There is no outline gate for a heal.
 - The fix addresses the root cause (not a symptom workaround).
 - The fresh scenarios pass after the fix.
 - The user approves the final artifact (Gate 2).
-- Work is committed to the `mngr/heal-<skill-name>` branch.
+- Work is committed to the worker's branch (`mngr/heal-$TARGET`).
 TASK_EOF
 ```
 
-## Step 3: Launch the worker
+## Step 4: Launch the worker
 
 ```bash
-mngr create heal-<skill-name> -t crystallize-worker \
+mngr create heal-$TARGET -t crystallize-worker \
     --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-heal-<skill-name>.md
-mngr wait heal-<skill-name> DONE STOPPED WAITING &
+    --message-file /tmp/task-heal-$TARGET.md
 ```
 
-`crystallize-worker` is the right template here too -- it pre-installs the
-heal sub-skill (alongside build/update) into the worker's worktree.
+The `crystallize-worker` template pre-installs `heal-skill-worker`
+alongside the other worker sub-skills.
 
-## Step 4: Relay the Gate 2 question
+## Step 5: Wait for completion, then merge
 
-When the worker ends its turn with "approve the fix?", relay via
-`send-telegram-message` and forward the reply back through
-`mngr message heal-<skill-name>`. See the `crystallize-task` skill for the
-full relay pattern.
-
-## Step 5: Merge on approval
+The worker runs in its own agent with its own chat channel. The user will
+handle the Gate 2 approval directly with the worker -- you do not relay
+questions. Wait for DONE (or STOPPED) and then merge:
 
 ```bash
-git fetch . mngr/heal-<skill-name>:mngr/heal-<skill-name> 2>/dev/null || true
-git merge --no-ff mngr/heal-<skill-name>
+mngr wait heal-$TARGET DONE STOPPED &
+wait
+git fetch . mngr/heal-$TARGET:mngr/heal-$TARGET
+git merge --no-ff mngr/heal-$TARGET
 ```
 
-## Caveats
+If the worker stopped without producing the expected commit, see
+`launch-task/references/worker-failure.md`.
 
-- Built-in skills from the upstream template (`launch-task`, `update-self`,
-  etc.) are eligible for heal, but doing so causes local drift from
-  upstream. Reconcile manually via `update-self` (pull) or
-  `submit-upstream-changes` (push) later.
+On successful merge, close the tracking ticket:
+
+```bash
+if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
+    tk close "$TICKET_ID"
+fi
+```
+
+## Gotchas
+
+- If the target is a built-in skill from the upstream template (e.g.
+  `launch-task`, `update-self`), healing it causes local drift from
+  upstream. Reconcile later via `update-self` (pull) or
+  `submit-upstream-changes` (push).
 - Heal is non-blocking. The user's original request is already delivered;
   the heal worker just produces a quieter follow-up commit.

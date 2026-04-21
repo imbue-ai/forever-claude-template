@@ -104,6 +104,12 @@ RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     --path vendor/mngr/libs/mngr_claude \
     --path vendor/mngr/libs/mngr_wait
 
+# Expose the vendored tk ticket tracker on PATH. `tk` is a portable bash
+# script at vendor/tk/ticket; a symlink into /root/.local/bin/ (already on
+# PATH) makes it invocable without bundling an additional install mechanism.
+# Tickets themselves live under .tickets/ (gitignored) at the repo root.
+RUN mkdir -p /root/.local/bin && ln -sf /code/vendor/tk/ticket /root/.local/bin/tk
+
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.
 # `tail -f /dev/null` does not do this.

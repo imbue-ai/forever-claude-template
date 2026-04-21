@@ -1,5 +1,5 @@
 ---
-name: heal-crystallized-skill
+name: heal-skill-worker
 description: Repair a failing skill. Invoke when your task file asks you to heal a specific skill by pointing at its incident transcript.
 metadata:
   role: worker-sub-skill
@@ -8,8 +8,12 @@ metadata:
 # Healing a skill
 
 A crystallized or hand-authored skill misbehaved during a real turn; your
-job is to fix it. There is no outline gate -- heal is a tight diagnose-
-fix-verify loop with only a final Gate 2.
+job is to fix it.
+
+There is no outline gate for a heal: the diagnosis is already in the task
+file, and the fix is small. Inserting a gate would just stall the tight
+diagnose-fix-verify loop without giving the user useful new information.
+Gate 2 is kept as a final safety check on the actual change.
 
 ## Stage 1: Replicate
 
@@ -43,11 +47,12 @@ fix-verify loop with only a final Gate 2.
 - Include 1-2 additional scenarios that exercise neighbouring code paths
   to make sure the fix didn't regress anything.
 - Scenarios are ephemeral (run in your transcript, not saved to disk).
+  Use the template in
+  `../crystallize-task-worker/references/spec-summary.md`.
 
 ## Stage 5: Code review
 
-Run `/autofix` on your commits if the harness exposes it. Fix anything the
-reviewer flags.
+Run `/autofix` on your commits. Fix anything the reviewer flags.
 
 ## Stage 6: Gate 2 -- approval
 
@@ -77,3 +82,10 @@ user should decide on, end your turn with:
 > <next step, e.g. a create-new-skill update or manual investigation>."
 
 and stop.
+
+## Gotchas
+
+- You run with `MNGR_AGENT_ROLE=worker` in the environment. The
+  crystallization Stop hook detects this and stays silent, so you will NOT
+  see a crystallization reminder after a heavy sub-turn. Don't try to
+  recursively crystallize work you do while healing this skill.

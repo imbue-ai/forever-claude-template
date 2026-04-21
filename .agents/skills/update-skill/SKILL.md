@@ -28,34 +28,51 @@ The update worker will decide, but you should have a rough expectation:
 If the post-processing was *non-deterministic* (judgement, creativity,
 exploration), it is NOT an update candidate -- it stays with the main agent.
 
-## Step 1: Capture the incident transcript
+## Conventions
+
+Use `$TARGET` for the skill you are updating (e.g. `migrate-config`). Then:
+
+- Worker agent name: `update-$TARGET`
+- Worker branch: `mngr/update-$TARGET`
+- Runtime path: `runtime/update/$TARGET/`
+- Task file: `/tmp/task-update-$TARGET.md`
+
+## Step 1: Open a tracking ticket
+
+```bash
+if command -v tk >/dev/null 2>&1; then
+    TICKET_ID=$(tk create "update $TARGET" -t task \
+        --acceptance "incident captured; task file written; worker launched; worker DONE; branch merged")
+    tk start "$TICKET_ID"
+fi
+```
+
+## Step 2: Capture the incident transcript
 
 ```bash
 uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
-    --transcript "$CLAUDE_TRANSCRIPT_PATH" \
-    --output runtime/update/<skill-name>/turn.jsonl
+    --output runtime/update/$TARGET/turn.jsonl
 ```
 
-The worker will get the bundled `update-crystallized-skill` sub-skill
-installed into its own `.agents/skills/` at provision time; no manual
-staging from your side is needed.
+The helper auto-discovers the current session transcript from
+`$CLAUDE_TRANSCRIPT_PATH` or `$MNGR_CLAUDE_SESSION_ID`.
 
-## Step 2: Write the task file
+## Step 3: Write the task file
 
 ```bash
-cat > /tmp/task-update-<skill-name>.md << 'TASK_EOF'
-# Task: update the `<skill-name>` skill (or split a new one)
+cat > /tmp/task-update-$TARGET.md << 'TASK_EOF'
+# Task: update the `$TARGET` skill (or split a new one)
 
 ## Incident
-The turn where `<skill-name>` was invoked is at
-runtime/update/<skill-name>/turn.jsonl.
+The turn where `$TARGET` was invoked is at
+runtime/update/$TARGET/turn.jsonl.
 
 ## What was missing
 <describe in 2-5 sentences what the skill did, what additional deterministic
 work you had to do by hand, and why folding it in would help future turns.>
 
 ## What to do
-Use the `update-crystallized-skill` sub-skill to: replicate the incident,
+Use the `update-skill-worker` sub-skill to: replicate the incident,
 decide update-in-place vs. new-sibling-skill, run Gate 1 on the outline,
 implement, hand-craft 2-3 scenarios, run them, run Gate 2.
 
@@ -63,35 +80,51 @@ implement, hand-craft 2-3 scenarios, run them, run Gate 2.
 - The additional processing no longer needs to be done manually.
 - All scenarios pass.
 - User has approved outline (Gate 1) and final artifact (Gate 2).
-- Work is committed to the `mngr/update-<skill-name>` branch.
+- Work is committed to the worker's branch (`mngr/update-$TARGET`).
 TASK_EOF
 ```
 
-## Step 3: Launch the worker
+## Step 4: Launch the worker
 
 ```bash
-mngr create update-<skill-name> -t crystallize-worker \
+mngr create update-$TARGET -t crystallize-worker \
     --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-update-<skill-name>.md
-mngr wait update-<skill-name> DONE STOPPED WAITING &
+    --message-file /tmp/task-update-$TARGET.md
 ```
 
-## Step 4: Relay the gate questions
+## Step 5: Wait for completion, then merge
 
-Update has two gates (outline + final artifact). Relay each via
-`send-telegram-message`; forward each reply via `mngr message update-<skill-name>`.
-
-## Step 5: Merge on approval
+The worker runs in its own agent with its own chat channel. The user will
+handle both gate approvals (outline + final artifact) directly with the
+worker -- you do not relay questions. Wait for DONE (or STOPPED) and then
+merge:
 
 ```bash
-git fetch . mngr/update-<skill-name>:mngr/update-<skill-name> 2>/dev/null || true
-git merge --no-ff mngr/update-<skill-name>
+mngr wait update-$TARGET DONE STOPPED &
+wait
+git fetch . mngr/update-$TARGET:mngr/update-$TARGET
+git merge --no-ff mngr/update-$TARGET
 ```
 
-## Caveats
+If the worker stopped without producing the expected commit, see
+`launch-task/references/worker-failure.md`.
 
-- Same drift caveats as `heal-skill` if the target is a built-in skill.
+If the worker decided "create-new-skill", the new skill lands in its own
+directory; the old skill is unchanged.
+
+On successful merge, close the tracking ticket:
+
+```bash
+if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
+    tk close "$TICKET_ID"
+fi
+```
+
+## Gotchas
+
+- If the target is a built-in skill from the upstream template (e.g.
+  `launch-task`, `update-self`), updating it causes local drift from
+  upstream. Reconcile later via `update-self` (pull) or
+  `submit-upstream-changes` (push).
 - Update is non-blocking -- the user's original request is already
-  delivered.
-- If the worker decides "create-new-skill", the new skill lands in its own
-  directory; the old skill is unchanged.
+  delivered; the update worker just produces a quieter follow-up commit.

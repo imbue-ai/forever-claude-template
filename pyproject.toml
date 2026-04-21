@@ -22,6 +22,7 @@ dev = [
     "inline-snapshot>=0.31",
     "import-linter>=2.0",
     "tomlkit>=0.12",
+    "pyyaml>=6",
 ]
 
 [tool.uv]

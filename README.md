@@ -29,7 +29,7 @@ mngr create my-workspace main -t local \
 ## Create templates
 
 - `worker` - For sub-agents created via the launch-task skill (includes code review)
-- `crystallize-worker` - Sub-agent for the skill crystallization / heal / update lifecycle. Inherits from `worker` and pre-installs the bundled `build-crystallized-skill`, `heal-crystallized-skill`, and `update-crystallized-skill` sub-skills into its own `.agents/skills/`.
+- `crystallize-worker` - Sub-agent for the skill crystallization / heal / update lifecycle. Inherits from `worker` and pre-installs the bundled `crystallize-task-worker`, `heal-skill-worker`, and `update-skill-worker` sub-skills into its own `.agents/skills/`.
 
 ## Skill crystallization lifecycle
 
