@@ -4,10 +4,10 @@ Provides a thread-safe interface for reading and writing user preferences
 that persist across sessions, such as the default account for new workspaces
 and the auto-open behavior for the requests panel.
 
-Also exposes static service URLs (``cloudflare_forwarding_url``,
-``supertokens_connection_uri``) used by the desktop client to talk to the
-backing services. Those URLs follow env > file > default precedence so ops
-can point a local build at a different deployment without editing code.
+Also exposes the ``cloudflare_forwarding_url`` (which now doubles as the auth
+backend URL) used by the desktop client to talk to the backing service. The
+URL follows env > file > default precedence so ops can point a local build at
+a different deployment without editing code.
 """
 
 import os
@@ -27,16 +27,13 @@ from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME = "config.toml"
 
-DEFAULT_CLOUDFLARE_FORWARDING_URL: Final[str] = "https://joshalbrecht--cloudflare-forwarding-fastapi-app.modal.run"
-DEFAULT_SUPERTOKENS_CONNECTION_URI: Final[str] = (
-    "https://st-dev-aba73a80-3754-11f1-9afe-f5bb4fa720bc.aws.supertokens.io"
+DEFAULT_CLOUDFLARE_FORWARDING_URL: Final[str] = (
+    "https://joshalbrecht--cloudflare-forwarding-production-fastapi-app.modal.run"
 )
 
 _CLOUDFLARE_FORWARDING_URL_ENV: Final[str] = "CLOUDFLARE_FORWARDING_URL"
-_SUPERTOKENS_CONNECTION_URI_ENV: Final[str] = "SUPERTOKENS_CONNECTION_URI"
 
 _CLOUDFLARE_FORWARDING_URL_KEY: Final[str] = "cloudflare_forwarding_url"
-_SUPERTOKENS_CONNECTION_URI_KEY: Final[str] = "supertokens_connection_uri"
 
 _URL_VALIDATOR: Final[TypeAdapter[AnyUrl]] = TypeAdapter(AnyUrl)
 
@@ -145,7 +142,7 @@ class MindsConfig(MutableModel):
 
     @property
     def cloudflare_forwarding_url(self) -> AnyUrl:
-        """Base URL of the Cloudflare forwarding API.
+        """Base URL of the Cloudflare forwarding API (also hosts the auth backend).
 
         Precedence: ``$CLOUDFLARE_FORWARDING_URL`` > ``config.toml`` > built-in default.
         """
@@ -153,16 +150,4 @@ class MindsConfig(MutableModel):
             env_var=_CLOUDFLARE_FORWARDING_URL_ENV,
             file_key=_CLOUDFLARE_FORWARDING_URL_KEY,
             default=DEFAULT_CLOUDFLARE_FORWARDING_URL,
-        )
-
-    @property
-    def supertokens_connection_uri(self) -> AnyUrl:
-        """URI of the SuperTokens core.
-
-        Precedence: ``$SUPERTOKENS_CONNECTION_URI`` > ``config.toml`` > built-in default.
-        """
-        return self._resolve_url_setting(
-            env_var=_SUPERTOKENS_CONNECTION_URI_ENV,
-            file_key=_SUPERTOKENS_CONNECTION_URI_KEY,
-            default=DEFAULT_SUPERTOKENS_CONNECTION_URI,
         )

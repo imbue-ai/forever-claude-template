@@ -4,7 +4,6 @@ import pytest
 from pydantic import AnyUrl
 
 from imbue.minds.desktop_client.minds_config import DEFAULT_CLOUDFLARE_FORWARDING_URL
-from imbue.minds.desktop_client.minds_config import DEFAULT_SUPERTOKENS_CONNECTION_URI
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.errors import MindsConfigError
 
@@ -13,7 +12,6 @@ from imbue.minds.errors import MindsConfigError
 def _clear_url_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure no stray env-var overrides leak into url-resolution tests."""
     monkeypatch.delenv("CLOUDFLARE_FORWARDING_URL", raising=False)
-    monkeypatch.delenv("SUPERTOKENS_CONNECTION_URI", raising=False)
 
 
 def _make_config(tmp_path: Path) -> MindsConfig:
@@ -99,23 +97,10 @@ def test_cloudflare_forwarding_url_defaults_when_unset(tmp_path: Path) -> None:
     assert config.cloudflare_forwarding_url == AnyUrl(DEFAULT_CLOUDFLARE_FORWARDING_URL)
 
 
-def test_supertokens_connection_uri_defaults_when_unset(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    assert config.supertokens_connection_uri == AnyUrl(DEFAULT_SUPERTOKENS_CONNECTION_URI)
-
-
 def test_cloudflare_forwarding_url_file_overrides_default(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text('cloudflare_forwarding_url = "https://cf-from-file.example.com/"\n')
     config = _make_config(tmp_path)
     assert str(config.cloudflare_forwarding_url) == "https://cf-from-file.example.com/"
-    # unrelated URL still uses default
-    assert config.supertokens_connection_uri == AnyUrl(DEFAULT_SUPERTOKENS_CONNECTION_URI)
-
-
-def test_supertokens_connection_uri_file_overrides_default(tmp_path: Path) -> None:
-    (tmp_path / "config.toml").write_text('supertokens_connection_uri = "https://st-from-file.example.com/"\n')
-    config = _make_config(tmp_path)
-    assert str(config.supertokens_connection_uri) == "https://st-from-file.example.com/"
 
 
 def test_cloudflare_forwarding_url_env_overrides_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,13 +108,6 @@ def test_cloudflare_forwarding_url_env_overrides_file(tmp_path: Path, monkeypatc
     monkeypatch.setenv("CLOUDFLARE_FORWARDING_URL", "https://cf-from-env.example.com/")
     config = _make_config(tmp_path)
     assert str(config.cloudflare_forwarding_url) == "https://cf-from-env.example.com/"
-
-
-def test_supertokens_connection_uri_env_overrides_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    (tmp_path / "config.toml").write_text('supertokens_connection_uri = "https://st-from-file.example.com/"\n')
-    monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://st-from-env.example.com/")
-    config = _make_config(tmp_path)
-    assert str(config.supertokens_connection_uri) == "https://st-from-env.example.com/"
 
 
 def test_invalid_url_in_file_raises(tmp_path: Path) -> None:
