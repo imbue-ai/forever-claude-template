@@ -38,9 +38,15 @@ QUALIFYING_CALL_THRESHOLD: int = 5
 
 REMINDER_MESSAGE: str = (
     "The turn that just finished used {count} non-read tool calls. "
-    "If the work was a cohesive, likely-to-recur, mostly-deterministic unit, "
-    "consider invoking the `crystallize-task` skill to turn it into a reusable skill. "
-    "If the work was pure research / one-off exploration, ignore this reminder."
+    "Consider whether any portion of the work is worth crystallizing into "
+    "a reusable skill via `crystallize-task`. This includes sub-processes "
+    "within a larger task, not just the task as a whole. In particular, if "
+    "you learned how to do something -- through research, debugging, or "
+    "experimentation -- that seems likely to be useful in the future, and "
+    "the process is mostly deterministic, that is a strong signal to "
+    "crystallize it. "
+    "If the entire turn was pure one-off work with nothing reusable, "
+    "ignore this reminder."
 )
 
 

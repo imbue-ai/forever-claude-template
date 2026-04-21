@@ -1,6 +1,6 @@
 ---
 name: crystallize-task
-description: Turn the turn that just finished into a reusable deterministic skill. Invoke when the Stop hook has just reminded you that the turn used many non-read tool calls AND the work was a cohesive single unit likely to recur with a mostly deterministic process.
+description: Turn a reusable, mostly-deterministic process from the turn that just finished into a skill. The process does not have to be the entire turn -- a sub-process (e.g. a data pipeline within a larger build) counts. Strong signal: you learned how to do something through research or debugging that is likely to be useful again.
 ---
 
 # Crystallizing a task into a skill
@@ -23,9 +23,16 @@ Only crystallize when ALL of these hold:
    a script with clear inputs and outputs.
 3. You expect this task to recur, either verbatim or with minor input changes.
 
-If any of the above is false, just send a short acknowledgement to the user
-and move on. A pure-research turn, a one-off incident response, or creative
-writing should never be crystallized.
+If none of the above holds for any portion of the turn, just send a short
+acknowledgement to the user and move on. A pure-research turn, a one-off
+incident response, or creative writing should never be crystallized.
+
+**Important:** You don't have to crystallize the entire turn. Look for
+reusable sub-processes within the work. In particular, if you learned
+how to do something -- through research, debugging, or experimentation
+-- that seems likely to be useful in the future, and the process is
+mostly deterministic, that is a strong signal to crystallize it. Extract
+just the reusable portion, even if the surrounding task was one-off.
 
 ## Conventions
 
@@ -106,6 +113,13 @@ TASK_EOF
 
 ## Step 4: Launch the worker
 
+Follow the `launch-task` skill's conventions for worker lifecycle management
+(background waiting, checking results, handling outcomes), with these
+crystallize-specific overrides:
+
+- Template: `-t crystallize-worker` (not `-t worker`)
+- Task file: the one written in step 3
+
 ```bash
 mngr create crystallize-$NAME -t crystallize-worker \
     --label workspace=$MINDS_WORKSPACE_NAME \
@@ -117,16 +131,29 @@ The `crystallize-worker` template (see `.mngr/settings.toml`) inherits from
 worker, and runs the bundled-sub-skill installer so the worker's
 `.agents/skills/` contains `crystallize-task-worker` et al.
 
-## Step 5: Wait for completion, then merge
+## Step 5: Monitor in background, then merge
 
 The worker runs in its own agent with its own chat channel. The user will
 handle gate approvals directly with the worker -- you do not relay
-questions. Your remaining job is to wait for the worker to reach DONE (or
-STOPPED) and then merge the branch so the new skill is discoverable.
+questions. Your remaining job is to be notified when the worker finishes
+and then merge the branch.
+
+Start `mngr wait` in the background (using the Bash tool with
+`run_in_background: true`) so you can continue working. You will be
+notified when it completes -- do not block on it.
 
 ```bash
-mngr wait crystallize-$NAME DONE STOPPED &
-wait
+# Run with Bash run_in_background: true
+mngr wait crystallize-$NAME DONE STOPPED WAITING --timeout 30m
+```
+
+When notified that the wait completed, check the outcome and merge:
+
+```bash
+# Check what happened
+mngr transcript crystallize-$NAME --role=assistant | tail -n 20
+
+# If successful, merge the branch
 git fetch . mngr/crystallize-$NAME:mngr/crystallize-$NAME
 git merge --no-ff mngr/crystallize-$NAME
 ```
@@ -141,7 +168,7 @@ worker:
 if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
     tk close "$TICKET_ID"
 fi
-# optional: mngr destroy crystallize-$NAME
+# optional: echo "y" | mngr destroy crystallize-$NAME --force
 ```
 
 ## Guidelines
