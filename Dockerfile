@@ -59,6 +59,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
+# Pre-seed github.com SSH host key so git operations don't block on
+# interactive host-key confirmation (e.g. when Claude Code installs
+# plugins from github:<owner>/<repo>).
+RUN mkdir -p /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts && \
+    chmod 600 /root/.ssh/known_hosts
+
 # install python dependencies
 RUN uv tool install modal
 
@@ -83,8 +91,8 @@ RUN cd /code/vendor/mngr/apps/minds_workspace_server/frontend && \
 # so they can parse plugin-specific config fields like auto_dismiss_dialogs)
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     uv tool install -e /code/vendor/mngr/apps/minds_workspace_server \
-        --with /code/vendor/mngr/libs/mngr_claude \
-        --with /code/vendor/mngr/libs/mngr_modal && \
+        --with-editable /code/vendor/mngr/libs/mngr_claude \
+        --with-editable /code/vendor/mngr/libs/mngr_modal && \
     mngr plugin add \
     --path vendor/mngr/libs/mngr_modal/ \
     --path vendor/mngr/libs/mngr_claude
