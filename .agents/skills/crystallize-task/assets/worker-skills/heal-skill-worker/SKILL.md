@@ -10,6 +10,10 @@ metadata:
 A crystallized or hand-authored skill misbehaved during a real turn; your
 job is to fix it.
 
+**Principle.** Reliability is the floor; simplicity is the target. Default to
+a single entry point and one flow. Add surface only when a specific invariant
+demands it.
+
 There is no outline gate for a heal: the diagnosis is already in the task
 file, and the fix is small. Inserting a gate would just stall the tight
 diagnose-fix-verify loop without giving the user useful new information.
@@ -38,6 +42,9 @@ Gate 2 is kept as a final safety check on the actual change.
 
 - Edit `scripts/run.py` and/or `SKILL.md` to address the root cause.
 - Keep the fix minimal. Don't refactor unrelated code.
+- A heal is a minimal fix. If the fix is growing enough to feel like a
+  redesign (new subcommands, new flows, expanded contract), stop and
+  escalate to `update-skill` instead.
 - Do not add test-only exports or TODO comments.
 - Fail loudly on unexpected input rather than silently swallowing.
 

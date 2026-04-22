@@ -14,6 +14,10 @@ delivered the correct result but did not. Typical triggers:
 - A missing capability in the script prevented it from handling a realistic
   input shape.
 
+**Principle.** Reliability is the floor; simplicity is the target. Default to
+a single entry point and one flow. Add surface only when a specific invariant
+demands it.
+
 Do NOT use heal for a drift between what the skill *does* and what the user
 is *now asking it to do* -- that is an `update-skill` situation.
 
@@ -66,9 +70,10 @@ cat > /tmp/task-heal-$TARGET.md << 'TASK_EOF'
 The turn where `$TARGET` misbehaved is at
 runtime/heal/$TARGET/turn.jsonl.
 
-## What went wrong
-<summarize in 2-5 sentences: what was invoked, what happened, what the user
-actually needed. Quote the key error/output if short.>
+## What the fixed skill must do
+<state the contract the healed skill must honor — what input shapes should
+work, what outputs are correct. Read the incident transcript for how it
+failed; here, describe only what success looks like.>
 
 ## What to do
 Use the `heal-skill-worker` sub-skill to replicate the problem, find

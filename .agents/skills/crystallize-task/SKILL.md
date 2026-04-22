@@ -11,6 +11,10 @@ reusable skill consisting of a PEP 723 `scripts/run.py` and a companion
 You dispatch the actual build to a sub-agent; your role is to package context,
 launch, and merge.
 
+**Principle.** Reliability is the floor; simplicity is the target. Default to
+a single entry point and one flow. Add surface only when a specific invariant
+demands it.
+
 ## When to invoke
 
 The Stop hook emits a reminder whenever the turn used at least five non-read
@@ -81,6 +85,10 @@ Do not pass `--transcript` unless you have a specific file to replay.
 
 ## Step 3: Write the task file
 
+Describe invariants and state constraints — what must be true about the
+skill's inputs and outputs. Do not enumerate subcommands, flow steps, or
+argparse surfaces; surface decisions belong to the worker.
+
 ```bash
 cat > /tmp/task-crystallize-$NAME.md << 'TASK_EOF'
 # Task: crystallize the just-finished work into a reusable skill
@@ -90,6 +98,12 @@ The turn you need to crystallize is at
 runtime/crystallize/$NAME/turn.jsonl (JSONL of tool calls and results).
 Replay it mentally to understand what was done; you do not need to
 re-execute destructive operations.
+
+## Preconditions and postconditions
+<describe what must be true about the skill's inputs before it runs, and
+what must be true about its outputs after. Focus on the contract; do not
+prescribe subcommands, flow steps, or argparse surfaces — the worker owns
+those decisions.>
 
 ## What to do
 Use the `crystallize-task-worker` sub-skill to drive the end-to-end build.

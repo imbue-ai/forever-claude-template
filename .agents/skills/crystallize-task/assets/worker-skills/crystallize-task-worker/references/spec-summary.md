@@ -39,6 +39,10 @@ specific reason to constrain or declare them -- the defaults are fine.
 
 ## scripts/run.py
 
+The step-by-step flow should be as simple as the invariants allow — default
+to a single entry point and one flow, and only add subcommands or subflows
+when a specific invariant demands the separation.
+
 - PEP 723 header with pinned inline deps:
   ```python
   # /// script

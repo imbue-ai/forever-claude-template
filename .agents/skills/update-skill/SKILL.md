@@ -10,6 +10,10 @@ but you had to do additional *deterministic* processing to fully satisfy the
 user's request. The goal is to fold that processing into the skill (or into a
 sibling skill) so it never needs to be redone by hand.
 
+**Principle.** Reliability is the floor; simplicity is the target. Default to
+a single entry point and one flow. Add surface only when a specific invariant
+demands it.
+
 Trigger this via the turn-end reflection in CLAUDE.md: "did I do additional
 deterministic post-processing the skill could have done itself?" If yes,
 invoke update-skill.
@@ -59,6 +63,10 @@ The helper auto-discovers the current session transcript from
 
 ## Step 3: Write the task file
 
+Describe invariants and state constraints — what the updated skill must
+guarantee about its inputs and outputs. Do not enumerate subcommands, flow
+steps, or argparse surfaces; surface decisions belong to the worker.
+
 ```bash
 cat > /tmp/task-update-$TARGET.md << 'TASK_EOF'
 # Task: update the `$TARGET` skill (or split a new one)
@@ -67,9 +75,11 @@ cat > /tmp/task-update-$TARGET.md << 'TASK_EOF'
 The turn where `$TARGET` was invoked is at
 runtime/update/$TARGET/turn.jsonl.
 
-## What was missing
-<describe in 2-5 sentences what the skill did, what additional deterministic
-work you had to do by hand, and why folding it in would help future turns.>
+## What the updated skill must do
+<state the contract the updated skill must honor after this change — what
+inputs it should now accept, what outputs it should now produce. Read the
+incident transcript for what was done by hand; here, describe only the new
+contract.>
 
 ## What to do
 Use the `update-skill-worker` sub-skill to: replicate the incident,

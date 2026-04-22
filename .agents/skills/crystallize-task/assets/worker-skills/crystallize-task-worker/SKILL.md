@@ -11,6 +11,10 @@ Your task file describes a turn of work that should become a reusable skill
 and points at a replay transcript on disk. Follow these stages to go from
 "task handed off" to "new skill committed on your branch".
 
+**Principle.** Reliability is the floor; simplicity is the target. Default to
+a single entry point and one flow. Add surface only when a specific invariant
+demands it.
+
 Consult `references/spec-summary.md` for the agentskills.io layout,
 frontmatter template, PEP 723 script conventions, and the scenario template
 you will use in Stage 4.
@@ -39,6 +43,9 @@ Produce a short outline with:
 - Inputs: CLI arguments the script will take.
 - Outputs: what the script prints / writes / returns.
 - A step-by-step flow of what the script does.
+- Justification: for any subcommand or subflow in the planned flow, what
+  invariant makes it separate vs. inlined? If no invariant demands
+  separation, inline it.
 - 2-3 scenarios you plan to hand-craft (happy path + edge cases).
 - Any edge cases you foresaw but chose not to handle (and why).
 

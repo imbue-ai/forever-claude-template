@@ -12,6 +12,10 @@ An existing skill ran successfully on a prior turn, but additional
 Your job is to fold that work in -- either by updating the skill in place
 or by creating a new sibling skill.
 
+**Principle.** Reliability is the floor; simplicity is the target. Default to
+a single entry point and one flow. Add surface only when a specific invariant
+demands it.
+
 Both gates apply (outline + final artifact). The outline gate doubles as
 the user's chance to veto the update-vs-split decision.
 
@@ -47,6 +51,9 @@ Include:
   named `<new-name>`.
 - What changes / what the new skill does.
 - Inputs, outputs, step-by-step flow.
+- Justification: for any subcommand or subflow in the planned flow, what
+  invariant makes it separate vs. inlined? If no invariant demands
+  separation, inline it.
 - 2-3 scenarios you will run.
 
 ### Gate 1: outline approval
