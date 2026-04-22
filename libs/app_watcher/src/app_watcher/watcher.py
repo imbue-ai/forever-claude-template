@@ -1,8 +1,8 @@
 """Application watcher service.
 
 Watches runtime/applications.toml for changes. On startup and on every change,
-writes server_registered / server_deregistered events to
-events/servers/events.jsonl so the desktop client can discover available servers.
+writes service_registered / service_deregistered events to
+events/services/events.jsonl so the desktop client can discover available services.
 
 Uses both inotify (when available) and mtime polling (10-second fallback).
 """
@@ -31,22 +31,22 @@ except ModuleNotFoundError:
 APPLICATIONS_FILE = Path("runtime/applications.toml")
 POLL_INTERVAL_SECONDS = 10
 
-_EVENT_SOURCE = EventSource("servers")
-_EVENT_TYPE_REGISTERED = EventType("server_registered")
-_EVENT_TYPE_DEREGISTERED = EventType("server_deregistered")
+_EVENT_SOURCE = EventSource("services")
+_EVENT_TYPE_REGISTERED = EventType("service_registered")
+_EVENT_TYPE_DEREGISTERED = EventType("service_deregistered")
 
 
-class ServerRegisteredEvent(EventEnvelope):
-    """A server registered its URL with the agent."""
+class ServiceRegisteredEvent(EventEnvelope):
+    """A service registered its URL with the agent."""
 
-    server: str
+    service: str
     url: str
 
 
-class ServerDeregisteredEvent(EventEnvelope):
-    """A server that was previously registered is no longer available."""
+class ServiceDeregisteredEvent(EventEnvelope):
+    """A service that was previously registered is no longer available."""
 
-    server: str
+    service: str
 
 
 def _new_event_id() -> EventId:
@@ -64,7 +64,7 @@ def _get_events_dir() -> Path | None:
     state_dir = os.environ.get("MNGR_AGENT_STATE_DIR")
     if not state_dir:
         return None
-    return Path(state_dir) / "events" / "servers"
+    return Path(state_dir) / "events" / "services"
 
 
 def _load_applications() -> list[dict[str, object]]:
@@ -81,7 +81,7 @@ def _write_events(
     current_apps: list[dict[str, object]],
     previous_app_names: set[str],
 ) -> None:
-    """Write server events for all current applications and deregistration events for removed ones."""
+    """Write service events for all current applications and deregistration events for removed ones."""
     events_dir.mkdir(parents=True, exist_ok=True)
     events_path = events_dir / "events.jsonl"
 
@@ -94,23 +94,23 @@ def _write_events(
             if not name or not url:
                 continue
             current_names.add(name)
-            event = ServerRegisteredEvent(
+            event = ServiceRegisteredEvent(
                 timestamp=_now_iso(),
                 type=_EVENT_TYPE_REGISTERED,
                 event_id=_new_event_id(),
                 source=_EVENT_SOURCE,
-                server=name,
+                service=name,
                 url=url,
             )
             f.write(event.model_dump_json() + "\n")
 
         for name in sorted(previous_app_names - current_names):
-            event = ServerDeregisteredEvent(
+            event = ServiceDeregisteredEvent(
                 timestamp=_now_iso(),
                 type=_EVENT_TYPE_DEREGISTERED,
                 event_id=_new_event_id(),
                 source=_EVENT_SOURCE,
-                server=name,
+                service=name,
             )
             f.write(event.model_dump_json() + "\n")
 
@@ -152,7 +152,7 @@ def _wait_for_change_inotify(inotify: object, timeout_seconds: float) -> bool:
 
 
 def main() -> None:
-    """Main loop: watch applications.toml and write server events."""
+    """Main loop: watch applications.toml and write service events."""
     print("[app-watcher] Starting application watcher", file=sys.stderr, flush=True)
 
     APPLICATIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -204,7 +204,7 @@ def main() -> None:
                 flush=True,
             )
 
-            # Write server events
+            # Write service events
             if events_dir is not None:
                 _write_events(events_dir, apps, previous_app_names)
 
