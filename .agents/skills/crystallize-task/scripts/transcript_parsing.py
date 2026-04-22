@@ -90,7 +90,11 @@ def last_user_message_index(events: list[dict[str, Any]]) -> int | None:
     """Index of the most recent human user message, or ``None`` if there is none.
 
     Thin wrapper around ``nth_user_message_index(events, 0)``. Kept for the
-    existing detector caller. Callers slice however they like:
+    existing detector caller. Skips tool_result carriers and ``isMeta: true``
+    pseudo-messages (Stop-hook feedback, Skill-tool invocation frames) so
+    callers get a true human-turn boundary rather than a synthetic injection.
+
+    Callers slice however they like:
     - ``events[idx:]`` keeps the user message in the slice (replay use-cases).
     - ``events[idx + 1:]`` drops it (counting what happened *after* it).
     """

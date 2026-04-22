@@ -60,9 +60,10 @@ def _nth_turn_slice(events: list[dict[str, Any]], n: int) -> list[dict[str, Any]
         return [] if n > 0 else events
     if n == 0:
         return events[start:]
+    # If nth_user_message_index(events, n) succeeded, nth_user_message_index
+    # (events, n-1) must also succeed, so no None-check is needed here.
     end = nth_user_message_index(events, n - 1)
-    if end is None:
-        return events[start:]
+    assert end is not None
     return events[start:end]
 
 
@@ -78,6 +79,11 @@ def _marker_slice(
         return events[start:]
     end = find_marker_index(events, end_marker, start + 1)
     if end is None:
+        print(
+            f"warning: --end-marker {end_marker!r} not found after start; "
+            "slice runs to end-of-transcript",
+            file=sys.stderr,
+        )
         return events[start:]
     return events[start:end]
 
