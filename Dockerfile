@@ -36,16 +36,6 @@ RUN ARCH=$(dpkg --print-architecture) && \
     -o /usr/local/bin/cloudflared && \
     chmod +x /usr/local/bin/cloudflared
 
-# The agent runs latchkey in gateway mode: it forwards all calls to the host's
-# latchkey gateway, which owns the credential store and the browser. No local
-# keychain or playwright install is needed inside the container.
-#
-# NOTE: we would prefer to install the precompiled latchkey binary from GitHub
-# releases, but the 2.7.0 release binary has a build bug (hardcoded build-host
-# path to playwright-core) and fails at startup. Once upstream ships a fixed
-# binary, switch this to a `curl` of the release asset.
-ENV LATCHKEY_GATEWAY=http://localhost:1989
-
 RUN mkdir -p -m 755 /etc/apt/keyrings \
 	&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 	&& cat $out | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
@@ -70,7 +60,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     rm -rf /var/lib/apt/lists/*
 
 # Install latchkey (CLI for making authenticated HTTP calls to third-party
-# services). See the LATCHKEY_GATEWAY ENV above for gateway mode.
+# services). The agent runs it in gateway mode -- the per-agent
+# LATCHKEY_GATEWAY URL is injected at `mngr create` time by the outside
+# caller (see .mngr/settings.toml's pass_env), so we do not hardcode it here.
+#
+# NOTE: we would prefer to install the precompiled latchkey binary from GitHub
+# releases, but the 2.7.0 release binary has a build bug (hardcoded build-host
+# path to playwright-core) and fails at startup. Once upstream ships a fixed
+# binary, switch this to a `curl` of the release asset.
 ARG LATCHKEY_VERSION=2.7.0
 RUN npm install -g "latchkey@${LATCHKEY_VERSION}"
 
