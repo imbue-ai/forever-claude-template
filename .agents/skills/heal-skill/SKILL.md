@@ -50,11 +50,20 @@ fi
 
 ```bash
 uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
+    --nth 1 \
     --output runtime/heal/$TARGET/turn.jsonl
 ```
 
 The helper auto-discovers the current session transcript from
 `$CLAUDE_TRANSCRIPT_PATH` or `$MNGR_CLAUDE_SESSION_ID`.
+
+`--nth 1` selects the *previous* human turn -- the one where the skill
+misbehaved. `--nth 0` (the default) would select the current heal-skill
+invocation turn itself, which is not the incident you need to replay.
+
+If counting turns does not line up cleanly (e.g. sub-agent interleaving),
+use `--start-marker TEXT` and optionally `--end-marker TEXT` to slice by
+matching text content instead.
 
 ## Step 3: Write the task file
 

@@ -1,6 +1,6 @@
 ---
 name: crystallize-task
-description: Turn a reusable, mostly-deterministic process from the turn that just finished into a skill. The process does not have to be the entire turn -- a sub-process (e.g. a data pipeline within a larger build) counts. Strong signal: you learned how to do something through research or debugging that is likely to be useful again.
+description: "Turn a reusable, mostly-deterministic process from the turn that just finished into a skill. The process does not have to be the entire turn -- a sub-process (e.g. a data pipeline within a larger build) counts. Strong signal: you learned how to do something through research or debugging that is likely to be useful again."
 ---
 
 # Crystallizing a task into a skill
@@ -72,12 +72,21 @@ skill is unaffected.
 
 ```bash
 uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
+    --nth 1 \
     --output runtime/crystallize/$NAME/turn.jsonl
 ```
 
 The helper auto-discovers the current session transcript via
 `$CLAUDE_TRANSCRIPT_PATH` (set inside hooks) or `$MNGR_CLAUDE_SESSION_ID`.
 Do not pass `--transcript` unless you have a specific file to replay.
+
+`--nth 1` selects the *previous* human turn -- the one the user wants
+crystallized. `--nth 0` (the default) would select the current
+crystallize-task invocation turn itself, which is not what you want.
+
+If counting turns does not line up cleanly (e.g. sub-agent interleaving),
+use `--start-marker TEXT` and optionally `--end-marker TEXT` to slice by
+matching text content instead.
 
 ## Step 3: Write the task file
 
