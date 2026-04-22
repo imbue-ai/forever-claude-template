@@ -234,113 +234,65 @@ def test_evaluate_returns_silent_for_empty_transcript(tmp_path: Path) -> None:
     assert should_warn is False
 
 
-def test_evaluate_does_not_refire_for_same_turn(tmp_path: Path) -> None:
-    """Once a qualifying turn has fired, subsequent Stop events for it stay silent."""
+def test_evaluate_meta_injection_resets_tool_count(tmp_path: Path) -> None:
+    """After a Stop-hook re-injection, the "turn" restarts: if the agent's next
+    response has no tools, the hook must stay silent."""
     events = [
         _user("hi"),
         _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        # Stop-hook fires exit=2 and Claude Code re-injects the stderr as an
+        # isMeta user event. Prior tool calls are now on the far side of a
+        # fresh agent-response boundary.
+        {
+            "type": "user",
+            "isMeta": True,
+            "message": {"content": [{"type": "text", "text": "Stop hook feedback: ..."}]},
+        },
+        # Agent replies without tools.
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Ignoring"}]}},
     ]
     transcript = _write_transcript(tmp_path, events)
-    skills = _empty_skills_root(tmp_path)
-    state_dir = tmp_path / "state"
-    payload = {"transcript_path": str(transcript), "session_id": "s1"}
-
-    first_warn, _ = detect.evaluate(payload, skills, state_dir)
-    second_warn, _ = detect.evaluate(payload, skills, state_dir)
-    assert first_warn is True
-    assert second_warn is False
-
-
-def test_evaluate_refires_after_new_user_message(tmp_path: Path) -> None:
-    """A new human user message resets the fire latch."""
-    skills = _empty_skills_root(tmp_path)
-    state_dir = tmp_path / "state"
-    payload_base = {"session_id": "s1"}
-
-    first_events = [
-        _user("first"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
-    ]
-    transcript = _write_transcript(tmp_path, first_events)
-    first_warn, _ = detect.evaluate(
-        {**payload_base, "transcript_path": str(transcript)}, skills, state_dir
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
     )
-    assert first_warn is True
-
-    # Agent replies without tools; Stop fires again for the same turn -> silent.
-    first_events.append(
-        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Ignoring"}]}}
-    )
-    transcript = _write_transcript(tmp_path, first_events)
-    repeat_warn, _ = detect.evaluate(
-        {**payload_base, "transcript_path": str(transcript)}, skills, state_dir
-    )
-    assert repeat_warn is False
-
-    # User sends a new message, triggering another qualifying turn.
-    first_events.extend(
-        [
-            _user("second"),
-            _assistant_with_tool_uses(*(_tool_use("Bash", f"v{i}") for i in range(8))),
-        ]
-    )
-    transcript = _write_transcript(tmp_path, first_events)
-    second_warn, _ = detect.evaluate(
-        {**payload_base, "transcript_path": str(transcript)}, skills, state_dir
-    )
-    assert second_warn is True
+    assert should_warn is False
 
 
-def test_evaluate_dedupe_is_per_session(tmp_path: Path) -> None:
-    """Different session_ids should not share the fire latch."""
+def test_evaluate_refires_if_agent_keeps_using_tools_after_meta(tmp_path: Path) -> None:
+    """If the agent responds to a meta injection with more tool calls past the
+    threshold, that is a new qualifying turn and the hook should fire again."""
     events = [
         _user("hi"),
         _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        {
+            "type": "user",
+            "isMeta": True,
+            "message": {"content": [{"type": "text", "text": "Stop hook feedback: ..."}]},
+        },
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"v{i}") for i in range(6))),
     ]
     transcript = _write_transcript(tmp_path, events)
-    skills = _empty_skills_root(tmp_path)
-    state_dir = tmp_path / "state"
-
-    first, _ = detect.evaluate(
-        {"transcript_path": str(transcript), "session_id": "s1"}, skills, state_dir
+    should_warn, message = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
     )
-    second, _ = detect.evaluate(
-        {"transcript_path": str(transcript), "session_id": "s2"}, skills, state_dir
-    )
-    assert first is True
-    assert second is True
+    assert should_warn is True
+    assert "6 non-read tool calls" in message
 
 
-def test_evaluate_without_state_dir_does_not_dedupe(tmp_path: Path) -> None:
-    """Legacy callers that don't pass state_dir keep the original always-fire behavior."""
+def test_evaluate_tool_results_do_not_reset_count(tmp_path: Path) -> None:
+    """Tool-result-carrying user events must not be treated as a response boundary."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(5))),
+        _tool_result("u0"),
+        _tool_result("u1"),
     ]
     transcript = _write_transcript(tmp_path, events)
-    skills = _empty_skills_root(tmp_path)
-    payload = {"transcript_path": str(transcript), "session_id": "s1"}
-
-    first, _ = detect.evaluate(payload, skills)
-    second, _ = detect.evaluate(payload, skills)
-    assert first is True
-    assert second is True
-
-
-def test_evaluate_without_session_id_does_not_dedupe(tmp_path: Path) -> None:
-    """Missing session_id means we can't key the latch; prefer refire over silent drop."""
-    events = [
-        _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
-    ]
-    transcript = _write_transcript(tmp_path, events)
-    skills = _empty_skills_root(tmp_path)
-    state_dir = tmp_path / "state"
-
-    first, _ = detect.evaluate({"transcript_path": str(transcript)}, skills, state_dir)
-    second, _ = detect.evaluate({"transcript_path": str(transcript)}, skills, state_dir)
-    assert first is True
-    assert second is True
+    should_warn, message = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+    )
+    assert should_warn is True
+    assert "5 non-read tool calls" in message
 
 
 def test_skill_is_crystallized_handles_missing_file(tmp_path: Path) -> None:

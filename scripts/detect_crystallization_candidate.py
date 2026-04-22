@@ -52,7 +52,7 @@ def _load_transcript_parsing() -> Any:
 
 _transcript_parsing = _load_transcript_parsing()
 iter_transcript = _transcript_parsing.iter_transcript
-last_user_message_index = _transcript_parsing.last_user_message_index
+is_user_tool_result_carrier = _transcript_parsing.is_user_tool_result_carrier
 
 # Tool names that count as "pure reads" and are excluded from the tally. The
 # spec (concise.md) is explicit about these three names.
@@ -169,38 +169,37 @@ def _find_successful_crystallized_skill_call(
     return False
 
 
-def _read_recorded_turn(state_path: Path) -> int | None:
-    if not state_path.is_file():
-        return None
-    try:
-        return int(state_path.read_text().strip())
-    except (OSError, ValueError):
-        return None
+def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
+    """Index of the event that prompted the agent's most recent response.
+
+    This is the most recent ``type: user`` event that is NOT a tool_result
+    carrier. Unlike ``last_user_message_index`` in ``transcript_parsing``,
+    this deliberately includes ``isMeta: true`` events (e.g. Stop-hook
+    re-injections): those also prompt a fresh assistant response, so the
+    tool-use count for "the turn that just finished" should reset at them.
+    """
+    for index in range(len(events) - 1, -1, -1):
+        event = events[index]
+        if event.get("type") != "user":
+            continue
+        if is_user_tool_result_carrier(event):
+            continue
+        return index
+    return None
 
 
-def _record_fired_turn(state_path: Path, turn_index: int) -> None:
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = state_path.with_suffix(state_path.suffix + ".tmp")
-    tmp.write_text(str(turn_index))
-    os.replace(tmp, state_path)
-
-
-def evaluate(
-    payload: dict[str, Any],
-    skills_root: Path,
-    state_dir: Path | None = None,
-) -> tuple[bool, str]:
+def evaluate(payload: dict[str, Any], skills_root: Path) -> tuple[bool, str]:
     """Detection entry point.
 
     Returns ``(should_warn, message)``. ``should_warn == False`` means the
     caller should stay silent; ``message`` is meaningful only when the first
     element is True.
 
-    When ``state_dir`` is provided and the payload carries a ``session_id``,
-    the function records the turn boundary it fired for and stays silent on
-    subsequent invocations that target the same turn. This prevents a single
-    qualifying turn from emitting the reminder repeatedly while the agent
-    replies without using tools.
+    "The turn that just finished" is the agent's most recent response --
+    everything after the most recent non-tool-result user event (including
+    Stop-hook meta injections). If the agent replied without tools, the
+    count is zero and the hook stays silent, which is what we want when the
+    Stop hook re-fires after a tool-free acknowledgement.
     """
     transcript_path_str = payload.get("transcript_path")
     if not isinstance(transcript_path_str, str):
@@ -210,7 +209,7 @@ def evaluate(
         return False, ""
 
     events = iter_transcript(transcript_path)
-    boundary = last_user_message_index(events)
+    boundary = _latest_response_boundary(events)
     turn_events = events if boundary is None else events[boundary + 1 :]
     if not turn_events:
         return False, ""
@@ -221,19 +220,6 @@ def evaluate(
     count = _count_qualifying(_iter_assistant_tool_uses(turn_events))
     if count < QUALIFYING_CALL_THRESHOLD:
         return False, ""
-
-    session_id = payload.get("session_id")
-    if (
-        state_dir is not None
-        and isinstance(session_id, str)
-        and session_id
-        and boundary is not None
-    ):
-        state_path = state_dir / f"{session_id}.turn"
-        if _read_recorded_turn(state_path) == boundary:
-            return False, ""
-        _record_fired_turn(state_path, boundary)
-
     return True, REMINDER_MESSAGE.format(count=count)
 
 
@@ -242,13 +228,6 @@ def _skills_root() -> Path:
     workdir = os.environ.get("MNGR_AGENT_WORK_DIR")
     base = Path(workdir) if workdir else Path.cwd()
     return base / ".agents" / "skills"
-
-
-def _state_dir() -> Path:
-    """Where per-session dedupe markers live. Gitignored via ``runtime/``."""
-    workdir = os.environ.get("MNGR_AGENT_WORK_DIR")
-    base = Path(workdir) if workdir else Path.cwd()
-    return base / "runtime" / "crystallize_detector"
 
 
 def main() -> int:
@@ -266,7 +245,7 @@ def main() -> int:
     if not isinstance(payload, dict):
         return 0
 
-    should_warn, message = evaluate(payload, _skills_root(), _state_dir())
+    should_warn, message = evaluate(payload, _skills_root())
     if not should_warn:
         return 0
     print(message, file=sys.stderr)
