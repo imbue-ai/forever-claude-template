@@ -14,10 +14,6 @@ Runtime contract:
 - exit 0: stay silent (nothing to do, or the turn was already handled by an
   existing crystallized skill, or we are inside a worker sub-agent).
 - exit 2: print the reminder to stderr; Claude Code surfaces it to the agent.
-
-Hermes equivalent: a future hermes plugin under ``agents/hermes/plugins/``
-should call the ``evaluate`` function defined here. That is why the detection
-logic is factored into a plain function separate from ``main``.
 """
 
 from __future__ import annotations
@@ -52,7 +48,7 @@ def _load_transcript_parsing() -> Any:
 
 _transcript_parsing = _load_transcript_parsing()
 iter_transcript = _transcript_parsing.iter_transcript
-last_user_message_index = _transcript_parsing.last_user_message_index
+is_user_tool_result_carrier = _transcript_parsing.is_user_tool_result_carrier
 
 # Tool names that count as "pure reads" and are excluded from the tally. The
 # spec (concise.md) is explicit about these three names.
@@ -73,18 +69,6 @@ REMINDER_MESSAGE: str = (
     "If the entire turn was pure one-off work with nothing reusable, "
     "ignore this reminder."
 )
-
-
-def _last_turn_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Events after the most recent human user message.
-
-    "The turn that just finished" is everything after the latest ``type ==
-    "user"`` entry that is an actual user message (not a tool_result carrier).
-    """
-    boundary = last_user_message_index(events)
-    if boundary is None:
-        return events
-    return events[boundary + 1 :]
 
 
 def _iter_assistant_tool_uses(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -181,12 +165,37 @@ def _find_successful_crystallized_skill_call(
     return False
 
 
+def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
+    """Index of the event that prompted the agent's most recent response.
+
+    This is the most recent ``type: user`` event that is NOT a tool_result
+    carrier. Unlike ``last_user_message_index`` in ``transcript_parsing``,
+    this deliberately includes ``isMeta: true`` events (e.g. Stop-hook
+    re-injections): those also prompt a fresh assistant response, so the
+    tool-use count for "the turn that just finished" should reset at them.
+    """
+    for index in range(len(events) - 1, -1, -1):
+        event = events[index]
+        if event.get("type") != "user":
+            continue
+        if is_user_tool_result_carrier(event):
+            continue
+        return index
+    return None
+
+
 def evaluate(payload: dict[str, Any], skills_root: Path) -> tuple[bool, str]:
-    """Pure detection entry point.
+    """Detection entry point.
 
     Returns ``(should_warn, message)``. ``should_warn == False`` means the
     caller should stay silent; ``message`` is meaningful only when the first
     element is True.
+
+    "The turn that just finished" is the agent's most recent response --
+    everything after the most recent non-tool-result user event (including
+    Stop-hook meta injections). If the agent replied without tools, the
+    count is zero and the hook stays silent, which is what we want when the
+    Stop hook re-fires after a tool-free acknowledgement.
     """
     transcript_path_str = payload.get("transcript_path")
     if not isinstance(transcript_path_str, str):
@@ -196,7 +205,8 @@ def evaluate(payload: dict[str, Any], skills_root: Path) -> tuple[bool, str]:
         return False, ""
 
     events = iter_transcript(transcript_path)
-    turn_events = _last_turn_events(events)
+    boundary = _latest_response_boundary(events)
+    turn_events = events if boundary is None else events[boundary + 1 :]
     if not turn_events:
         return False, ""
 

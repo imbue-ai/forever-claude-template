@@ -234,6 +234,67 @@ def test_evaluate_returns_silent_for_empty_transcript(tmp_path: Path) -> None:
     assert should_warn is False
 
 
+def test_evaluate_meta_injection_resets_tool_count(tmp_path: Path) -> None:
+    """After a Stop-hook re-injection, the "turn" restarts: if the agent's next
+    response has no tools, the hook must stay silent."""
+    events = [
+        _user("hi"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        # Stop-hook fires exit=2 and Claude Code re-injects the stderr as an
+        # isMeta user event. Prior tool calls are now on the far side of a
+        # fresh agent-response boundary.
+        {
+            "type": "user",
+            "isMeta": True,
+            "message": {"content": [{"type": "text", "text": "Stop hook feedback: ..."}]},
+        },
+        # Agent replies without tools.
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Ignoring"}]}},
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+    )
+    assert should_warn is False
+
+
+def test_evaluate_refires_if_agent_keeps_using_tools_after_meta(tmp_path: Path) -> None:
+    """If the agent responds to a meta injection with more tool calls past the
+    threshold, that is a new qualifying turn and the hook should fire again."""
+    events = [
+        _user("hi"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        {
+            "type": "user",
+            "isMeta": True,
+            "message": {"content": [{"type": "text", "text": "Stop hook feedback: ..."}]},
+        },
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"v{i}") for i in range(6))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, message = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+    )
+    assert should_warn is True
+    assert "6 non-read tool calls" in message
+
+
+def test_evaluate_tool_results_do_not_reset_count(tmp_path: Path) -> None:
+    """Tool-result-carrying user events must not be treated as a response boundary."""
+    events = [
+        _user("hi"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(5))),
+        _tool_result("u0"),
+        _tool_result("u1"),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, message = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+    )
+    assert should_warn is True
+    assert "5 non-read tool calls" in message
+
+
 def test_skill_is_crystallized_handles_missing_file(tmp_path: Path) -> None:
     assert detect._skill_is_crystallized(tmp_path / "does-not-exist.md") is False
 
