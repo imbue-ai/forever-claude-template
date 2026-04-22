@@ -14,10 +14,6 @@ Runtime contract:
 - exit 0: stay silent (nothing to do, or the turn was already handled by an
   existing crystallized skill, or we are inside a worker sub-agent).
 - exit 2: print the reminder to stderr; Claude Code surfaces it to the agent.
-
-Hermes equivalent: a future hermes plugin under ``agents/hermes/plugins/``
-should call the ``evaluate`` function defined here. That is why the detection
-logic is factored into a plain function separate from ``main``.
 """
 
 from __future__ import annotations
