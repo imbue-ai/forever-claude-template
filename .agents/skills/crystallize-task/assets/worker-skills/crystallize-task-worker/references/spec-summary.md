@@ -5,13 +5,25 @@ spec](https://agentskills.io/specification). This file captures just the
 bits you need when building or updating a skill; consult the spec directly
 if anything else comes up.
 
+## What a skill is
+
+A skill is a SKILL.md describing a **process**, plus any supporting
+scripts, references, or assets. The SKILL.md reads like a recipe: "do X,
+then Y, then Z." Any given step can be "run this script" (deterministic)
+or "read the output and apply these criteria" (judgement -- executed by
+the agent using the skill).
+
+Judgement steps are part of the skill, written as prose in SKILL.md. Do
+not try to engineer them out. A mixed flow of scripts and prose
+instructions is the norm for useful skills, not the exception.
+
 ## Directory layout
 
 ```
 .agents/skills/<name>/
   SKILL.md                  # required; body <= 500 lines (progressive disclosure)
   scripts/
-    run.py                  # required for crystallized skills (PEP 723, argparse)
+    run.py                  # optional; include when there are deterministic steps
     *.py                    # optional helpers
   references/*.md           # optional long-form docs; load on demand
   assets/...                # optional static resources (templates, samples)
@@ -37,11 +49,20 @@ metadata:
 Omit `allowed-tools`, `license`, and `compatibility` unless you have a
 specific reason to constrain or declare them -- the defaults are fine.
 
-## scripts/run.py
+## scripts/run.py (optional)
 
-The step-by-step flow should be as simple as the invariants allow — default
-to a single entry point and one flow, and only add subcommands or subflows
-when a specific invariant demands the separation.
+Include `run.py` when the skill has deterministic steps that benefit from
+automation. A skill can also be pure SKILL.md prose with no scripts at
+all, if every step is judgement or uses existing tools directly. Use
+scripts where they earn their keep; don't force a script when prose is
+clearer.
+
+When you do include `run.py`, keep it as simple as the invariants allow
+-- default to a single entry point and one flow, and only add subcommands
+or subflows when a specific invariant demands the separation.
+
+If the process looks like: <deterministic steps> -> <nondeterministic judgments made by you> -> <deterministic steps>
+you can encode that as subcommands on `run.py` to do the deterministic sections as separate steps.
 
 - PEP 723 header with pinned inline deps:
   ```python

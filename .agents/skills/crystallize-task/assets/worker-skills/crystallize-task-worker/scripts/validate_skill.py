@@ -13,8 +13,9 @@ Checks (in order, short-circuit on first failure per check):
 - Frontmatter has `name` matching the directory basename.
 - Frontmatter has `description`, 1-1024 characters.
 - SKILL.md body (after frontmatter) is at most 500 lines.
-- If frontmatter `metadata.crystallized` is true, `scripts/run.py` exists and
-  begins with a PEP 723 `# /// script` header.
+- If `scripts/run.py` exists, it begins with a PEP 723 `# /// script` header.
+  (`run.py` is optional even for crystallized skills -- a skill may be pure
+  SKILL.md prose if every step is judgement or uses existing tools.)
 
 Exits 0 and prints `ok` when valid; exits 1 with a human-readable error to
 stderr otherwise.
@@ -60,9 +61,10 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], list[str]]:
 
 
 def _validate_run_py(skill_dir: Path) -> str | None:
+    """If scripts/run.py exists, require a PEP 723 header. Absent run.py is OK."""
     run_py = skill_dir / "scripts" / "run.py"
     if not run_py.is_file():
-        return f"metadata.crystallized=true but {run_py} not found"
+        return None
     first_few = run_py.read_text(encoding="utf-8").splitlines()[:5]
     if not any(line.strip().startswith("# /// script") for line in first_few):
         return f"{run_py} is missing a PEP 723 `# /// script` header"
@@ -106,11 +108,9 @@ def validate(skill_dir: Path) -> str | None:
             f"<= {_MAX_BODY_LINES} (use references/ for overflow)"
         )
 
-    metadata = frontmatter.get("metadata")
-    if isinstance(metadata, dict) and metadata.get("crystallized") is True:
-        err = _validate_run_py(skill_dir)
-        if err is not None:
-            return err
+    err = _validate_run_py(skill_dir)
+    if err is not None:
+        return err
 
     return None
 

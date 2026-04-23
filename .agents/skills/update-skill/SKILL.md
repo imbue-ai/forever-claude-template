@@ -1,36 +1,53 @@
 ---
 name: update-skill
-description: Extend or refactor a crystallized skill (or split a new one off) when you had to do additional deterministic post-processing beyond what the existing skill did. Invoke at turn-end when reflecting on a successful skill use that left you patching around gaps.
+description: Extend or refactor a crystallized skill (or split a new one off) when you had to do additional repeatable work -- script-shaped or prose-shaped -- beyond what the existing skill did. Invoke at turn-end when reflecting on a successful skill use that left you patching around gaps.
 ---
 
 # Updating or splitting a skill
 
 Use this skill when an existing skill in `.agents/skills/` ran successfully
-but you had to do additional *deterministic* processing to fully satisfy the
-user's request. The goal is to fold that processing into the skill (or into a
-sibling skill) so it never needs to be redone by hand.
+but you had to do additional *repeatable* work to fully satisfy the user's
+request. The goal is to fold that work into the skill (or into a sibling
+skill) so it never needs to be redone by hand.
+
+"Repeatable" covers both script-shaped extensions (an extra flag, a new
+output format) and prose-shaped extensions (an additional judgement step
+with a stable recipe, e.g. "read the output and classify according to
+these criteria"). Both fit inside a skill -- scripts in `scripts/`,
+judgement as SKILL.md prose.
 
 **Principle.** Reliability is the floor; simplicity is the target. Default to
 a single entry point and one flow. Add surface only when a specific invariant
 demands it.
 
-Trigger this via the turn-end reflection in CLAUDE.md: "did I do additional
-deterministic post-processing the skill could have done itself?" If yes,
-invoke update-skill.
+Trigger this via the turn-end reflection in CLAUDE.md: "did I do
+additional repeatable work the skill could have described itself?" If
+yes, invoke update-skill.
 
 ## Update vs. create-new: the rubric
 
-The update worker will decide, but you should have a rough expectation:
+**Default to update-in-place.** Only split into a new sibling skill when
+the extra work would plausibly be useful on its own -- in a context that
+does not involve the existing skill.
 
-- **Update-in-place**: the gap is a natural extension of the existing skill
-  (e.g. an additional flag, a new output format, an edge case the script
-  didn't handle). The skill's identity stays the same.
-- **Create-new-skill**: the gap is an orthogonal concern that happens to
-  chain onto the first skill's output. A new sibling skill is cleaner than
-  stretching the original's surface.
+- **Update-in-place** when the gap is a natural extension of the existing
+  skill (extra flag, new output format, edge case not covered, an
+  additional judgement step in the same flow), OR when the gap is only
+  useful in the context of this skill's process (you cannot concretely
+  imagine invoking it standalone). The skill's identity stays the same.
+- **Create-new-skill** when the gap is orthogonal AND has a concrete
+  standalone use case -- another agent in another flow would reasonably
+  want to invoke it without the existing skill. Don't decompose
+  proactively for hypothetical reuse; only split when the standalone case
+  is real.
 
-If the post-processing was *non-deterministic* (judgement, creativity,
-exploration), it is NOT an update candidate -- it stays with the main agent.
+Script vs prose is orthogonal to this decision. Update-in-place and
+create-new-skill can each land as scripts, SKILL.md prose, or a mix.
+
+If the extra work was **one-off creative or exploratory** with no
+repeatable pattern, it is NOT an update candidate -- it stays with the
+main agent. Judgement work with a repeatable recipe IS a candidate; it
+becomes a prose step in SKILL.md.
 
 ## Conventions
 
@@ -63,7 +80,7 @@ The helper auto-discovers the current session transcript from
 `$CLAUDE_TRANSCRIPT_PATH` or `$MNGR_CLAUDE_SESSION_ID`.
 
 `--nth 1` selects the *previous* human turn -- the one where the
-deterministic-but-manual work was done. `--nth 0` (the default) would
+repeatable-but-manual work was done. `--nth 0` (the default) would
 select the current update-skill invocation turn itself.
 
 If counting turns does not line up cleanly (e.g. sub-agent interleaving),

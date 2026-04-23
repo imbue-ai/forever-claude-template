@@ -1,6 +1,6 @@
 ---
 name: crystallize-task
-description: "Turn a reusable, mostly-deterministic process from the turn that just finished into a skill. The process does not have to be the entire turn -- a sub-process (e.g. a data pipeline within a larger build) counts. Strong signal: you learned how to do something through research or debugging that is likely to be useful again."
+description: "Turn a process from the turn that just finished into a reusable skill. A skill captures a stable process -- SKILL.md prose describing the recipe, with scripts for deterministic steps and prose instructions for nondeterministic steps. Consider using after completing a task where a re-run with new inputs would follow a largely similar process. The process does not have to be the entire turn -- a sub-process (e.g. a data pipeline within a larger build) counts. Strong signal: you learned how to do something through research or debugging that is likely to be useful again."
 ---
 
 # Crystallizing a task into a skill
@@ -13,30 +13,38 @@ launch, and merge.
 
 **Principle.** Reliability is the floor; simplicity is the target. Default to
 a single entry point and one flow. Add surface only when a specific invariant
-demands it.
+demands it. Decompose only when the separate components are likely to be used independently.
 
 ## When to invoke
 
-The Stop hook emits a reminder whenever the turn used at least five non-read
-tool calls. That threshold is deliberately dumb -- you supply the judgement.
-Only crystallize when ALL of these hold:
+Read `references/when-to-crystallize.md` if you haven't yet for detailed guidelines.
+
+Summary:
 
 1. The work was a single cohesive unit (not a mixed-bag turn that happened to
-   touch many files).
-2. The underlying process is mostly deterministic -- it could be expressed as
-   a script with clear inputs and outputs.
-3. You expect this task to recur, either verbatim or with minor input changes.
+   touch many files or make many web requests or other tool uses).
+2. **Re-run test**: if the user asked you to do this again with different
+   inputs, much of the process would be recognizably the same -- same
+   sources, same steps, same criteria, just different data. Judgement steps
+   in the middle of a flow are fine; they live in SKILL.md as prose
+   instructions.
+3. You expect this task (or one like it) to recur, either because the user suggested it might or because it seems like a useful task to repeat.
 
-If none of the above holds for any portion of the turn, just send a short
-acknowledgement to the user and move on. A pure-research turn, a one-off
-incident response, or creative writing should never be crystallized.
+A skill is a SKILL.md (process recipe) plus optional scripts for the
+deterministic steps. Judgement steps live in SKILL.md as prose and are
+executed by the agent using the skill. Do not demand end-to-end
+scriptability before crystallizing.
 
-**Important:** You don't have to crystallize the entire turn. Look for
-reusable sub-processes within the work. In particular, if you learned
-how to do something -- through research, debugging, or experimentation
--- that seems likely to be useful in the future, and the process is
-mostly deterministic, that is a strong signal to crystallize it. Extract
-just the reusable portion, even if the surrounding task was one-off.
+**Default to asking the user**, not to deciding silently. If you can name
+any plausible skill shape, propose it to the user and let them decide.
+Only decline outright if the work truly has no stable process across
+hypothetical re-runs.
+
+**You don't have to crystallize the entire turn.** Look for reusable
+sub-processes within the work. If you learned how to do something --
+through research, debugging, or experimentation -- that seems likely to
+be useful again, and the process would repeat recognizably, that's a
+strong signal to crystallize it.
 
 ## Conventions
 
@@ -69,7 +77,7 @@ if command -v tk >/dev/null 2>&1; then
 fi
 ```
 
-If `tk` is not on PATH (older containers), skip tracking; the rest of the
+If `tk` is not on PATH, skip tracking; the rest of the
 skill is unaffected.
 
 ## Step 2: Extract the just-finished turn
@@ -197,8 +205,11 @@ fi
 ## Guidelines
 
 - Never crystallize without explicit user Yes on the pre-gate question.
-- Never crystallize a turn whose process you could not explain as a linear
-  script. If there is heavy judgement or creativity in the turn, decline.
+- Never crystallize a turn whose process would not repeat recognizably on a
+  re-run. If each hypothetical re-run would require entirely different
+  steps rather than the same recipe with different data, decline. Note
+  that judgement steps within an otherwise stable process do NOT
+  disqualify crystallization -- they live in SKILL.md as prose.
 - The worker owns outline and implementation decisions. Do not second-guess
-  the worker's script unless something is clearly wrong.
+  the worker's skill structure unless something is clearly wrong.
 - Worker failure handling: see `launch-task/references/worker-failure.md`.

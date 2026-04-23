@@ -10,23 +10,18 @@ metadata:
 A crystallized or hand-authored skill misbehaved during a real turn; your
 job is to fix it.
 
-**Principle.** Reliability is the floor; simplicity is the target. Default to
-a single entry point and one flow. Add surface only when a specific invariant
-demands it.
-
-There is no outline gate for a heal: the diagnosis is already in the task
-file, and the fix is small. Inserting a gate would just stall the tight
-diagnose-fix-verify loop without giving the user useful new information.
-Gate 2 is kept as a final safety check on the actual change.
-
 ## Stage 1: Replicate
 
 1. Read the task file to learn which skill failed and how.
 2. Read the incident transcript the task file points at.
-3. Read the skill's current `SKILL.md` and `scripts/run.py`.
+3. Read the skill's current `SKILL.md` and any scripts under `<skill_directory>/scripts/`.
+   A skill may be pure prose (no scripts), in which case "replicate" means
+   tracing the SKILL.md instructions against the incident inputs to see
+   where the recipe led astray.
 4. Reproduce the failure. If the failure depends on external state you
    cannot recreate, construct a minimal synthetic input that exercises the
-   same code path.
+   same code path (or, for a prose-only skill, the same branch of the
+   recipe).
 
 ## Stage 2: Diagnose the root cause
 
@@ -40,10 +35,13 @@ Gate 2 is kept as a final safety check on the actual change.
 
 ## Stage 3: Apply the fix
 
-- Edit `scripts/run.py` and/or `SKILL.md` to address the root cause.
-- Keep the fix minimal. Don't refactor unrelated code.
+- Edit the relevant part of the skill to address the root cause. That
+  can be scripts under `scripts/`, `SKILL.md` prose, or both. If the
+  root cause was an ambiguous or wrong prose instruction, the fix is a
+  SKILL.md edit even if the skill has scripts.
+- Keep the fix minimal. Don't refactor unrelated code or prose.
 - A heal is a minimal fix. If the fix is growing enough to feel like a
-  redesign (new subcommands, new flows, expanded contract), stop and
+  redesign (new subcommands, new flows, expanded contract, new dependencies), stop and
   escalate to `update-skill` instead.
 - Do not add test-only exports or TODO comments.
 - Fail loudly on unexpected input rather than silently swallowing.
@@ -89,10 +87,3 @@ user should decide on, end your turn with:
 > <next step, e.g. a create-new-skill update or manual investigation>."
 
 and stop.
-
-## Gotchas
-
-- You run with `MNGR_AGENT_ROLE=worker` in the environment. The
-  crystallization Stop hook detects this and stays silent, so you will NOT
-  see a crystallization reminder after a heavy sub-turn. Don't try to
-  recursively crystallize work you do while healing this skill.
