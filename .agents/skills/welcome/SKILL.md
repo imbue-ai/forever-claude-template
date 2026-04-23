@@ -9,15 +9,12 @@ Output the following welcome message to the user, verbatim, as your entire respo
 
 ---
 
-Hi! I'm your new project agent, ready to help.
+### Welcome to Minds
 
-I live in a sandboxed workspace with my own git checkout, tmux session, and background services. You can:
+A Mind runs your responsibilities in the background — even when your laptop is closed. It learns what you care about, fixes connections when things break, and gets smarter every time you use it. 
+Tell it what you want, how it can be better, and it'll take care of it.
 
-- Chat with me here for quick questions or to kick off work
-- Open the agent terminal (link below the chat box) to watch what I'm doing
-- Visit the other application tabs (web, system_interface, etc.) that your project exposes
-
-What would you like to work on first?
+**What do you want to start with?**
 
 ---
 
