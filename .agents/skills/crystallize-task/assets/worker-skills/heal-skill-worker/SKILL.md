@@ -16,9 +16,10 @@ At Gate 2 and at terminal status (done or stuck), communicate with the
 lead by writing `runtime/heal/reports/report.md` and pushing it back.
 Do NOT emit `## GATE:` / `## STATUS:` headers in chat.
 
-**Inputs.** Your task file contains a `## Reporting back` section with
-`LEAD_AGENT: <name>` and `LEAD_REPORT_DIR: <path>`. Read both at the
-start of your run.
+**Inputs.** Your task file has YAML frontmatter with `lead_agent`,
+`lead_report_dir`, and `transcript_path`. Read all three at the start
+of your run -- the first two address reports back to the lead, the
+third is where Stage 1's incident transcript lives.
 
 **Procedure** at each gate/status:
 
@@ -37,7 +38,7 @@ start of your run.
 2. Push:
 
    ```bash
-   mngr push <LEAD_AGENT>:<LEAD_REPORT_DIR> \
+   mngr push <lead_agent>:<lead_report_dir> \
        --source runtime/heal/reports/ \
        --uncommitted-changes=merge
    ```

@@ -28,9 +28,11 @@ it back**. Do NOT emit `## GATE:` / `## STATUS:` headers in chat --
 those are not parsed. The lead polls for the pushed file and acts on
 it directly.
 
-**Inputs.** Your task file contains a `## Reporting back` section with
-`LEAD_AGENT: <name>` and `LEAD_REPORT_DIR: <path>`. Read these once at
-the start of your run and use them at every gate/status below.
+**Inputs.** Your task file has YAML frontmatter with `lead_agent`,
+`lead_report_dir`, and `transcript_path`. Read them once at the start
+of your run and use `lead_agent` / `lead_report_dir` at every
+gate/status below. `transcript_path` is where Stage 1's replay
+transcript lives.
 
 **Procedure.** When you reach a gate or terminal status:
 
@@ -53,15 +55,16 @@ the start of your run and use them at every gate/status below.
 2. Push the report directory to the lead:
 
    ```bash
-   mngr push <LEAD_AGENT>:<LEAD_REPORT_DIR> \
+   mngr push <lead_agent>:<lead_report_dir> \
        --source runtime/crystallize/reports/ \
        --uncommitted-changes=merge
    ```
 
-   Substitute the actual values from your task file for `<LEAD_AGENT>`
-   and `<LEAD_REPORT_DIR>`. The trailing slashes matter (rsync
-   directory semantics). `--uncommitted-changes=merge` is required
-   because the lead's worktree usually has uncommitted local state.
+   Substitute the actual values from your task file's frontmatter for
+   `<lead_agent>` and `<lead_report_dir>`. The trailing slashes matter
+   (rsync directory semantics). `--uncommitted-changes=merge` is
+   required because the lead's worktree usually has uncommitted local
+   state.
 
 3. Stop your turn. For gate reports, the lead will send the user's
    reply via `mngr message` and you will resume; for terminal status

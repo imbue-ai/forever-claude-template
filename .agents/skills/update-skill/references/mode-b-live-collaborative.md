@@ -42,14 +42,16 @@ matches the agreed design.
 
 ```bash
 cat > /tmp/task-update-$TARGET.md << TASK_EOF
+---
+lead_agent: $MNGR_AGENT_NAME
+lead_report_dir: runtime/update/$TARGET/reports/
+transcript_path: runtime/update/$TARGET/commit.diff
+---
+
 # Task: verify the live update to \`$TARGET\`
 
 ## Mode
 MODE: B
-
-## Reporting back
-LEAD_AGENT: $MNGR_AGENT_NAME
-LEAD_REPORT_DIR: runtime/update/$TARGET/
 
 ## Committed change
 Branch: $(git branch --show-current)
@@ -71,10 +73,10 @@ Use the \`update-skill-worker\` sub-skill in Mode B: skip Gate 1
 change, run 2-3 scenarios (at least one exercising the changed
 path), run \`/autofix\`, present Gate 2 with verification findings.
 
-When you reach a gate or terminal status, write a report file to
-\`runtime/update/reports/report.md\` and push it to the lead per
-the sub-skill's reporting protocol. Do NOT emit \`## GATE:\` /
-\`## STATUS:\` headers in chat.
+When you reach a gate or terminal status, write a report file and
+push it to the lead per the sub-skill's reporting protocol; the
+destination is given by \`lead_agent\` / \`lead_report_dir\` in
+frontmatter. Do NOT emit \`## GATE:\` / \`## STATUS:\` headers in chat.
 
 ## Success criteria
 - The committed change is consistent with the stated design

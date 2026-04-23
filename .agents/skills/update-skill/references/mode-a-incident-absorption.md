@@ -38,20 +38,26 @@ must guarantee about its inputs and outputs. Do not enumerate
 subcommands, flow steps, or argparse surfaces; surface decisions
 belong to the worker.
 
+The task file's YAML frontmatter carries `lead_agent`,
+`lead_report_dir`, and `transcript_path`; the worker reads all three
+at the start of its run.
+
 ```bash
 cat > /tmp/task-update-$TARGET.md << TASK_EOF
+---
+lead_agent: $MNGR_AGENT_NAME
+lead_report_dir: runtime/update/$TARGET/reports/
+transcript_path: runtime/update/$TARGET/turn.jsonl
+---
+
 # Task: update the \`$TARGET\` skill (or split a new one)
 
 ## Mode
 MODE: A
 
-## Reporting back
-LEAD_AGENT: $MNGR_AGENT_NAME
-LEAD_REPORT_DIR: runtime/update/$TARGET/
-
 ## Incident
-The turn where \`$TARGET\` was invoked is at
-runtime/update/$TARGET/turn.jsonl.
+The turn where \`$TARGET\` was invoked is at the path given by the
+\`transcript_path\` frontmatter field.
 
 ## What the updated skill must do
 <state the contract the updated skill must honor after this change --
@@ -65,11 +71,11 @@ incident, decide update-in-place vs. new-sibling-skill, run Gate 1
 on the outline, implement, hand-craft 2-3 scenarios, run them,
 run Gate 2.
 
-When you reach a gate or terminal status, write a report file to
-\`runtime/update/reports/report.md\` and push it to the lead per
-the sub-skill's reporting protocol. Do NOT emit \`## GATE:\` /
-\`## STATUS:\` headers in chat -- the lead reads the report file,
-not your transcript.
+When you reach a gate or terminal status, write a report file and
+push it to the lead per the sub-skill's reporting protocol; the
+destination is given by \`lead_agent\` / \`lead_report_dir\` in
+frontmatter. Do NOT emit \`## GATE:\` / \`## STATUS:\` headers in
+chat -- the lead reads the report file, not your transcript.
 
 ## Success criteria
 - The additional processing no longer needs to be done manually.

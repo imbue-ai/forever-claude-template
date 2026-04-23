@@ -152,11 +152,11 @@ questions and status updates must go through you.
 - Workers communicate via **report files**, not inline chat headers.
   At each gate or terminal status, the worker writes
   `runtime/<flow>/reports/report.md` (with YAML frontmatter `type:
-  gate|status` and `name: <marker>`) and `mngr push`es it to the path
-  you wrote into the task file's `## Reporting back` section. The
-  push is the ready signal; you poll for that file in the background
-  (`while [ ! -f ... ]; do sleep 5; done; cat ...`). No `mngr wait`,
-  no transcript parsing.
+  gate|status` and `name: <marker>`) and `mngr push`es it to the
+  destination you set in the task file's YAML frontmatter
+  (`lead_agent` + `lead_report_dir`). The push is the ready signal;
+  you poll for that file in the background (`while [ ! -f ... ]; do
+  sleep 5; done; cat ...`). No `mngr wait`, no transcript parsing.
 - For `type: gate` reports, decide whether to answer yourself or
   escalate. Answer yourself for implementation details, codebase
   conventions, naming, file layout, or anything you can determine

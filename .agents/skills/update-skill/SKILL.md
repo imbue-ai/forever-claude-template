@@ -101,15 +101,15 @@ Return here afterwards.
 
 Follow the same file-based proxy flow as
 `.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5e).
-Poll for `runtime/update/$TARGET/report.md`; when it appears, parse
-the frontmatter and act.
+Poll for `runtime/update/$TARGET/reports/report.md`; when it appears,
+parse the frontmatter and act.
 
 Substitutions:
 
 - Worker name: `update-$TARGET`
 - Branch: `mngr/update-$TARGET`
-- Poll path: `runtime/update/$TARGET/report.md`
-- Consumed path: `runtime/update/$TARGET/consumed/`
+- Poll path: `runtime/update/$TARGET/reports/report.md`
+- Consumed path: `runtime/update/$TARGET/reports/consumed/`
 - User-approval gates:
   - **Mode A:** `type: gate, name: outline-approval` (Gate 1, where
     the worker also presents the update-in-place vs. create-new-skill
