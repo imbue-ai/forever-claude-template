@@ -94,6 +94,57 @@ def test_no_env_no_explicit_raises(tmp_path: Path) -> None:
         extract_turn.resolve_transcript_path(None, {})
 
 
+def test_state_dir_file_fallback_succeeds(tmp_path: Path) -> None:
+    """With neither env var set, read session id from MNGR_AGENT_STATE_DIR/claude_session_id."""
+    session_id = "session-abc"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "claude_session_id").write_text(f"{session_id}\n", encoding="utf-8")
+    projects = tmp_path / "projects"
+    slug_dir = projects / "-slug"
+    slug_dir.mkdir(parents=True)
+    transcript = slug_dir / f"{session_id}.jsonl"
+    transcript.write_text("")
+    env = {
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "CLAUDE_CONFIG_DIR": str(tmp_path),
+    }
+    assert extract_turn.resolve_transcript_path(None, env) == transcript
+
+
+def test_state_dir_file_fallback_missing_file_raises(tmp_path: Path) -> None:
+    """MNGR_AGENT_STATE_DIR set but claude_session_id missing -- still raises."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    env = {"MNGR_AGENT_STATE_DIR": str(state_dir)}
+    with pytest.raises(FileNotFoundError):
+        extract_turn.resolve_transcript_path(None, env)
+
+
+def test_session_id_env_wins_over_state_dir_file(tmp_path: Path) -> None:
+    """Explicit MNGR_CLAUDE_SESSION_ID takes precedence over on-disk session id."""
+    env_session = "from-env"
+    file_session = "from-file"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    (state_dir / "claude_session_id").write_text(file_session, encoding="utf-8")
+    projects = tmp_path / "projects"
+    slug_dir = projects / "-slug"
+    slug_dir.mkdir(parents=True)
+    env_transcript = slug_dir / f"{env_session}.jsonl"
+    env_transcript.write_text("")
+    # Also create a transcript for the on-disk id so we can distinguish which
+    # branch resolved -- if the env var wins, we should NOT pick this one.
+    file_transcript = slug_dir / f"{file_session}.jsonl"
+    file_transcript.write_text("")
+    env = {
+        "MNGR_CLAUDE_SESSION_ID": env_session,
+        "MNGR_AGENT_STATE_DIR": str(state_dir),
+        "CLAUDE_CONFIG_DIR": str(tmp_path),
+    }
+    assert extract_turn.resolve_transcript_path(None, env) == env_transcript
+
+
 def test_session_id_without_match_raises(tmp_path: Path) -> None:
     projects = tmp_path / "projects"
     projects.mkdir()
