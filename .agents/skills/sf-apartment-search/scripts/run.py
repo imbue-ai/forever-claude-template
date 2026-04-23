@@ -143,48 +143,56 @@ def fetch_with_playwright(targets: dict[str, str], out_dir: Path) -> dict[str, d
                 name: {"url": url, "error": f"browser launch failed: {exc}"}
                 for name, url in targets.items()
             }
-        ctx = browser.new_context(
-            user_agent=UA,
-            viewport={"width": 1440, "height": 900},
-            locale="en-US",
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept": (
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                    "image/avif,image/webp,*/*;q=0.8"
-                ),
-            },
-        )
-        ctx.add_init_script(STEALTH_INIT_SCRIPT)
-        for name, url in targets.items():
-            page = ctx.new_page()
-            entry: dict[str, str | int] = {"url": url}
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                for _ in range(8):
-                    page.wait_for_timeout(2500)
+        try:
+            ctx = browser.new_context(
+                user_agent=UA,
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                        "image/avif,image/webp,*/*;q=0.8"
+                    ),
+                },
+            )
+            ctx.add_init_script(STEALTH_INIT_SCRIPT)
+            for name, url in targets.items():
+                entry: dict[str, str | int] = {"url": url}
+                page = None
+                try:
+                    page = ctx.new_page()
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    for _ in range(8):
+                        page.wait_for_timeout(2500)
+                        title = page.title()
+                        tl = title.lower()
+                        if (
+                            "just a moment" not in tl
+                            and "checking your browser" not in tl
+                            and "access" not in tl
+                            and "denied" not in tl
+                        ):
+                            break
+                    html = page.content()
                     title = page.title()
-                    tl = title.lower()
-                    if (
-                        "just a moment" not in tl
-                        and "checking your browser" not in tl
-                        and "access" not in tl
-                        and "denied" not in tl
-                    ):
-                        break
-                html = page.content()
-                title = page.title()
-                (out_dir / f"{name}.html").write_text(html, encoding="utf-8")
-                entry["title"] = title
-                entry["length"] = len(html)
-                # detect hard block in content
-                if "Access Denied" in html or "access to this page has been denied" in html.lower():
-                    entry["blocked"] = "bot detection returned Access Denied"
-            except Exception as exc:  # noqa: BLE001 - navigation errors vary
-                entry["error"] = str(exc)
-            page.close()
-            report[name] = entry
-        browser.close()
+                    (out_dir / f"{name}.html").write_text(html, encoding="utf-8")
+                    entry["title"] = title
+                    entry["length"] = len(html)
+                    # detect hard block in content
+                    if "Access Denied" in html or "access to this page has been denied" in html.lower():
+                        entry["blocked"] = "bot detection returned Access Denied"
+                except Exception as exc:  # noqa: BLE001 - navigation errors vary
+                    entry["error"] = str(exc)
+                finally:
+                    if page is not None:
+                        try:
+                            page.close()
+                        except Exception:  # noqa: BLE001 - best-effort page cleanup
+                            pass
+                report[name] = entry
+        finally:
+            browser.close()
     return report
 
 
