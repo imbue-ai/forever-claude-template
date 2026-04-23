@@ -319,12 +319,23 @@ Then re-arm the background poll (same command as 5a).
   # optional: echo "y" | mngr destroy crystallize-$NAME --force
   ```
 
-- `name: stuck` (or any skill-specific no-op terminal like
-  `no-update-needed`), or the 30m `timeout` tripped without a report
+- `name: stuck`, or the 30m `timeout` tripped without a report
   arriving -- follow `launch-task/references/worker-failure.md`:
   surface the report body (or the absence of one) to the user, point
   at the branch and worker agent, and leave both intact for manual
   inspection.
+
+- `name: no-update-needed` (or any skill-specific benign no-op
+  terminal) -- the worker decided there was nothing to do. Close the
+  tracking ticket and stop; do not merge, do not invoke the failure
+  flow. Optionally surface the one-sentence reason to the user so
+  they know the outcome.
+
+  ```bash
+  if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
+      tk close "$TICKET_ID"
+  fi
+  ```
 
 In all status cases, consume the report (move it to `consumed/`) so the
 directory is clean for future runs.
