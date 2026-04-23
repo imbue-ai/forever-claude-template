@@ -40,12 +40,21 @@ Produce a short outline with:
   `references/spec-summary.md`).
 - A one-paragraph description that states what the skill does AND when to
   use it (this becomes the SKILL.md `description` frontmatter field).
-- Inputs: CLI arguments the script will take.
-- Outputs: what the script prints / writes / returns.
-- A step-by-step flow of what the script does.
+- Inputs: what the skill needs from its caller (CLI args if there's a
+  script, or prose parameters if the skill is agent-driven).
+- Outputs: what the skill produces (files, stdout, a report the agent
+  hands back to the user).
+- A step-by-step flow of the skill's process. For each step, tag it as
+  either `[script]` (deterministic, will live in `scripts/`) or
+  `[prose]` (judgement, will live in SKILL.md as instructions the agent
+  using the skill follows). Use the re-run test to decide: if the step
+  would run the same code every time with only the data varying, it's a
+  script step; if it requires reading output and applying judgement, it's
+  a prose step.
 - Justification: for any subcommand or subflow in the planned flow, what
   invariant makes it separate vs. inlined? If no invariant demands
-  separation, inline it.
+  separation, inline it. A skill with zero script steps (pure prose
+  recipe) is valid -- do not invent scripts where judgement is clearer.
 - 2-3 scenarios you plan to hand-craft (happy path + edge cases).
 - Any edge cases you foresaw but chose not to handle (and why).
 
@@ -84,12 +93,19 @@ Pick 2-3 scenarios that exercise the skill end-to-end:
    different code path.
 
 Use the scenario template in `references/spec-summary.md` to record each
-scenario in your transcript. Run each one by invoking `scripts/run.py` with
-real inputs and inspecting the output. Scenarios are *ephemeral* -- do NOT
-write them as files in the skill.
+scenario in your transcript. Scenarios are *ephemeral* -- do NOT write
+them as files in the skill.
 
-If a scenario fails, fix the script. If the script is correct but your
-scenario was wrong, update the scenario.
+Run each scenario:
+
+- For script steps: invoke `scripts/run.py` (or the relevant helper) with
+  real inputs and inspect the output.
+- For prose steps: walk through the SKILL.md instructions as if you were
+  an agent using the skill, and confirm they produce the expected
+  behavior on the scenario's data.
+
+If a scenario fails, fix the skill (script or prose). If the skill is
+correct but your scenario was wrong, update the scenario.
 
 ## Stage 5: Code review
 
@@ -101,7 +117,7 @@ End your turn with:
 
 > "Built `<name>`:
 > - SKILL.md: <one-line summary>
-> - run.py: <one-line summary>
+> - Scripts: <one-line summary per script, or "none -- pure prose skill">
 > - Scenarios run: <list, with pass/fail>
 >
 > Approve and save? (yes / no with notes)"
@@ -115,13 +131,25 @@ name so the caller knows what to merge.
 
 ## If you need to give up
 
-If you cannot produce a good artifact (e.g. the work turns out to be too
-judgement-heavy to express as a script, or you hit a dependency you cannot
-resolve), end your turn with:
+If you cannot produce a good artifact, end your turn with:
 
 > "I could not crystallize this task because: <reason>. No skill was saved."
 
 and stop.
+
+Reasons that genuinely warrant giving up:
+
+- The work had no stable process across hypothetical re-runs -- each
+  re-run would require entirely different steps, not just different
+  data.
+- You hit a dependency you cannot resolve (e.g. a required service is
+  unreachable, a file format you cannot parse).
+
+"Too judgement-heavy to script" is NOT a valid reason to give up.
+Judgement steps belong in SKILL.md as prose instructions. A skill can be
+pure prose with no scripts at all if that's what the process calls for.
+Only give up if the *process* itself is unstable, not if parts of it
+happen to require judgement.
 
 ## Gotchas
 

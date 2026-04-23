@@ -84,18 +84,28 @@ def test_body_too_long(tmp_path: Path) -> None:
     assert "500" in error
 
 
-def test_crystallized_requires_run_py(tmp_path: Path) -> None:
+def test_crystallized_without_run_py_is_ok(tmp_path: Path) -> None:
+    """Crystallized skills do not require run.py -- pure-prose skills are valid."""
     skill = _write_skill(
         tmp_path, "s", metadata_crystallized=True, include_run_py=False
     )
-    error = validate_skill.validate(skill)
-    assert error is not None
-    assert "run.py" in error
+    assert validate_skill.validate(skill) is None
 
 
-def test_crystallized_requires_pep723(tmp_path: Path) -> None:
+def test_run_py_without_pep723_is_invalid(tmp_path: Path) -> None:
+    """If run.py is present (crystallized or not), it must have a PEP 723 header."""
     skill = _write_skill(
         tmp_path, "s", metadata_crystallized=True, run_py_has_pep723=False
+    )
+    error = validate_skill.validate(skill)
+    assert error is not None
+    assert "PEP 723" in error
+
+
+def test_non_crystallized_run_py_also_needs_pep723(tmp_path: Path) -> None:
+    """run.py must have PEP 723 even when the skill is not crystallized."""
+    skill = _write_skill(
+        tmp_path, "s", include_run_py=True, run_py_has_pep723=False
     )
     error = validate_skill.validate(skill)
     assert error is not None

@@ -58,16 +58,23 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
 QUALIFYING_CALL_THRESHOLD: int = 5
 
 REMINDER_MESSAGE: str = (
-    "The turn that just finished used {count} non-read tool calls. "
-    "Consider whether any portion of the work is worth crystallizing into "
-    "a reusable skill via `crystallize-task`. This includes sub-processes "
-    "within a larger task, not just the task as a whole. In particular, if "
-    "you learned how to do something -- through research, debugging, or "
-    "experimentation -- that seems likely to be useful in the future, and "
-    "the process is mostly deterministic, that is a strong signal to "
-    "crystallize it. "
-    "If the entire turn was pure one-off work with nothing reusable, "
-    "ignore this reminder."
+    "The turn that just finished used {count} non-read tool calls.\n"
+    "\n"
+    "Quick check: would repeating this task with new inputs follow a "
+    "largely similar process -- same sources, same steps, same criteria, "
+    "just different data? Judgement steps in the middle of a flow are "
+    "fine (they live in SKILL.md as prose instructions). The question is "
+    "whether the *process* would repeat recognizably.\n"
+    "\n"
+    "If no -- the re-run would require entirely new thinking from scratch "
+    "-- ignore this reminder.\n"
+    "\n"
+    "If yes or uncertain: read "
+    "`.agents/skills/crystallize-task/references/when-to-crystallize.md` "
+    "before deciding whether to invoke `crystallize-task`. That file "
+    "contains the decision criteria, common reasoning traps, and the "
+    "ask-don't-decide-silently rule. You have a documented bias toward "
+    "wrongly declining -- the reference counters it."
 )
 
 
