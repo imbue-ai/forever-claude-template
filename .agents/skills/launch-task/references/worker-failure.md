@@ -16,7 +16,7 @@ where worker bugs get fixed.
 - User rejected the worker's Gate 2 proposal and the worker stopped instead
   of iterating.
 - For crystallize / heal / update workers: the pushed report at
-  `runtime/<flow>/<name>/report.md` has frontmatter
+  `runtime/<flow>/<name>/reports/report.md` has frontmatter
   `type: status, name: stuck`, or the 30m poll timeout tripped without
   any report arriving. The first case is the worker explicitly giving
   up (the report body names a reason); the second means the worker
