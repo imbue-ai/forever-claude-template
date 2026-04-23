@@ -149,7 +149,7 @@ default interface between the worker and the user. The user can view
 the worker's chat if they want, but they are not required to, so gate
 questions and status updates must go through you.
 
-- Workers communicate via **report files**, not inline chat headers.
+- Workers communicate via **report files**.
   At each gate or terminal status, the worker writes
   `runtime/<flow>/reports/report.md` (with YAML frontmatter `type:
   gate|status` and `name: <marker>`) and `mngr push`es it to the

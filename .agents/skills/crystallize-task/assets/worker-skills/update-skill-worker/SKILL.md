@@ -82,7 +82,6 @@ your job is to verify, not to re-litigate.
 
 At each gate and at terminal status, communicate with the lead by
 writing `runtime/update/reports/report.md` and pushing it back.
-Do NOT emit `## GATE:` / `## STATUS:` headers in chat.
 
 Which gates apply:
 

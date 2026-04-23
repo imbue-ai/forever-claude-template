@@ -24,9 +24,7 @@ you will use in Stage 4.
 At each gate (Stage 2 outline, Stage 6 final artifact) and at the
 terminal status (Stage 7 done, or "stuck" / "give up" exits), you
 communicate with the lead agent by **writing a report file and pushing
-it back**. Do NOT emit `## GATE:` / `## STATUS:` headers in chat --
-those are not parsed. The lead polls for the pushed file and acts on
-it directly.
+it back**. The lead polls for the pushed file and acts on it directly.
 
 **Inputs.** Your task file has been synced to your worktree alongside
 `turn.jsonl` at `runtime/crystallize/*/task.md`. At the start of your
@@ -60,11 +58,10 @@ is where Stage 1's replay transcript lives.
    name: <outline-approval | final-artifact | done | stuck>
    ---
 
-   <body: the message the user needs to see, in the voice you would
-   have used inside an inline `## GATE:` / `## STATUS:` block -- e.g.
-   the proposed outline for Gate 1, the summary + approval prompt for
-   Gate 2, the "committed on branch X" note for done, the failure
-   explanation for stuck>
+   <body: the message the user needs to see, addressing the user
+   directly -- e.g. the proposed outline for Gate 1, the summary +
+   approval prompt for Gate 2, the "committed on branch X" note for
+   done, the failure explanation for stuck>
    ```
 
 2. Push the report directory to the lead:

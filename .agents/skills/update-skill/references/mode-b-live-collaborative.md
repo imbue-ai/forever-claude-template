@@ -76,7 +76,7 @@ path), run \`/autofix\`, present Gate 2 with verification findings.
 When you reach a gate or terminal status, write a report file and
 push it to the lead per the sub-skill's reporting protocol; the
 destination is given by \`lead_agent\` / \`lead_report_dir\` in
-frontmatter. Do NOT emit \`## GATE:\` / \`## STATUS:\` headers in chat.
+frontmatter.
 
 ## Success criteria
 - The committed change is consistent with the stated design

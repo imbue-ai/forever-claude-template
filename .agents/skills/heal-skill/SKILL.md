@@ -117,8 +117,7 @@ heal.
 When you reach Gate 2 or a terminal status, write a report file and
 push it to the lead per the sub-skill's reporting protocol; the
 destination is given by \`lead_agent\` / \`lead_report_dir\` in
-frontmatter. Do NOT emit \`## GATE:\` / \`## STATUS:\` headers in chat
--- the lead reads the report file, not your transcript.
+frontmatter.
 
 ## Success criteria
 - The incident reproduces against the current skill before the fix.

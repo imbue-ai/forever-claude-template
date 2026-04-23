@@ -154,8 +154,7 @@ Use the `crystallize-task-worker` sub-skill to drive the end-to-end
 build. When you reach a gate or terminal status, write a report file
 and push it to the lead per the sub-skill's reporting protocol; the
 destination is given by `lead_agent` / `lead_report_dir` in
-frontmatter. Do NOT emit `## GATE:` / `## STATUS:` headers in chat --
-the lead reads the report file, not your transcript.
+frontmatter.
 
 ## Worker sub-skills
 The `crystallize-task-worker`, `heal-skill-worker`, and
@@ -227,10 +226,10 @@ The user sees your chat, not the worker's. The user can view the
 worker's chat if they want to, but they are not required to -- so you
 drive the worker to completion by proxying its reports.
 
-The worker communicates with you via **report files**, not inline
-`## GATE:` / `## STATUS:` headers in chat. Whenever it reaches a gate
-or terminal status it writes `runtime/crystallize/reports/report.md` on
-its side and `mngr push`es it back to
+The worker communicates with you via **report files**. Whenever it
+reaches a gate or terminal status it writes
+`runtime/crystallize/reports/report.md` on its side and `mngr push`es
+it back to
 `runtime/crystallize/$NAME/reports/report.md` on your side (a
 dedicated inbox subdirectory, kept separate from the inbound
 `turn.jsonl`). The push is the ready signal: it only happens once the

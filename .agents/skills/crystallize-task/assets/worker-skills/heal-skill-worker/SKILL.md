@@ -14,7 +14,6 @@ job is to fix it.
 
 At Gate 2 and at terminal status (done or stuck), communicate with the
 lead by writing `runtime/heal/reports/report.md` and pushing it back.
-Do NOT emit `## GATE:` / `## STATUS:` headers in chat.
 
 **Inputs.** Your task file has been synced to your worktree alongside
 `turn.jsonl` at `runtime/heal/*/task.md`. At the start of your run,
