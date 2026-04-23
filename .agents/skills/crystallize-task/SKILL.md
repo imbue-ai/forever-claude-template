@@ -61,13 +61,20 @@ Use that same slug everywhere below.
 
 ## Step 1: Confirm and open a tracking ticket
 
-Send a one-line pre-gate question via the `send-user-message` skill:
+**Skip the pre-gate question if the user explicitly invoked this skill.**
+Triggers that count as explicit invocation: the user typed
+`/crystallize-task`, said "crystallize this / yes crystallize / make a
+skill out of this" in the immediately-prior turn, or otherwise named
+the skill by hand. In that case go straight to the ticket -- asking
+again is redundant and annoying.
+
+Otherwise send a one-line pre-gate question via the `send-user-message` skill:
 
 > "I just did X and Y. Worth crystallizing into a reusable skill? (yes/no)"
 
 Wait for the user's reply. If no, stop here.
 
-If yes, open a `tk` ticket so the lifecycle is visible after the turn ends:
+Open a `tk` ticket so the lifecycle is visible after the turn ends:
 
 ```bash
 if command -v tk >/dev/null 2>&1; then
@@ -88,9 +95,11 @@ uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
     --output runtime/crystallize/$NAME/turn.jsonl
 ```
 
-The helper auto-discovers the current session transcript via
-`$CLAUDE_TRANSCRIPT_PATH` (set inside hooks) or `$MNGR_CLAUDE_SESSION_ID`.
-Do not pass `--transcript` unless you have a specific file to replay.
+The helper auto-discovers the current session transcript via (in order)
+`$CLAUDE_TRANSCRIPT_PATH` (set inside hooks), `$MNGR_CLAUDE_SESSION_ID`,
+or `$MNGR_AGENT_STATE_DIR/claude_session_id` (the on-disk session id
+file, which is always present inside a standard mngr agent). Do not pass
+`--transcript` unless you have a specific file to replay.
 
 `--nth 1` selects the *previous* human turn -- the one the user wants
 crystallized. `--nth 0` (the default) would select the current
@@ -164,6 +173,26 @@ The `crystallize-worker` template (see `.mngr/settings.toml`) inherits from
 worker, and runs the bundled-sub-skill installer so the worker's
 `.agents/skills/` contains `crystallize-task-worker` et al.
 
+Then push the extracted transcript into the worker's worktree -- the
+worker cannot read files that live only in the lead's worktree:
+
+```bash
+mngr push crystallize-$NAME:runtime/crystallize/$NAME/ \
+    --source runtime/crystallize/$NAME/ \
+    --uncommitted-changes=merge
+```
+
+Notes:
+- Use the directory form (trailing slash on both sides). Pushing a
+  single file via `--source .../turn.jsonl` fails: rsync interprets the
+  source as a directory and errors with `change_dir`.
+- `--uncommitted-changes=merge` is required. The worker's worktree has
+  uncommitted changes immediately after creation (the installed worker
+  sub-skills under `.agents/skills/`), so the default `fail` mode would
+  refuse the push.
+- There is no `mngr file put` subcommand -- `mngr push` is the
+  correct mechanism.
+
 ## Step 5: Proxy gates, then merge
 
 The user sees your chat, not the worker's. The user can view the worker's
@@ -191,17 +220,43 @@ The notification is informational; act on it once the user's current
 request is complete. Do not abandon in-flight work to service a worker
 gate.
 
-### 5c. On notification, read the worker's latest message
+### 5c. On notification, confirm the worker is actually at rest, then read
 
-When the wait completes, capture the worker's latest assistant message:
+`mngr wait ... WAITING` returns on the first RUNNING->WAITING transition.
+In practice the worker may flip to WAITING between sub-skill invocations
+(e.g. a sub-agent finishes, the top-level loop is momentarily idle, then
+the next sub-agent spins up). Treating that transient as a real gate
+leads to forwarding an approval while the worker is still working.
+
+Before reading the transcript, confirm the worker has actually stopped:
+
+```bash
+mngr capture crystallize-$NAME 2>&1 | tail -40
+```
+
+If the pane shows a live spinner (`Committing…`, `Running…`,
+`Skill(…) loaded`, a token counter that is still climbing, or an
+unfinished tool call), the worker is not at rest. Re-arm a
+**terminal-only** wait and come back later:
+
+```bash
+# Run with Bash run_in_background: true
+mngr wait crystallize-$NAME DONE STOPPED --timeout 30m
+```
+
+(Note: `DONE STOPPED` -- no `WAITING` -- so the next notification only
+fires on a real terminal transition.)
+
+If the capture looks quiet (prompt ready, no spinner, no in-flight
+tool call), proceed: read the worker's latest assistant message.
 
 ```bash
 mngr transcript crystallize-$NAME --role=assistant \
     > /tmp/worker-crystallize-$NAME-transcript.txt
 ```
 
-Read the file and locate the last line starting with `## GATE: <name>`
-or `## STATUS: <name>`. The message body is everything from that header
+Locate the last line starting with `## GATE: <name>` or
+`## STATUS: <name>`. The message body is everything from that header
 to the end of the transcript.
 
 If there is no such header, treat it as a failure (see step 5f).
@@ -276,7 +331,10 @@ worker's branch and tmux session intact.
 
 ## Guidelines
 
-- Never crystallize without explicit user Yes on the pre-gate question.
+- Never crystallize without explicit user go-ahead. That go-ahead is
+  either a Yes to the Step 1 pre-gate question or, if Step 1's skip
+  rule applied, the explicit invocation itself (typing
+  `/crystallize-task`, saying "crystallize this", etc.).
 - Never crystallize a turn whose process would not repeat recognizably on a
   re-run. If each hypothetical re-run would require entirely different
   steps rather than the same recipe with different data, decline. Note

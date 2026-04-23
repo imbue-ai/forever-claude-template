@@ -25,6 +25,10 @@ Transcript path resolution (in order):
 3. ``$MNGR_CLAUDE_SESSION_ID`` combined with ``$CLAUDE_CONFIG_DIR/projects/``
    -- find a ``<session-id>.jsonl`` file anywhere under the projects tree.
    This is concurrent-session-safe because every session has a unique id.
+4. ``$MNGR_AGENT_STATE_DIR/claude_session_id`` (a file written by mngr) --
+   read the session id from disk and resolve as in (3). This makes the
+   script work in a standard mngr agent where neither env var from (2) or
+   (3) is exported into the Bash tool's environment.
 
 We deliberately do NOT fall back to an mtime scan: the most-recently-modified
 transcript may belong to a sibling session writing concurrently, not to the
@@ -107,9 +111,19 @@ def resolve_transcript_path(
 
     session_id = environ.get("MNGR_CLAUDE_SESSION_ID")
     if not session_id:
+        # Fallback: read the session id from $MNGR_AGENT_STATE_DIR/claude_session_id,
+        # which is present inside a standard mngr agent even when
+        # MNGR_CLAUDE_SESSION_ID is not exported into the shell environment.
+        state_dir = environ.get("MNGR_AGENT_STATE_DIR")
+        if state_dir:
+            session_file = Path(state_dir) / "claude_session_id"
+            if session_file.is_file():
+                session_id = session_file.read_text(encoding="utf-8").strip() or None
+    if not session_id:
         raise FileNotFoundError(
-            "No --transcript flag, $CLAUDE_TRANSCRIPT_PATH, or "
-            "$MNGR_CLAUDE_SESSION_ID available; cannot auto-discover transcript."
+            "No --transcript flag, $CLAUDE_TRANSCRIPT_PATH, "
+            "$MNGR_CLAUDE_SESSION_ID, or $MNGR_AGENT_STATE_DIR/claude_session_id "
+            "available; cannot auto-discover transcript."
         )
 
     projects_root = Path(environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))) / "projects"

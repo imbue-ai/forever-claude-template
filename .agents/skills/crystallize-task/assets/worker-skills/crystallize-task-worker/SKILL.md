@@ -118,9 +118,46 @@ Run each scenario:
 If a scenario fails, fix the skill (script or prose). If the skill is
 correct but your scenario was wrong, update the scenario.
 
-## Stage 5: Code review
+### Fixture-based tests for skills that parse external data
 
-Run `/autofix` on your commits. Fix anything the reviewer flags.
+If the skill's scripts parse external data -- HTML, JSON from
+third-party APIs, scraped pages, user-uploaded files -- add a
+fixture-based unit test alongside the live-data scenarios above.
+Live-data scenarios alone miss a category of bugs that only surface
+when a specific input shape hits the parser (e.g. a substring match
+that also matches an unintended token, a hardcoded numeric bound, a
+date format the parser did not anticipate).
+
+Concretely:
+- Save 1-3 representative samples of the external data under
+  `.agents/skills/<name>/tests/fixtures/` (small, anonymized if
+  applicable).
+- Add a `scripts/<name>_test.py` (or similar) that loads each fixture,
+  feeds it through the parser, and asserts on the expected shape of
+  the output (exact counts, specific field values, edge-case flags).
+- Run it as part of Stage 4.
+
+This is strongly recommended -- skipping it is how parser regressions
+land. In the sf-apartment-search crystallization, seven follow-up
+autofix commits within the first day were for parser defects (a `jr`
+substring matching "major", a price ceiling silently capping
+user-specified budgets, a regex eating whitespace from next fields)
+that a single fixture-based test would have caught.
+
+## Stage 5: Code review and architecture verification
+
+1. Run `/autofix` on your commits. Fix anything the reviewer flags.
+2. Run `/imbue-code-guardian:verify-architecture` on your branch. Read
+   the verdict. If it flags a blocker, fix it and re-run; if it flags
+   non-blockers worth mentioning, surface them in the Gate 2 summary
+   below.
+
+Both of these run **before** Stage 6's `## GATE: final-artifact` --
+the user should see a single gate message that already reflects the
+review verdicts, not a gate-then-verify-then-gate-again pattern.
+Emitting the gate before verification causes the lead agent's
+`mngr wait` to fire on a transient WAITING state while verification is
+still running, and produces two near-identical gate messages.
 
 ## Stage 6: Gate 2 -- final artifact approval
 
