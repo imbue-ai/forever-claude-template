@@ -337,7 +337,11 @@ def parse_equity_like(html: str, building_slug: str, source_name: str) -> list[L
         if not price.isdigit():
             continue
         p = int(price)
-        if not (1500 <= p <= 6000):
+        # Noise band: filter out obvious non-prices (square footage under
+        # 1500, unit/building id numbers above 20000). Semantic filtering
+        # against the user's --budget and --min-price-floor happens in
+        # classify(); keep this band wide enough not to pre-empt it.
+        if not (1500 <= p <= 20000):
             continue
         start = max(0, m.start() - 180)
         end = min(len(flat), m.end() + 60)
