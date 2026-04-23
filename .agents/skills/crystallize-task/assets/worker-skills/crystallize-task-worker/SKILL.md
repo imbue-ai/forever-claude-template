@@ -19,6 +19,72 @@ Consult `references/spec-summary.md` for the agentskills.io layout,
 frontmatter template, PEP 723 script conventions, and the scenario template
 you will use in Stage 4.
 
+## Reporting back to the lead
+
+At each gate (Stage 2 outline, Stage 6 final artifact) and at the
+terminal status (Stage 7 done, or "stuck" / "give up" exits), you
+communicate with the lead agent by **writing a report file and pushing
+it back**. The lead polls for the pushed file and acts on it directly.
+
+**Inputs.** Your task file has been synced to your worktree alongside
+`turn.jsonl` at `runtime/crystallize/*/task.md`. At the start of your
+run, validate its frontmatter and extract the three required fields
+with:
+
+```bash
+uv run .agents/skills/crystallize-task-worker/scripts/parse_task_frontmatter.py \
+    'runtime/crystallize/*/task.md'
+```
+
+Quote the glob pattern so the shell passes the literal to the
+helper; the helper expands it internally and fails loudly if zero or
+more than one task file matches (each worker handles a single task
+-- either condition means the runtime layout drifted). On success it
+prints three shell-evalable `KEY=value` lines on stdout
+(`LEAD_AGENT=`, `LEAD_REPORT_DIR=`, `TRANSCRIPT_PATH=`). It exits
+non-zero with a stderr message on any failure, including a missing
+or misspelled field or a non-string / empty value. Use `lead_agent`
+/ `lead_report_dir` at every gate/status below; `transcript_path`
+is where Stage 1's replay transcript lives.
+
+**Procedure.** When you reach a gate or terminal status:
+
+1. Write `runtime/crystallize/reports/report.md` (create the directory
+   if missing) with this exact shape:
+
+   ```
+   ---
+   type: gate | status
+   name: <outline-approval | final-artifact | done | stuck>
+   ---
+
+   <body: the message the user needs to see, addressing the user
+   directly -- e.g. the proposed outline for Gate 1, the summary +
+   approval prompt for Gate 2, the "committed on branch X" note for
+   done, the failure explanation for stuck>
+   ```
+
+2. Push the report directory to the lead:
+
+   ```bash
+   mngr push <lead_agent>:<lead_report_dir> \
+       --source runtime/crystallize/reports/ \
+       --uncommitted-changes=merge
+   ```
+
+   Substitute the actual values from your task file's frontmatter for
+   `<lead_agent>` and `<lead_report_dir>`. The trailing slashes matter
+   (rsync directory semantics). `--uncommitted-changes=merge` is
+   required because the lead's worktree usually has uncommitted local
+   state.
+
+3. Stop your turn. For gate reports, the lead will send the user's
+   reply via `mngr message` and you will resume; for terminal status
+   reports, the lead acts on the report and the run ends.
+
+The push is the ready signal -- it only happens once you are finished
+writing. Do not push a partial report.
+
 ## Stage 1: Replicate
 
 1. Read the task file.
@@ -61,12 +127,14 @@ Produce a short outline with:
 
 ### Gate 1: outline approval
 
-End your turn with a response that begins with this exact header on its
-own line, followed by the outline prose:
+Write a report with `type: gate`, `name: outline-approval`, and a body
+that contains the outline plus an explicit "Approve this outline? (yes
+/ no with notes)" prompt. Push it and stop, per the reporting
+procedure at the top of this file.
+
+Body template:
 
 ```
-## GATE: outline-approval
-
 Proposed skill outline:
 
 <paste outline>
@@ -74,12 +142,8 @@ Proposed skill outline:
 Approve this outline? (yes / no with notes)
 ```
 
-Emit the message inline in your response -- do not use
-`send-user-message` or any other channel skill. The `## GATE:` header
-is how the user knows to stop and review.
-
-If the user asks for changes, iterate -- then end your next turn with
-the same `## GATE: outline-approval` header and the revised outline.
+If the user asks for changes, iterate, then emit a fresh
+`type: gate, name: outline-approval` report with the revised outline.
 Do not proceed to Stage 3 without an explicit yes.
 
 ## Stage 3: Build the artifact
@@ -118,18 +182,53 @@ Run each scenario:
 If a scenario fails, fix the skill (script or prose). If the skill is
 correct but your scenario was wrong, update the scenario.
 
-## Stage 5: Code review
+### Fixture-based tests for skills that parse external data
 
-Run `/autofix` on your commits. Fix anything the reviewer flags.
+If the skill's scripts parse external data -- HTML, JSON from
+third-party APIs, scraped pages, user-uploaded files -- add a
+fixture-based unit test alongside the live-data scenarios above.
+Live-data scenarios alone miss a category of bugs that only surface
+when a specific input shape hits the parser (e.g. a substring match
+that also matches an unintended token, a hardcoded numeric bound, a
+date format the parser did not anticipate).
+
+Concretely:
+- Save 1-3 representative samples of the external data under
+  `.agents/skills/<name>/tests/fixtures/` (small, anonymized if
+  applicable).
+- Add a `scripts/<name>_test.py` (or similar) that loads each fixture,
+  feeds it through the parser, and asserts on the expected shape of
+  the output (exact counts, specific field values, edge-case flags).
+- Run it as part of Stage 4.
+
+This is strongly recommended -- skipping it is how parser regressions
+land. Typical defects that only surface under a concrete input shape:
+a substring match that also matches an unintended token (e.g. `jr`
+matching inside "major"), a hardcoded numeric bound silently capping
+user-specified values, a regex eating whitespace from adjacent fields.
+A single fixture-based test catches all of these before they ship.
+
+## Stage 5: Code review and architecture verification
+
+1. Run `/autofix` on your commits. Fix anything the reviewer flags.
+2. Run `/imbue-code-guardian:verify-architecture` on your branch. Read
+   the verdict. If it flags a blocker, fix it and re-run; if it flags
+   non-blockers worth mentioning, surface them in the Gate 2 summary
+   below.
+
+Both of these run **before** Stage 6's final-artifact report -- the
+user should see a single report that already reflects the review
+verdicts, not a report-then-verify-then-report-again pattern.
 
 ## Stage 6: Gate 2 -- final artifact approval
 
-End your turn with a response that begins with this exact header on its
-own line, followed by the summary prose:
+Write a report with `type: gate`, `name: final-artifact`, and a body
+containing the built-artifact summary plus an approval prompt. Push it
+and stop, per the reporting procedure at the top of this file.
+
+Body template:
 
 ```
-## GATE: final-artifact
-
 Built `<name>`:
 - SKILL.md: <one-line summary>
 - Scripts: <one-line summary per script, or "none -- pure prose skill">
@@ -138,33 +237,28 @@ Built `<name>`:
 Approve and save? (yes / no with notes)
 ```
 
-Emit this inline -- do not use `send-user-message` or any other
-channel skill.
-
-Wait for the user's reply.
-
 ## Stage 7: Commit and hand off
 
-Commit on your current branch. End your final response with this exact
-header on its own line, followed by the hand-off summary:
+Commit on your current branch. Then write a terminal report with
+`type: status`, `name: done`, and a body like:
 
 ```
-## STATUS: done
-
 Committed on branch `<branch-name>`. Ready to merge.
 ```
 
+Push it (per the reporting procedure at the top of this file) and
+stop. The lead will merge the branch.
+
 ## If you need to give up
 
-If you cannot produce a good artifact, end your turn with:
+If you cannot produce a good artifact, write a terminal report with
+`type: status`, `name: stuck`, and a body like:
 
 ```
-## STATUS: stuck
-
 I could not crystallize this task because: <reason>. No skill was saved.
 ```
 
-and stop.
+Push it and stop.
 
 Reasons that genuinely warrant giving up:
 

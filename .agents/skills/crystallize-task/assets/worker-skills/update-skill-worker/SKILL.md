@@ -1,180 +1,172 @@
 ---
 name: update-skill-worker
-description: Extend an existing skill or split off a new sibling skill. Invoke when your task file asks you to fold additional processing into an existing skill (or create a sibling for it).
+description: Extend an existing skill, split off a new sibling skill, or verify a live-committed skill change. Invoke when your task file asks you to fold additional processing into an existing skill (Mode A) or to verify a skill change that was already committed live (Mode B).
 metadata:
   role: worker-sub-skill
 ---
 
-# Updating (or splitting) a skill
+# Updating (or verifying) a skill
 
-An existing skill ran successfully on a prior turn, but additional
-*repeatable* work had to be done by hand to satisfy the user's request.
-Your job is to fold that work in -- either by updating the skill in place
-or by creating a new sibling skill.
+An existing skill needs a change. There are two flavors:
 
-"Repeatable" covers both script-shaped extensions (extra flag, new output
-format) and prose-shaped extensions (an additional judgement step with a
-stable recipe). Both land inside a skill: scripts under `scripts/`,
-judgement steps as SKILL.md prose.
+- **Mode A (incident absorption) -- default.** A skill ran but
+  additional *repeatable* work had to be done by hand. You replicate
+  the incident, decide update-in-place vs. sibling-split, propose the
+  design at Gate 1, implement, run scenarios, and present Gate 2.
+- **Mode B (live collaborative update).** The main agent and the user
+  already discussed and committed the change. You skip design gates,
+  read the committed change, run scenarios, run `/autofix`, and
+  present Gate 2 with verification findings.
 
-**Principle.** Reliability is the floor; simplicity is the target. Default to
-a single entry point and one flow. Add surface only when a specific invariant
-demands it.
+## Stage 0: Detect mode
 
-Both gates apply (outline + final artifact). The outline gate doubles as
-the user's chance to veto the update-vs-split decision.
+Read your task file. Look for a top-level `## Mode` section with
+`MODE: A` or `MODE: B`. If absent, default to Mode A
+(backward-compatible with older callers).
 
-Consult `../crystallize-task-worker/references/spec-summary.md` for the
-layout, frontmatter, validation helpers, and scenario template.
+Then dispatch:
 
-## Stage 1: Replicate
+- **Mode A:** follow `references/mode-a-incident-absorption.md` for
+  Stages 1-9.
+- **Mode B:** follow `references/mode-b-live-collaborative.md` for
+  its stages (design gates skipped; verification-only).
 
-1. Read the task file to learn which skill was used and what was missing.
-2. Read the incident transcript the task file points at.
-3. Read the target skill's current `SKILL.md` and any scripts under
-   `scripts/`. A skill may be pure prose.
+The rest of this file holds content that is shared across modes:
+principles, the reporting-back procedure, validation and scenario
+pointers, and the update-vs-create-new rubric.
 
-## Stage 2: Decide update-in-place vs. create-new
+## Principles
+
+"Repeatable" covers both script-shaped extensions (extra flag, new
+output format) and prose-shaped extensions (an additional judgement
+step with a stable recipe). Both land inside a skill: scripts under
+`scripts/`, judgement steps as SKILL.md prose.
+
+**Reliability is the floor; simplicity is the target.** Default to a
+single entry point and one flow. Add surface only when a specific
+invariant demands it.
+
+Consult `../crystallize-task-worker/references/spec-summary.md` for
+the layout, frontmatter, validation helpers, and scenario template.
+
+## Update-in-place vs. create-new-skill (Mode A only)
 
 **Default to update-in-place.** Only split when the extra work would
-plausibly be useful on its own, in a context that does not involve the
-existing skill.
+plausibly be useful on its own, in a context that does not involve
+the existing skill.
 
-- **Update-in-place** when the gap is a natural extension of the existing
-  skill (extra flag, new output format, edge case the skill did not
-  cover, an additional judgement step in the same flow), OR when the gap
-  is only useful in the context of this skill's process (you cannot
-  concretely imagine invoking it standalone). The skill's identity and
-  primary purpose stay the same.
+- **Update-in-place** when the gap is a natural extension of the
+  existing skill (extra flag, new output format, edge case the skill
+  did not cover, an additional judgement step in the same flow), OR
+  when the gap is only useful in the context of this skill's process
+  (you cannot concretely imagine invoking it standalone). The skill's
+  identity and primary purpose stay the same.
 - **Create-new-skill** when the gap is orthogonal AND has a concrete
-  standalone use case -- another agent in another flow would reasonably
-  want to invoke it without the existing skill. Pick a fresh kebab-case
-  name; the old skill stays untouched. Don't decompose proactively for
-  hypothetical reuse.
+  standalone use case -- another agent in another flow would
+  reasonably want to invoke it without the existing skill. Pick a
+  fresh kebab-case name; the old skill stays untouched. Don't
+  decompose proactively for hypothetical reuse.
 
-Script vs prose is orthogonal to the update-vs-split decision. An
-update-in-place can land as a new script step, a new prose step, or
-both. Same for a create-new-skill.
+Script vs prose is orthogonal to this decision. An update-in-place
+can land as a new script step, a new prose step, or both. Same for a
+create-new-skill.
 
-If update-in-place would double the size of the original SKILL.md or blur
-its one-line description, that is a signal to split (combined with the
-standalone-use-case check).
+If update-in-place would double the size of the original SKILL.md or
+blur its one-line description, that is a signal to split (combined
+with the standalone-use-case check).
 
-## Stage 3: Propose an outline
+In Mode B the decision has already been made by the committed change;
+your job is to verify, not to re-litigate.
 
-Include:
+## Reporting back to the lead
 
-- **Decision**: update-in-place of `<existing-name>`, or create-new-skill
-  named `<new-name>`.
-- What changes / what the new skill does.
-- Inputs, outputs, step-by-step flow.
-- Justification: for any subcommand or subflow in the planned flow, what
-  invariant makes it separate vs. inlined? If no invariant demands
-  separation, inline it.
-- 2-3 scenarios you will run.
+At each gate and at terminal status, communicate with the lead by
+writing `runtime/update/reports/report.md` and pushing it back.
 
-### Gate 1: outline approval
+Which gates apply:
 
-End your turn with a response that begins with this exact header on its
-own line, followed by the outline prose:
+- **Mode A:** Gate 1 (`outline-approval`), Gate 2 (`final-artifact`).
+- **Mode B:** Gate 2 only (`final-artifact`).
 
-```
-## GATE: outline-approval
+Terminal statuses (both modes): `done`, `stuck`, `no-update-needed`.
 
-Proposed update:
-
-<paste outline, including the update-vs-split decision and reasoning>
-
-Approve this outline? (yes / no with notes)
-```
-
-Emit this inline -- do not use `send-user-message` or any other channel
-skill.
-
-Wait for the user's reply before coding.
-
-## Stage 4: Implement
-
-### Update-in-place
-
-- Edit the relevant parts of the skill in place: scripts under
-  `scripts/`, SKILL.md prose, or both. A new script step goes in
-  `scripts/`; a new judgement step goes in SKILL.md as prose
-  instructions for the agent using the skill. Preserve the existing
-  contract for current callers unless the outline explicitly calls for
-  a breaking change.
-- Keep SKILL.md under ~500 lines; split long content into `references/`.
-
-### Create-new-skill
-
-Delegate to `crystallize-task-worker`: follow its Stage 3 (Build the
-artifact) and Stage 4 (Scenarios) using your Gate-1-approved outline as
-the input. This avoids restating the layout/validation rules and keeps a
-single source of truth. Skip its Gate 1 and Gate 2 -- your outline has
-already been approved, and you'll run Gate 2 here.
-
-## Stage 5: Validate
+**Inputs.** Your task file has been synced to your worktree alongside
+`turn.jsonl` (Mode A) or `commit.diff` (Mode B) at
+`runtime/update/*/task.md`. At the start of your run, validate its
+frontmatter and extract the three required fields with:
 
 ```bash
-uv run .agents/skills/crystallize-task-worker/scripts/validate_skill.py .agents/skills/<name>
+uv run .agents/skills/crystallize-task-worker/scripts/parse_task_frontmatter.py \
+    'runtime/update/*/task.md'
 ```
 
-Run this for both update-in-place (against the edited skill) and create-new
-(against the new skill). It must print `ok` before moving on.
+Quote the glob pattern so the shell passes the literal to the
+helper; the helper expands it internally and fails loudly if zero or
+more than one task file matches (each worker handles a single task
+-- either condition means the runtime layout drifted). On success it
+prints three shell-evalable `KEY=value` lines on stdout
+(`LEAD_AGENT=`, `LEAD_REPORT_DIR=`, `TRANSCRIPT_PATH=`). It exits
+non-zero with a stderr message on any failure, including a missing
+or misspelled field or a non-string / empty value. The first two
+address reports back to the lead; `transcript_path` is where Stage
+1's incident transcript (or committed diff) lives.
 
-## Stage 6: Run 2-3 scenarios
+**Procedure** at each gate/status:
 
-- At least one scenario must mimic the original incident (to prove the
-  manual work is no longer needed).
-- Others should exercise neighbouring or edge paths.
-- Scenarios are ephemeral. Use the template in
-  `../crystallize-task-worker/references/spec-summary.md`.
+1. Write `runtime/update/reports/report.md` (create the directory if
+   missing):
 
-## Stage 7: Code review
+   ```
+   ---
+   type: gate | status
+   name: <outline-approval | final-artifact | done | stuck | no-update-needed>
+   ---
 
-Run `/autofix` on your commits. Fix anything the reviewer flags.
+   <body: the message the user needs to see>
+   ```
 
-## Stage 8: Gate 2 -- final artifact
+2. Push:
 
-End your turn with a response that begins with this exact header on its
-own line, followed by the summary prose:
+   ```bash
+   mngr push <lead_agent>:<lead_report_dir> \
+       --source runtime/update/reports/ \
+       --uncommitted-changes=merge
+   ```
+
+3. Stop your turn.
+
+The push is the ready signal -- only push once the report is fully
+written.
+
+## Validation (both modes)
+
+Before emitting Gate 2, validate the target skill's layout:
+
+```bash
+uv run .agents/skills/crystallize-task-worker/scripts/validate_skill.py \
+    .agents/skills/<name>
+```
+
+It must print `ok` and exit 0.
+
+## Scenarios (both modes)
+
+At least one scenario must exercise the new behaviour (the absorbed
+incident in Mode A; the changed path in Mode B). Others should
+exercise neighbouring or edge paths.
+
+Scenarios are ephemeral -- they live in the transcript for
+reproducibility, not on disk. Use the template in
+`../crystallize-task-worker/references/spec-summary.md`.
+
+## If you decide no change is needed
+
+Applies to both modes. If the right answer turns out to be "leave
+the skill alone", write a terminal report with
+`type: status`, `name: no-update-needed`, and body:
 
 ```
-## GATE: final-artifact
-
-<Updated | Created> `<name>`:
-- SKILL.md: <one-line summary of changes, or "unchanged">
-- Scripts: <one-line summary per changed/added script, or "unchanged" / "none">
-- Scenarios run: <list, all pass>
-
-Approve and save? (yes / no with notes)
-```
-
-Emit this inline -- do not use `send-user-message` or any other channel
-skill.
-
-Wait for the user's reply.
-
-## Stage 9: Commit and hand off
-
-Commit on your current branch. End your final response with this exact
-header on its own line, followed by the hand-off summary:
-
-```
-## STATUS: done
-
-Committed on branch `<branch-name>`. Ready to merge.
-```
-
-## If you decide not to change anything
-
-If the right answer turns out to be "leave the skill alone; the extra
-processing was genuinely ad-hoc", end your turn with:
-
-```
-## STATUS: no-update-needed
-
 No update needed. Reason: <one-sentence>.
 ```
 
-and stop. Do not commit a null change.
+Push it and stop. Do not commit a null change.

@@ -10,6 +10,58 @@ metadata:
 A crystallized or hand-authored skill misbehaved during a real turn; your
 job is to fix it.
 
+## Reporting back to the lead
+
+At Gate 2 and at terminal status (done or stuck), communicate with the
+lead by writing `runtime/heal/reports/report.md` and pushing it back.
+
+**Inputs.** Your task file has been synced to your worktree alongside
+`turn.jsonl` at `runtime/heal/*/task.md`. At the start of your run,
+validate its frontmatter and extract the three required fields with:
+
+```bash
+uv run .agents/skills/crystallize-task-worker/scripts/parse_task_frontmatter.py \
+    'runtime/heal/*/task.md'
+```
+
+Quote the glob pattern so the shell passes the literal to the
+helper; the helper expands it internally and fails loudly if zero or
+more than one task file matches (each worker handles a single task
+-- either condition means the runtime layout drifted). On success it
+prints three shell-evalable `KEY=value` lines on stdout
+(`LEAD_AGENT=`, `LEAD_REPORT_DIR=`, `TRANSCRIPT_PATH=`). It exits
+non-zero with a stderr message on any failure, including a missing
+or misspelled field or a non-string / empty value. The first two
+address reports back to the lead; `transcript_path` is where Stage
+1's incident transcript lives.
+
+**Procedure** at each gate/status:
+
+1. Write `runtime/heal/reports/report.md` (create the directory if
+   missing):
+
+   ```
+   ---
+   type: gate | status
+   name: <final-artifact | done | stuck>
+   ---
+
+   <body: the message the user needs to see>
+   ```
+
+2. Push:
+
+   ```bash
+   mngr push <lead_agent>:<lead_report_dir> \
+       --source runtime/heal/reports/ \
+       --uncommitted-changes=merge
+   ```
+
+3. Stop your turn.
+
+The push is the ready signal -- only push once the report is fully
+written.
+
 ## Stage 1: Replicate
 
 1. Read the task file to learn which skill failed and how.
@@ -61,12 +113,9 @@ Run `/autofix` on your commits. Fix anything the reviewer flags.
 
 ## Stage 6: Gate 2 -- approval
 
-End your turn with a response that begins with this exact header on its
-own line, followed by the summary prose:
+Write a report with `type: gate`, `name: final-artifact`, and body:
 
 ```
-## GATE: final-artifact
-
 Fixed `<skill-name>`:
 - Root cause: <one-sentence>
 - Change: <one-sentence>
@@ -75,33 +124,28 @@ Fixed `<skill-name>`:
 Approve the fix? (yes / no with notes)
 ```
 
-Emit this inline -- do not use `send-user-message` or any other channel
-skill.
-
-Wait for the user's reply.
+Push it and stop, per the reporting procedure at the top of this file.
 
 ## Stage 7: Commit and hand off
 
-Commit on your current branch. End your final response with this exact
-header on its own line, followed by the hand-off summary:
+Commit on your current branch. Then write a terminal report with
+`type: status`, `name: done`, and body:
 
 ```
-## STATUS: done
-
 Committed on branch `<branch-name>`. Ready to merge.
 ```
 
+Push it and stop.
+
 ## If you cannot fix it
 
-If the root cause is out of scope (e.g. upstream API change,
-environmental problem) or the right fix would change the skill's
-contract in ways the user should decide on, end your turn with:
+If the root cause is impossible for you to implement or the right fix would change the skill's
+contract in ways the user should decide on, write a terminal report
+with `type: status`, `name: stuck`, and body:
 
 ```
-## STATUS: stuck
-
 I could not heal `<skill-name>` because: <reason>. Recommend: <next
 step, e.g. a create-new-skill update or manual investigation>.
 ```
 
-and stop.
+Push it and stop.

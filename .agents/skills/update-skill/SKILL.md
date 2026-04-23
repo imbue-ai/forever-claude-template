@@ -1,64 +1,81 @@
 ---
 name: update-skill
-description: Extend or refactor a crystallized skill (or split a new one off) when you had to do additional repeatable work -- script-shaped or prose-shaped -- beyond what the existing skill did. Invoke at turn-end when reflecting on a successful skill use that left you patching around gaps.
+description: Extend or refactor a crystallized skill (or split a new one off). Invoke at turn-end when you had to do additional repeatable work around an existing skill (Mode A, incident absorption), or when you and the user explicitly discussed a change to a skill and you applied it live (Mode B, live collaborative update).
 ---
 
 # Updating or splitting a skill
 
-Use this skill when an existing skill in `.agents/skills/` ran successfully
-but you had to do additional *repeatable* work to fully satisfy the user's
-request. The goal is to fold that work into the skill (or into a sibling
-skill) so it never needs to be redone by hand.
+Use this skill when an existing skill in `.agents/skills/` needs a
+change. Two modes cover the two ways this happens.
 
-"Repeatable" covers both script-shaped extensions (an extra flag, a new
-output format) and prose-shaped extensions (an additional judgement step
-with a stable recipe, e.g. "read the output and classify according to
-these criteria"). Both fit inside a skill -- scripts in `scripts/`,
-judgement as SKILL.md prose.
+- **Mode A (incident absorption) -- default.** A skill ran
+  successfully but you had to do additional *repeatable* work to
+  fully satisfy the user's request. The user was not part of a design
+  conversation about the change. You hand the worker the incident
+  transcript and the new contract; the worker replicates, proposes a
+  design at Gate 1, implements, runs scenarios, presents Gate 2.
+- **Mode B (live collaborative update).** You and the user discussed
+  a change to a skill during the turn, agreed on a design, and you
+  committed the change live. You hand the worker the committed diff
+  and the design rationale. The worker skips Gate 1 (the design was
+  approved organically in chat), reads the committed change, runs
+  scenarios, runs `/autofix`, and presents Gate 2 with verification
+  findings.
 
-**Principle.** Reliability is the floor; simplicity is the target. Default to
-a single entry point and one flow. Add surface only when a specific invariant
-demands it.
+Pick Mode B when the user was explicitly in the design loop for this
+skill change *and* the change is already committed on the branch.
+Otherwise pick Mode A. Mode A is the safe default; its Gate 1 just
+re-surfaces the design for an approval pass.
 
-Trigger this via the turn-end reflection in CLAUDE.md: "did I do
-additional repeatable work the skill could have described itself?" If
-yes, invoke update-skill.
+"Repeatable" covers both script-shaped extensions (an extra flag, a
+new output format) and prose-shaped extensions (an additional
+judgement step with a stable recipe). Both fit inside a skill --
+scripts in `scripts/`, judgement as SKILL.md prose.
+
+**Principle.** Reliability is the floor; simplicity is the target.
+Default to a single entry point and one flow. Add surface only when a
+specific invariant demands it.
 
 ## Update vs. create-new: the rubric
 
-**Default to update-in-place.** Only split into a new sibling skill when
-the extra work would plausibly be useful on its own -- in a context that
-does not involve the existing skill.
+This decision belongs to the worker (Mode A); it is included here so
+you can anticipate the worker's choice. In Mode B the decision has
+already been made -- it is whatever the live commit implemented.
 
-- **Update-in-place** when the gap is a natural extension of the existing
-  skill (extra flag, new output format, edge case not covered, an
-  additional judgement step in the same flow), OR when the gap is only
-  useful in the context of this skill's process (you cannot concretely
-  imagine invoking it standalone). The skill's identity stays the same.
+**Default to update-in-place.** Only split into a new sibling skill
+when the extra work would plausibly be useful on its own -- in a
+context that does not involve the existing skill.
+
+- **Update-in-place** when the gap is a natural extension of the
+  existing skill (extra flag, new output format, edge case not
+  covered, an additional judgement step in the same flow), OR when
+  the gap is only useful in the context of this skill's process.
 - **Create-new-skill** when the gap is orthogonal AND has a concrete
-  standalone use case -- another agent in another flow would reasonably
-  want to invoke it without the existing skill. Don't decompose
-  proactively for hypothetical reuse; only split when the standalone case
-  is real.
+  standalone use case. Don't decompose proactively for hypothetical
+  reuse.
 
-Script vs prose is orthogonal to this decision. Update-in-place and
-create-new-skill can each land as scripts, SKILL.md prose, or a mix.
+Script vs prose is orthogonal to this decision.
 
 If the extra work was **one-off creative or exploratory** with no
-repeatable pattern, it is NOT an update candidate -- it stays with the
-main agent. Judgement work with a repeatable recipe IS a candidate; it
-becomes a prose step in SKILL.md.
+repeatable pattern, it is NOT an update candidate -- it stays with
+the main agent. Judgement work with a repeatable recipe IS a
+candidate; it becomes a prose step in SKILL.md.
 
 ## Conventions
 
-Use `$TARGET` for the skill you are updating (e.g. `migrate-config`). Then:
+Use `$TARGET` for the skill you are updating (e.g. `migrate-config`).
+Then:
 
 - Worker agent name: `update-$TARGET`
 - Worker branch: `mngr/update-$TARGET`
 - Runtime path: `runtime/update/$TARGET/`
-- Task file: `/tmp/task-update-$TARGET.md`
+- Task file: `runtime/update/$TARGET/task.md` (sits alongside `turn.jsonl`
+  / `commit.diff` so the Mode A / Mode B `mngr push` syncs it to the
+  worker for free)
 
 ## Step 1: Open a tracking ticket
+
+Shared across modes.
 
 ```bash
 if command -v tk >/dev/null 2>&1; then
@@ -68,111 +85,50 @@ if command -v tk >/dev/null 2>&1; then
 fi
 ```
 
-## Step 2: Capture the incident transcript
+## Step 2: Prepare artifacts, task file, and launch the worker
 
-```bash
-uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
-    --nth 1 \
-    --output runtime/update/$TARGET/turn.jsonl
-```
+The two modes differ in what they capture (transcript vs. committed
+diff) and in the task-file body (new-contract prose vs. design
+rationale). The task file carries a `MODE: A|B` marker so the worker
+routes correctly; if absent the worker defaults to A.
 
-The helper auto-discovers the current session transcript from
-`$CLAUDE_TRANSCRIPT_PATH` or `$MNGR_CLAUDE_SESSION_ID`.
+- **Mode A:** follow `references/mode-a-incident-absorption.md`.
+- **Mode B:** follow `references/mode-b-live-collaborative.md`.
 
-`--nth 1` selects the *previous* human turn -- the one where the
-repeatable-but-manual work was done. `--nth 0` (the default) would
-select the current update-skill invocation turn itself.
+Each reference walks you through capturing the artifact, writing the
+task file, running `mngr create`, and running any needed `mngr push`.
+Return here afterwards.
 
-If counting turns does not line up cleanly (e.g. sub-agent interleaving),
-use `--start-marker TEXT` and optionally `--end-marker TEXT` to slice by
-matching text content instead.
+## Step 3: Proxy gates, then merge
 
-## Step 3: Write the task file
+Follow the same file-based proxy flow as
+`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5e).
+Poll for `runtime/update/$TARGET/reports/report.md`; when it appears,
+parse the frontmatter and act.
 
-Describe invariants and state constraints — what the updated skill must
-guarantee about its inputs and outputs. Do not enumerate subcommands, flow
-steps, or argparse surfaces; surface decisions belong to the worker.
-
-```bash
-cat > /tmp/task-update-$TARGET.md << 'TASK_EOF'
-# Task: update the `$TARGET` skill (or split a new one)
-
-## Incident
-The turn where `$TARGET` was invoked is at
-runtime/update/$TARGET/turn.jsonl.
-
-## What the updated skill must do
-<state the contract the updated skill must honor after this change — what
-inputs it should now accept, what outputs it should now produce. Read the
-incident transcript for what was done by hand; here, describe only the new
-contract.>
-
-## What to do
-Use the `update-skill-worker` sub-skill to: replicate the incident,
-decide update-in-place vs. new-sibling-skill, run Gate 1 on the outline,
-implement, hand-craft 2-3 scenarios, run them, run Gate 2.
-
-Emit gate questions and status updates inline in your response, using
-the headers the sub-skill defines (e.g. `## GATE: outline-approval`,
-`## GATE: final-artifact`, `## STATUS: done`). Do NOT call
-`send-user-message` or any other channel skill for gates -- the user
-reads your response inline.
-
-## Success criteria
-- The additional processing no longer needs to be done manually.
-- All scenarios pass.
-- User has approved outline (Gate 1) and final artifact (Gate 2).
-- Work is committed to the worker's branch (`mngr/update-$TARGET`).
-TASK_EOF
-```
-
-## Step 4: Launch the worker
-
-```bash
-mngr create update-$TARGET -t crystallize-worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-update-$TARGET.md
-```
-
-The worker runs in a separate git worktree, so it cannot see files
-under `runtime/` (which is gitignored). Push the incident transcript
-into the worker's working directory so the task message's path resolves
-there. Run this immediately after `mngr create`:
-
-```bash
-mngr push update-$TARGET:runtime/update/$TARGET runtime/update/$TARGET
-```
-
-See `.agents/skills/launch-task/SKILL.md` (Worktree isolation section)
-for background.
-
-## Step 5: Proxy gates, then merge
-
-The user sees your chat, not the worker's. The user can view the
-worker's chat if they want to, but they are not required to -- so you
-drive the worker to completion by proxying its gates and any mid-flow
-questions.
-
-Follow the same proxy flow as
-`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5f),
-with these substitutions:
+Substitutions:
 
 - Worker name: `update-$TARGET`
 - Branch: `mngr/update-$TARGET`
-- Transcript capture path: `/tmp/worker-update-$TARGET-transcript.txt`
-- User-approval gates: `## GATE: outline-approval` (Gate 1, where the
-  worker also presents the update-in-place vs. create-new-skill
-  decision) and `## GATE: final-artifact` (Gate 2).
-- Terminal markers: `## STATUS: done` (merge),
-  `## STATUS: no-update-needed` (no change — just close the ticket; no
-  merge), `## STATUS: stuck` (failure-handling flow).
+- Poll path: `runtime/update/$TARGET/reports/report.md`
+- Consumed path: `runtime/update/$TARGET/reports/consumed/`
+- User-approval gates:
+  - **Mode A:** `type: gate, name: outline-approval` (Gate 1, where
+    the worker also presents the update-in-place vs. create-new-skill
+    decision) and `type: gate, name: final-artifact` (Gate 2).
+  - **Mode B:** `type: gate, name: final-artifact` (Gate 2 only; the
+    design was approved organically in chat, so no Gate 1).
+- Terminal statuses: `type: status, name: done` (merge);
+  `type: status, name: no-update-needed` (no change -- just close
+  the ticket; no merge); `type: status, name: stuck`
+  (failure-handling flow).
 
 As a reminder: do not interrupt more recent user work to handle a
-worker notification. Answer implementation-detail questions yourself;
+report notification. Answer implementation-detail questions yourself;
 escalate Gate 1 and Gate 2 approvals to the user.
 
-If the worker decided "create-new-skill", the new skill lands in its
-own directory; the old skill is unchanged.
+If the worker decided "create-new-skill" (Mode A), the new skill
+lands in its own directory; the old skill is unchanged.
 
 On successful merge, close the tracking ticket:
 
@@ -189,4 +145,7 @@ fi
   upstream. Reconcile later via `update-self` (pull) or
   `submit-upstream-changes` (push).
 - Update is non-blocking -- the user's original request is already
-  delivered; the update worker just produces a quieter follow-up commit.
+  delivered; the update worker produces a quieter follow-up commit.
+- Mode B's worker may produce no new commits of its own if
+  verification is clean. That is expected -- the substantive change
+  is already on the current branch.

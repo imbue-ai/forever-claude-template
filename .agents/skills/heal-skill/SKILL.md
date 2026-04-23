@@ -42,7 +42,8 @@ Use `$TARGET` for the skill you are healing (e.g. `migrate-config`). Then:
 - Worker agent name: `heal-$TARGET`
 - Worker branch: `mngr/heal-$TARGET`
 - Runtime path: `runtime/heal/$TARGET/`
-- Task file: `/tmp/task-heal-$TARGET.md`
+- Task file: `runtime/heal/$TARGET/task.md` (sits alongside `turn.jsonl`
+  so the existing Step 4 `mngr push` syncs it to the worker for free)
 
 ## Step 1: Open a tracking ticket
 
@@ -62,8 +63,10 @@ uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
     --output runtime/heal/$TARGET/turn.jsonl
 ```
 
-The helper auto-discovers the current session transcript from
-`$CLAUDE_TRANSCRIPT_PATH` or `$MNGR_CLAUDE_SESSION_ID`.
+The helper auto-discovers the current session transcript via (in order)
+`$CLAUDE_TRANSCRIPT_PATH` (set inside hooks), `$MNGR_CLAUDE_SESSION_ID`,
+or `$MNGR_AGENT_STATE_DIR/claude_session_id` (the on-disk session id
+file, which is always present inside a standard mngr agent).
 
 `--nth 1` selects the *previous* human turn -- the one where the skill
 misbehaved. `--nth 0` (the default) would select the current heal-skill
@@ -75,85 +78,110 @@ matching text content instead.
 
 ## Step 3: Write the task file
 
+The task file's YAML frontmatter carries `lead_agent` and
+`lead_report_dir` (used by the worker to push Gate 2 and terminal
+status reports back to the lead via `mngr push` — see Step 5) and
+`transcript_path` (where the worker reads the incident transcript).
+
 ```bash
-cat > /tmp/task-heal-$TARGET.md << 'TASK_EOF'
-# Task: heal the `$TARGET` skill
+mkdir -p runtime/heal/$TARGET
+{
+cat << FRONTMATTER_EOF
+---
+lead_agent: $MNGR_AGENT_NAME
+lead_report_dir: runtime/heal/$TARGET/reports/
+transcript_path: runtime/heal/$TARGET/turn.jsonl
+---
+FRONTMATTER_EOF
+cat << BODY_EOF
+
+# Task: heal the \`$TARGET\` skill
 
 ## Incident
-The turn where `$TARGET` misbehaved is at
-runtime/heal/$TARGET/turn.jsonl.
+The turn where \`$TARGET\` misbehaved is at the path given by the
+\`transcript_path\` frontmatter field.
 
 ## What the fixed skill must do
-<state the contract the healed skill must honor — what input shapes should
-work, what outputs are correct. Read the incident transcript for how it
-failed; here, describe only what success looks like.>
+<state the contract the healed skill must honor — what input shapes
+should work, what outputs are correct. Read the incident transcript
+for how it failed; here, describe only what success looks like.>
 
 ## What to do
-Use the `heal-skill-worker` sub-skill to replicate the problem, find
+Use the \`heal-skill-worker\` sub-skill to replicate the problem, find
 the root cause, apply a fix to the relevant part of
-`.agents/skills/$TARGET/` (SKILL.md prose, scripts, or both), re-run
+\`.agents/skills/$TARGET/\` (SKILL.md prose, scripts, or both), re-run
 fresh 2-3 scenarios against the fixed skill, and push through Gate 2
 (user approval of the final artifact). There is no outline gate for a
 heal.
 
-Emit gate questions and status updates inline in your response, using
-the headers the sub-skill defines (e.g. `## GATE: final-artifact`,
-`## STATUS: done`). Do NOT call `send-user-message` or any other
-channel skill for gates -- the user reads your response inline.
+When you reach Gate 2 or a terminal status, write a report file and
+push it to the lead per the sub-skill's reporting protocol; the
+destination is given by \`lead_agent\` / \`lead_report_dir\` in
+frontmatter.
 
 ## Success criteria
 - The incident reproduces against the current skill before the fix.
 - The fix addresses the root cause (not a symptom workaround).
 - The fresh scenarios pass after the fix.
-- The user approves the final artifact (Gate 2).
-- Work is committed to the worker's branch (`mngr/heal-$TARGET`).
-TASK_EOF
+- The user approves the final artifact (Gate 2, via a pushed report).
+- Work is committed to your branch.
+BODY_EOF
+} > runtime/heal/$TARGET/task.md
 ```
+
+The body heredoc stays unquoted because this task's prose still needs
+`$TARGET` expansion (the target skill name appears in multiple places).
+Backticks in the body are backslash-escaped. If a heal task doesn't need
+any variable expansion in its body, quote the body delimiter
+(`<< 'BODY_EOF'`) and drop the escapes -- see crystallize-task/SKILL.md
+Step 3 for that pattern.
 
 ## Step 4: Launch the worker
 
 ```bash
 mngr create heal-$TARGET -t crystallize-worker \
     --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-heal-$TARGET.md
+    --message-file runtime/heal/$TARGET/task.md
 ```
 
 The `crystallize-worker` template pre-installs `heal-skill-worker`
 alongside the other worker sub-skills.
 
-The worker runs in a separate git worktree, so it cannot see files
-under `runtime/` (which is gitignored). Push the incident transcript
-into the worker's working directory so the task message's path resolves
-there. Run this immediately after `mngr create`:
+Then push the runtime dir (task file + transcript) into the worker's
+worktree -- the worker cannot read files that live only in the
+lead's worktree, and its `parse_task_frontmatter.py` helper needs
+`task.md` on disk to validate the schema:
 
 ```bash
-mngr push heal-$TARGET:runtime/heal/$TARGET runtime/heal/$TARGET
+mngr push heal-$TARGET:runtime/heal/$TARGET/ \
+    --source runtime/heal/$TARGET/ \
+    --uncommitted-changes=merge
 ```
 
-See `.agents/skills/launch-task/SKILL.md` (Worktree isolation section)
-for background.
+See `.agents/skills/crystallize-task/SKILL.md` Step 4 for the rationale
+behind the directory form, the `--uncommitted-changes=merge` flag, and
+why `mngr push` (not `mngr file put`) is the correct command.
 
 ## Step 5: Proxy Gate 2, then merge
 
-The user sees your chat, not the worker's. The user can view the
-worker's chat if they want to, but they are not required to -- so you
-drive the worker to completion by proxying its Gate 2 and any mid-flow
-questions.
+Follow the same file-based proxy flow as
+`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5e).
+Poll for `runtime/heal/$TARGET/reports/report.md`; when it appears,
+parse the frontmatter and act.
 
-Follow the same proxy flow as
-`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5f),
-with these substitutions:
+Substitutions:
 
 - Worker name: `heal-$TARGET`
 - Branch: `mngr/heal-$TARGET`
-- Transcript capture path: `/tmp/worker-heal-$TARGET-transcript.txt`
-- The only user-approval gate is `## GATE: final-artifact` (Gate 2).
-  There is no outline gate for a heal.
-- Terminal markers: `## STATUS: done` (merge), `## STATUS: stuck`
-  (failure-handling flow).
+- Poll path: `runtime/heal/$TARGET/reports/report.md`
+- Consumed path: `runtime/heal/$TARGET/reports/consumed/`
+- The only user-approval gate is `type: gate, name: final-artifact`
+  (Gate 2). There is no outline gate for a heal.
+- Terminal statuses: `type: status, name: done` (merge);
+  `type: status, name: stuck` (failure-handling flow).
 
 As a reminder: do not interrupt more recent user work to handle a
-worker notification. Answer implementation-detail questions yourself;
+report notification. Answer implementation-detail questions yourself;
 escalate Gate 2 approval to the user.
 
 On successful merge, close the tracking ticket:
