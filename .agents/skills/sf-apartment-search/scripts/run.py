@@ -8,9 +8,12 @@
 # ///
 """Fetch + parse + filter SF apartment listings.
 
-Fetches from Craigslist + rentalsinsf (plain HTTP), Zumper + PadMapper +
-Equity Residential + Essex + AvalonBay (Playwright with stealth). Records
-Apartments.com / Zillow / Trulia as attempted-but-blocked.
+Fetches from Craigslist + rentalsinsf (plain HTTP) and Zumper + PadMapper
+(Playwright with stealth). Equity Residential, Essex, and AvalonBay are
+not fetched automatically, but if the caller drops `equity_*.html` /
+`essex_*.html` / `avalon_*.html` files into the output dir, they are
+parsed alongside the scraped sources. Records Apartments.com / Zillow /
+Trulia as attempted-but-blocked.
 """
 
 from __future__ import annotations

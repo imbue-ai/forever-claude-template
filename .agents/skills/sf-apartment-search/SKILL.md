@@ -1,6 +1,6 @@
 ---
 name: sf-apartment-search
-description: Research San Francisco apartment listings matching a user's hard criteria (budget, bed count, required amenities) and a walk-distance constraint from an anchor address. Scrapes Craigslist, Zumper, rentalsinsf, PadMapper, Equity Residential, Essex, and AvalonBay (Playwright with stealth for the anti-bot sites); explicitly lists Apartments.com, Zillow, and Trulia as blocked so the user can do a manual pass. Use when helping someone hunt for an SF apartment with specific price / layout / amenity requirements.
+description: Research San Francisco apartment listings matching a user's hard criteria (budget, bed count, required amenities) and a walk-distance constraint from an anchor address. Scrapes Craigslist, rentalsinsf, Zumper, and PadMapper (Playwright with stealth for the anti-bot sites); also parses Equity Residential / Essex / AvalonBay building pages if the user drops their HTML into the output dir; explicitly lists Apartments.com, Zillow, and Trulia as blocked so the user can do a manual pass. Use when helping someone hunt for an SF apartment with specific price / layout / amenity requirements.
 metadata:
   crystallized: true
 ---
@@ -82,6 +82,13 @@ missing Chromium, run `uv run --with playwright python -m playwright install chr
 already in the output directory. Useful when tuning amenity keywords or
 the price floor.
 
+**Optional: Equity Residential / Essex / AvalonBay building pages.**
+Those sites are not fetched automatically (each has many building URLs
+and no unified search). If the user wants them covered, manually save
+building pages as `equity_<slug>.html`, `essex_<slug>.html`, or
+`avalon_<slug>.html` under `--output-dir` and the parse step will pick
+them up.
+
 ### 3. Inspect `results.json`
 
 Structure:
@@ -157,6 +164,6 @@ and are recorded as blocked so the user knows to do a manual pass.
   (requires an API key; worth it if this skill is used often).
 - Generalize to non-SF cities (requires researching per-city source
   lists and neighborhood slugs).
-- Add a sub-flag that reads a list of specific building URLs (Equity /
-  Essex / Avalon) to fetch individually, beyond the neighborhood
-  sweep.
+- Add automatic fetching of Equity / Essex / AvalonBay building pages
+  (currently the parser only runs against HTML the user drops in
+  manually, since those sites have no unified search URL).
