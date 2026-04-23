@@ -139,8 +139,7 @@ Push it and stop.
 
 ## If you cannot fix it
 
-If the root cause is out of scope (e.g. upstream API change,
-environmental problem) or the right fix would change the skill's
+If the root cause is impossible for you to implement or the right fix would change the skill's
 contract in ways the user should decide on, write a terminal report
 with `type: status`, `name: stuck`, and body:
 
