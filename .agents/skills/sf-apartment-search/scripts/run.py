@@ -88,8 +88,12 @@ def fetch_craigslist(
     postal: str,
     radius_mi: float,
     out_dir: Path,
-) -> Path:
-    """Craigslist search is WebFetch-friendly (no anti-bot)."""
+) -> dict[str, str]:
+    """Craigslist search is WebFetch-friendly (no anti-bot).
+
+    Returns a fetch_report entry: always includes 'path'; includes 'error'
+    if the fetch failed so collect_blocked() can surface the failure.
+    """
     params = {
         "max_price": str(budget),
         "min_bedrooms": str(min_beds),
@@ -104,25 +108,34 @@ def fetch_craigslist(
         + urllib.parse.urlencode(params)
     )
     path = out_dir / "craigslist.html"
+    entry: dict[str, str] = {"path": str(path)}
     try:
         resp = requests.get(url, headers={"User-Agent": UA}, timeout=30)
         resp.raise_for_status()
         path.write_text(resp.text, encoding="utf-8")
     except requests.RequestException as exc:
         path.write_text(f"<!-- fetch error: {exc} -->", encoding="utf-8")
-    return path
+        entry["error"] = str(exc)
+    return entry
 
 
-def fetch_rentalsinsf(out_dir: Path) -> Path:
+def fetch_rentalsinsf(out_dir: Path) -> dict[str, str]:
+    """Fetch rentalsinsf listings page.
+
+    Returns a fetch_report entry: always includes 'path'; includes 'error'
+    if the fetch failed so collect_blocked() can surface the failure.
+    """
     url = "https://www.rentalsinsf.com/listings"
     path = out_dir / "rentalsinsf.html"
+    entry: dict[str, str] = {"path": str(path)}
     try:
         resp = requests.get(url, headers={"User-Agent": UA}, timeout=30)
         resp.raise_for_status()
         path.write_text(resp.text, encoding="utf-8")
     except requests.RequestException as exc:
         path.write_text(f"<!-- fetch error: {exc} -->", encoding="utf-8")
-    return path
+        entry["error"] = str(exc)
+    return entry
 
 
 def fetch_with_playwright(targets: dict[str, str], out_dir: Path) -> dict[str, dict]:
@@ -445,7 +458,7 @@ def build_playwright_targets(neighborhoods: list[str], budget: int) -> dict[str,
 def run_fetch(args: argparse.Namespace, out_dir: Path) -> dict[str, dict]:
     report: dict[str, dict] = {}
     neighborhoods = [n for n in args.neighborhoods.split(",") if n.strip()]
-    cl_path = fetch_craigslist(
+    report["craigslist"] = fetch_craigslist(
         budget=args.budget,
         min_beds=args.min_beds,
         max_beds=args.max_beds,
@@ -453,9 +466,7 @@ def run_fetch(args: argparse.Namespace, out_dir: Path) -> dict[str, dict]:
         radius_mi=args.max_walk_miles,
         out_dir=out_dir,
     )
-    report["craigslist"] = {"path": str(cl_path)}
-    rs_path = fetch_rentalsinsf(out_dir)
-    report["rentalsinsf"] = {"path": str(rs_path)}
+    report["rentalsinsf"] = fetch_rentalsinsf(out_dir)
     playwright_targets = build_playwright_targets(neighborhoods, args.budget)
     report.update(fetch_with_playwright(playwright_targets, out_dir))
     return report
