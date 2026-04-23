@@ -110,6 +110,7 @@ def resolve_transcript_path(
         return Path(hook_path)
 
     session_id = environ.get("MNGR_CLAUDE_SESSION_ID")
+    state_dir_reason = "MNGR_AGENT_STATE_DIR is unset"
     if not session_id:
         # Fallback: read the session id from $MNGR_AGENT_STATE_DIR/claude_session_id,
         # which is present inside a standard mngr agent even when
@@ -117,13 +118,17 @@ def resolve_transcript_path(
         state_dir = environ.get("MNGR_AGENT_STATE_DIR")
         if state_dir:
             session_file = Path(state_dir) / "claude_session_id"
-            if session_file.is_file():
+            if not session_file.is_file():
+                state_dir_reason = f"{session_file} does not exist"
+            else:
                 session_id = session_file.read_text(encoding="utf-8").strip() or None
+                if not session_id:
+                    state_dir_reason = f"{session_file} is empty"
     if not session_id:
         raise FileNotFoundError(
-            "No --transcript flag, $CLAUDE_TRANSCRIPT_PATH, "
-            "$MNGR_CLAUDE_SESSION_ID, or $MNGR_AGENT_STATE_DIR/claude_session_id "
-            "available; cannot auto-discover transcript."
+            "Cannot auto-discover transcript: no --transcript flag, "
+            "$CLAUDE_TRANSCRIPT_PATH, or $MNGR_CLAUDE_SESSION_ID; "
+            f"and $MNGR_AGENT_STATE_DIR fallback did not resolve ({state_dir_reason})."
         )
 
     projects_root = Path(environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))) / "projects"
