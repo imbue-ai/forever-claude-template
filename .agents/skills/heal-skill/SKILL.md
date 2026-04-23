@@ -121,6 +121,18 @@ mngr create heal-$TARGET -t crystallize-worker \
 The `crystallize-worker` template pre-installs `heal-skill-worker`
 alongside the other worker sub-skills.
 
+The worker runs in a separate git worktree, so it cannot see files
+under `runtime/` (which is gitignored). Push the incident transcript
+into the worker's working directory so the task message's path resolves
+there. Run this immediately after `mngr create`:
+
+```bash
+mngr push heal-$TARGET:runtime/heal/$TARGET runtime/heal/$TARGET
+```
+
+See `.agents/skills/launch-task/SKILL.md` (Worktree isolation section)
+for background.
+
 ## Step 5: Proxy Gate 2, then merge
 
 The user sees your chat, not the worker's. The user can view the

@@ -134,6 +134,18 @@ mngr create update-$TARGET -t crystallize-worker \
     --message-file /tmp/task-update-$TARGET.md
 ```
 
+The worker runs in a separate git worktree, so it cannot see files
+under `runtime/` (which is gitignored). Push the incident transcript
+into the worker's working directory so the task message's path resolves
+there. Run this immediately after `mngr create`:
+
+```bash
+mngr push update-$TARGET:runtime/update/$TARGET runtime/update/$TARGET
+```
+
+See `.agents/skills/launch-task/SKILL.md` (Worktree isolation section)
+for background.
+
 ## Step 5: Proxy gates, then merge
 
 The user sees your chat, not the worker's. The user can view the

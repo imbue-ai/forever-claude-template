@@ -164,6 +164,20 @@ The `crystallize-worker` template (see `.mngr/settings.toml`) inherits from
 worker, and runs the bundled-sub-skill installer so the worker's
 `.agents/skills/` contains `crystallize-task-worker` et al.
 
+The worker runs in a separate git worktree, so it cannot see files
+under `runtime/` (which is gitignored). Push the extracted transcript
+into the worker's working directory so the task message's path resolves
+there. Run this immediately after `mngr create` — provisioning and
+skill loading give a window before the worker acts on the task:
+
+```bash
+mngr push crystallize-$NAME:runtime/crystallize/$NAME \
+    runtime/crystallize/$NAME
+```
+
+See `.agents/skills/launch-task/SKILL.md` (Worktree isolation section)
+for background on why this is needed.
+
 ## Step 5: Proxy gates, then merge
 
 The user sees your chat, not the worker's. The user can view the worker's
