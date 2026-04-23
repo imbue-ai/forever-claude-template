@@ -1,6 +1,6 @@
 ---
 name: sf-apartment-search
-description: Research San Francisco apartment listings matching a user's hard criteria (budget, bed count, required amenities) and a walk-distance constraint from an anchor address. Scrapes Craigslist, rentalsinsf, Zumper, and PadMapper (Playwright with stealth for the anti-bot sites); also parses Equity Residential / Essex / AvalonBay building pages if the user drops their HTML into the output dir; explicitly lists Apartments.com, Zillow, and Trulia as blocked so the user can do a manual pass. Use when helping someone hunt for an SF apartment with specific price / layout / amenity requirements.
+description: Research San Francisco apartment listings matching a user's hard criteria (budget, bed count, required amenities) and a walk-distance constraint from an anchor address. Parses Craigslist and Zumper (Playwright with stealth for Zumper) into ranked results; also fetches rentalsinsf and PadMapper HTML for manual review (not parsed into the ranked buckets); parses Equity Residential / Essex / AvalonBay building pages if the user drops their HTML into the output dir; explicitly lists Apartments.com, Zillow, and Trulia as blocked so the user can do a manual pass. Use when helping someone hunt for an SF apartment with specific price / layout / amenity requirements.
 metadata:
   crystallized: true
 ---
@@ -102,6 +102,13 @@ Structure:
   includes Apartments.com / Zillow / Trulia (known hard-blocked).
 - `stats`: raw listing counts per source.
 
+Only Craigslist and Zumper (plus any Equity/Essex/Avalon HTML you
+dropped in) feed `results.json`. `rentalsinsf.html` and
+`padmapper_sf_1br.html` are written to `--output-dir` as raw HTML for
+you to skim manually — they are not parsed into the buckets above. Open
+them in a browser (or grep for price strings) if you want coverage
+beyond the ranked results.
+
 ### 4. Rank the top picks
 
 Judgment step. Read `good` and select the top ~10 listings balancing:
@@ -167,3 +174,6 @@ and are recorded as blocked so the user knows to do a manual pass.
 - Add automatic fetching of Equity / Essex / AvalonBay building pages
   (currently the parser only runs against HTML the user drops in
   manually, since those sites have no unified search URL).
+- Write parsers for `rentalsinsf.html` and `padmapper_sf_1br.html` so
+  those sources feed the ranked `good` / `maybe` buckets instead of
+  only being fetched for manual review.
