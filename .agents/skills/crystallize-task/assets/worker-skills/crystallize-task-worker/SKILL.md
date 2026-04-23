@@ -29,22 +29,25 @@ those are not parsed. The lead polls for the pushed file and acts on
 it directly.
 
 **Inputs.** Your task file has been synced to your worktree alongside
-`turn.jsonl` at `runtime/crystallize/*/task.md` (the glob matches
-exactly one file -- each worker handles a single task). At the start
-of your run, validate its frontmatter and extract the three required
-fields with:
+`turn.jsonl` at `runtime/crystallize/*/task.md`. At the start of your
+run, validate its frontmatter and extract the three required fields
+with:
 
 ```bash
 uv run .agents/skills/crystallize-task-worker/scripts/parse_task_frontmatter.py \
-    runtime/crystallize/*/task.md
+    'runtime/crystallize/*/task.md'
 ```
 
-It prints three shell-evalable `KEY=value` lines on stdout
-(`LEAD_AGENT=`, `LEAD_REPORT_DIR=`, `TRANSCRIPT_PATH=`) and exits
-non-zero with a stderr message if any required field is missing, not
-a string, or empty. Use `lead_agent` / `lead_report_dir` at every
-gate/status below; `transcript_path` is where Stage 1's replay
-transcript lives.
+Quote the glob pattern so the shell passes the literal to the
+helper; the helper expands it internally and fails loudly if zero or
+more than one task file matches (each worker handles a single task
+-- either condition means the runtime layout drifted). On success it
+prints three shell-evalable `KEY=value` lines on stdout
+(`LEAD_AGENT=`, `LEAD_REPORT_DIR=`, `TRANSCRIPT_PATH=`). It exits
+non-zero with a stderr message on any failure, including a missing
+or misspelled field or a non-string / empty value. Use `lead_agent`
+/ `lead_report_dir` at every gate/status below; `transcript_path`
+is where Stage 1's replay transcript lives.
 
 **Procedure.** When you reach a gate or terminal status:
 

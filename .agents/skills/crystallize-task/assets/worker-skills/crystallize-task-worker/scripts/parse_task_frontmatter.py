@@ -9,6 +9,14 @@ Pins the schema so workers can't silently consume a task file whose
 `lead_agent` / `lead_report_dir` / `transcript_path` was missing,
 misspelled, or the wrong type.
 
+The positional argument is a path that may contain a shell-style glob
+(e.g. ``runtime/crystallize/*/task.md``). The helper resolves the
+glob itself and fails loudly if zero or multiple files match -- so a
+worker whose runtime layout drifts (missing task file, or two copies
+landing in the same tree) cannot silently parse the wrong thing.
+Quote the pattern in the shell (``'runtime/crystallize/*/task.md'``)
+so the literal glob reaches this script.
+
 On success (exit 0) prints three shell-evalable `KEY=value` lines to
 stdout (values quoted via ``shlex.quote`` so whitespace and shell
 metacharacters survive):
@@ -17,15 +25,17 @@ metacharacters survive):
     LEAD_REPORT_DIR=runtime/update/foo/reports/
     TRANSCRIPT_PATH=runtime/update/foo/turn.jsonl
 
-On any failure -- file missing, no/broken frontmatter, any required
-field missing, wrong type, or empty string -- prints a human-readable
-error to stderr and exits 1. Unknown extra keys in the frontmatter
-are ignored (room for future additions without a breaking change).
+On any failure -- no glob match, multiple glob matches, file missing,
+no/broken frontmatter, any required field missing, wrong type, or
+empty string -- prints a human-readable error to stderr and exits 1.
+Unknown extra keys in the frontmatter are ignored (room for future
+additions without a breaking change).
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import shlex
 import sys
 from pathlib import Path
@@ -35,6 +45,25 @@ import yaml
 
 
 _REQUIRED_FIELDS = ("lead_agent", "lead_report_dir", "transcript_path")
+
+
+def resolve(pattern: str) -> Path:
+    """Return the single path matching ``pattern`` (treated as a glob).
+
+    Raises ``ValueError`` if zero or more than one paths match. A
+    literal (non-glob) path still goes through this function -- if the
+    path exists, glob returns a single-element list; if not, glob
+    returns an empty list and we report it as a missing match.
+    """
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        raise ValueError(f"no task file matches pattern: {pattern}")
+    if len(matches) > 1:
+        joined = ", ".join(matches)
+        raise ValueError(
+            f"pattern matches {len(matches)} files (want exactly 1): {joined}"
+        )
+    return Path(matches[0])
 
 
 def _split_frontmatter(text: str) -> dict[str, Any]:
@@ -91,14 +120,19 @@ def _render(fields: dict[str, str]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "task_file",
-        type=Path,
-        help="Path to the worker task file (markdown with YAML frontmatter).",
+        "pattern",
+        help=(
+            "Path or shell-style glob pattern resolving to exactly one "
+            "worker task file (markdown with YAML frontmatter). Quote "
+            "the pattern in the shell so the literal glob reaches this "
+            "script."
+        ),
     )
     args = parser.parse_args()
 
     try:
-        fields = parse(args.task_file)
+        task_file = resolve(args.pattern)
+        fields = parse(task_file)
     except ValueError as exc:
         print(f"invalid task frontmatter: {exc}", file=sys.stderr)
         return 1

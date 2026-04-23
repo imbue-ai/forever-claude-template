@@ -162,6 +162,41 @@ body
         parse_task_frontmatter.parse(task)
 
 
+def test_resolve_single_literal_path(tmp_path: Path) -> None:
+    task = _write_task(tmp_path, _VALID_FRONTMATTER)
+    assert parse_task_frontmatter.resolve(str(task)) == task
+
+
+def test_resolve_single_glob_match(tmp_path: Path) -> None:
+    (tmp_path / "crystallize").mkdir()
+    (tmp_path / "crystallize" / "foo").mkdir()
+    task = tmp_path / "crystallize" / "foo" / "task.md"
+    task.write_text(_VALID_FRONTMATTER)
+    pattern = str(tmp_path / "crystallize" / "*" / "task.md")
+    assert parse_task_frontmatter.resolve(pattern) == task
+
+
+def test_resolve_zero_matches_fails_loud(tmp_path: Path) -> None:
+    pattern = str(tmp_path / "crystallize" / "*" / "task.md")
+    with pytest.raises(ValueError, match="no task file matches pattern"):
+        parse_task_frontmatter.resolve(pattern)
+
+
+def test_resolve_missing_literal_path_fails_loud(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="no task file matches pattern"):
+        parse_task_frontmatter.resolve(str(tmp_path / "missing.md"))
+
+
+def test_resolve_multiple_matches_fails_loud(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "task.md").write_text(_VALID_FRONTMATTER)
+    (tmp_path / "b" / "task.md").write_text(_VALID_FRONTMATTER)
+    pattern = str(tmp_path / "*" / "task.md")
+    with pytest.raises(ValueError, match=r"pattern matches 2 files"):
+        parse_task_frontmatter.resolve(pattern)
+
+
 def test_extra_keys_are_ignored(tmp_path: Path) -> None:
     task = _write_task(
         tmp_path,
