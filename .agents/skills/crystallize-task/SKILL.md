@@ -54,7 +54,9 @@ Pick a short kebab-case slug `$NAME` for this crystallization (e.g.
 - Worker agent name: `crystallize-$NAME`
 - Worker branch: `mngr/crystallize-$NAME` (created by `mngr create`)
 - Local artifact paths under `runtime/crystallize/$NAME/`
-- Task file path: `/tmp/task-crystallize-$NAME.md`
+- Task file path: `runtime/crystallize/$NAME/task.md` (sits alongside
+  `turn.jsonl` so the existing Step 4 `mngr push` syncs it to the
+  worker for free)
 - `tk` ticket title
 
 Use that same slug everywhere below.
@@ -122,6 +124,7 @@ gate/status reports back to the lead via `mngr push` — see Step 5) and
 `transcript_path` (where the worker reads the replay transcript).
 
 ```bash
+mkdir -p runtime/crystallize/$NAME
 {
 cat << FRONTMATTER_EOF
 ---
@@ -168,7 +171,7 @@ The `crystallize-task-worker`, `heal-skill-worker`, and
   (Gate 2), each communicated via a pushed report file.
 - Work is committed to your branch.
 BODY_EOF
-} > /tmp/task-crystallize-$NAME.md
+} > runtime/crystallize/$NAME/task.md
 ```
 
 The split-heredoc shape keeps variable expansion (`$MNGR_AGENT_NAME`,
@@ -188,7 +191,7 @@ crystallize-specific overrides:
 ```bash
 mngr create crystallize-$NAME -t crystallize-worker \
     --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-crystallize-$NAME.md
+    --message-file runtime/crystallize/$NAME/task.md
 ```
 
 The `crystallize-worker` template (see `.mngr/settings.toml`) inherits from
@@ -196,8 +199,10 @@ The `crystallize-worker` template (see `.mngr/settings.toml`) inherits from
 worker, and runs the bundled-sub-skill installer so the worker's
 `.agents/skills/` contains `crystallize-task-worker` et al.
 
-Then push the extracted transcript into the worker's worktree -- the
-worker cannot read files that live only in the lead's worktree:
+Then push the runtime dir (task file + transcript) into the worker's
+worktree -- the worker cannot read files that live only in the lead's
+worktree, and its `parse_task_frontmatter.py` helper needs `task.md`
+on disk to validate the schema:
 
 ```bash
 mngr push crystallize-$NAME:runtime/crystallize/$NAME/ \

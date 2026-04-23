@@ -42,7 +42,8 @@ Use `$TARGET` for the skill you are healing (e.g. `migrate-config`). Then:
 - Worker agent name: `heal-$TARGET`
 - Worker branch: `mngr/heal-$TARGET`
 - Runtime path: `runtime/heal/$TARGET/`
-- Task file: `/tmp/task-heal-$TARGET.md`
+- Task file: `runtime/heal/$TARGET/task.md` (sits alongside `turn.jsonl`
+  so the existing Step 4 `mngr push` syncs it to the worker for free)
 
 ## Step 1: Open a tracking ticket
 
@@ -83,6 +84,7 @@ status reports back to the lead via `mngr push` — see Step 5) and
 `transcript_path` (where the worker reads the incident transcript).
 
 ```bash
+mkdir -p runtime/heal/$TARGET
 {
 cat << FRONTMATTER_EOF
 ---
@@ -125,7 +127,7 @@ frontmatter. Do NOT emit \`## GATE:\` / \`## STATUS:\` headers in chat
 - The user approves the final artifact (Gate 2, via a pushed report).
 - Work is committed to your branch.
 BODY_EOF
-} > /tmp/task-heal-$TARGET.md
+} > runtime/heal/$TARGET/task.md
 ```
 
 The body heredoc stays unquoted because this task's prose still needs
@@ -140,14 +142,16 @@ Step 3 for that pattern.
 ```bash
 mngr create heal-$TARGET -t crystallize-worker \
     --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-heal-$TARGET.md
+    --message-file runtime/heal/$TARGET/task.md
 ```
 
 The `crystallize-worker` template pre-installs `heal-skill-worker`
 alongside the other worker sub-skills.
 
-Then push the extracted transcript into the worker's worktree -- the
-worker cannot read files that live only in the lead's worktree:
+Then push the runtime dir (task file + transcript) into the worker's
+worktree -- the worker cannot read files that live only in the
+lead's worktree, and its `parse_task_frontmatter.py` helper needs
+`task.md` on disk to validate the schema:
 
 ```bash
 mngr push heal-$TARGET:runtime/heal/$TARGET/ \
