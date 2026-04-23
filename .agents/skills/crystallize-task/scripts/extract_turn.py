@@ -157,8 +157,8 @@ def main() -> int:
         default=None,
         help=(
             "Path to the Claude Code session JSONL transcript. "
-            "If omitted, the transcript is resolved from $CLAUDE_TRANSCRIPT_PATH "
-            "or $MNGR_CLAUDE_SESSION_ID."
+            "If omitted, the transcript is resolved from $CLAUDE_TRANSCRIPT_PATH, "
+            "$MNGR_CLAUDE_SESSION_ID, or $MNGR_AGENT_STATE_DIR/claude_session_id."
         ),
     )
     parser.add_argument(
