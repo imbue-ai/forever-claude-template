@@ -41,7 +41,7 @@ as ground truth and the rationale to judge whether the implementation
 matches the agreed design.
 
 ```bash
-cat > /tmp/task-update-$TARGET.md << TASK_EOF
+cat > runtime/update/$TARGET/task.md << TASK_EOF
 ---
 lead_agent: $MNGR_AGENT_NAME
 lead_report_dir: runtime/update/$TARGET/reports/
@@ -100,11 +100,11 @@ in the task file.
 ```bash
 mngr create update-$TARGET -t crystallize-worker \
     --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-update-$TARGET.md
+    --message-file runtime/update/$TARGET/task.md
 ```
 
-Push the `runtime/update/$TARGET/` dir so the worker has
-`commit.log` and `commit.diff` under its worktree:
+Push the `runtime/update/$TARGET/` dir so the worker has `task.md`,
+`commit.log`, and `commit.diff` under its worktree:
 
 ```bash
 mngr push update-$TARGET:runtime/update/$TARGET/ \

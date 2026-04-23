@@ -43,7 +43,8 @@ The task file's YAML frontmatter carries `lead_agent`,
 at the start of its run.
 
 ```bash
-cat > /tmp/task-update-$TARGET.md << TASK_EOF
+mkdir -p runtime/update/$TARGET
+cat > runtime/update/$TARGET/task.md << TASK_EOF
 ---
 lead_agent: $MNGR_AGENT_NAME
 lead_report_dir: runtime/update/$TARGET/reports/
@@ -98,11 +99,13 @@ the marker is absent.
 ```bash
 mngr create update-$TARGET -t crystallize-worker \
     --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-update-$TARGET.md
+    --message-file runtime/update/$TARGET/task.md
 ```
 
-Then push the extracted transcript into the worker's worktree -- the
-worker cannot read files that live only in the lead's worktree:
+Then push the runtime dir (task file + transcript) into the worker's
+worktree -- the worker cannot read files that live only in the
+lead's worktree, and its `parse_task_frontmatter.py` helper needs
+`task.md` on disk to validate the schema:
 
 ```bash
 mngr push update-$TARGET:runtime/update/$TARGET/ \
