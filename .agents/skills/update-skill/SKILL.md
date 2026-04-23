@@ -96,21 +96,27 @@ guarantee about its inputs and outputs. Do not enumerate subcommands,
 flow steps, or argparse surfaces; surface decisions belong to the
 worker.
 
-The task file must include `LEAD_AGENT` and `LEAD_REPORT_DIR` lines.
-The worker uses these to push gate and terminal status reports back
-via `mngr push` (see Step 5 for how the lead consumes them).
+The task file's YAML frontmatter carries `lead_agent` and
+`lead_report_dir` (used by the worker to push gate/status reports back
+to the lead via `mngr push` — see Step 5) and `transcript_path` (where
+the worker reads the incident transcript).
 
 ```bash
-cat > /tmp/task-update-$TARGET.md << TASK_EOF
+{
+cat << FRONTMATTER_EOF
+---
+lead_agent: $MNGR_AGENT_NAME
+lead_report_dir: runtime/update/$TARGET/reports/
+transcript_path: runtime/update/$TARGET/turn.jsonl
+---
+FRONTMATTER_EOF
+cat << BODY_EOF
+
 # Task: update the \`$TARGET\` skill (or split a new one)
 
-## Reporting back
-LEAD_AGENT: $MNGR_AGENT_NAME
-LEAD_REPORT_DIR: runtime/update/$TARGET/reports/
-
 ## Incident
-The turn where \`$TARGET\` was invoked is at
-runtime/update/$TARGET/turn.jsonl.
+The turn where \`$TARGET\` was invoked is at the path given by the
+\`transcript_path\` frontmatter field.
 
 ## What the updated skill must do
 <state the contract the updated skill must honor after this change —
@@ -123,24 +129,28 @@ Use the \`update-skill-worker\` sub-skill to: replicate the incident,
 decide update-in-place vs. new-sibling-skill, run Gate 1 on the
 outline, implement, hand-craft 2-3 scenarios, run them, run Gate 2.
 
-When you reach a gate or terminal status, write a report file to
-\`runtime/update/reports/report.md\` and push it to the lead per the
-sub-skill's reporting protocol. Do NOT emit \`## GATE:\` /
-\`## STATUS:\` headers in chat -- the lead reads the report file, not
-your transcript.
+When you reach a gate or terminal status, write a report file and
+push it to the lead per the sub-skill's reporting protocol; the
+destination is given by \`lead_agent\` / \`lead_report_dir\` in
+frontmatter. Do NOT emit \`## GATE:\` / \`## STATUS:\` headers in chat
+-- the lead reads the report file, not your transcript.
 
 ## Success criteria
 - The additional processing no longer needs to be done manually.
 - All scenarios pass.
 - User has approved outline (Gate 1) and final artifact (Gate 2), each
   communicated via a pushed report file.
-- Work is committed to the worker's branch (\`mngr/update-$TARGET\`).
-TASK_EOF
+- Work is committed to your branch.
+BODY_EOF
+} > /tmp/task-update-$TARGET.md
 ```
 
-The heredoc delimiter is unquoted so `$MNGR_AGENT_NAME` and `$TARGET`
-expand; shell metacharacters inside the body (`$`, backticks) are
-backslash-escaped so they land literal in the task file.
+The body heredoc stays unquoted because the prose still needs
+`$TARGET` expansion (the target skill name appears in multiple places).
+Backticks in the body are backslash-escaped. If an update task doesn't
+need any variable expansion in its body, quote the body delimiter
+(`<< 'BODY_EOF'`) and drop the escapes -- see crystallize-task/SKILL.md
+Step 3 for that pattern.
 
 ## Step 4: Launch the worker
 

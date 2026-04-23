@@ -77,21 +77,27 @@ matching text content instead.
 
 ## Step 3: Write the task file
 
-The task file must include `LEAD_AGENT` and `LEAD_REPORT_DIR` lines.
-The worker uses these to push Gate 2 and terminal status reports back
-via `mngr push` (see Step 5 for how the lead consumes them).
+The task file's YAML frontmatter carries `lead_agent` and
+`lead_report_dir` (used by the worker to push Gate 2 and terminal
+status reports back to the lead via `mngr push` — see Step 5) and
+`transcript_path` (where the worker reads the incident transcript).
 
 ```bash
-cat > /tmp/task-heal-$TARGET.md << TASK_EOF
+{
+cat << FRONTMATTER_EOF
+---
+lead_agent: $MNGR_AGENT_NAME
+lead_report_dir: runtime/heal/$TARGET/reports/
+transcript_path: runtime/heal/$TARGET/turn.jsonl
+---
+FRONTMATTER_EOF
+cat << BODY_EOF
+
 # Task: heal the \`$TARGET\` skill
 
-## Reporting back
-LEAD_AGENT: $MNGR_AGENT_NAME
-LEAD_REPORT_DIR: runtime/heal/$TARGET/reports/
-
 ## Incident
-The turn where \`$TARGET\` misbehaved is at
-runtime/heal/$TARGET/turn.jsonl.
+The turn where \`$TARGET\` misbehaved is at the path given by the
+\`transcript_path\` frontmatter field.
 
 ## What the fixed skill must do
 <state the contract the healed skill must honor — what input shapes
@@ -106,24 +112,28 @@ fresh 2-3 scenarios against the fixed skill, and push through Gate 2
 (user approval of the final artifact). There is no outline gate for a
 heal.
 
-When you reach Gate 2 or a terminal status, write a report file to
-\`runtime/heal/reports/report.md\` and push it to the lead per the
-sub-skill's reporting protocol. Do NOT emit \`## GATE:\` /
-\`## STATUS:\` headers in chat -- the lead reads the report file, not
-your transcript.
+When you reach Gate 2 or a terminal status, write a report file and
+push it to the lead per the sub-skill's reporting protocol; the
+destination is given by \`lead_agent\` / \`lead_report_dir\` in
+frontmatter. Do NOT emit \`## GATE:\` / \`## STATUS:\` headers in chat
+-- the lead reads the report file, not your transcript.
 
 ## Success criteria
 - The incident reproduces against the current skill before the fix.
 - The fix addresses the root cause (not a symptom workaround).
 - The fresh scenarios pass after the fix.
 - The user approves the final artifact (Gate 2, via a pushed report).
-- Work is committed to the worker's branch (\`mngr/heal-$TARGET\`).
-TASK_EOF
+- Work is committed to your branch.
+BODY_EOF
+} > /tmp/task-heal-$TARGET.md
 ```
 
-The heredoc delimiter is unquoted so `$MNGR_AGENT_NAME` and `$TARGET`
-expand; shell metacharacters inside the body (`$`, backticks) are
-backslash-escaped so they land literal in the task file.
+The body heredoc stays unquoted because this task's prose still needs
+`$TARGET` expansion (the target skill name appears in multiple places).
+Backticks in the body are backslash-escaped. If a heal task doesn't need
+any variable expansion in its body, quote the body delimiter
+(`<< 'BODY_EOF'`) and drop the escapes -- see crystallize-task/SKILL.md
+Step 3 for that pattern.
 
 ## Step 4: Launch the worker
 

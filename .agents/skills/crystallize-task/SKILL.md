@@ -116,21 +116,27 @@ Describe invariants and state constraints — what must be true about the
 skill's inputs and outputs. Do not enumerate subcommands, flow steps, or
 argparse surfaces; surface decisions belong to the worker.
 
-The task file must also include `LEAD_AGENT` and `LEAD_REPORT_DIR`
-lines. The worker sub-skill uses these to push gate/status reports back
-to the lead via `mngr push` (see Step 5 for how the lead consumes them).
+The task file's YAML frontmatter carries the infrastructure contract:
+`lead_agent` and `lead_report_dir` (used by the worker to push
+gate/status reports back to the lead via `mngr push` — see Step 5) and
+`transcript_path` (where the worker reads the replay transcript).
 
 ```bash
-cat > /tmp/task-crystallize-$NAME.md << TASK_EOF
+{
+cat << FRONTMATTER_EOF
+---
+lead_agent: $MNGR_AGENT_NAME
+lead_report_dir: runtime/crystallize/$NAME/reports/
+transcript_path: runtime/crystallize/$NAME/turn.jsonl
+---
+FRONTMATTER_EOF
+cat << 'BODY_EOF'
+
 # Task: crystallize the just-finished work into a reusable skill
 
-## Reporting back
-LEAD_AGENT: $MNGR_AGENT_NAME
-LEAD_REPORT_DIR: runtime/crystallize/$NAME/reports/
-
 ## Transcript
-The turn you need to crystallize is at
-runtime/crystallize/$NAME/turn.jsonl (JSONL of tool calls and results).
+The turn you need to crystallize is at the path given by the
+`transcript_path` frontmatter field (JSONL of tool calls and results).
 Replay it mentally to understand what was done; you do not need to
 re-execute destructive operations.
 
@@ -141,33 +147,34 @@ prescribe subcommands, flow steps, or argparse surfaces — the worker owns
 those decisions.>
 
 ## What to do
-Use the \`crystallize-task-worker\` sub-skill to drive the end-to-end
-build. When you reach a gate or terminal status, write a report file to
-\`runtime/crystallize/reports/report.md\` and push it to the lead per
-the sub-skill's reporting protocol. Do NOT emit \`## GATE:\` /
-\`## STATUS:\` headers in chat -- the lead reads the report file, not
-your transcript.
+Use the `crystallize-task-worker` sub-skill to drive the end-to-end
+build. When you reach a gate or terminal status, write a report file
+and push it to the lead per the sub-skill's reporting protocol; the
+destination is given by `lead_agent` / `lead_report_dir` in
+frontmatter. Do NOT emit `## GATE:` / `## STATUS:` headers in chat --
+the lead reads the report file, not your transcript.
 
 ## Worker sub-skills
-The \`crystallize-task-worker\`, \`heal-skill-worker\`, and
-\`update-skill-worker\` skills have been pre-installed into your
-\`.agents/skills/\` tree.
+The `crystallize-task-worker`, `heal-skill-worker`, and
+`update-skill-worker` skills have been pre-installed into your
+`.agents/skills/` tree.
 
 ## Success criteria
-- New skill lives at \`.agents/skills/<name>/\` with SKILL.md
-  (agentskills.io-compliant, \`metadata.crystallized: true\`) and
-  \`scripts/run.py\` (PEP 723, argparse).
-- All hand-crafted scenarios pass when run against \`scripts/run.py\`.
+- New skill lives at `.agents/skills/<name>/` with SKILL.md
+  (agentskills.io-compliant, `metadata.crystallized: true`) and
+  `scripts/run.py` (PEP 723, argparse).
+- All hand-crafted scenarios pass when run against `scripts/run.py`.
 - User has approved both the outline (Gate 1) and the final artifact
   (Gate 2), each communicated via a pushed report file.
-- Work is committed to the worker's branch (\`mngr/crystallize-$NAME\`).
-TASK_EOF
+- Work is committed to your branch.
+BODY_EOF
+} > /tmp/task-crystallize-$NAME.md
 ```
 
-Note the heredoc delimiter is unquoted (`TASK_EOF` vs. `'TASK_EOF'`) so
-that `$MNGR_AGENT_NAME` and `$NAME` expand. Shell metacharacters inside
-the body (`$`, backticks) are backslash-escaped accordingly; they end up
-literal in the final task file.
+The split-heredoc shape keeps variable expansion (`$MNGR_AGENT_NAME`,
+`$NAME`) contained to the small frontmatter block while the larger
+body block stays single-quoted -- so `$` and backticks in the body are
+literal by default, no escaping needed.
 
 ## Step 4: Launch the worker
 
