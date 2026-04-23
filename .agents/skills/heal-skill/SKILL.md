@@ -87,7 +87,7 @@ cat > /tmp/task-heal-$TARGET.md << TASK_EOF
 
 ## Reporting back
 LEAD_AGENT: $MNGR_AGENT_NAME
-LEAD_REPORT_DIR: runtime/heal/$TARGET/
+LEAD_REPORT_DIR: runtime/heal/$TARGET/reports/
 
 ## Incident
 The turn where \`$TARGET\` misbehaved is at
@@ -160,8 +160,8 @@ Substitutions:
 
 - Worker name: `heal-$TARGET`
 - Branch: `mngr/heal-$TARGET`
-- Poll path: `runtime/heal/$TARGET/report.md`
-- Consumed path: `runtime/heal/$TARGET/consumed/`
+- Poll path: `runtime/heal/$TARGET/reports/report.md`
+- Consumed path: `runtime/heal/$TARGET/reports/consumed/`
 - The only user-approval gate is `type: gate, name: final-artifact`
   (Gate 2). There is no outline gate for a heal.
 - Terminal statuses: `type: status, name: done` (merge);

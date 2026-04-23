@@ -106,7 +106,7 @@ cat > /tmp/task-update-$TARGET.md << TASK_EOF
 
 ## Reporting back
 LEAD_AGENT: $MNGR_AGENT_NAME
-LEAD_REPORT_DIR: runtime/update/$TARGET/
+LEAD_REPORT_DIR: runtime/update/$TARGET/reports/
 
 ## Incident
 The turn where \`$TARGET\` was invoked is at
@@ -174,8 +174,8 @@ Substitutions:
 
 - Worker name: `update-$TARGET`
 - Branch: `mngr/update-$TARGET`
-- Poll path: `runtime/update/$TARGET/report.md`
-- Consumed path: `runtime/update/$TARGET/consumed/`
+- Poll path: `runtime/update/$TARGET/reports/report.md`
+- Consumed path: `runtime/update/$TARGET/reports/consumed/`
 - User-approval gates: `type: gate, name: outline-approval` (Gate 1,
   where the worker also presents the update-in-place vs.
   create-new-skill decision) and `type: gate, name: final-artifact`

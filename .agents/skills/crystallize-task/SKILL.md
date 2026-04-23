@@ -126,7 +126,7 @@ cat > /tmp/task-crystallize-$NAME.md << TASK_EOF
 
 ## Reporting back
 LEAD_AGENT: $MNGR_AGENT_NAME
-LEAD_REPORT_DIR: runtime/crystallize/$NAME/
+LEAD_REPORT_DIR: runtime/crystallize/$NAME/reports/
 
 ## Transcript
 The turn you need to crystallize is at
@@ -219,13 +219,15 @@ The worker communicates with you via **report files**, not inline
 `## GATE:` / `## STATUS:` headers in chat. Whenever it reaches a gate
 or terminal status it writes `runtime/crystallize/reports/report.md` on
 its side and `mngr push`es it back to
-`runtime/crystallize/$NAME/report.md` on your side. The push is the
-ready signal: it only happens once the worker is finished writing.
-You poll for that file; no `mngr wait`, no transcript parsing.
+`runtime/crystallize/$NAME/reports/report.md` on your side (a
+dedicated inbox subdirectory, kept separate from the inbound
+`turn.jsonl`). The push is the ready signal: it only happens once the
+worker is finished writing. You poll for that file; no `mngr wait`, no
+transcript parsing.
 
 ### 5a. Wait for the next report
 
-Start a background poll for `runtime/crystallize/$NAME/report.md`.
+Start a background poll for `runtime/crystallize/$NAME/reports/report.md`.
 Bash's `run_in_background: true` gives you the notify-on-exit semantics
 for free -- the command returns (and you are notified) the instant the
 file appears.
@@ -233,8 +235,8 @@ file appears.
 ```bash
 # Run with Bash run_in_background: true
 timeout 30m bash -c '
-  while [ ! -f runtime/crystallize/'"$NAME"'/report.md ]; do sleep 5; done
-  cat runtime/crystallize/'"$NAME"'/report.md
+  while [ ! -f runtime/crystallize/'"$NAME"'/reports/report.md ]; do sleep 5; done
+  cat runtime/crystallize/'"$NAME"'/reports/report.md
 '
 ```
 
@@ -293,9 +295,9 @@ After forwarding, consume the report by moving it aside so the next
 push can land a fresh `report.md`:
 
 ```bash
-mkdir -p runtime/crystallize/$NAME/consumed
-mv runtime/crystallize/$NAME/report.md \
-   runtime/crystallize/$NAME/consumed/$(date +%s)-gate.md
+mkdir -p runtime/crystallize/$NAME/reports/consumed
+mv runtime/crystallize/$NAME/reports/report.md \
+   runtime/crystallize/$NAME/reports/consumed/$(date +%s)-gate.md
 ```
 
 Then re-arm the background poll (same command as 5a).
