@@ -407,7 +407,7 @@ def classify(
 
 # --------------------------------------------------------------------- main
 
-def build_playwright_targets(neighborhoods: list[str]) -> dict[str, str]:
+def build_playwright_targets(neighborhoods: list[str], budget: int) -> dict[str, str]:
     targets: dict[str, str] = {}
     for nb in neighborhoods:
         slug = nb.strip().lower()
@@ -418,7 +418,7 @@ def build_playwright_targets(neighborhoods: list[str]) -> dict[str, str]:
         )
     targets["padmapper_sf_1br"] = (
         "https://www.padmapper.com/apartments/san-francisco-ca/"
-        "1-bedroom-apartments-under-4200-price"
+        f"1-bedroom-apartments-under-{budget}-price"
     )
     return targets
 
@@ -437,7 +437,7 @@ def run_fetch(args: argparse.Namespace, out_dir: Path) -> dict[str, dict]:
     report["craigslist"] = {"path": str(cl_path)}
     rs_path = fetch_rentalsinsf(out_dir)
     report["rentalsinsf"] = {"path": str(rs_path)}
-    playwright_targets = build_playwright_targets(neighborhoods)
+    playwright_targets = build_playwright_targets(neighborhoods, args.budget)
     report.update(fetch_with_playwright(playwright_targets, out_dir))
     return report
 
