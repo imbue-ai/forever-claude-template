@@ -62,8 +62,10 @@ uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
     --output runtime/heal/$TARGET/turn.jsonl
 ```
 
-The helper auto-discovers the current session transcript from
-`$CLAUDE_TRANSCRIPT_PATH` or `$MNGR_CLAUDE_SESSION_ID`.
+The helper auto-discovers the current session transcript via (in order)
+`$CLAUDE_TRANSCRIPT_PATH` (set inside hooks), `$MNGR_CLAUDE_SESSION_ID`,
+or `$MNGR_AGENT_STATE_DIR/claude_session_id` (the on-disk session id
+file, which is always present inside a standard mngr agent).
 
 `--nth 1` selects the *previous* human turn -- the one where the skill
 misbehaved. `--nth 0` (the default) would select the current heal-skill
@@ -121,6 +123,19 @@ mngr create heal-$TARGET -t crystallize-worker \
 The `crystallize-worker` template pre-installs `heal-skill-worker`
 alongside the other worker sub-skills.
 
+Then push the extracted transcript into the worker's worktree -- the
+worker cannot read files that live only in the lead's worktree:
+
+```bash
+mngr push heal-$TARGET:runtime/heal/$TARGET/ \
+    --source runtime/heal/$TARGET/ \
+    --uncommitted-changes=merge
+```
+
+See `.agents/skills/crystallize-task/SKILL.md` Step 4 for the rationale
+behind the directory form, the `--uncommitted-changes=merge` flag, and
+why `mngr push` (not `mngr file put`) is the correct command.
+
 ## Step 5: Proxy Gate 2, then merge
 
 The user sees your chat, not the worker's. The user can view the
@@ -129,8 +144,13 @@ drive the worker to completion by proxying its Gate 2 and any mid-flow
 questions.
 
 Follow the same proxy flow as
-`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5f),
-with these substitutions:
+`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5f).
+The capture-based WAITING guardrail in 5c (confirm the worker is
+actually at rest via `mngr capture` before reading the transcript)
+applies here too -- heal workers may also flip to WAITING transiently
+between sub-skill invocations.
+
+Substitutions:
 
 - Worker name: `heal-$TARGET`
 - Branch: `mngr/heal-$TARGET`
