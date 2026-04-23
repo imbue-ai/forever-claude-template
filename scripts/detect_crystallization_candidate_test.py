@@ -66,14 +66,14 @@ def test_evaluate_below_threshold_stays_silent(tmp_path: Path) -> None:
 def test_evaluate_at_threshold_warns_with_count(tmp_path: Path) -> None:
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(5))),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
         {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
     )
     assert should_warn is True
-    assert "5 non-read tool calls" in message
+    assert "8 non-read tool calls" in message
 
 
 def test_evaluate_excludes_read_only_tools(tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ def test_evaluate_ignores_tool_result_carriers_when_finding_turn_boundary(tmp_pa
     """tool_result-carrying user events must not be treated as a turn boundary."""
     events = [
         _user("real user message"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(5))),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
         _tool_result("u0"),
         _tool_result("u1"),
     ]
@@ -121,7 +121,7 @@ def test_evaluate_ignores_tool_result_carriers_when_finding_turn_boundary(tmp_pa
         {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
     )
     assert should_warn is True
-    assert "5 non-read tool calls" in message
+    assert "8 non-read tool calls" in message
 
 
 def test_evaluate_silenced_by_successful_crystallized_skill(tmp_path: Path) -> None:
@@ -269,21 +269,21 @@ def test_evaluate_refires_if_agent_keeps_using_tools_after_meta(tmp_path: Path) 
             "isMeta": True,
             "message": {"content": [{"type": "text", "text": "Stop hook feedback: ..."}]},
         },
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"v{i}") for i in range(6))),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"v{i}") for i in range(8))),
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
         {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
     )
     assert should_warn is True
-    assert "6 non-read tool calls" in message
+    assert "8 non-read tool calls" in message
 
 
 def test_evaluate_tool_results_do_not_reset_count(tmp_path: Path) -> None:
     """Tool-result-carrying user events must not be treated as a response boundary."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(5))),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
         _tool_result("u0"),
         _tool_result("u1"),
     ]
@@ -292,7 +292,7 @@ def test_evaluate_tool_results_do_not_reset_count(tmp_path: Path) -> None:
         {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
     )
     assert should_warn is True
-    assert "5 non-read tool calls" in message
+    assert "8 non-read tool calls" in message
 
 
 def test_skill_is_crystallized_handles_missing_file(tmp_path: Path) -> None:
