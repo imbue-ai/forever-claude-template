@@ -67,6 +67,14 @@ RUN mkdir -p /root/.ssh && \
     ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts && \
     chmod 600 /root/.ssh/known_hosts
 
+# Install latchkey (CLI for making authenticated HTTP calls to third-party
+# services). The agent runs it in gateway mode -- the per-agent
+# LATCHKEY_GATEWAY URL is injected at `mngr create` time by the outside
+# caller (see .mngr/settings.toml's pass_env), so we do not hardcode it here.
+#
+ARG LATCHKEY_VERSION=2.7.1
+RUN npm install -g "latchkey@${LATCHKEY_VERSION}"
+
 # install python dependencies
 RUN uv tool install modal
 
