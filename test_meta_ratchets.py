@@ -109,11 +109,13 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
 
 
 def _find_bash_scripts_without_strict_mode() -> list[str]:
-    """Find bash scripts missing 'set -euo pipefail', excluding vendored code."""
+    """Find bash scripts missing 'set -euo pipefail', excluding vendored and venv code."""
     violations: list[str] = []
     vendored_prefix = str(_VENDORED_DIR)
     for script in _REPO_ROOT.rglob("*.sh"):
         if str(script).startswith(vendored_prefix):
+            continue
+        if ".venv" in script.parts:
             continue
         content = script.read_text(errors="replace")
         if re.search(r"^#!/.*bash", content) and "set -euo pipefail" not in content:

@@ -35,6 +35,7 @@ Only after doing all of the above should you begin writing code.
 # Important commands and conventions:
 
 - Never run `uv sync`, always run `uv sync --all-packages` instead
+- For browser automation, Playwright's Python API is available in the root venv with Chromium preinstalled -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`, not an MCP server.
 
 # Always remember these guidelines:
 
