@@ -27,7 +27,7 @@ Transcript path resolution (in order):
    This is concurrent-session-safe because every session has a unique id.
 4. ``$MNGR_AGENT_STATE_DIR/claude_session_id`` (a file written by mngr) --
    read the session id from disk and resolve as in (3). This makes the
-   script work in a standard mngr agent where neither env var from (2) or
+   script work in a standard mngr agent where neither env var from (2) nor
    (3) is exported into the Bash tool's environment.
 
 We deliberately do NOT fall back to an mtime scan: the most-recently-modified
