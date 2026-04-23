@@ -69,7 +69,9 @@ Then:
 - Worker agent name: `update-$TARGET`
 - Worker branch: `mngr/update-$TARGET`
 - Runtime path: `runtime/update/$TARGET/`
-- Task file: `/tmp/task-update-$TARGET.md`
+- Task file: `runtime/update/$TARGET/task.md` (sits alongside `turn.jsonl`
+  / `commit.diff` so the Mode A / Mode B `mngr push` syncs it to the
+  worker for free)
 
 ## Step 1: Open a tracking ticket
 
