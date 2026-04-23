@@ -55,7 +55,7 @@ is_user_tool_result_carrier = _transcript_parsing.is_user_tool_result_carrier
 READ_ONLY_TOOLS: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
 
 # Threshold at which the hook emits a reminder.
-QUALIFYING_CALL_THRESHOLD: int = 5
+QUALIFYING_CALL_THRESHOLD: int = 8
 
 REMINDER_MESSAGE: str = (
     "The turn that just finished used {count} non-read tool calls.\n"
@@ -63,18 +63,18 @@ REMINDER_MESSAGE: str = (
     "Quick check: would repeating this task with new inputs follow a "
     "largely similar process -- same sources, same steps, same criteria, "
     "just different data? Judgement steps in the middle of a flow are "
-    "fine (they live in SKILL.md as prose instructions). The question is "
-    "whether the *process* would repeat recognizably.\n"
+    "fine; The question is "
+    "whether the *process* (or significant parts of it) would repeat recognizably.\n"
     "\n"
     "If no -- the re-run would require entirely new thinking from scratch "
     "-- ignore this reminder.\n"
     "\n"
     "If yes or uncertain: read "
-    "`.agents/skills/crystallize-task/references/when-to-crystallize.md` "
-    "before deciding whether to invoke `crystallize-task`. That file "
-    "contains the decision criteria, common reasoning traps, and the "
-    "ask-don't-decide-silently rule. You have a documented bias toward "
-    "wrongly declining -- the reference counters it."
+    "`.agents/skills/crystallize-task/references/when-to-crystallize.md`. "
+    "That file "
+    "contains the decision criteria and common reasoning traps."
+    "If the task seems like a potential crystallization candidate, ask the user whether they"
+    "expect to ever run it again; if so, you should crystallize it."
 )
 
 

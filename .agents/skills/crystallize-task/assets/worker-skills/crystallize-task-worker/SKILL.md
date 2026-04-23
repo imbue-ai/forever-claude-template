@@ -53,9 +53,10 @@ Produce a short outline with:
   a prose step.
 - Justification: for any subcommand or subflow in the planned flow, what
   invariant makes it separate vs. inlined? If no invariant demands
-  separation, inline it. A skill with zero script steps (pure prose
+  separation, inline it. 
+- A skill with zero script steps (pure prose
   recipe) is valid -- do not invent scripts where judgement is clearer.
-- 2-3 scenarios you plan to hand-craft (happy path + edge cases).
+- 2-3 evaluation scenarios you plan to hand-craft (happy path + edge cases).
 - Any edge cases you foresaw but chose not to handle (and why).
 
 ### Gate 1: outline approval
@@ -102,7 +103,7 @@ Run each scenario:
   real inputs and inspect the output.
 - For prose steps: walk through the SKILL.md instructions as if you were
   an agent using the skill, and confirm they produce the expected
-  behavior on the scenario's data.
+  behavior on the scenario's data. Write out this walk-through process; don't just think through it.
 
 If a scenario fails, fix the skill (script or prose). If the skill is
 correct but your scenario was wrong, update the scenario.
@@ -139,7 +140,7 @@ and stop.
 
 Reasons that genuinely warrant giving up:
 
-- The work had no stable process across hypothetical re-runs -- each
+- The work turned out to have no stable process across hypothetical re-runs -- each
   re-run would require entirely different steps, not just different
   data.
 - You hit a dependency you cannot resolve (e.g. a required service is
@@ -150,10 +151,3 @@ Judgement steps belong in SKILL.md as prose instructions. A skill can be
 pure prose with no scripts at all if that's what the process calls for.
 Only give up if the *process* itself is unstable, not if parts of it
 happen to require judgement.
-
-## Gotchas
-
-- You run with `MNGR_AGENT_ROLE=worker` in the environment. The
-  crystallization Stop hook detects this and stays silent, so you will NOT
-  see a crystallization reminder after a heavy sub-turn. Don't try to
-  recursively crystallize work you do while building this skill.

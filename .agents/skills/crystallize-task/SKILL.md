@@ -1,6 +1,6 @@
 ---
 name: crystallize-task
-description: "Turn a process from the turn that just finished into a reusable skill. A skill captures a stable process -- SKILL.md prose describing the recipe, with scripts for deterministic steps and prose instructions for judgement steps. Candidate if the re-run with new inputs would follow a largely similar process. The process does not have to be the entire turn -- a sub-process (e.g. a data pipeline within a larger build) counts. Strong signal: you learned how to do something through research or debugging that is likely to be useful again. Ask the user with a concrete skill proposal rather than deciding silently -- models tend to wrongly decline."
+description: "Turn a process from the turn that just finished into a reusable skill. A skill captures a stable process -- SKILL.md prose describing the recipe, with scripts for deterministic steps and prose instructions for nondeterministic steps. Consider using after completing a task where a re-run with new inputs would follow a largely similar process. The process does not have to be the entire turn -- a sub-process (e.g. a data pipeline within a larger build) counts. Strong signal: you learned how to do something through research or debugging that is likely to be useful again."
 ---
 
 # Crystallizing a task into a skill
@@ -13,26 +13,22 @@ launch, and merge.
 
 **Principle.** Reliability is the floor; simplicity is the target. Default to
 a single entry point and one flow. Add surface only when a specific invariant
-demands it.
+demands it. Decompose only when the separate components are likely to be used independently.
 
 ## When to invoke
 
-The Stop hook emits a reminder whenever the turn used at least five non-read
-tool calls. The reminder points at
-`references/when-to-crystallize.md`, which contains the full decision
-criteria, the re-run test, the common reasoning traps, and the
-ask-don't-decide-silently rule. Read that file before deciding.
+Read `references/when-to-crystallize.md` if you haven't yet for detailed guidelines.
 
-Short version:
+Summary:
 
 1. The work was a single cohesive unit (not a mixed-bag turn that happened to
-   touch many files).
+   touch many files or make many web requests or other tool uses).
 2. **Re-run test**: if the user asked you to do this again with different
    inputs, much of the process would be recognizably the same -- same
    sources, same steps, same criteria, just different data. Judgement steps
    in the middle of a flow are fine; they live in SKILL.md as prose
    instructions.
-3. You expect this task (or one like it) to recur.
+3. You expect this task (or one like it) to recur, either because the user suggested it might or because it seems like a useful task to repeat.
 
 A skill is a SKILL.md (process recipe) plus optional scripts for the
 deterministic steps. Judgement steps live in SKILL.md as prose and are
@@ -41,10 +37,8 @@ scriptability before crystallizing.
 
 **Default to asking the user**, not to deciding silently. If you can name
 any plausible skill shape, propose it to the user and let them decide.
-Only decline outright if the work had no stable process across
-hypothetical re-runs. Models have a documented bias toward wrongly
-declining -- if you feel skeptical, that's often the bias, not a true
-signal.
+Only decline outright if the work truly has no stable process across
+hypothetical re-runs.
 
 **You don't have to crystallize the entire turn.** Look for reusable
 sub-processes within the work. If you learned how to do something --
@@ -83,7 +77,7 @@ if command -v tk >/dev/null 2>&1; then
 fi
 ```
 
-If `tk` is not on PATH (older containers), skip tracking; the rest of the
+If `tk` is not on PATH, skip tracking; the rest of the
 skill is unaffected.
 
 ## Step 2: Extract the just-finished turn

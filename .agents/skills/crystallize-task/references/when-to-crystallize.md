@@ -59,21 +59,13 @@ itself, by following the SKILL.md's instructions for it.
 Do not require end-to-end scriptability before crystallizing. What
 matters is whether the *process* is stable across runs.
 
-## Reasoning traps (known model biases)
+## Reasoning traps
 
-You have a documented bias toward wrongly declining. Before you decline,
-check whether your reasoning matches any of these:
+Before you decline, check whether your reasoning matches any of these:
 
-- **"This was one-off."** Many user tasks recur daily or weekly for
-  weeks (apartment/job search, price monitoring, periodic reports, inbox
-  triage, status checks). The first turn does the judgement-heavy setup;
-  later turns repeat the same process with new data. If the task could
-  plausibly recur, recurrence holds.
-- **"The websites/tools change too fast."** Most non-tech-company sites
-  (landlords, universities, government, retailers) change on ~yearly
-  cycles. Aggregators and URL-param APIs are stable on multi-year
-  scales. Fragility is manageable via `heal-skill` when the skill is
-  used often.
+- **"This was one-off."** This turn may have involved one-off work (e.g. identifying data sources); that does not mean that the whole task was one-off. Consider the output that you generated - is it possible the user may want this output regenerated based on updated data or using different parameter values?
+- **"The data sources change too fast."** Fragility is manageable via `heal-skill` when the skill is
+  used often. You can flag to the user if you think this is a serious concern, but it shouldn't by itself be a reason not to crystallize.
 - **"The hard part was judgement."** Setup judgement (which sites, which
   filters, which approach) is often a one-time cost paid during the
   first run. The crystallized skill captures the *post-setup* process.
@@ -96,6 +88,7 @@ check whether your reasoning matches any of these:
 - Work with no stable structure across hypothetical re-runs -- each
   re-run would require entirely different steps, not just different
   data.
+- If the user came to you with the task of planning out and implementing a complex code-based product already -- there's no need to muddy the water of the implementation by adding skills into the mix or duplicating work; just implement what the user is asking you to do.
 
 ## Skill-shape sanity checks
 
@@ -107,22 +100,3 @@ A good crystallization candidate usually has:
 - A stable process across runs, even if some steps are judgement.
 
 If three of four are present, name the shape and ask.
-
-## Worked example
-
-A user asks for help finding an apartment; you aggregate listings across
-several aggregator and landlord sites, filter by budget and amenities,
-and return a ranked shortlist.
-
-Re-run test:
-
-- Same sources hit each time -- identical process.
-- Same budget/amenity filter shape -- parameterized inputs.
-- Same dedupe and output-format logic -- identical process.
-- Reading individual listings to spot-check or apply soft constraints --
-  same recipe applied to different data.
-
-Every step's process is stable across runs; only the data varies. Strong
-candidate. The SKILL.md would describe steps 1 (fetch script), 2 (read
-listings and flag suspicious ones using these criteria -- prose), 3
-(format script). Ask the user.

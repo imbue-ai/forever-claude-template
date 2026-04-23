@@ -1,6 +1,6 @@
 ---
 name: update-skill-worker
-description: Extend an existing skill or split off a new sibling skill. Invoke when your task file asks you to fold additional deterministic processing into an existing skill (or create a sibling for it).
+description: Extend an existing skill or split off a new sibling skill. Invoke when your task file asks you to fold additional processing into an existing skill (or create a sibling for it).
 metadata:
   role: worker-sub-skill
 ---
@@ -152,10 +152,3 @@ processing was genuinely ad-hoc", end your turn with:
 > "No update needed. Reason: <one-sentence>."
 
 and stop. Do not commit a null change.
-
-## Gotchas
-
-- You run with `MNGR_AGENT_ROLE=worker` in the environment. The
-  crystallization Stop hook detects this and stays silent, so you will NOT
-  see a crystallization reminder after a heavy sub-turn. Don't try to
-  recursively crystallize work you do while updating this skill.

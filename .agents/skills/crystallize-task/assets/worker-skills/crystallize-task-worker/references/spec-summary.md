@@ -61,6 +61,9 @@ When you do include `run.py`, keep it as simple as the invariants allow
 -- default to a single entry point and one flow, and only add subcommands
 or subflows when a specific invariant demands the separation.
 
+If the process looks like: <deterministic steps> -> <nondeterministic judgments made by you> -> <deterministic steps>
+you can encode that as subcommands on `run.py` to do the deterministic sections as separate steps.
+
 - PEP 723 header with pinned inline deps:
   ```python
   # /// script
