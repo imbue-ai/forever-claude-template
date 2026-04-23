@@ -36,6 +36,7 @@ Only after doing all of the above should you begin writing code.
 # Important commands and conventions:
 
 - Never run `uv sync`, always run `uv sync --all-packages` instead
+- For browser automation, Playwright's Python API is available in the root venv with Chromium preinstalled -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`.
 
 # Always remember these guidelines:
 
@@ -141,30 +142,39 @@ Use your judgment on when to do work directly vs delegating. Delegation is usefu
 - Multi-file changes that benefit from verification before merging
 - Long-running operations you don't want to block on
 
-## Proxying worker gates
+## Proxying worker reports
 
 For `crystallize-task`, `heal-skill`, and `update-skill`, you are the
 default interface between the worker and the user. The user can view
 the worker's chat if they want, but they are not required to, so gate
 questions and status updates must go through you.
 
-- Workers emit gate/status messages inline in their response, prefixed
-  with `## GATE: <name>` or `## STATUS: <name>`. When `mngr wait`
-  notifies you, read the worker's latest assistant message, find the
-  last such header, and branch on it.
-- For `## GATE:` messages, decide whether to answer yourself or
+- Workers communicate via **report files**, not inline chat headers.
+  At each gate or terminal status, the worker writes
+  `runtime/<flow>/reports/report.md` (with YAML frontmatter `type:
+  gate|status` and `name: <marker>`) and `mngr push`es it to the path
+  you wrote into the task file's `## Reporting back` section. The
+  push is the ready signal; you poll for that file in the background
+  (`while [ ! -f ... ]; do sleep 5; done; cat ...`). No `mngr wait`,
+  no transcript parsing.
+- For `type: gate` reports, decide whether to answer yourself or
   escalate. Answer yourself for implementation details, codebase
-  conventions, naming, file layout, or anything you can determine from
-  reading files or applying the skill's own guidelines. Escalate to
-  the user (via `send-user-message`) for user intent, scope, subjective
-  preference, or domain knowledge you do not have. Gate 1 (outline)
-  and Gate 2 (final artifact) approvals generally escalate.
+  conventions, naming, file layout, or anything you can determine
+  from reading files or applying the skill's own guidelines. Escalate
+  to the user (via `send-user-message`) for user intent, scope,
+  subjective preference, or domain knowledge you do not have. Gate 1
+  (outline) and Gate 2 (final artifact) approvals generally escalate.
 - The worker is framed as talking to the user directly. When you
-  answer, phrase your reply as if you were the user and forward it via
-  `mngr message <worker> -m "..."`.
-- After forwarding, re-arm `mngr wait` in the background so the next
-  gate is caught.
-- Do not interrupt more recent user work to handle a worker
+  answer, phrase your reply as if you were the user and forward it
+  via `mngr message <worker> -m "..."`.
+- After forwarding, consume the report (`mv report.md consumed/...`)
+  so the poll path is clear, then re-arm the background poll so the
+  next report is caught.
+- For `type: status` reports (`done`, `stuck`, `no-update-needed`),
+  act once: merge the branch on `done`, open the failure flow on
+  `stuck`, or just close the ticket on `no-update-needed`. Stop
+  polling.
+- Do not interrupt more recent user work to handle a report
   notification. Finish whatever the user has asked for more recently
   first, then service the worker.
 

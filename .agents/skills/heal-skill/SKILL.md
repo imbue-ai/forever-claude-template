@@ -77,40 +77,53 @@ matching text content instead.
 
 ## Step 3: Write the task file
 
+The task file must include `LEAD_AGENT` and `LEAD_REPORT_DIR` lines.
+The worker uses these to push Gate 2 and terminal status reports back
+via `mngr push` (see Step 5 for how the lead consumes them).
+
 ```bash
-cat > /tmp/task-heal-$TARGET.md << 'TASK_EOF'
-# Task: heal the `$TARGET` skill
+cat > /tmp/task-heal-$TARGET.md << TASK_EOF
+# Task: heal the \`$TARGET\` skill
+
+## Reporting back
+LEAD_AGENT: $MNGR_AGENT_NAME
+LEAD_REPORT_DIR: runtime/heal/$TARGET/
 
 ## Incident
-The turn where `$TARGET` misbehaved is at
+The turn where \`$TARGET\` misbehaved is at
 runtime/heal/$TARGET/turn.jsonl.
 
 ## What the fixed skill must do
-<state the contract the healed skill must honor — what input shapes should
-work, what outputs are correct. Read the incident transcript for how it
-failed; here, describe only what success looks like.>
+<state the contract the healed skill must honor — what input shapes
+should work, what outputs are correct. Read the incident transcript
+for how it failed; here, describe only what success looks like.>
 
 ## What to do
-Use the `heal-skill-worker` sub-skill to replicate the problem, find
+Use the \`heal-skill-worker\` sub-skill to replicate the problem, find
 the root cause, apply a fix to the relevant part of
-`.agents/skills/$TARGET/` (SKILL.md prose, scripts, or both), re-run
+\`.agents/skills/$TARGET/\` (SKILL.md prose, scripts, or both), re-run
 fresh 2-3 scenarios against the fixed skill, and push through Gate 2
 (user approval of the final artifact). There is no outline gate for a
 heal.
 
-Emit gate questions and status updates inline in your response, using
-the headers the sub-skill defines (e.g. `## GATE: final-artifact`,
-`## STATUS: done`). Do NOT call `send-user-message` or any other
-channel skill for gates -- the user reads your response inline.
+When you reach Gate 2 or a terminal status, write a report file to
+\`runtime/heal/reports/report.md\` and push it to the lead per the
+sub-skill's reporting protocol. Do NOT emit \`## GATE:\` /
+\`## STATUS:\` headers in chat -- the lead reads the report file, not
+your transcript.
 
 ## Success criteria
 - The incident reproduces against the current skill before the fix.
 - The fix addresses the root cause (not a symptom workaround).
 - The fresh scenarios pass after the fix.
-- The user approves the final artifact (Gate 2).
-- Work is committed to the worker's branch (`mngr/heal-$TARGET`).
+- The user approves the final artifact (Gate 2, via a pushed report).
+- Work is committed to the worker's branch (\`mngr/heal-$TARGET\`).
 TASK_EOF
 ```
+
+The heredoc delimiter is unquoted so `$MNGR_AGENT_NAME` and `$TARGET`
+expand; shell metacharacters inside the body (`$`, backticks) are
+backslash-escaped so they land literal in the task file.
 
 ## Step 4: Launch the worker
 
@@ -138,30 +151,24 @@ why `mngr push` (not `mngr file put`) is the correct command.
 
 ## Step 5: Proxy Gate 2, then merge
 
-The user sees your chat, not the worker's. The user can view the
-worker's chat if they want to, but they are not required to -- so you
-drive the worker to completion by proxying its Gate 2 and any mid-flow
-questions.
-
-Follow the same proxy flow as
-`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5f).
-The capture-based WAITING guardrail in 5c (confirm the worker is
-actually at rest via `mngr capture` before reading the transcript)
-applies here too -- heal workers may also flip to WAITING transiently
-between sub-skill invocations.
+Follow the same file-based proxy flow as
+`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5e).
+Poll for `runtime/heal/$TARGET/report.md`; when it appears, parse the
+frontmatter and act.
 
 Substitutions:
 
 - Worker name: `heal-$TARGET`
 - Branch: `mngr/heal-$TARGET`
-- Transcript capture path: `/tmp/worker-heal-$TARGET-transcript.txt`
-- The only user-approval gate is `## GATE: final-artifact` (Gate 2).
-  There is no outline gate for a heal.
-- Terminal markers: `## STATUS: done` (merge), `## STATUS: stuck`
-  (failure-handling flow).
+- Poll path: `runtime/heal/$TARGET/report.md`
+- Consumed path: `runtime/heal/$TARGET/consumed/`
+- The only user-approval gate is `type: gate, name: final-artifact`
+  (Gate 2). There is no outline gate for a heal.
+- Terminal statuses: `type: status, name: done` (merge);
+  `type: status, name: stuck` (failure-handling flow).
 
 As a reminder: do not interrupt more recent user work to handle a
-worker notification. Answer implementation-detail questions yourself;
+report notification. Answer implementation-detail questions yourself;
 escalate Gate 2 approval to the user.
 
 On successful merge, close the tracking ticket:

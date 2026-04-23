@@ -27,6 +27,44 @@ the user's chance to veto the update-vs-split decision.
 Consult `../crystallize-task-worker/references/spec-summary.md` for the
 layout, frontmatter, validation helpers, and scenario template.
 
+## Reporting back to the lead
+
+At each gate (Stage 3 outline, Stage 8 final artifact) and at terminal
+status (done, stuck, or no-update-needed), communicate with the lead
+by writing `runtime/update/reports/report.md` and pushing it back.
+Do NOT emit `## GATE:` / `## STATUS:` headers in chat.
+
+**Inputs.** Your task file contains a `## Reporting back` section with
+`LEAD_AGENT: <name>` and `LEAD_REPORT_DIR: <path>`. Read both at the
+start of your run.
+
+**Procedure** at each gate/status:
+
+1. Write `runtime/update/reports/report.md` (create the directory if
+   missing):
+
+   ```
+   ---
+   type: gate | status
+   name: <outline-approval | final-artifact | done | stuck | no-update-needed>
+   ---
+
+   <body: the message the user needs to see>
+   ```
+
+2. Push:
+
+   ```bash
+   mngr push <LEAD_AGENT>:<LEAD_REPORT_DIR> \
+       --source runtime/update/reports/ \
+       --uncommitted-changes=merge
+   ```
+
+3. Stop your turn.
+
+The push is the ready signal -- only push once the report is fully
+written.
+
 ## Stage 1: Replicate
 
 1. Read the task file to learn which skill was used and what was missing.
@@ -75,12 +113,9 @@ Include:
 
 ### Gate 1: outline approval
 
-End your turn with a response that begins with this exact header on its
-own line, followed by the outline prose:
+Write a report with `type: gate`, `name: outline-approval`, and body:
 
 ```
-## GATE: outline-approval
-
 Proposed update:
 
 <paste outline, including the update-vs-split decision and reasoning>
@@ -88,10 +123,9 @@ Proposed update:
 Approve this outline? (yes / no with notes)
 ```
 
-Emit this inline -- do not use `send-user-message` or any other channel
-skill.
-
-Wait for the user's reply before coding.
+Push it and stop, per the reporting procedure at the top of this
+file. Wait for the user's reply (delivered via `mngr message`) before
+coding.
 
 ## Stage 4: Implement
 
@@ -136,12 +170,9 @@ Run `/autofix` on your commits. Fix anything the reviewer flags.
 
 ## Stage 8: Gate 2 -- final artifact
 
-End your turn with a response that begins with this exact header on its
-own line, followed by the summary prose:
+Write a report with `type: gate`, `name: final-artifact`, and body:
 
 ```
-## GATE: final-artifact
-
 <Updated | Created> `<name>`:
 - SKILL.md: <one-line summary of changes, or "unchanged">
 - Scripts: <one-line summary per changed/added script, or "unchanged" / "none">
@@ -150,31 +181,27 @@ own line, followed by the summary prose:
 Approve and save? (yes / no with notes)
 ```
 
-Emit this inline -- do not use `send-user-message` or any other channel
-skill.
-
-Wait for the user's reply.
+Push it and stop, per the reporting procedure at the top of this file.
 
 ## Stage 9: Commit and hand off
 
-Commit on your current branch. End your final response with this exact
-header on its own line, followed by the hand-off summary:
+Commit on your current branch. Then write a terminal report with
+`type: status`, `name: done`, and body:
 
 ```
-## STATUS: done
-
 Committed on branch `<branch-name>`. Ready to merge.
 ```
+
+Push it and stop.
 
 ## If you decide not to change anything
 
 If the right answer turns out to be "leave the skill alone; the extra
-processing was genuinely ad-hoc", end your turn with:
+processing was genuinely ad-hoc", write a terminal report with
+`type: status`, `name: no-update-needed`, and body:
 
 ```
-## STATUS: no-update-needed
-
 No update needed. Reason: <one-sentence>.
 ```
 
-and stop. Do not commit a null change.
+Push it and stop. Do not commit a null change.

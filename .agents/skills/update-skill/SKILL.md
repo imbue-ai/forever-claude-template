@@ -92,41 +92,55 @@ matching text content instead.
 ## Step 3: Write the task file
 
 Describe invariants and state constraints — what the updated skill must
-guarantee about its inputs and outputs. Do not enumerate subcommands, flow
-steps, or argparse surfaces; surface decisions belong to the worker.
+guarantee about its inputs and outputs. Do not enumerate subcommands,
+flow steps, or argparse surfaces; surface decisions belong to the
+worker.
+
+The task file must include `LEAD_AGENT` and `LEAD_REPORT_DIR` lines.
+The worker uses these to push gate and terminal status reports back
+via `mngr push` (see Step 5 for how the lead consumes them).
 
 ```bash
-cat > /tmp/task-update-$TARGET.md << 'TASK_EOF'
-# Task: update the `$TARGET` skill (or split a new one)
+cat > /tmp/task-update-$TARGET.md << TASK_EOF
+# Task: update the \`$TARGET\` skill (or split a new one)
+
+## Reporting back
+LEAD_AGENT: $MNGR_AGENT_NAME
+LEAD_REPORT_DIR: runtime/update/$TARGET/
 
 ## Incident
-The turn where `$TARGET` was invoked is at
+The turn where \`$TARGET\` was invoked is at
 runtime/update/$TARGET/turn.jsonl.
 
 ## What the updated skill must do
-<state the contract the updated skill must honor after this change — what
-inputs it should now accept, what outputs it should now produce. Read the
-incident transcript for what was done by hand; here, describe only the new
-contract.>
+<state the contract the updated skill must honor after this change —
+what inputs it should now accept, what outputs it should now produce.
+Read the incident transcript for what was done by hand; here, describe
+only the new contract.>
 
 ## What to do
-Use the `update-skill-worker` sub-skill to: replicate the incident,
-decide update-in-place vs. new-sibling-skill, run Gate 1 on the outline,
-implement, hand-craft 2-3 scenarios, run them, run Gate 2.
+Use the \`update-skill-worker\` sub-skill to: replicate the incident,
+decide update-in-place vs. new-sibling-skill, run Gate 1 on the
+outline, implement, hand-craft 2-3 scenarios, run them, run Gate 2.
 
-Emit gate questions and status updates inline in your response, using
-the headers the sub-skill defines (e.g. `## GATE: outline-approval`,
-`## GATE: final-artifact`, `## STATUS: done`). Do NOT call
-`send-user-message` or any other channel skill for gates -- the user
-reads your response inline.
+When you reach a gate or terminal status, write a report file to
+\`runtime/update/reports/report.md\` and push it to the lead per the
+sub-skill's reporting protocol. Do NOT emit \`## GATE:\` /
+\`## STATUS:\` headers in chat -- the lead reads the report file, not
+your transcript.
 
 ## Success criteria
 - The additional processing no longer needs to be done manually.
 - All scenarios pass.
-- User has approved outline (Gate 1) and final artifact (Gate 2).
-- Work is committed to the worker's branch (`mngr/update-$TARGET`).
+- User has approved outline (Gate 1) and final artifact (Gate 2), each
+  communicated via a pushed report file.
+- Work is committed to the worker's branch (\`mngr/update-$TARGET\`).
 TASK_EOF
 ```
+
+The heredoc delimiter is unquoted so `$MNGR_AGENT_NAME` and `$TARGET`
+expand; shell metacharacters inside the body (`$`, backticks) are
+backslash-escaped so they land literal in the task file.
 
 ## Step 4: Launch the worker
 
@@ -151,32 +165,28 @@ why `mngr push` (not `mngr file put`) is the correct command.
 
 ## Step 5: Proxy gates, then merge
 
-The user sees your chat, not the worker's. The user can view the
-worker's chat if they want to, but they are not required to -- so you
-drive the worker to completion by proxying its gates and any mid-flow
-questions.
-
-Follow the same proxy flow as
-`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5f).
-The capture-based WAITING guardrail in 5c (confirm the worker is
-actually at rest via `mngr capture` before reading the transcript)
-applies here too -- update workers may also flip to WAITING transiently
-between sub-skill invocations.
+Follow the same file-based proxy flow as
+`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5e).
+Poll for `runtime/update/$TARGET/report.md`; when it appears, parse
+the frontmatter and act.
 
 Substitutions:
 
 - Worker name: `update-$TARGET`
 - Branch: `mngr/update-$TARGET`
-- Transcript capture path: `/tmp/worker-update-$TARGET-transcript.txt`
-- User-approval gates: `## GATE: outline-approval` (Gate 1, where the
-  worker also presents the update-in-place vs. create-new-skill
-  decision) and `## GATE: final-artifact` (Gate 2).
-- Terminal markers: `## STATUS: done` (merge),
-  `## STATUS: no-update-needed` (no change — just close the ticket; no
-  merge), `## STATUS: stuck` (failure-handling flow).
+- Poll path: `runtime/update/$TARGET/report.md`
+- Consumed path: `runtime/update/$TARGET/consumed/`
+- User-approval gates: `type: gate, name: outline-approval` (Gate 1,
+  where the worker also presents the update-in-place vs.
+  create-new-skill decision) and `type: gate, name: final-artifact`
+  (Gate 2).
+- Terminal statuses: `type: status, name: done` (merge);
+  `type: status, name: no-update-needed` (no change — just close the
+  ticket; no merge); `type: status, name: stuck` (failure-handling
+  flow).
 
 As a reminder: do not interrupt more recent user work to handle a
-worker notification. Answer implementation-detail questions yourself;
+report notification. Answer implementation-detail questions yourself;
 escalate Gate 1 and Gate 2 approvals to the user.
 
 If the worker decided "create-new-skill", the new skill lands in its

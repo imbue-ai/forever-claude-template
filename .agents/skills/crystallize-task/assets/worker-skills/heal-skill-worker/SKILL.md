@@ -10,6 +10,43 @@ metadata:
 A crystallized or hand-authored skill misbehaved during a real turn; your
 job is to fix it.
 
+## Reporting back to the lead
+
+At Gate 2 and at terminal status (done or stuck), communicate with the
+lead by writing `runtime/heal/reports/report.md` and pushing it back.
+Do NOT emit `## GATE:` / `## STATUS:` headers in chat.
+
+**Inputs.** Your task file contains a `## Reporting back` section with
+`LEAD_AGENT: <name>` and `LEAD_REPORT_DIR: <path>`. Read both at the
+start of your run.
+
+**Procedure** at each gate/status:
+
+1. Write `runtime/heal/reports/report.md` (create the directory if
+   missing):
+
+   ```
+   ---
+   type: gate | status
+   name: <final-artifact | done | stuck>
+   ---
+
+   <body: the message the user needs to see>
+   ```
+
+2. Push:
+
+   ```bash
+   mngr push <LEAD_AGENT>:<LEAD_REPORT_DIR> \
+       --source runtime/heal/reports/ \
+       --uncommitted-changes=merge
+   ```
+
+3. Stop your turn.
+
+The push is the ready signal -- only push once the report is fully
+written.
+
 ## Stage 1: Replicate
 
 1. Read the task file to learn which skill failed and how.
@@ -61,12 +98,9 @@ Run `/autofix` on your commits. Fix anything the reviewer flags.
 
 ## Stage 6: Gate 2 -- approval
 
-End your turn with a response that begins with this exact header on its
-own line, followed by the summary prose:
+Write a report with `type: gate`, `name: final-artifact`, and body:
 
 ```
-## GATE: final-artifact
-
 Fixed `<skill-name>`:
 - Root cause: <one-sentence>
 - Change: <one-sentence>
@@ -75,33 +109,29 @@ Fixed `<skill-name>`:
 Approve the fix? (yes / no with notes)
 ```
 
-Emit this inline -- do not use `send-user-message` or any other channel
-skill.
-
-Wait for the user's reply.
+Push it and stop, per the reporting procedure at the top of this file.
 
 ## Stage 7: Commit and hand off
 
-Commit on your current branch. End your final response with this exact
-header on its own line, followed by the hand-off summary:
+Commit on your current branch. Then write a terminal report with
+`type: status`, `name: done`, and body:
 
 ```
-## STATUS: done
-
 Committed on branch `<branch-name>`. Ready to merge.
 ```
+
+Push it and stop.
 
 ## If you cannot fix it
 
 If the root cause is out of scope (e.g. upstream API change,
 environmental problem) or the right fix would change the skill's
-contract in ways the user should decide on, end your turn with:
+contract in ways the user should decide on, write a terminal report
+with `type: status`, `name: stuck`, and body:
 
 ```
-## STATUS: stuck
-
 I could not heal `<skill-name>` because: <reason>. Recommend: <next
 step, e.g. a create-new-skill update or manual investigation>.
 ```
 
-and stop.
+Push it and stop.
