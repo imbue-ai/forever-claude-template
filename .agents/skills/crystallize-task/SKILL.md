@@ -74,7 +74,8 @@ Otherwise send a one-line pre-gate question via the `send-user-message` skill:
 
 Wait for the user's reply. If no, stop here.
 
-Open a `tk` ticket so the lifecycle is visible after the turn ends:
+If the user said yes (or the skip rule above applied), open a `tk`
+ticket so the lifecycle is visible after the turn ends:
 
 ```bash
 if command -v tk >/dev/null 2>&1; then
