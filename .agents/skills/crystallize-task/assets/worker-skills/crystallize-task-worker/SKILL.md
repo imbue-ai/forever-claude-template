@@ -34,6 +34,12 @@ of your run and use `lead_agent` / `lead_report_dir` at every
 gate/status below. `transcript_path` is where Stage 1's replay
 transcript lives.
 
+#TODO: replace this inline prose with a typed helper (e.g.
+`scripts/parse_task_frontmatter.py`) that pins the frontmatter schema
+and returns the three fields as a dict. The arch review that landed
+with the YAML-frontmatter refactor flagged this as a drift-prevention
+win.
+
 **Procedure.** When you reach a gate or terminal status:
 
 1. Write `runtime/crystallize/reports/report.md` (create the directory
