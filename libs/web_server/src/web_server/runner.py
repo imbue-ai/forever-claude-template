@@ -4,7 +4,7 @@ Serves a single placeholder page so the "web" application slot in the
 desktop client has something meaningful to render out of the box.
 Registration with ``runtime/applications.toml`` is handled by the
 ``services.toml`` entry (via ``scripts/forward_port.py``) so the
-app-watcher writes the server_registered event to ``events/servers/events.jsonl``.
+app-watcher writes the service_registered event to ``events/services/events.jsonl``.
 """
 
 import os

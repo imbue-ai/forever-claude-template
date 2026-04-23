@@ -4,8 +4,18 @@
 [commands.create]
 connect = false
 ensure_clean = false
-pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "CLOUDFLARE_FORWARDING_URL", "LATCHKEY_GATEWAY"]
-env = ["IS_SANDBOX=1", "IS_AUTONOMOUS=1"]
+pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
+env = [
+    "IS_SANDBOX=1",
+    "IS_AUTONOMOUS=1",
+    # Lock Claude Code to the version pinned in agent_types.claude.version and the
+    # Dockerfile's CLAUDE_CODE_VERSION; disable the auto-updater + background
+    # feedback pings so the installed binary cannot silently drift. Tracks the
+    # FIXME on ClaudeAgentConfig.version in libs/mngr_claude/.../plugin.py.
+    "DISABLE_AUTOUPDATER=1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1",
+]
 worktree_base_folder = "/worktree/"
 disable_plugin = ["recursive", "ttyd"]
 yes = true
@@ -22,6 +32,10 @@ auto_dismiss_dialogs = true
 auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions"""
 settings_overrides = {model = "opus[1m]", fastMode = true}
+# Pin Claude Code to a specific version; the provisioning-time version check
+# refuses to start the agent if the installed binary diverges. Bump this in
+# sync with CLAUDE_CODE_VERSION in the Dockerfile.
+version = "2.1.116"
 
 # The "main" agent type -- inherits everything from claude
 [agent_types.main]
@@ -53,7 +67,8 @@ extra_window = [
     "bootstrap='uv run bootstrap'",
     "telegram='uv run telegram-bot'",
     "terminal='bash scripts/run_ttyd.sh'",
-    "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE'"
+    "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE'",
+    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && gh auth setup-git'"
 ]
 
 # template for dev mode (runs in-place on local provider)
@@ -81,7 +96,16 @@ idle_mode = "disabled"
 provider = "lima"
 target_path = "/code/"
 idle_mode = "disabled"
-start_arg = ["--cpus=2", "--memory=4GiB", "--disk=5GiB"]
+start_arg = ["--cpus=2", "--memory=4", "--disk=20"]
+extra_provision_command = [
+    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
+    "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
+    "curl -LsSf https://astral.sh/uv/install.sh | sh",
+    "ARCH=$(uname -m) && sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && sudo chmod +x /usr/local/bin/ttyd",
+    "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh",
+    "cd vendor/mngr/apps/minds_workspace_server/frontend && npm ci && npm run build",
+    "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install vendor/mngr/apps/minds_workspace_server --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
+]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]
