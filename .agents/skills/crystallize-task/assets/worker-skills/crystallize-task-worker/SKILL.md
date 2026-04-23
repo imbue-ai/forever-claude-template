@@ -202,11 +202,11 @@ Concretely:
 - Run it as part of Stage 4.
 
 This is strongly recommended -- skipping it is how parser regressions
-land. In the sf-apartment-search crystallization, seven follow-up
-autofix commits within the first day were for parser defects (a `jr`
-substring matching "major", a price ceiling silently capping
-user-specified budgets, a regex eating whitespace from next fields)
-that a single fixture-based test would have caught.
+land. Typical defects that only surface under a concrete input shape:
+a substring match that also matches an unintended token (e.g. `jr`
+matching inside "major"), a hardcoded numeric bound silently capping
+user-specified values, a regex eating whitespace from adjacent fields.
+A single fixture-based test catches all of these before they ship.
 
 ## Stage 5: Code review and architecture verification
 
