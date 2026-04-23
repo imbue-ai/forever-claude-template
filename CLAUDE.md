@@ -141,6 +141,35 @@ Use your judgment on when to do work directly vs delegating. Delegation is usefu
 - Multi-file changes that benefit from verification before merging
 - Long-running operations you don't want to block on
 
+## Proxying worker gates
+
+For `crystallize-task`, `heal-skill`, and `update-skill`, you are the
+default interface between the worker and the user. The user can view
+the worker's chat if they want, but they are not required to, so gate
+questions and status updates must go through you.
+
+- Workers emit gate/status messages inline in their response, prefixed
+  with `## GATE: <name>` or `## STATUS: <name>`. When `mngr wait`
+  notifies you, read the worker's latest assistant message, find the
+  last such header, and branch on it.
+- For `## GATE:` messages, decide whether to answer yourself or
+  escalate. Answer yourself for implementation details, codebase
+  conventions, naming, file layout, or anything you can determine from
+  reading files or applying the skill's own guidelines. Escalate to
+  the user (via `send-user-message`) for user intent, scope, subjective
+  preference, or domain knowledge you do not have. Gate 1 (outline)
+  and Gate 2 (final artifact) approvals generally escalate.
+- The worker is framed as talking to the user directly. When you
+  answer, phrase your reply as if you were the user and forward it via
+  `mngr message <worker> -m "..."`.
+- After forwarding, re-arm `mngr wait` in the background so the next
+  gate is caught.
+- Do not interrupt more recent user work to handle a worker
+  notification. Finish whatever the user has asked for more recently
+  first, then service the worker.
+
+Full flow details: see step 5 of `.agents/skills/crystallize-task/SKILL.md`.
+
 # Responding to events
 
 You can create a persistent background watcher using the `create-event-processor` skill if you would like to automatically respond to certain events (e.g. new messages, tickets, or specific times of day).

@@ -96,6 +96,11 @@ fresh 2-3 scenarios against the fixed skill, and push through Gate 2
 (user approval of the final artifact). There is no outline gate for a
 heal.
 
+Emit gate questions and status updates inline in your response, using
+the headers the sub-skill defines (e.g. `## GATE: final-artifact`,
+`## STATUS: done`). Do NOT call `send-user-message` or any other
+channel skill for gates -- the user reads your response inline.
+
 ## Success criteria
 - The incident reproduces against the current skill before the fix.
 - The fix addresses the root cause (not a symptom workaround).
@@ -116,21 +121,28 @@ mngr create heal-$TARGET -t crystallize-worker \
 The `crystallize-worker` template pre-installs `heal-skill-worker`
 alongside the other worker sub-skills.
 
-## Step 5: Wait for completion, then merge
+## Step 5: Proxy Gate 2, then merge
 
-The worker runs in its own agent with its own chat channel. The user will
-handle the Gate 2 approval directly with the worker -- you do not relay
-questions. Wait for DONE (or STOPPED) and then merge:
+The user sees your chat, not the worker's. The user can view the
+worker's chat if they want to, but they are not required to -- so you
+drive the worker to completion by proxying its Gate 2 and any mid-flow
+questions.
 
-```bash
-mngr wait heal-$TARGET DONE STOPPED &
-wait
-git fetch . mngr/heal-$TARGET:mngr/heal-$TARGET
-git merge --no-ff mngr/heal-$TARGET
-```
+Follow the same proxy flow as
+`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5f),
+with these substitutions:
 
-If the worker stopped without producing the expected commit, see
-`launch-task/references/worker-failure.md`.
+- Worker name: `heal-$TARGET`
+- Branch: `mngr/heal-$TARGET`
+- Transcript capture path: `/tmp/worker-heal-$TARGET-transcript.txt`
+- The only user-approval gate is `## GATE: final-artifact` (Gate 2).
+  There is no outline gate for a heal.
+- Terminal markers: `## STATUS: done` (merge), `## STATUS: stuck`
+  (failure-handling flow).
+
+As a reminder: do not interrupt more recent user work to handle a
+worker notification. Answer implementation-detail questions yourself;
+escalate Gate 2 approval to the user.
 
 On successful merge, close the tracking ticket:
 

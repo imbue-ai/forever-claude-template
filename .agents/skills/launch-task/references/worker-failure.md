@@ -15,6 +15,11 @@ where worker bugs get fixed.
   not implement what the task file asked for.
 - User rejected the worker's Gate 2 proposal and the worker stopped instead
   of iterating.
+- For crystallize / heal / update workers: the worker's final assistant
+  message begins with `## STATUS: stuck`, or terminated without any
+  `## STATUS: <name>` header at all. The first case is the worker
+  explicitly giving up (its prose names a reason); the second means the
+  worker died without following its contract.
 
 ## What to do
 

@@ -124,8 +124,10 @@ those decisions.>
 
 ## What to do
 Use the `crystallize-task-worker` sub-skill to drive the end-to-end build.
-The user will interact with you directly in your own chat channel for
-outline (Gate 1) and final-artifact (Gate 2) approval.
+Emit gate questions and status updates inline in your response, using
+the headers the sub-skill defines (e.g. `## GATE: outline-approval`,
+`## STATUS: done`). Do NOT call `send-user-message` or any other
+channel skill for gates -- the user reads your response inline.
 
 ## Worker sub-skills
 The `crystallize-task-worker`, `heal-skill-worker`, and
@@ -162,38 +164,101 @@ The `crystallize-worker` template (see `.mngr/settings.toml`) inherits from
 worker, and runs the bundled-sub-skill installer so the worker's
 `.agents/skills/` contains `crystallize-task-worker` et al.
 
-## Step 5: Monitor in background, then merge
+## Step 5: Proxy gates, then merge
 
-The worker runs in its own agent with its own chat channel. The user will
-handle gate approvals directly with the worker -- you do not relay
-questions. Your remaining job is to be notified when the worker finishes
-and then merge the branch.
+The user sees your chat, not the worker's. The user can view the worker's
+chat if they want to, but they are not required to -- so you are
+responsible for driving the worker to completion by proxying gate
+questions and status updates between it and the user.
+
+### 5a. Background the wait
 
 Start `mngr wait` in the background (using the Bash tool with
-`run_in_background: true`) so you can continue working. You will be
-notified when it completes -- do not block on it.
+`run_in_background: true`). You will be notified when the worker
+transitions to a terminal state or pauses at a gate -- do not block on
+it.
 
 ```bash
 # Run with Bash run_in_background: true
 mngr wait crystallize-$NAME DONE STOPPED WAITING --timeout 30m
 ```
 
-When notified that the wait completed, check the outcome and merge:
+### 5b. Do not interrupt more recent user work
+
+If the user has given you a more recent task since the worker was
+launched, finish that task before acting on the worker's notification.
+The notification is informational; act on it once the user's current
+request is complete. Do not abandon in-flight work to service a worker
+gate.
+
+### 5c. On notification, read the worker's latest message
+
+When the wait completes, capture the worker's latest assistant message:
 
 ```bash
-# Check what happened
-mngr transcript crystallize-$NAME --role=assistant | tail -n 20
+mngr transcript crystallize-$NAME --role=assistant \
+    > /tmp/worker-crystallize-$NAME-transcript.txt
+```
 
-# If successful, merge the branch
+Read the file and locate the last line starting with `## GATE: <name>`
+or `## STATUS: <name>`. The message body is everything from that header
+to the end of the transcript.
+
+If there is no such header, treat it as a failure (see step 5f).
+
+### 5d. On `## GATE: <name>`: decide, forward, re-arm
+
+Read the gate body. Decide whether to answer it yourself or escalate to
+the user:
+
+- **Answer yourself** when the question is about implementation details
+  the worker could not decide on its own: script structure, argparse
+  surface, naming conventions, which utility to reuse, file layout,
+  agentskills.io compliance, or anything you can determine from reading
+  files or applying the guidelines in
+  `.agents/skills/crystallize-task/` and its references.
+- **Escalate to the user** when the question turns on user intent (does
+  this outline match what you wanted?), scope (should the skill also
+  do X?), subjective preference, or domain knowledge you do not have.
+  `## GATE: outline-approval` and `## GATE: final-artifact` generally
+  escalate.
+- **Mix**: if a gate bundles approval (escalate) with pure
+  implementation sub-questions (answer yourself), you may pre-answer the
+  sub-questions in the message you forward to the user so they do not
+  have to weigh in on them.
+
+The worker is framed as addressing the user directly. When you answer,
+write your reply in the user's voice and forward it:
+
+```bash
+mngr message crystallize-$NAME -m "<reply, in the user's voice>"
+```
+
+To escalate, use `send-user-message` to ask the user on your own
+channel, wait for their reply, then forward it (verbatim or lightly
+massaged) via `mngr message`.
+
+After forwarding, re-arm the wait in the background so the next gate or
+terminal status is caught:
+
+```bash
+# Run with Bash run_in_background: true
+mngr wait crystallize-$NAME DONE STOPPED WAITING --timeout 30m
+```
+
+### 5e. On `## STATUS: done`: merge
+
+Merge the worker's branch:
+
+```bash
 git fetch . mngr/crystallize-$NAME:mngr/crystallize-$NAME
 git merge --no-ff mngr/crystallize-$NAME
 ```
 
-If the merge conflicts, resolve manually. If the worker stopped without
-producing the expected commit, see `launch-task/references/worker-failure.md`.
+If the merge conflicts, resolve manually.
 
-On successful merge, close the tracking ticket and optionally destroy the
-worker:
+On successful merge, close the tracking ticket and optionally destroy
+the worker:
 
 ```bash
 if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
@@ -201,6 +266,13 @@ if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
 fi
 # optional: echo "y" | mngr destroy crystallize-$NAME --force
 ```
+
+### 5f. On `## STATUS: stuck`, no marker, or other terminal failure
+
+Follow `launch-task/references/worker-failure.md`: capture the
+transcript for the user, tell the user what happened and where the
+evidence lives (branch name, transcript command), and leave the
+worker's branch and tmux session intact.
 
 ## Guidelines
 

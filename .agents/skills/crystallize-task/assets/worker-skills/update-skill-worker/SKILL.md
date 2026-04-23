@@ -75,13 +75,21 @@ Include:
 
 ### Gate 1: outline approval
 
-End your turn with:
+End your turn with a response that begins with this exact header on its
+own line, followed by the outline prose:
 
-> "Proposed update:
->
-> <paste outline, including the update-vs-split decision and reasoning>
->
-> Approve this outline? (yes / no with notes)"
+```
+## GATE: outline-approval
+
+Proposed update:
+
+<paste outline, including the update-vs-split decision and reasoning>
+
+Approve this outline? (yes / no with notes)
+```
+
+Emit this inline -- do not use `send-user-message` or any other channel
+skill.
 
 Wait for the user's reply before coding.
 
@@ -128,27 +136,45 @@ Run `/autofix` on your commits. Fix anything the reviewer flags.
 
 ## Stage 8: Gate 2 -- final artifact
 
-End your turn with:
+End your turn with a response that begins with this exact header on its
+own line, followed by the summary prose:
 
-> "<Updated | Created> `<name>`:
-> - SKILL.md: <one-line summary of changes, or "unchanged">
-> - Scripts: <one-line summary per changed/added script, or "unchanged" / "none">
-> - Scenarios run: <list, all pass>
->
-> Approve and save? (yes / no with notes)"
+```
+## GATE: final-artifact
+
+<Updated | Created> `<name>`:
+- SKILL.md: <one-line summary of changes, or "unchanged">
+- Scripts: <one-line summary per changed/added script, or "unchanged" / "none">
+- Scenarios run: <list, all pass>
+
+Approve and save? (yes / no with notes)
+```
+
+Emit this inline -- do not use `send-user-message` or any other channel
+skill.
 
 Wait for the user's reply.
 
 ## Stage 9: Commit and hand off
 
-Commit on your current branch. In your final response, state the branch
-name so the caller knows what to merge.
+Commit on your current branch. End your final response with this exact
+header on its own line, followed by the hand-off summary:
+
+```
+## STATUS: done
+
+Committed on branch `<branch-name>`. Ready to merge.
+```
 
 ## If you decide not to change anything
 
 If the right answer turns out to be "leave the skill alone; the extra
 processing was genuinely ad-hoc", end your turn with:
 
-> "No update needed. Reason: <one-sentence>."
+```
+## STATUS: no-update-needed
+
+No update needed. Reason: <one-sentence>.
+```
 
 and stop. Do not commit a null change.

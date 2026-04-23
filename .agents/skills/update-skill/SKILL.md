@@ -112,6 +112,12 @@ Use the `update-skill-worker` sub-skill to: replicate the incident,
 decide update-in-place vs. new-sibling-skill, run Gate 1 on the outline,
 implement, hand-craft 2-3 scenarios, run them, run Gate 2.
 
+Emit gate questions and status updates inline in your response, using
+the headers the sub-skill defines (e.g. `## GATE: outline-approval`,
+`## GATE: final-artifact`, `## STATUS: done`). Do NOT call
+`send-user-message` or any other channel skill for gates -- the user
+reads your response inline.
+
 ## Success criteria
 - The additional processing no longer needs to be done manually.
 - All scenarios pass.
@@ -128,25 +134,33 @@ mngr create update-$TARGET -t crystallize-worker \
     --message-file /tmp/task-update-$TARGET.md
 ```
 
-## Step 5: Wait for completion, then merge
+## Step 5: Proxy gates, then merge
 
-The worker runs in its own agent with its own chat channel. The user will
-handle both gate approvals (outline + final artifact) directly with the
-worker -- you do not relay questions. Wait for DONE (or STOPPED) and then
-merge:
+The user sees your chat, not the worker's. The user can view the
+worker's chat if they want to, but they are not required to -- so you
+drive the worker to completion by proxying its gates and any mid-flow
+questions.
 
-```bash
-mngr wait update-$TARGET DONE STOPPED &
-wait
-git fetch . mngr/update-$TARGET:mngr/update-$TARGET
-git merge --no-ff mngr/update-$TARGET
-```
+Follow the same proxy flow as
+`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5f),
+with these substitutions:
 
-If the worker stopped without producing the expected commit, see
-`launch-task/references/worker-failure.md`.
+- Worker name: `update-$TARGET`
+- Branch: `mngr/update-$TARGET`
+- Transcript capture path: `/tmp/worker-update-$TARGET-transcript.txt`
+- User-approval gates: `## GATE: outline-approval` (Gate 1, where the
+  worker also presents the update-in-place vs. create-new-skill
+  decision) and `## GATE: final-artifact` (Gate 2).
+- Terminal markers: `## STATUS: done` (merge),
+  `## STATUS: no-update-needed` (no change — just close the ticket; no
+  merge), `## STATUS: stuck` (failure-handling flow).
 
-If the worker decided "create-new-skill", the new skill lands in its own
-directory; the old skill is unchanged.
+As a reminder: do not interrupt more recent user work to handle a
+worker notification. Answer implementation-detail questions yourself;
+escalate Gate 1 and Gate 2 approvals to the user.
+
+If the worker decided "create-new-skill", the new skill lands in its
+own directory; the old skill is unchanged.
 
 On successful merge, close the tracking ticket:
 
