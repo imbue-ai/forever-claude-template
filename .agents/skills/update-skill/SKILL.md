@@ -177,8 +177,8 @@ why `mngr push` (not `mngr file put`) is the correct command.
 
 Follow the same file-based proxy flow as
 `.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5e).
-Poll for `runtime/update/$TARGET/report.md`; when it appears, parse
-the frontmatter and act.
+Poll for `runtime/update/$TARGET/reports/report.md`; when it appears,
+parse the frontmatter and act.
 
 Substitutions:
 
