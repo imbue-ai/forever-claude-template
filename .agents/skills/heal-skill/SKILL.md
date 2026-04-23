@@ -8,11 +8,15 @@ description: Fix a crystallized or hand-authored skill that errored or delivered
 Use this skill when an existing skill in `.agents/skills/` should have
 delivered the correct result but did not. Typical triggers:
 
-- `scripts/run.py` raised an exception or returned a non-zero exit.
-- The script ran to completion but produced output that did not satisfy the
-  user's request, forcing you to patch around it.
-- A missing capability in the script prevented it from handling a realistic
-  input shape.
+- A script under `scripts/` raised an exception or returned a non-zero
+  exit.
+- The skill's scripts ran to completion but produced output that did not
+  satisfy the user's request, forcing you to patch around it.
+- The SKILL.md prose instructions were ambiguous, incomplete, or wrong,
+  causing you (as the agent using the skill) to take the wrong action on
+  a realistic input.
+- A missing step or capability in the skill -- script or prose --
+  prevented it from handling a realistic input shape.
 
 **Principle.** Reliability is the floor; simplicity is the target. Default to
 a single entry point and one flow. Add surface only when a specific invariant
@@ -86,10 +90,11 @@ failed; here, describe only what success looks like.>
 
 ## What to do
 Use the `heal-skill-worker` sub-skill to replicate the problem, find
-the root cause, apply a fix to `.agents/skills/$TARGET/scripts/run.py`
-and/or `.agents/skills/$TARGET/SKILL.md`, re-run fresh 2-3 scenarios
-against the fixed script, and push through Gate 2 (user approval of the
-final artifact). There is no outline gate for a heal.
+the root cause, apply a fix to the relevant part of
+`.agents/skills/$TARGET/` (SKILL.md prose, scripts, or both), re-run
+fresh 2-3 scenarios against the fixed skill, and push through Gate 2
+(user approval of the final artifact). There is no outline gate for a
+heal.
 
 ## Success criteria
 - The incident reproduces against the current skill before the fix.
