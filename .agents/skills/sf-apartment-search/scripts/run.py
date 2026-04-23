@@ -209,10 +209,13 @@ def parse_price_range(text: str) -> tuple[int, int] | None:
     return min(nums), max(nums)
 
 
+_JR_TOKEN_RE = re.compile(r"\b(?:jr|junior)\b")
+
+
 def extract_bed_count(text: str) -> tuple[int, bool]:
     """Return (min_bed_count, is_studio). Studio counts as 0."""
     t = text.lower()
-    is_studio = "studio" in t or "jr" in t
+    is_studio = "studio" in t or bool(_JR_TOKEN_RE.search(t))
     m = re.search(r"(\d+)\s*(?:bed|br|bd)", t)
     if m:
         return int(m.group(1)), is_studio
