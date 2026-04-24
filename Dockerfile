@@ -86,7 +86,7 @@ RUN mkdir -p /root/.ssh && \
 # LATCHKEY_GATEWAY URL is injected at `mngr create` time by the outside
 # caller (see .mngr/settings.toml's pass_env), so we do not hardcode it here.
 #
-ARG LATCHKEY_VERSION=2.7.1
+ARG LATCHKEY_VERSION=2.7.2
 RUN npm install -g "latchkey@${LATCHKEY_VERSION}"
 
 # install python dependencies
