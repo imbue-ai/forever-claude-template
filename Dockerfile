@@ -116,12 +116,8 @@ RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     --path vendor/mngr/libs/mngr_claude \
     --path vendor/mngr/libs/mngr_wait
 
-# Sync the workspace venv. Chromium + system libs were already installed above
-# against PLAYWRIGHT_VERSION, so `playwright install` here is a cache hit when
-# the pyproject.toml version matches (and a re-download otherwise, which is
-# the intended failure mode if the two drift).
-RUN uv sync --all-packages \
-    && uv run playwright install chromium
+# Sync the workspace venv
+RUN uv sync --all-packages
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.
