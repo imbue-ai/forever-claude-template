@@ -1,7 +1,7 @@
 """Tests for ``validate_skill.py``.
 
 Run via: ``uv run pytest
-.agents/skills/crystallize-task/assets/worker-skills/crystallize-task-worker/scripts/validate_skill_test.py``
+.agents/shared/scripts/validate_skill_test.py``
 """
 
 from __future__ import annotations

@@ -57,31 +57,19 @@ fi
 
 ## Step 2: Capture the incident transcript
 
+See `.agents/shared/references/lead-proxy.md` for the `extract_turn.py`
+invocation contract.
+
 ```bash
-uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
+uv run .agents/shared/scripts/extract_turn.py \
     --nth 1 \
     --output runtime/heal/$TARGET/turn.jsonl
 ```
 
-The helper auto-discovers the current session transcript via (in order)
-`$CLAUDE_TRANSCRIPT_PATH` (set inside hooks), `$MNGR_CLAUDE_SESSION_ID`,
-or `$MNGR_AGENT_STATE_DIR/claude_session_id` (the on-disk session id
-file, which is always present inside a standard mngr agent).
-
-`--nth 1` selects the *previous* human turn -- the one where the skill
-misbehaved. `--nth 0` (the default) would select the current heal-skill
-invocation turn itself, which is not the incident you need to replay.
-
-If counting turns does not line up cleanly (e.g. sub-agent interleaving),
-use `--start-marker TEXT` and optionally `--end-marker TEXT` to slice by
-matching text content instead.
-
 ## Step 3: Write the task file
 
-The task file's YAML frontmatter carries `lead_agent` and
-`lead_report_dir` (used by the worker to push Gate 2 and terminal
-status reports back to the lead via `mngr push` — see Step 5) and
-`transcript_path` (where the worker reads the incident transcript).
+The task file's YAML frontmatter follows the schema in
+`.agents/shared/references/worker-reporting.md`.
 
 ```bash
 mkdir -p runtime/heal/$TARGET
@@ -147,10 +135,10 @@ mngr create heal-$TARGET -t crystallize-worker \
 The `crystallize-worker` template pre-installs `heal-skill-worker`
 alongside the other worker sub-skills.
 
-Then push the runtime dir (task file + transcript) into the worker's
-worktree -- the worker cannot read files that live only in the
-lead's worktree, and its `parse_task_frontmatter.py` helper needs
-`task.md` on disk to validate the schema:
+Push the runtime dir (task file + transcript) into the worker's worktree
+-- see `.agents/shared/references/lead-proxy.md` § "mngr push rationale"
+for why the directory form and `--uncommitted-changes=merge` are
+required:
 
 ```bash
 mngr push heal-$TARGET:runtime/heal/$TARGET/ \
@@ -158,18 +146,13 @@ mngr push heal-$TARGET:runtime/heal/$TARGET/ \
     --uncommitted-changes=merge
 ```
 
-See `.agents/skills/crystallize-task/SKILL.md` Step 4 for the rationale
-behind the directory form, the `--uncommitted-changes=merge` flag, and
-why `mngr push` (not `mngr file put`) is the correct command.
-
 ## Step 5: Proxy Gate 2, then merge
 
-Follow the same file-based proxy flow as
-`.agents/skills/crystallize-task/SKILL.md` step 5 (subsections 5a-5e).
-Poll for `runtime/heal/$TARGET/reports/report.md`; when it appears,
-parse the frontmatter and act.
+Follow `.agents/shared/references/lead-proxy.md` for polling, gate
+decisions, the "do not interrupt more recent user work" rule, and
+terminal-status handling.
 
-Substitutions:
+Flow-specific substitutions:
 
 - Worker name: `heal-$TARGET`
 - Branch: `mngr/heal-$TARGET`
@@ -179,10 +162,6 @@ Substitutions:
   (Gate 2). There is no outline gate for a heal.
 - Terminal statuses: `type: status, name: done` (merge);
   `type: status, name: stuck` (failure-handling flow).
-
-As a reminder: do not interrupt more recent user work to handle a
-report notification. Answer implementation-detail questions yourself;
-escalate Gate 2 approval to the user.
 
 On successful merge, close the tracking ticket:
 

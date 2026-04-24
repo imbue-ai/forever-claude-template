@@ -92,25 +92,14 @@ skill is unaffected.
 
 ## Step 2: Extract the just-finished turn
 
+See `.agents/shared/references/lead-proxy.md` for the `extract_turn.py`
+invocation contract.
+
 ```bash
-uv run .agents/skills/crystallize-task/scripts/extract_turn.py \
+uv run .agents/shared/scripts/extract_turn.py \
     --nth 1 \
     --output runtime/crystallize/$NAME/turn.jsonl
 ```
-
-The helper auto-discovers the current session transcript via (in order)
-`$CLAUDE_TRANSCRIPT_PATH` (set inside hooks), `$MNGR_CLAUDE_SESSION_ID`,
-or `$MNGR_AGENT_STATE_DIR/claude_session_id` (the on-disk session id
-file, which is always present inside a standard mngr agent). Do not pass
-`--transcript` unless you have a specific file to replay.
-
-`--nth 1` selects the *previous* human turn -- the one the user wants
-crystallized. `--nth 0` (the default) would select the current
-crystallize-task invocation turn itself, which is not what you want.
-
-If counting turns does not line up cleanly (e.g. sub-agent interleaving),
-use `--start-marker TEXT` and optionally `--end-marker TEXT` to slice by
-matching text content instead.
 
 ## Step 3: Write the task file
 
@@ -118,10 +107,9 @@ Describe invariants and state constraints — what must be true about the
 skill's inputs and outputs. Do not enumerate subcommands, flow steps, or
 argparse surfaces; surface decisions belong to the worker.
 
-The task file's YAML frontmatter carries the infrastructure contract:
-`lead_agent` and `lead_report_dir` (used by the worker to push
-gate/status reports back to the lead via `mngr push` — see Step 5) and
-`transcript_path` (where the worker reads the replay transcript).
+The task file's YAML frontmatter follows the schema in
+`.agents/shared/references/worker-reporting.md` -- `lead_agent`,
+`lead_report_dir`, and `transcript_path`.
 
 ```bash
 mkdir -p runtime/crystallize/$NAME
@@ -193,15 +181,9 @@ mngr create crystallize-$NAME -t crystallize-worker \
     --message-file runtime/crystallize/$NAME/task.md
 ```
 
-The `crystallize-worker` template (see `.mngr/settings.toml`) inherits from
-`worker`, sets `MNGR_AGENT_ROLE=worker` so the Stop hook skips inside the
-worker, and runs the bundled-sub-skill installer so the worker's
-`.agents/skills/` contains `crystallize-task-worker` et al.
-
-Then push the runtime dir (task file + transcript) into the worker's
-worktree -- the worker cannot read files that live only in the lead's
-worktree, and its `parse_task_frontmatter.py` helper needs `task.md`
-on disk to validate the schema:
+Push the runtime dir (task file + transcript) into the worker's worktree --
+see `.agents/shared/references/lead-proxy.md` § "mngr push rationale" for
+why the directory form and `--uncommitted-changes=merge` are required:
 
 ```bash
 mngr push crystallize-$NAME:runtime/crystallize/$NAME/ \
@@ -209,149 +191,22 @@ mngr push crystallize-$NAME:runtime/crystallize/$NAME/ \
     --uncommitted-changes=merge
 ```
 
-Notes:
-- Use the directory form (trailing slash on both sides). Pushing a
-  single file via `--source .../turn.jsonl` fails: rsync interprets the
-  source as a directory and errors with `change_dir`.
-- `--uncommitted-changes=merge` is required. The worker's worktree has
-  uncommitted changes immediately after creation (the installed worker
-  sub-skills under `.agents/skills/`), so the default `fail` mode would
-  refuse the push.
-- There is no `mngr file put` subcommand -- `mngr push` is the
-  correct mechanism.
-
 ## Step 5: Proxy reports, then merge
 
-The user sees your chat, not the worker's. The user can view the
-worker's chat if they want to, but they are not required to -- so you
-drive the worker to completion by proxying its reports.
+Follow `.agents/shared/references/lead-proxy.md` for polling, gate
+decisions, the "do not interrupt more recent user work" rule, `mngr push`
+rationale, and terminal-status handling.
 
-The worker communicates with you via **report files**. Whenever it
-reaches a gate or terminal status it writes
-`runtime/crystallize/reports/report.md` on its side and `mngr push`es
-it back to
-`runtime/crystallize/$NAME/reports/report.md` on your side (a
-dedicated inbox subdirectory, kept separate from the inbound
-`turn.jsonl`). The push is the ready signal: it only happens once the
-worker is finished writing. You poll for that file; no `mngr wait`, no
-transcript parsing.
+Flow-specific substitutions:
 
-### 5a. Wait for the next report
-
-Start a background poll for `runtime/crystallize/$NAME/reports/report.md`.
-Bash's `run_in_background: true` gives you the notify-on-exit semantics
-for free -- the command returns (and you are notified) the instant the
-file appears.
-
-```bash
-# Run with Bash run_in_background: true
-timeout 30m bash -c '
-  while [ ! -f runtime/crystallize/'"$NAME"'/reports/report.md ]; do sleep 5; done
-  cat runtime/crystallize/'"$NAME"'/reports/report.md
-'
-```
-
-The tool output will be the report contents: YAML frontmatter (`type`,
-`name`) followed by a body. If the `timeout` trips without the file
-appearing, treat it as a terminal failure (step 5e).
-
-### 5b. Do not interrupt more recent user work
-
-If the user has given you a more recent task since the worker was
-launched, finish that task before acting on the report notification.
-The notification is informational; act on it once the user's current
-request is complete. Do not abandon in-flight work to service a worker
-report.
-
-### 5c. On notification, parse the report
-
-The Bash tool output contains the full report. Parse the frontmatter
-to get `type` (`gate` or `status`) and `name` (`outline-approval`,
-`final-artifact`, `done`, `stuck`, or skill-specific markers like
-`no-update-needed`). The body below the frontmatter is the message
-intended for the user.
-
-If the file contents do not parse (no frontmatter, unknown type,
-truncated), treat it as a terminal failure (step 5e).
-
-### 5d. On `type: gate`: decide, forward, consume, re-arm
-
-Decide whether to answer the gate yourself or escalate to the user:
-
-- **Answer yourself** when the question is about implementation
-  details the worker could not decide on its own: script structure,
-  argparse surface, naming conventions, which utility to reuse, file
-  layout, agentskills.io compliance, or anything you can determine
-  from reading files or applying the guidelines in
-  `.agents/skills/crystallize-task/` and its references.
-- **Escalate to the user** when the question turns on user intent,
-  scope, subjective preference, or domain knowledge you do not have.
-  `outline-approval` and `final-artifact` gates generally escalate.
-- **Mix**: if a gate bundles approval (escalate) with pure
-  implementation sub-questions (answer yourself), you may pre-answer
-  the sub-questions in the message you forward to the user so they do
-  not have to weigh in on them.
-
-The worker is framed as addressing the user directly. When you answer,
-write your reply in the user's voice and forward it via `mngr message`:
-
-```bash
-mngr message crystallize-$NAME -m "<reply, in the user's voice>"
-```
-
-To escalate, use `send-user-message` to ask the user on your own
-channel, wait for their reply, then forward it via `mngr message`.
-
-After forwarding, consume the report by moving it aside so the next
-push can land a fresh `report.md`:
-
-```bash
-mkdir -p runtime/crystallize/$NAME/reports/consumed
-mv runtime/crystallize/$NAME/reports/report.md \
-   runtime/crystallize/$NAME/reports/consumed/$(date +%s)-gate.md
-```
-
-Then re-arm the background poll (same command as 5a).
-
-### 5e. On `type: status`: act and stop polling
-
-- `name: done` -- merge the worker's branch:
-
-  ```bash
-  git fetch . mngr/crystallize-$NAME:mngr/crystallize-$NAME
-  git merge --no-ff mngr/crystallize-$NAME
-  ```
-
-  If the merge conflicts, resolve manually. On successful merge, close
-  the tracking ticket and optionally destroy the worker:
-
-  ```bash
-  if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
-      tk close "$TICKET_ID"
-  fi
-  # optional: echo "y" | mngr destroy crystallize-$NAME --force
-  ```
-
-- `name: stuck`, or the 30m `timeout` tripped without a report
-  arriving -- follow `launch-task/references/worker-failure.md`:
-  surface the report body (or the absence of one) to the user, point
-  at the branch and worker agent, and leave both intact for manual
-  inspection.
-
-- `name: no-update-needed` (or any skill-specific benign no-op
-  terminal) -- the worker decided there was nothing to do. Close the
-  tracking ticket and stop; do not merge, do not invoke the failure
-  flow. Optionally surface the one-sentence reason to the user so
-  they know the outcome.
-
-  ```bash
-  if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
-      tk close "$TICKET_ID"
-  fi
-  ```
-
-In all status cases, consume the report (move it to `consumed/`) so the
-directory is clean for future runs.
+- Worker name: `crystallize-$NAME`
+- Branch: `mngr/crystallize-$NAME`
+- Poll path: `runtime/crystallize/$NAME/reports/report.md`
+- Consumed path: `runtime/crystallize/$NAME/reports/consumed/`
+- User-approval gates: `type: gate, name: outline-approval` (Gate 1) and
+  `type: gate, name: final-artifact` (Gate 2).
+- Terminal statuses: `type: status, name: done` (merge);
+  `type: status, name: stuck` (failure-handling flow).
 
 ## Guidelines
 

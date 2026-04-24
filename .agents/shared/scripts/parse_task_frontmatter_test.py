@@ -1,7 +1,7 @@
 """Tests for ``parse_task_frontmatter.py``.
 
 Run via: ``uv run pytest
-.agents/skills/crystallize-task/assets/worker-skills/crystallize-task-worker/scripts/parse_task_frontmatter_test.py``
+.agents/shared/scripts/parse_task_frontmatter_test.py``
 """
 
 from __future__ import annotations

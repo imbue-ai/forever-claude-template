@@ -142,44 +142,6 @@ Use your judgment on when to do work directly vs delegating. Delegation is usefu
 - Multi-file changes that benefit from verification before merging
 - Long-running operations you don't want to block on
 
-## Proxying worker reports
-
-For `crystallize-task`, `heal-skill`, and `update-skill`, you are the
-default interface between the worker and the user. The user can view
-the worker's chat if they want, but they are not required to, so gate
-questions and status updates must go through you.
-
-- Workers communicate via **report files**.
-  At each gate or terminal status, the worker writes
-  `runtime/<flow>/reports/report.md` (with YAML frontmatter `type:
-  gate|status` and `name: <marker>`) and `mngr push`es it to the
-  destination you set in the task file's YAML frontmatter
-  (`lead_agent` + `lead_report_dir`). The push is the ready signal;
-  you poll for that file in the background (`while [ ! -f ... ]; do
-  sleep 5; done; cat ...`). No `mngr wait`, no transcript parsing.
-- For `type: gate` reports, decide whether to answer yourself or
-  escalate. Answer yourself for implementation details, codebase
-  conventions, naming, file layout, or anything you can determine
-  from reading files or applying the skill's own guidelines. Escalate
-  to the user (via `send-user-message`) for user intent, scope,
-  subjective preference, or domain knowledge you do not have. Gate 1
-  (outline) and Gate 2 (final artifact) approvals generally escalate.
-- The worker is framed as talking to the user directly. When you
-  answer, phrase your reply as if you were the user and forward it
-  via `mngr message <worker> -m "..."`.
-- After forwarding, consume the report (`mv report.md consumed/...`)
-  so the poll path is clear, then re-arm the background poll so the
-  next report is caught.
-- For `type: status` reports (`done`, `stuck`, `no-update-needed`),
-  act once: merge the branch on `done`, open the failure flow on
-  `stuck`, or just close the ticket on `no-update-needed`. Stop
-  polling.
-- Do not interrupt more recent user work to handle a report
-  notification. Finish whatever the user has asked for more recently
-  first, then service the worker.
-
-Full flow details: see step 5 of `.agents/skills/crystallize-task/SKILL.md`.
-
 # Responding to events
 
 You can create a persistent background watcher using the `create-event-processor` skill if you would like to automatically respond to certain events (e.g. new messages, tickets, or specific times of day).
@@ -202,26 +164,16 @@ The upstream is defined in `parent.toml`.
 
 # Using crystallized skills
 
-The skills under `.agents/skills/` fall into two buckets: hand-authored
-built-ins (e.g. `launch-task`, `send-telegram-message`) and *crystallized*
-skills produced by the crystallization lifecycle. Both are used the same
-way; the difference matters only for maintenance.
-
 - **Prefer an applicable skill over reinventing.** Skill descriptions are
   injected so you can match by purpose, not by name.
-- **After the Stop hook nudges you with a crystallization reminder**, decide
-  whether the turn was cohesive, likely to recur, and mostly deterministic.
-  If yes, invoke `crystallize-task`; otherwise acknowledge the reminder
-  briefly and move on. Do not crystallize judgement-heavy or one-off turns.
-- **If a skill you invoked errored or delivered a wrong result**, fulfil the
-  user's request by working around it, then at turn-end invoke `heal-skill`
-  with the incident context. Never try to patch the skill inline.
-- **After a successful skill use**, reflect: did you have to do additional
-  *deterministic* post-processing to fully satisfy the user? If yes, invoke
-  `update-skill` at turn-end so the skill absorbs the gap.
-- Heal and update are non-blocking follow-ups: the user's immediate request
-  has already been delivered. They spawn workers via the same flow as
-  `launch-task`, with a `crystallize-worker` template.
+- After a Stop-hook crystallization nudge: if the turn was cohesive, likely
+  to recur, and mostly deterministic, invoke `crystallize-task`. Otherwise
+  acknowledge and move on.
+- If a skill errored or delivered a wrong result: fulfil the user's request
+  by working around it, then at turn-end invoke `heal-skill`. Never patch
+  the skill inline.
+- After a successful skill use that still required manual post-processing:
+  invoke `update-skill` at turn-end so the skill absorbs the gap.
 
 # Memory
 

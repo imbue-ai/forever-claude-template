@@ -143,17 +143,16 @@ agent_args = [
 # Crystallize-worker template: sub-agent for the crystallize-task / heal-skill /
 # update-skill flows. Inherits from `worker`, adds:
 #  - MNGR_AGENT_ROLE=worker so the crystallization Stop hook skips in-worker.
-#  - A pre-provision step that installs the bundled worker sub-skills from the
-#    main agent's staging directory into the worker's .agents/skills/ tree.
-# The staging directory is written by the main agent via
-# .agents/skills/crystallize-task/scripts/install_worker_skills.sh before
-# calling `mngr create -t crystallize-worker`.
+#  - A pre-provision step that installs the bundled worker sub-skills from
+#    each lifecycle skill's assets/worker/ directory into the worker's
+#    .agents/skills/ tree. The installer auto-discovers any parent skill
+#    under .agents/skills/ that has an assets/worker/ subdir.
 [create_templates.crystallize-worker]
 type = "worker"
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"]
 env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "MNGR_AGENT_ROLE=worker"]
 extra_provision_command = [
-    "bash .agents/skills/crystallize-task/scripts/install_worker_skills.sh .agents/skills",
+    "bash .agents/shared/scripts/install_worker_skills.sh .agents/skills",
 ]
 agent_args = [
     "--dangerously-skip-permissions",

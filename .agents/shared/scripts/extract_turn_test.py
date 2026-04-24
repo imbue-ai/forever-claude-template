@@ -1,6 +1,6 @@
 """Tests for ``resolve_transcript_path`` in ``extract_turn.py``.
 
-Run via: ``uv run pytest .agents/skills/crystallize-task/scripts/extract_turn_test.py``
+Run via: ``uv run pytest .agents/shared/scripts/extract_turn_test.py``
 """
 
 from __future__ import annotations

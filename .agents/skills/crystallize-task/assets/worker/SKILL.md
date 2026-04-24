@@ -21,69 +21,17 @@ you will use in Stage 4.
 
 ## Reporting back to the lead
 
-At each gate (Stage 2 outline, Stage 6 final artifact) and at the
-terminal status (Stage 7 done, or "stuck" / "give up" exits), you
-communicate with the lead agent by **writing a report file and pushing
-it back**. The lead polls for the pushed file and acts on it directly.
+Follow `.agents/shared/references/worker-reporting.md` for the report-file
+procedure and task-file frontmatter schema. Substitute:
 
-**Inputs.** Your task file has been synced to your worktree alongside
-`turn.jsonl` at `runtime/crystallize/*/task.md`. At the start of your
-run, validate its frontmatter and extract the three required fields
-with:
+- `<RUNTIME_REPORTS_DIR>` → `runtime/crystallize/reports/`
+- `<TASK_FILE_GLOB>` → `runtime/crystallize/*/task.md`
 
-```bash
-uv run .agents/skills/crystallize-task-worker/scripts/parse_task_frontmatter.py \
-    'runtime/crystallize/*/task.md'
-```
+Valid `name:` values for this worker:
 
-Quote the glob pattern so the shell passes the literal to the
-helper; the helper expands it internally and fails loudly if zero or
-more than one task file matches (each worker handles a single task
--- either condition means the runtime layout drifted). On success it
-prints three shell-evalable `KEY=value` lines on stdout
-(`LEAD_AGENT=`, `LEAD_REPORT_DIR=`, `TRANSCRIPT_PATH=`). It exits
-non-zero with a stderr message on any failure, including a missing
-or misspelled field or a non-string / empty value. Use `lead_agent`
-/ `lead_report_dir` at every gate/status below; `transcript_path`
-is where Stage 1's replay transcript lives.
-
-**Procedure.** When you reach a gate or terminal status:
-
-1. Write `runtime/crystallize/reports/report.md` (create the directory
-   if missing) with this exact shape:
-
-   ```
-   ---
-   type: gate | status
-   name: <outline-approval | final-artifact | done | stuck>
-   ---
-
-   <body: the message the user needs to see, addressing the user
-   directly -- e.g. the proposed outline for Gate 1, the summary +
-   approval prompt for Gate 2, the "committed on branch X" note for
-   done, the failure explanation for stuck>
-   ```
-
-2. Push the report directory to the lead:
-
-   ```bash
-   mngr push <lead_agent>:<lead_report_dir> \
-       --source runtime/crystallize/reports/ \
-       --uncommitted-changes=merge
-   ```
-
-   Substitute the actual values from your task file's frontmatter for
-   `<lead_agent>` and `<lead_report_dir>`. The trailing slashes matter
-   (rsync directory semantics). `--uncommitted-changes=merge` is
-   required because the lead's worktree usually has uncommitted local
-   state.
-
-3. Stop your turn. For gate reports, the lead will send the user's
-   reply via `mngr message` and you will resume; for terminal status
-   reports, the lead acts on the report and the run ends.
-
-The push is the ready signal -- it only happens once you are finished
-writing. Do not push a partial report.
+- Gates: `outline-approval` (Stage 2), `final-artifact` (Stage 6).
+- Terminal statuses: `done` (Stage 7), `stuck` (see "If you need to give up"
+  below).
 
 ## Stage 1: Replicate
 
@@ -129,8 +77,8 @@ Produce a short outline with:
 
 Write a report with `type: gate`, `name: outline-approval`, and a body
 that contains the outline plus an explicit "Approve this outline? (yes
-/ no with notes)" prompt. Push it and stop, per the reporting
-procedure at the top of this file.
+/ no with notes)" prompt. Push it and stop, per the reporting procedure
+above.
 
 Body template:
 
@@ -152,8 +100,8 @@ Follow the layout and frontmatter conventions in
 `references/spec-summary.md`. Then validate structurally:
 
 ```bash
-uv run .agents/skills/crystallize-task-worker/scripts/validate_skill_name.py <name>
-uv run .agents/skills/crystallize-task-worker/scripts/validate_skill.py .agents/skills/<name>
+uv run .agents/shared/scripts/validate_skill_name.py <name>
+uv run .agents/shared/scripts/validate_skill.py .agents/skills/<name>
 ```
 
 Both must print `ok` before moving on. If either fails, fix and rerun.
@@ -224,7 +172,7 @@ verdicts, not a report-then-verify-then-report-again pattern.
 
 Write a report with `type: gate`, `name: final-artifact`, and a body
 containing the built-artifact summary plus an approval prompt. Push it
-and stop, per the reporting procedure at the top of this file.
+and stop, per the reporting procedure above.
 
 Body template:
 
@@ -246,8 +194,7 @@ Commit on your current branch. Then write a terminal report with
 Committed on branch `<branch-name>`. Ready to merge.
 ```
 
-Push it (per the reporting procedure at the top of this file) and
-stop. The lead will merge the branch.
+Push it and stop. The lead will merge the branch.
 
 ## If you need to give up
 
