@@ -4,7 +4,7 @@
 [commands.create]
 connect = false
 ensure_clean = false
-pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL"]
+pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
 env = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
@@ -78,7 +78,7 @@ worktree_base_folder = "/tmp/mngr-worktrees/"
 extra_provision_command = [
     "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/minds_workspace_server && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
 ]
-pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR"]
+pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR", "LATCHKEY_GATEWAY"]
 
 # template for docker provider
 [create_templates.docker]

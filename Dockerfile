@@ -73,6 +73,22 @@ RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
+# Pre-seed github.com SSH host key so git operations don't block on
+# interactive host-key confirmation (e.g. when Claude Code installs
+# plugins from github:<owner>/<repo>).
+RUN mkdir -p /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts && \
+    chmod 600 /root/.ssh/known_hosts
+
+# Install latchkey (CLI for making authenticated HTTP calls to third-party
+# services). The agent runs it in gateway mode -- the per-agent
+# LATCHKEY_GATEWAY URL is injected at `mngr create` time by the outside
+# caller (see .mngr/settings.toml's pass_env), so we do not hardcode it here.
+#
+ARG LATCHKEY_VERSION=2.7.2
+RUN npm install -g "latchkey@${LATCHKEY_VERSION}"
+
 # install python dependencies
 RUN uv tool install "modal==${MODAL_VERSION}"
 
