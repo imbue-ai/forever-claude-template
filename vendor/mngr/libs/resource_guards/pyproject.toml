@@ -16,6 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
+    "pluggy>=1.5",
     "pytest>=9.0",
 ]
 
@@ -57,7 +58,6 @@ omit = [
   "test_*.py",
   "*/tests/*",
   "*/conftest.py",
-  "*/testing.py",
 ]
 
 [tool.inline-snapshot]
