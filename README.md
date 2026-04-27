@@ -35,7 +35,7 @@ mngr create my-workspace main -t local \
 
 The main agent can promote ad-hoc work into reusable deterministic skills, heal skills that fail, and extend skills that came up short. The user-invokable surface is three skills (main agent side):
 
-- `crystallize-task` - Turn the just-finished turn into a new skill. Triggered by a Stop-hook reminder when the turn used >=5 non-read tool calls (detection lives in `scripts/detect_crystallization_candidate.py`).
+- `crystallize-task` - Turn the just-finished turn into a new skill. Triggered by a Stop-hook reminder when the turn used >=8 non-read tool calls (detection lives in `scripts/detect_crystallization_candidate.py`).
 - `heal-skill` - Repair a skill that errored or produced wrong results.
 - `update-skill` - Extend a skill (or split off a new sibling) when post-processing revealed a gap.
 
