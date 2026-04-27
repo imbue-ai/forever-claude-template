@@ -28,16 +28,17 @@ from typing import Any
 
 
 def _load_transcript_parsing() -> Any:
-    """Load the shared transcript_parsing module from the crystallize-task skill.
+    """Load the shared transcript_parsing module from .agents/shared/scripts/.
 
-    The module lives under ``.agents/skills/crystallize-task/scripts/`` so the
-    PEP 723 worker script (``extract_turn.py``) can import it as a sibling.
-    From this top-level hook we load it via importlib because it is not on the
-    default import path.
+    The module lives under ``.agents/shared/scripts/`` so any worker script
+    (e.g. ``extract_turn.py``) can import it as a sibling and any top-level
+    hook can locate it at a fixed shared path. From this top-level hook we
+    load it via importlib because the directory is not on the default import
+    path.
     """
     workdir = os.environ.get("MNGR_AGENT_WORK_DIR")
     base = Path(workdir) if workdir else Path(__file__).resolve().parent.parent
-    module_path = base / ".agents" / "skills" / "crystallize-task" / "scripts" / "transcript_parsing.py"
+    module_path = base / ".agents" / "shared" / "scripts" / "transcript_parsing.py"
     spec = importlib.util.spec_from_file_location("transcript_parsing", module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load transcript_parsing from {module_path}")
