@@ -82,6 +82,14 @@ For `latchkey auth set`, include the exact command for the user to run.
 
 Wait for approval before any further work.
 
+When proposing the plan, note explicitly that anything written under
+`runtime/do-something-new/$SLUG/` is **temporary scratch** -- the
+polished skill produced by Step 6's `crystallize-task` handoff will
+replace it. If the user wants to keep using the capability after this
+turn (e.g. wiring it into a service or UI), have them depend on the
+eventual `.agents/skills/<name>/scripts/run.py` path; the runtime
+artifacts are not a stable contract.
+
 ## Step 4: Validate the core capability first
 
 Before any other work, validate the absolute minimum capability the task hinges
