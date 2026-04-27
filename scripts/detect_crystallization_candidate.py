@@ -73,8 +73,9 @@ REMINDER_MESSAGE: str = (
     "If yes or uncertain: read "
     "`.agents/skills/crystallize-task/references/when-to-crystallize.md`. "
     "That file "
-    "contains the decision criteria and common reasoning traps."
-    "If the task seems like a potential crystallization candidate, ask the user whether they"
+    "contains the decision criteria and common reasoning traps.\n"
+    "\n"
+    "If the task seems like a potential crystallization candidate, ask the user whether they "
     "expect to ever run it again; if so, you should crystallize it."
 )
 
