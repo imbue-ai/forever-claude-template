@@ -171,16 +171,42 @@ The upstream is defined in `parent.toml`.
 
 - **Prefer an applicable skill over reinventing.** Skill descriptions are
   injected so you can match by purpose, not by name.
-- If the user asks for something net-new, no existing skill applies, and it
-  will need research or experimentation: invoke `do-something-new`.
-- After a Stop-hook crystallization nudge: if the turn was cohesive, likely
-  to recur, and mostly deterministic, invoke `crystallize-task`. Otherwise
-  acknowledge and move on.
-- If a skill errored or delivered a wrong result: fulfil the user's request
-  by working around it, then at turn-end invoke `heal-skill`. Never patch
-  the skill inline.
-- After a successful skill use that still required manual post-processing:
-  invoke `update-skill` at turn-end so the skill absorbs the gap.
+
+- **Live first, ratify at turn-end via the worker pipeline.** All four
+  lifecycle skills (`do-something-new`, `crystallize-task`, `heal-skill`,
+  `update-skill`) follow the same shape: handle the user's immediate
+  request *live* in the current chat to keep the conversation interactive
+  and iterative; at turn-end, invoke the appropriate worker-backed skill
+  to formalize the work through validation, scenario testing, and proper
+  commits. If you find yourself committing a change to any
+  contract-bearing file (a skill, a hook script with a documented
+  contract, an invariant elsewhere) and stopping there, you've skipped
+  the ratify step. The live phase is necessary but not sufficient -- the
+  worker pipeline exists to add the rigor that's awkward to do
+  interactively.
+
+  Concrete cases:
+  - **Net-new task needing research / experimentation**: invoke
+    `do-something-new` to drive the live phase. It hands off to
+    `crystallize-task` at the end.
+  - **Stop-hook crystallization nudge** after a normal turn that turned
+    out to be cohesive, likely to recur, and mostly deterministic:
+    invoke `crystallize-task` to ratify the just-finished work.
+    Otherwise acknowledge and move on.
+  - **A skill errored or delivered a wrong result**: fulfil the user's
+    request live by working around the failure, then at turn-end invoke
+    `heal-skill`. Never patch the skill inline -- `heal-skill` is the
+    ratify path.
+  - **You and the user discussed and applied a change to an existing
+    skill**: edit live so the user can iterate, then at turn-end invoke
+    `update-skill` (verify flow). Direct Edit + commit skips the
+    ratification. (For non-skill contract-bearing files like hook
+    scripts or CLAUDE.md itself, no worker pipeline exists today --
+    apply the live phase carefully and add manual rigor at turn-end:
+    real test fixtures, end-to-end exercise of new code paths, etc.)
+  - **A skill use was successful but required manual post-processing**:
+    do the post-work live, then at turn-end invoke `update-skill`
+    (absorb flow) so the skill swallows the gap.
 
 # Memory
 
