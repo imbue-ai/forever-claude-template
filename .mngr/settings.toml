@@ -3,7 +3,11 @@
 # Default create command settings -- apply to all mngr create from this repo
 [commands.create]
 connect = false
-ensure_clean = false
+# ensure_clean is intentionally left at the default (true) so that
+# forgetting to commit vendor/mngr before creating pool hosts will
+# produce an error instead of silently deploying stale code.
+# Before creating pool hosts in dev mode, rsync the mngr code into
+# vendor/mngr/ and commit it.
 pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
 env = [
     "IS_SANDBOX=1",
