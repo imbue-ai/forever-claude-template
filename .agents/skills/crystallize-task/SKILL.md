@@ -144,6 +144,15 @@ and push it to the lead per the sub-skill's reporting protocol; the
 destination is given by `lead_agent` / `lead_report_dir` in
 frontmatter.
 
+## Data-capture guidance
+When the skill being built fetches data from external APIs, capture
+*all reasonable fields per record* in the calls you're already making,
+not just the fields the user displayed in the original turn. This keeps
+downstream consumers (e.g. an interface built later on top of the
+captured data) unconstrained. Pagination is a normal part of the
+workflow if the original ask requires it. Do NOT make extra
+un-asked-for API calls just to gather more data.
+
 ## Worker sub-skills
 The `crystallize-task-worker`, `heal-skill-worker`, and
 `update-skill-worker` skills have been pre-installed into your
@@ -160,6 +169,18 @@ The `crystallize-task-worker`, `heal-skill-worker`, and
 BODY_EOF
 } > runtime/crystallize/$NAME/task.md
 ```
+
+**Optional: source artifacts handoff.** If a calling skill (e.g.
+`/do-something-new`) handed you a directory of pre-existing artifacts
+(scripts, sample data) that the worker should have access to, include
+an extra line in the frontmatter heredoc:
+
+```
+source_artifacts_dir: runtime/<calling-skill>/<slug>/
+```
+
+Step 4 then pushes that directory to the worker alongside the standard
+crystallize runtime dir.
 
 The split-heredoc shape keeps variable expansion (`$MNGR_AGENT_NAME`,
 `$NAME`) contained to the small frontmatter block while the larger
@@ -188,6 +209,16 @@ why the directory form and `--uncommitted-changes=merge` are required:
 ```bash
 mngr push crystallize-$NAME:runtime/crystallize/$NAME/ \
     --source runtime/crystallize/$NAME/ \
+    --uncommitted-changes=merge
+```
+
+If you set `source_artifacts_dir: <dir>` in the task frontmatter (Step 3),
+also push that directory so the worker has the calling skill's scripts and
+sample data:
+
+```bash
+mngr push crystallize-$NAME:<dir>/ \
+    --source <dir>/ \
     --uncommitted-changes=merge
 ```
 

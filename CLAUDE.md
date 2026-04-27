@@ -40,6 +40,7 @@ Only after doing all of the above should you begin writing code.
 
 # Always remember these guidelines:
 
+- When the user is actively interacting with you, prioritize delivering a result they care about over technical polish. Technical refinement can happen in the background.
 - Never misrepresent your progress. It is far better to say "I made some progress but didn't finish" than to say "I finished" when you did not.
 - Always finish your response by reflecting on your work and identify any potential issues.
 - If I ask for something that seems misguided, flag that immediately. Then attempt to do whatever makes the most sense given the request, and in your final reflection, be sure to flag that you had to diverge from the request and explain why.
@@ -166,6 +167,8 @@ The upstream is defined in `parent.toml`.
 
 - **Prefer an applicable skill over reinventing.** Skill descriptions are
   injected so you can match by purpose, not by name.
+- If the user asks for something net-new, no existing skill applies, and it
+  will need research or experimentation: invoke `do-something-new`.
 - After a Stop-hook crystallization nudge: if the turn was cohesive, likely
   to recur, and mostly deterministic, invoke `crystallize-task`. Otherwise
   acknowledge and move on.
