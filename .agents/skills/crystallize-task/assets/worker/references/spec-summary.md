@@ -80,13 +80,13 @@ you can encode that as subcommands on `run.py` to do the deterministic sections 
 
 ## Validation
 
-Two helpers live in the `crystallize-task-worker` scripts directory (they are
-installed alongside any worker sub-skill by the crystallize-worker template):
+Two helpers live under `.agents/shared/scripts/` and are invoked via `uv run`:
 
-- `scripts/validate_skill_name.py <name>` -- checks the kebab-case rules.
-- `scripts/validate_skill.py <skill_dir>` -- checks SKILL.md frontmatter,
-  directory name match, description length, 500-line body limit, and PEP 723
-  run.py presence for crystallized skills.
+- `uv run .agents/shared/scripts/validate_skill_name.py <name>` -- checks the
+  kebab-case rules.
+- `uv run .agents/shared/scripts/validate_skill.py <skill_dir>` -- checks
+  SKILL.md frontmatter, directory name match, description length, 500-line
+  body limit, and PEP 723 run.py presence for crystallized skills.
 
 Both print `ok` and exit 0 on success; exit 1 with a clear error on failure.
 
