@@ -22,8 +22,26 @@ timeout 30m bash -c '
 ```
 
 The tool output is the report contents: YAML frontmatter (`type`, `name`) plus a
-body. If the timeout trips without the file appearing, treat it as a terminal
-failure (`.agents/skills/launch-task/references/worker-failure.md`).
+body. If the timeout trips without the file appearing, do *not* immediately
+treat it as a terminal failure -- see "Diagnose worker liveness" below.
+
+## Diagnose worker liveness before invoking failure flow
+
+If the timeout trips without a report appearing, the worker may still be
+alive and working. Long-running stages (autofix, verify-architecture, large
+implementations) can legitimately exceed 30 minutes on a healthy worker.
+Before invoking the failure flow, check the worker session:
+
+```bash
+tmux capture-pane -t minds-<WORKER_NAME>:claude -p -S -100 | tail -40
+```
+
+If the output shows ongoing tool use, an active spinner / "Running…" line,
+or recent timestamps within the last few minutes, the worker is alive --
+re-arm the poll with a longer timeout (e.g. `60m`) and continue. Only
+invoke the failure flow (`.agents/skills/launch-task/references/worker-failure.md`)
+if the session is dead, the agent is wedged on the same operation for an
+extended period, or output has been static.
 
 ## Do not interrupt more recent user work
 

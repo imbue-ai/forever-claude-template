@@ -118,21 +118,22 @@ background. Tell `crystallize-task` that the source artifacts directory is
 task frontmatter as `source_artifacts_dir` and its Step 4 pushes the directory
 to the worker, so the worker has the scripts and sample data you produced.
 
-Once crystallize is launched, end this skill with one of these messages:
+**The lead is still on the hook for the lead-proxy poll.** Kicking off
+`crystallize-task` is *not* fire-and-forget -- the lead must launch the
+background poll for worker reports (per `crystallize-task` Step 5 / 
+`.agents/shared/references/lead-proxy.md`) *concurrently with* the
+interface-design conversation. The poll is a `run_in_background: true` bash
+invocation; it does not block subsequent steps. Without it, Gate 1 / Gate 2
+reports never reach the user and the worker deadlocks waiting for approval.
 
-- If the user's original prompt named a desired interface (e.g. "web
-  dashboard", "Slack bot"):
+Once crystallize is launched and the lead-proxy poll is running in the
+background, transition the conversation toward interface design.
+Acknowledge that the worker is now formalizing the capability, then
+either follow up on the interface the user named in their original
+prompt (if they did) or ask how they'd like to interact with the thing.
 
-  > "Great, let me convert this into a robust reusable workflow. Let's talk
-  > more about the interface you asked for."
-
-- If they didn't:
-
-  > "Great, let me convert this into a robust reusable workflow. Let's talk
-  > about how you'd like to interact with this."
-
-The skill's responsibility ends here. Interface design happens in subsequent
-turns.
+The skill's responsibility ends here. Interface design happens in
+subsequent turns.
 
 ## Re-fetch while crystallize is running
 

@@ -47,6 +47,10 @@ Only after doing all of the above should you begin writing code.
 - During your final reflection, if you see a potentially better way to do something (e.g. by using an existing library or reusing existing code), flag that as a potential task for future improvement.
 - Never use emojis. Remove any emojis you see in the code or docs whenever you are modifying that code or those docs.
 - Be concise in your communications. Don't hype up your results, say "perfect!", or use emojis. Be serious and professional.
+- **Feedback systems start flexible.** When building anything that learns from user feedback, default to free-form text input plus an LLM judge in early stages -- do not prescribe binary thumbs, fixed schemas, or rigid taxonomies before you know what kind of feedback the user will actually give. The user may want to teach the system rules ("never surface this sender"), give qualitative explanations ("this was important because X"), or just tag with emoji -- you can't know upfront. Switch to a more structured pipeline later only if data volume or latency genuinely requires it.
+- **Default UI is web view.** When exposing a tool to the user, default to a web page. Don't enumerate options (CLI / telegram / status line / web) -- just propose the web view and only deviate when there's a specific reason (CLI for batch jobs, telegram for push-only notifications, etc.).
+- **Naming is informative, not cheeky.** Service names, app names, skill names, command names: prefer something that explains what the thing does (`slack-inbox-checker`) over something clever (`nothing-new`). Cute names tax every later mention.
+- **Platform-internal APIs are valid.** When a documented public API doesn't match the user's mental model -- especially around UI-state concepts like "unread", "marked", "pinned", "starred" -- look at what the platform's own client (web app, mobile app) actually uses. Internal/undocumented endpoints accessible via the same user-session auth are often the right answer, and using them is preferable to designing brute-force workarounds against the public API. The signal: if a "documented" approach forces you into a sweep across all entities, the platform almost certainly has a single targeted endpoint its own client uses.
 
 # When coding, follow these guidelines:
 
@@ -167,16 +171,42 @@ The upstream is defined in `parent.toml`.
 
 - **Prefer an applicable skill over reinventing.** Skill descriptions are
   injected so you can match by purpose, not by name.
-- If the user asks for something net-new, no existing skill applies, and it
-  will need research or experimentation: invoke `do-something-new`.
-- After a Stop-hook crystallization nudge: if the turn was cohesive, likely
-  to recur, and mostly deterministic, invoke `crystallize-task`. Otherwise
-  acknowledge and move on.
-- If a skill errored or delivered a wrong result: fulfil the user's request
-  by working around it, then at turn-end invoke `heal-skill`. Never patch
-  the skill inline.
-- After a successful skill use that still required manual post-processing:
-  invoke `update-skill` at turn-end so the skill absorbs the gap.
+
+- **Live first, ratify at turn-end via the worker pipeline.** All four
+  lifecycle skills (`do-something-new`, `crystallize-task`, `heal-skill`,
+  `update-skill`) follow the same shape: handle the user's immediate
+  request *live* in the current chat to keep the conversation interactive
+  and iterative; at turn-end, invoke the appropriate worker-backed skill
+  to formalize the work through validation, scenario testing, and proper
+  commits. If you find yourself committing a change to any
+  contract-bearing file (a skill, a hook script with a documented
+  contract, an invariant elsewhere) and stopping there, you've skipped
+  the ratify step. The live phase is necessary but not sufficient -- the
+  worker pipeline exists to add the rigor that's awkward to do
+  interactively.
+
+  Concrete cases:
+  - **Net-new task needing research / experimentation**: invoke
+    `do-something-new` to drive the live phase. It hands off to
+    `crystallize-task` at the end.
+  - **Stop-hook crystallization nudge** after a normal turn that turned
+    out to be cohesive, likely to recur, and mostly deterministic:
+    invoke `crystallize-task` to ratify the just-finished work.
+    Otherwise acknowledge and move on.
+  - **A skill errored or delivered a wrong result**: fulfil the user's
+    request live by working around the failure, then at turn-end invoke
+    `heal-skill`. Never patch the skill inline -- `heal-skill` is the
+    ratify path.
+  - **You and the user discussed and applied a change to an existing
+    skill**: edit live so the user can iterate, then at turn-end invoke
+    `update-skill` (verify flow). Direct Edit + commit skips the
+    ratification. (For non-skill contract-bearing files like hook
+    scripts or CLAUDE.md itself, no worker pipeline exists today --
+    apply the live phase carefully and add manual rigor at turn-end:
+    real test fixtures, end-to-end exercise of new code paths, etc.)
+  - **A skill use was successful but required manual post-processing**:
+    do the post-work live, then at turn-end invoke `update-skill`
+    (absorb flow) so the skill swallows the gap.
 
 # Memory
 
