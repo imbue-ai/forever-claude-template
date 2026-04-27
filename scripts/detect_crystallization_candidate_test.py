@@ -18,6 +18,20 @@ def _user(text: str) -> dict[str, Any]:
     return {"type": "user", "message": {"content": [{"type": "text", "text": text}]}}
 
 
+def _user_command(command_name: str) -> dict[str, Any]:
+    """User message that invokes a slash command (e.g. ``/do-something-new``)."""
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": (
+                f"<command-message>{command_name}</command-message>\n"
+                f"<command-name>/{command_name}</command-name>"
+            ),
+        },
+    }
+
+
 def _tool_use(name: str, block_id: str = "use-id", **input_kwargs: Any) -> dict[str, Any]:
     return {"type": "tool_use", "id": block_id, "name": name, "input": dict(input_kwargs)}
 
@@ -37,6 +51,13 @@ def _tool_result(tool_use_id: str, *, is_error: bool = False) -> dict[str, Any]:
     }
 
 
+def _commit_assistant(block_id: str = "commit-id") -> dict[str, Any]:
+    """Assistant turn containing a single ``git commit`` Bash call."""
+    return _assistant_with_tool_uses(
+        _tool_use("Bash", block_id, command="git commit -m 'msg'")
+    )
+
+
 def _write_transcript(tmp_path: Path, events: list[dict[str, Any]]) -> Path:
     path = tmp_path / "transcript.jsonl"
     path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
@@ -49,6 +70,12 @@ def _empty_skills_root(tmp_path: Path) -> Path:
     return skills
 
 
+def _workdir(tmp_path: Path) -> Path:
+    work = tmp_path / "work"
+    work.mkdir()
+    return work
+
+
 def test_evaluate_below_threshold_stays_silent(tmp_path: Path) -> None:
     events = [
         _user("hi"),
@@ -58,7 +85,9 @@ def test_evaluate_below_threshold_stays_silent(tmp_path: Path) -> None:
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is False
 
@@ -70,7 +99,9 @@ def test_evaluate_at_threshold_warns_with_count(tmp_path: Path) -> None:
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
@@ -88,7 +119,9 @@ def test_evaluate_excludes_read_only_tools(tmp_path: Path) -> None:
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is False
 
@@ -103,7 +136,9 @@ def test_evaluate_only_counts_last_turn(tmp_path: Path) -> None:
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is False
 
@@ -118,7 +153,9 @@ def test_evaluate_ignores_tool_result_carriers_when_finding_turn_boundary(tmp_pa
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
@@ -142,7 +179,9 @@ def test_evaluate_silenced_by_successful_crystallized_skill(tmp_path: Path) -> N
         _tool_result("skill-id"),
     ]
     transcript = _write_transcript(tmp_path, events)
-    should_warn, _ = detect.evaluate({"transcript_path": str(transcript)}, skills)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, skills, _workdir(tmp_path)
+    )
     assert should_warn is False
 
 
@@ -164,7 +203,9 @@ def test_evaluate_not_silenced_when_crystallized_skill_errored(tmp_path: Path) -
         _tool_result("skill-id", is_error=True),
     ]
     transcript = _write_transcript(tmp_path, events)
-    should_warn, _ = detect.evaluate({"transcript_path": str(transcript)}, skills)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, skills, _workdir(tmp_path)
+    )
     assert should_warn is True
 
 
@@ -186,7 +227,9 @@ def test_evaluate_not_silenced_by_non_crystallized_skill(tmp_path: Path) -> None
         _tool_result("skill-id"),
     ]
     transcript = _write_transcript(tmp_path, events)
-    should_warn, _ = detect.evaluate({"transcript_path": str(transcript)}, skills)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, skills, _workdir(tmp_path)
+    )
     assert should_warn is True
 
 
@@ -208,12 +251,16 @@ def test_evaluate_strips_plugin_prefix_from_skill_name(tmp_path: Path) -> None:
         _tool_result("skill-id"),
     ]
     transcript = _write_transcript(tmp_path, events)
-    should_warn, _ = detect.evaluate({"transcript_path": str(transcript)}, skills)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, skills, _workdir(tmp_path)
+    )
     assert should_warn is False
 
 
 def test_evaluate_returns_silent_when_transcript_path_missing(tmp_path: Path) -> None:
-    should_warn, _ = detect.evaluate({}, _empty_skills_root(tmp_path))
+    should_warn, _ = detect.evaluate(
+        {}, _empty_skills_root(tmp_path), _workdir(tmp_path)
+    )
     assert should_warn is False
 
 
@@ -221,6 +268,7 @@ def test_evaluate_returns_silent_when_transcript_file_missing(tmp_path: Path) ->
     should_warn, _ = detect.evaluate(
         {"transcript_path": str(tmp_path / "no-such-file.jsonl")},
         _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is False
 
@@ -229,7 +277,9 @@ def test_evaluate_returns_silent_for_empty_transcript(tmp_path: Path) -> None:
     transcript = tmp_path / "empty.jsonl"
     transcript.write_text("", encoding="utf-8")
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is False
 
@@ -253,7 +303,9 @@ def test_evaluate_meta_injection_resets_tool_count(tmp_path: Path) -> None:
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is False
 
@@ -273,7 +325,9 @@ def test_evaluate_refires_if_agent_keeps_using_tools_after_meta(tmp_path: Path) 
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
@@ -289,7 +343,9 @@ def test_evaluate_tool_results_do_not_reset_count(tmp_path: Path) -> None:
     ]
     transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path)
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
@@ -318,3 +374,191 @@ def test_skill_is_crystallized_returns_false_when_flag_absent(tmp_path: Path) ->
     path = tmp_path / "SKILL.md"
     path.write_text("---\nname: foo\ndescription: bar\n---\n", encoding="utf-8")
     assert detect._skill_is_crystallized(path) is False
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle-skill / commit-gate suppression
+# ---------------------------------------------------------------------------
+
+
+def test_lifecycle_skill_invocation_suppresses_until_commit(tmp_path: Path) -> None:
+    """do-something-new invoked, no commit yet -> stay silent even past threshold."""
+    events = [
+        _user("hi"),
+        _assistant_with_tool_uses(_tool_use("Skill", "skill-id", skill="do-something-new")),
+        _tool_result("skill-id"),
+        _user("ok keep going"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
+    )
+    assert should_warn is False
+
+
+def test_lifecycle_skill_then_commit_re_arms_nudge(tmp_path: Path) -> None:
+    """After do-something-new + a successful commit, the nudge is allowed to fire."""
+    events = [
+        _user("hi"),
+        _assistant_with_tool_uses(_tool_use("Skill", "skill-id", skill="do-something-new")),
+        _tool_result("skill-id"),
+        _user("now commit"),
+        _commit_assistant("commit-id"),
+        _tool_result("commit-id"),
+        _user("now do more work"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
+    )
+    assert should_warn is True
+
+
+def test_slash_command_invocation_also_suppresses(tmp_path: Path) -> None:
+    """User typing /do-something-new is recognized as a lifecycle invocation."""
+    events = [
+        _user_command("do-something-new"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
+    )
+    assert should_warn is False
+
+
+def test_plugin_namespaced_lifecycle_skill_recognized(tmp_path: Path) -> None:
+    """`foo:do-something-new` strips the prefix and still suppresses."""
+    events = [
+        _user("hi"),
+        _assistant_with_tool_uses(
+            _tool_use("Skill", "skill-id", skill="foo:do-something-new"),
+        ),
+        _tool_result("skill-id"),
+        _user("continue"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
+    )
+    assert should_warn is False
+
+
+def test_errored_commit_does_not_re_arm_nudge(tmp_path: Path) -> None:
+    """A failed git commit should not satisfy the commit gate after a lifecycle skill."""
+    events = [
+        _user("hi"),
+        _assistant_with_tool_uses(_tool_use("Skill", "skill-id", skill="do-something-new")),
+        _tool_result("skill-id"),
+        _user("commit"),
+        _commit_assistant("commit-id"),
+        _tool_result("commit-id", is_error=True),
+        _user("more work"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
+    )
+    assert should_warn is False
+
+
+def test_already_nudged_for_current_commit_window_suppresses(tmp_path: Path) -> None:
+    """If state file records a nudge at commit_count=N, suppress while count==N."""
+    work = _workdir(tmp_path)
+    state_path = work / detect.NUDGE_STATE_REL_PATH
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        _user("hi"),
+        _commit_assistant("commit-id"),
+        _tool_result("commit-id"),
+        _user("more work"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    state_path.write_text(
+        json.dumps({"transcript_path": str(transcript), "commit_count": 1}),
+        encoding="utf-8",
+    )
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path), work
+    )
+    assert should_warn is False
+
+
+def test_new_commit_after_nudge_re_arms(tmp_path: Path) -> None:
+    """If state file recorded a nudge at count=1 and a new commit lands, fire again."""
+    work = _workdir(tmp_path)
+    state_path = work / detect.NUDGE_STATE_REL_PATH
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        _user("hi"),
+        _commit_assistant("c1"),
+        _tool_result("c1"),
+        _user("more"),
+        _commit_assistant("c2"),
+        _tool_result("c2"),
+        _user("now do work"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    state_path.write_text(
+        json.dumps({"transcript_path": str(transcript), "commit_count": 1}),
+        encoding="utf-8",
+    )
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path), work
+    )
+    assert should_warn is True
+
+
+def test_state_file_for_different_transcript_does_not_suppress(tmp_path: Path) -> None:
+    """A nudge recorded for transcript A must not gate transcript B."""
+    work = _workdir(tmp_path)
+    state_path = work / detect.NUDGE_STATE_REL_PATH
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps({"transcript_path": "/some/other/transcript.jsonl", "commit_count": 5}),
+        encoding="utf-8",
+    )
+    events = [
+        _user("hi"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path), work
+    )
+    assert should_warn is True
+
+
+def test_nudge_persists_state_after_firing(tmp_path: Path) -> None:
+    """Firing a nudge writes the state file with the current commit count."""
+    work = _workdir(tmp_path)
+    events = [
+        _user("hi"),
+        _commit_assistant("c1"),
+        _tool_result("c1"),
+        _user("more"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path), work
+    )
+    assert should_warn is True
+    state = json.loads((work / detect.NUDGE_STATE_REL_PATH).read_text())
+    assert state == {"transcript_path": str(transcript), "commit_count": 1}

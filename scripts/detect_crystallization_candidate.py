@@ -9,10 +9,20 @@ writes a reminder to stderr and exits 2 so the reminder surfaces to the agent.
 The detection is intentionally dumb: the main agent applies its own judgement
 about whether the turn is actually worth crystallizing.
 
+Suppression rules (in priority order):
+1. Worker sub-agent — workers run their own crystallization lifecycle.
+2. Latest turn already invoked a crystallized skill successfully.
+3. Latest turn is below the tool-call threshold.
+4. A lifecycle skill (do-something-new, crystallize-task) was invoked in this
+   transcript and no successful ``git commit`` has happened since. The live
+   phase is still in progress; the skill itself handles crystallization at the
+   commit boundary.
+5. We already nudged once for the current commit count — wait for the next
+   successful commit before re-arming.
+
 Runtime contract:
 - stdin: Claude Code Stop-hook JSON payload (must include ``transcript_path``).
-- exit 0: stay silent (nothing to do, or the turn was already handled by an
-  existing crystallized skill, or we are inside a worker sub-agent).
+- exit 0: stay silent.
 - exit 2: print the reminder to stderr; Claude Code surfaces it to the agent.
 """
 
@@ -23,7 +33,6 @@ import json
 import os
 import re
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -59,19 +68,26 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
 # Threshold at which the hook emits a reminder.
 QUALIFYING_CALL_THRESHOLD: int = 8
 
-# Suppress the nudge when a do-something-new or crystallize-task flow has had
-# activity within this window. Both skills have explicit "we'll crystallize at
-# Step N" semantics, so re-prompting during them is pure noise.
-SKILL_FLOW_RECENT_MINUTES: int = 60
+# Lifecycle skills whose mid-flow presence suppresses the nudge. These skills
+# already drive crystallization on their own schedule, so a generic nudge
+# during them is pure noise.
+LIFECYCLE_SKILL_NAMES: frozenset[str] = frozenset(
+    {"do-something-new", "crystallize-task"}
+)
 
-# Path (relative to workdir) where we persist nudge state across hook fires so
-# we can back off after the agent declines a nudge.
+# Path (relative to workdir) where we persist nudge state across hook fires
+# so we only nudge once per commit window.
 NUDGE_STATE_REL_PATH: str = "runtime/.crystallize_nudge_state.json"
 
-# Number of user-response boundaries that must pass after a nudge before we
-# emit another one in the same session. Prevents the "five nudges per session"
-# harassment pattern.
-NUDGE_BACKOFF_BOUNDARIES: int = 3
+# Matches the Bash command of a successful ``git commit`` invocation. We
+# only require the literal ``git commit`` token; subcommands like
+# ``git commit-tree`` are excluded by the word boundary.
+_GIT_COMMIT_PATTERN = re.compile(r"\bgit commit\b")
+
+# Matches a slash-style command marker in a user-message string, e.g.
+# ``<command-name>/do-something-new</command-name>``. The leading slash is
+# optional so we also catch the un-slashed form some clients emit.
+_COMMAND_NAME_PATTERN = re.compile(r"<command-name>/?([\w-]+)</command-name>")
 
 REMINDER_MESSAGE: str = (
     "The turn that just finished used {count} non-read tool calls.\n"
@@ -138,26 +154,9 @@ def _skill_is_crystallized(skill_md_path: Path) -> bool:
     return bool(_CRYSTALLIZED_PATTERN.search(match.group(1)))
 
 
-def _find_successful_crystallized_skill_call(
-    events: list[dict[str, Any]], skills_root: Path
-) -> bool:
-    """True if any Skill tool call in the turn targeted a crystallized skill and did not error."""
-    # Build a map of tool_use_id -> skill name so we can cross-reference results.
-    skill_calls: dict[str, str] = {}
-    for block in _iter_assistant_tool_uses(events):
-        if block.get("name") != "Skill":
-            continue
-        block_id = block.get("id")
-        tool_input = block.get("input")
-        if not isinstance(block_id, str) or not isinstance(tool_input, dict):
-            continue
-        skill_name = tool_input.get("skill")
-        if isinstance(skill_name, str):
-            skill_calls[block_id] = skill_name
-    if not skill_calls:
-        return False
-
-    errored_ids: set[str] = set()
+def _errored_tool_use_ids(events: list[dict[str, Any]]) -> set[str]:
+    """Set of tool_use_ids whose tool_result reported is_error=True."""
+    out: set[str] = set()
     for event in events:
         if event.get("type") != "user":
             continue
@@ -172,11 +171,33 @@ def _find_successful_crystallized_skill_call(
                 continue
             if block.get("type") != "tool_result":
                 continue
-            if block.get("is_error") is True:
-                tool_use_id = block.get("tool_use_id")
-                if isinstance(tool_use_id, str):
-                    errored_ids.add(tool_use_id)
+            if block.get("is_error") is not True:
+                continue
+            tool_use_id = block.get("tool_use_id")
+            if isinstance(tool_use_id, str):
+                out.add(tool_use_id)
+    return out
 
+
+def _find_successful_crystallized_skill_call(
+    events: list[dict[str, Any]], skills_root: Path
+) -> bool:
+    """True if any Skill tool call in the turn targeted a crystallized skill and did not error."""
+    skill_calls: dict[str, str] = {}
+    for block in _iter_assistant_tool_uses(events):
+        if block.get("name") != "Skill":
+            continue
+        block_id = block.get("id")
+        tool_input = block.get("input")
+        if not isinstance(block_id, str) or not isinstance(tool_input, dict):
+            continue
+        skill_name = tool_input.get("skill")
+        if isinstance(skill_name, str):
+            skill_calls[block_id] = skill_name
+    if not skill_calls:
+        return False
+
+    errored_ids = _errored_tool_use_ids(events)
     for block_id, skill_name in skill_calls.items():
         if block_id in errored_ids:
             continue
@@ -189,33 +210,91 @@ def _find_successful_crystallized_skill_call(
     return False
 
 
-def _skill_flow_in_flight(workdir: Path) -> bool:
-    """True if a do-something-new or crystallize-task flow has had recent activity.
+def _last_lifecycle_invocation_index(events: list[dict[str, Any]]) -> int | None:
+    """Index of the most recent lifecycle-skill invocation in the transcript.
 
-    Detects activity by checking mtime on slug-directories under the canonical
-    runtime paths. Either skill creates `runtime/<skill>/<slug>/` and writes
-    files into it as the flow progresses; if any such directory has been
-    touched recently, a flow is presumably still in progress and the nudge
-    would be noise.
+    Detects two invocation forms:
+
+    - Programmatic: an assistant ``tool_use`` block with ``name: "Skill"`` and
+      ``input.skill`` set to a lifecycle skill name. Plugin prefixes
+      (``"plugin:do-something-new"``) are stripped before matching.
+    - Slash command: a user message whose ``content`` string contains a
+      ``<command-name>/<skill></command-name>`` marker.
     """
-    cutoff = time.time() - (SKILL_FLOW_RECENT_MINUTES * 60)
-    for parent_rel in ("runtime/do-something-new", "runtime/crystallize"):
-        parent = workdir / parent_rel
-        if not parent.is_dir():
-            continue
-        try:
-            children = list(parent.iterdir())
-        except OSError:
-            continue
-        for child in children:
-            if not child.is_dir():
+    last: int | None = None
+    for index, event in enumerate(events):
+        event_type = event.get("type")
+        if event_type == "assistant":
+            message = event.get("message")
+            if not isinstance(message, dict):
                 continue
-            try:
-                if child.stat().st_mtime > cutoff:
-                    return True
-            except OSError:
+            content = message.get("content")
+            if not isinstance(content, list):
                 continue
-    return False
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_use" or block.get("name") != "Skill":
+                    continue
+                tool_input = block.get("input")
+                if not isinstance(tool_input, dict):
+                    continue
+                skill_name = tool_input.get("skill")
+                if not isinstance(skill_name, str):
+                    continue
+                bare = skill_name.split(":", 1)[-1]
+                if bare in LIFECYCLE_SKILL_NAMES:
+                    last = index
+                    break
+        elif event_type == "user":
+            message = event.get("message")
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            for match in _COMMAND_NAME_PATTERN.finditer(content):
+                if match.group(1) in LIFECYCLE_SKILL_NAMES:
+                    last = index
+                    break
+    return last
+
+
+def _successful_commit_indices(events: list[dict[str, Any]]) -> list[int]:
+    """Indices of assistant events containing a successful ``git commit`` Bash call.
+
+    A commit counts as successful when its tool_result is not flagged as an
+    error. Multiple commits in a single assistant event collapse to one
+    index; we only need the count and the position relative to skill
+    invocations.
+    """
+    errored = _errored_tool_use_ids(events)
+    indices: list[int] = []
+    for index, event in enumerate(events):
+        if event.get("type") != "assistant":
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use" or block.get("name") != "Bash":
+                continue
+            block_id = block.get("id")
+            if not isinstance(block_id, str) or block_id in errored:
+                continue
+            tool_input = block.get("input")
+            if not isinstance(tool_input, dict):
+                continue
+            command = tool_input.get("command")
+            if isinstance(command, str) and _GIT_COMMIT_PATTERN.search(command):
+                indices.append(index)
+                break
+    return indices
 
 
 def _read_nudge_state(path: Path) -> dict[str, Any]:
@@ -225,32 +304,19 @@ def _read_nudge_state(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _write_nudge_state(path: Path, transcript_path: str, boundary: int) -> None:
+def _write_nudge_state(path: Path, transcript_path: str, commit_count: int) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"transcript_path": transcript_path, "boundary": boundary}),
+            json.dumps(
+                {"transcript_path": transcript_path, "commit_count": commit_count}
+            ),
             encoding="utf-8",
         )
     except OSError:
         # Persisting the nudge state is best-effort; if it fails we just nudge
         # again next turn rather than crashing the hook.
         pass
-
-
-def _count_response_boundaries_since(
-    events: list[dict[str, Any]], last_boundary: int
-) -> int:
-    """Count user-response boundaries (excluding tool_result carriers) after last_boundary."""
-    count = 0
-    for index in range(last_boundary + 1, len(events)):
-        event = events[index]
-        if event.get("type") != "user":
-            continue
-        if is_user_tool_result_carrier(event):
-            continue
-        count += 1
-    return count
 
 
 def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
@@ -303,32 +369,34 @@ def evaluate(
     if _find_successful_crystallized_skill_call(turn_events, skills_root):
         return False, ""
 
-    # Suppress while a do-something-new or crystallize-task flow is active.
-    # Those skills crystallize on their own schedule; a generic nudge during
-    # them is pure noise.
-    if _skill_flow_in_flight(workdir):
-        return False, ""
-
-    # Back off if we already nudged recently in this session and not enough
-    # response boundaries have passed since then.
-    nudge_state_path = workdir / NUDGE_STATE_REL_PATH
-    nudge_state = _read_nudge_state(nudge_state_path)
-    if nudge_state.get("transcript_path") == transcript_path_str:
-        last_warned_boundary = nudge_state.get("boundary")
-        if isinstance(last_warned_boundary, int):
-            boundaries_since = _count_response_boundaries_since(
-                events, last_warned_boundary
-            )
-            if boundaries_since < NUDGE_BACKOFF_BOUNDARIES:
-                return False, ""
-
     count = _count_qualifying(_iter_assistant_tool_uses(turn_events))
     if count < QUALIFYING_CALL_THRESHOLD:
         return False, ""
 
-    # Persist the nudge so the next few stop-fires back off.
-    if boundary is not None:
-        _write_nudge_state(nudge_state_path, transcript_path_str, boundary)
+    # Suppress while a lifecycle skill flow is mid-run: a lifecycle skill
+    # was invoked in this transcript and no successful commit has happened
+    # since. The skill drives crystallization itself once the live phase
+    # commits.
+    commit_indices = _successful_commit_indices(events)
+    skill_index = _last_lifecycle_invocation_index(events)
+    if skill_index is not None and not any(
+        commit_index > skill_index for commit_index in commit_indices
+    ):
+        return False, ""
+
+    # Suppress if we already nudged for the current commit window. The next
+    # successful commit increments the count and re-arms the nudge.
+    nudge_state_path = workdir / NUDGE_STATE_REL_PATH
+    nudge_state = _read_nudge_state(nudge_state_path)
+    last_commit_count = nudge_state.get("commit_count")
+    if (
+        nudge_state.get("transcript_path") == transcript_path_str
+        and isinstance(last_commit_count, int)
+        and len(commit_indices) <= last_commit_count
+    ):
+        return False, ""
+
+    _write_nudge_state(nudge_state_path, transcript_path_str, len(commit_indices))
     return True, REMINDER_MESSAGE.format(count=count)
 
 
