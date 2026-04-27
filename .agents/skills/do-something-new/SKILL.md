@@ -127,21 +127,14 @@ invocation; it does not block subsequent steps. Without it, Gate 1 / Gate 2
 reports never reach the user and the worker deadlocks waiting for approval.
 
 Once crystallize is launched and the lead-proxy poll is running in the
-background, end this skill with one of these messages:
+background, transition the conversation toward interface design.
+Acknowledge that the worker is now formalizing the capability, then
+either follow up on the interface the user named in their original
+prompt (if they did) or ask how they'd like to interact with the thing.
+Keep it conversational; do not use a templated message.
 
-- If the user's original prompt named a desired interface (e.g. "web
-  dashboard", "Slack bot"):
-
-  > "Great, let me convert this into a robust reusable workflow. Let's talk
-  > more about the interface you asked for."
-
-- If they didn't:
-
-  > "Great, let me convert this into a robust reusable workflow. Let's talk
-  > about how you'd like to interact with this."
-
-The skill's responsibility ends here. Interface design happens in subsequent
-turns.
+The skill's responsibility ends here. Interface design happens in
+subsequent turns.
 
 ## Re-fetch while crystallize is running
 
