@@ -131,7 +131,6 @@ background, transition the conversation toward interface design.
 Acknowledge that the worker is now formalizing the capability, then
 either follow up on the interface the user named in their original
 prompt (if they did) or ask how they'd like to interact with the thing.
-Keep it conversational; do not use a templated message.
 
 The skill's responsibility ends here. Interface design happens in
 subsequent turns.
