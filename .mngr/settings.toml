@@ -36,6 +36,12 @@ settings_overrides = {model = "opus[1m]", fastMode = true}
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
 version = "2.1.116"
+# Keep minds isolated from the host's global Claude state -- agents get a
+# fresh CLAUDE_CONFIG_DIR populated only from the template/repo, not from
+# ~/.claude/ or ~/.claude.json. ANTHROPIC_API_KEY (passed via pass_env)
+# covers auth, so credential sync is not required.
+sync_home_settings = false
+sync_claude_json = false
 
 # The "main" agent type -- inherits everything from claude
 [agent_types.main]
