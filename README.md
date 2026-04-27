@@ -39,6 +39,6 @@ The main agent can promote ad-hoc work into reusable deterministic skills, heal 
 - `heal-skill` - Repair a skill that errored or produced wrong results.
 - `update-skill` - Extend a skill (or split off a new sibling) when post-processing revealed a gap.
 
-Each of these spawns a `crystallize-worker` sub-agent that runs a matching build / heal / update sub-skill bundled under `.agents/skills/crystallize-task/assets/worker-skills/`. Workers commit to `mngr/<task-name>` branches; main merges on user approval.
+Each of these spawns a `crystallize-worker` sub-agent that runs a matching build / heal / update sub-skill bundled under each parent skill's `assets/worker/` directory (`.agents/skills/crystallize-task/assets/worker/`, `.agents/skills/heal-skill/assets/worker/`, `.agents/skills/update-skill/assets/worker/`). Workers commit to `mngr/<task-name>` branches; main merges on user approval.
 
 Crystallized skills are marked with `metadata.crystallized: true` in their SKILL.md frontmatter and follow the [agentskills.io](https://agentskills.io/specification) layout (`scripts/run.py` as a PEP 723 script, companion SKILL.md, optional `references/` and `assets/`).
