@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,20 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
 
 # Threshold at which the hook emits a reminder.
 QUALIFYING_CALL_THRESHOLD: int = 8
+
+# Suppress the nudge when a do-something-new or crystallize-task flow has had
+# activity within this window. Both skills have explicit "we'll crystallize at
+# Step N" semantics, so re-prompting during them is pure noise.
+SKILL_FLOW_RECENT_MINUTES: int = 60
+
+# Path (relative to workdir) where we persist nudge state across hook fires so
+# we can back off after the agent declines a nudge.
+NUDGE_STATE_REL_PATH: str = "runtime/.crystallize_nudge_state.json"
+
+# Number of user-response boundaries that must pass after a nudge before we
+# emit another one in the same session. Prevents the "five nudges per session"
+# harassment pattern.
+NUDGE_BACKOFF_BOUNDARIES: int = 3
 
 REMINDER_MESSAGE: str = (
     "The turn that just finished used {count} non-read tool calls.\n"
@@ -174,6 +189,70 @@ def _find_successful_crystallized_skill_call(
     return False
 
 
+def _skill_flow_in_flight(workdir: Path) -> bool:
+    """True if a do-something-new or crystallize-task flow has had recent activity.
+
+    Detects activity by checking mtime on slug-directories under the canonical
+    runtime paths. Either skill creates `runtime/<skill>/<slug>/` and writes
+    files into it as the flow progresses; if any such directory has been
+    touched recently, a flow is presumably still in progress and the nudge
+    would be noise.
+    """
+    cutoff = time.time() - (SKILL_FLOW_RECENT_MINUTES * 60)
+    for parent_rel in ("runtime/do-something-new", "runtime/crystallize"):
+        parent = workdir / parent_rel
+        if not parent.is_dir():
+            continue
+        try:
+            children = list(parent.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            try:
+                if child.stat().st_mtime > cutoff:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def _read_nudge_state(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_nudge_state(path: Path, transcript_path: str, boundary: int) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"transcript_path": transcript_path, "boundary": boundary}),
+            encoding="utf-8",
+        )
+    except OSError:
+        # Persisting the nudge state is best-effort; if it fails we just nudge
+        # again next turn rather than crashing the hook.
+        pass
+
+
+def _count_response_boundaries_since(
+    events: list[dict[str, Any]], last_boundary: int
+) -> int:
+    """Count user-response boundaries (excluding tool_result carriers) after last_boundary."""
+    count = 0
+    for index in range(last_boundary + 1, len(events)):
+        event = events[index]
+        if event.get("type") != "user":
+            continue
+        if is_user_tool_result_carrier(event):
+            continue
+        count += 1
+    return count
+
+
 def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
     """Index of the event that prompted the agent's most recent response.
 
@@ -193,7 +272,9 @@ def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
     return None
 
 
-def evaluate(payload: dict[str, Any], skills_root: Path) -> tuple[bool, str]:
+def evaluate(
+    payload: dict[str, Any], skills_root: Path, workdir: Path
+) -> tuple[bool, str]:
     """Detection entry point.
 
     Returns ``(should_warn, message)``. ``should_warn == False`` means the
@@ -222,17 +303,44 @@ def evaluate(payload: dict[str, Any], skills_root: Path) -> tuple[bool, str]:
     if _find_successful_crystallized_skill_call(turn_events, skills_root):
         return False, ""
 
+    # Suppress while a do-something-new or crystallize-task flow is active.
+    # Those skills crystallize on their own schedule; a generic nudge during
+    # them is pure noise.
+    if _skill_flow_in_flight(workdir):
+        return False, ""
+
+    # Back off if we already nudged recently in this session and not enough
+    # response boundaries have passed since then.
+    nudge_state_path = workdir / NUDGE_STATE_REL_PATH
+    nudge_state = _read_nudge_state(nudge_state_path)
+    if nudge_state.get("transcript_path") == transcript_path_str:
+        last_warned_boundary = nudge_state.get("boundary")
+        if isinstance(last_warned_boundary, int):
+            boundaries_since = _count_response_boundaries_since(
+                events, last_warned_boundary
+            )
+            if boundaries_since < NUDGE_BACKOFF_BOUNDARIES:
+                return False, ""
+
     count = _count_qualifying(_iter_assistant_tool_uses(turn_events))
     if count < QUALIFYING_CALL_THRESHOLD:
         return False, ""
+
+    # Persist the nudge so the next few stop-fires back off.
+    if boundary is not None:
+        _write_nudge_state(nudge_state_path, transcript_path_str, boundary)
     return True, REMINDER_MESSAGE.format(count=count)
+
+
+def _workspace_root() -> Path:
+    """Resolve the workspace root for the current agent."""
+    workdir = os.environ.get("MNGR_AGENT_WORK_DIR")
+    return Path(workdir) if workdir else Path.cwd()
 
 
 def _skills_root() -> Path:
     """Resolve the shared ``.agents/skills`` directory for the current workspace."""
-    workdir = os.environ.get("MNGR_AGENT_WORK_DIR")
-    base = Path(workdir) if workdir else Path.cwd()
-    return base / ".agents" / "skills"
+    return _workspace_root() / ".agents" / "skills"
 
 
 def main() -> int:
@@ -250,7 +358,7 @@ def main() -> int:
     if not isinstance(payload, dict):
         return 0
 
-    should_warn, message = evaluate(payload, _skills_root())
+    should_warn, message = evaluate(payload, _skills_root(), _workspace_root())
     if not should_warn:
         return 0
     print(message, file=sys.stderr)
