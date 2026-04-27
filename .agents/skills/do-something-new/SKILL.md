@@ -151,17 +151,11 @@ Otherwise stay silent -- no automatic post-every-refetch ping.
 
 ## Background crystallize gates
 
-The lead-proxy mechanics for `crystallize-task` apply, with two adjustments
-specific to this skill:
-
-- **Gate 1 (outline-approval):** filter aggressively. The user cares about the
-  experience, not technical details. Only escalate genuine *process* questions
-  (e.g. "should I dedupe by message-id or thread-id?"). Suppress
-  technical-detail questions (e.g. naming, file layout) -- answer them yourself
-  per the lead-proxy "answer yourself" rubric.
-- **Gate 2 (final-artifact):** surfaced normally. The existing "do not
-  interrupt more recent user work" rule already defers it until the user isn't
-  actively working on something else.
+The standard lead-proxy mechanics for `crystallize-task` apply -- nothing
+special. By default that means Gate 1 outline-approval is answered by the
+lead unless the worker has a genuine process question, and Gate 2
+final-artifact escalates to the user but is deferred until the user isn't
+actively working on something else.
 
 ## When NOT to use this skill
 

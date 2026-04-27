@@ -131,6 +131,12 @@ The turn you need to crystallize is at the path given by the
 Replay it mentally to understand what was done; you do not need to
 re-execute destructive operations.
 
+## Source artifacts (optional)
+If your frontmatter has a `source_artifacts_dir` field, the calling
+skill has pre-staged scripts and sample data at that path in your
+worktree. Read those before designing the new skill so you reuse
+working code instead of rebuilding from scratch.
+
 ## Preconditions and postconditions
 <describe what must be true about the skill's inputs before it runs, and
 what must be true about its outputs after. Focus on the contract; do not
