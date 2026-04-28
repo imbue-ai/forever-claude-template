@@ -7,6 +7,9 @@ ARG UV_VERSION=0.11.7
 ARG CLAUDE_CODE_VERSION=2.1.116
 ARG MODAL_VERSION=1.4.2
 ARG NODE_MAJOR=20
+# Keep in sync with the `playwright==X.Y.Z` pin in the root pyproject.toml so
+# the Chromium build cached here is the one the workspace venv resolves to.
+ARG PLAYWRIGHT_VERSION=1.58.0
 
 # Install system dependencies including tini for proper signal handling
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -73,8 +76,33 @@ RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
+# Pre-seed github.com SSH host key so git operations don't block on
+# interactive host-key confirmation (e.g. when Claude Code installs
+# plugins from github:<owner>/<repo>).
+RUN mkdir -p /root/.ssh && \
+    chmod 700 /root/.ssh && \
+    ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts && \
+    chmod 600 /root/.ssh/known_hosts
+
+# Install latchkey (CLI for making authenticated HTTP calls to third-party
+# services). The agent runs it in gateway mode -- the per-agent
+# LATCHKEY_GATEWAY URL is injected at `mngr create` time by the outside
+# caller (see .mngr/settings.toml's pass_env), so we do not hardcode it here.
+#
+ARG LATCHKEY_VERSION=2.7.2
+RUN npm install -g "latchkey@${LATCHKEY_VERSION}"
+
 # install python dependencies
 RUN uv tool install "modal==${MODAL_VERSION}"
+
+# Install Playwright's Chromium browser + Debian system libs before the COPY
+# so this layer survives code changes. The workspace venv gets its own
+# `playwright` install later via `uv sync --all-packages`; as long as the
+# version matches PLAYWRIGHT_VERSION, it reuses the Chromium build cached in
+# ~/.cache/ms-playwright. `--with-deps` invokes apt-get internally.
+RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
+    && playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 # copy in all of our code:
 COPY . /code/
@@ -103,6 +131,9 @@ RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     --path vendor/mngr/libs/mngr_modal/ \
     --path vendor/mngr/libs/mngr_claude \
     --path vendor/mngr/libs/mngr_wait
+
+# Sync the workspace venv
+RUN uv sync --all-packages
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.

@@ -9,12 +9,6 @@ function messageTextKey(agentId: string): string {
   return `${MESSAGE_TEXT_KEY_PREFIX}${agentId}`;
 }
 
-// Per-agent draft storage. Keyed by agent id so that multiple MessageInput
-// instances rendered simultaneously (one per dockview tab) don't trample each
-// other's draft message state. Previously these were single globals, which
-// meant the last-rendered tab's view() would reset the shared `messageText`
-// and every other tab's send button would fire handleSend with an empty
-// messageText -> early return -> "click does nothing" bug.
 const messageTextByAgent: Map<string, string> = new Map();
 let messageTextareaElement: HTMLTextAreaElement | null = null;
 
