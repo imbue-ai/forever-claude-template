@@ -55,8 +55,8 @@ Pick a short kebab-case slug `$NAME` for this crystallization (e.g.
 - Worker branch: `mngr/crystallize-$NAME` (created by `mngr create`)
 - Local artifact paths under `runtime/crystallize/$NAME/`
 - Task file path: `runtime/crystallize/$NAME/task.md` (sits alongside
-  `turn.jsonl` so the existing Step 4 `mngr push` syncs it to the
-  worker for free)
+  `turn.jsonl` so the Step 3 `mngr push` syncs it to the worker for
+  free)
 - `tk` ticket title
 
 Use that same slug everywhere below.
