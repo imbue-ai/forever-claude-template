@@ -30,7 +30,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import collect_provider_profile_files
-from imbue.mngr.utils.testing import TEST_ENV_PATTERN
+from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr_modal import hookimpl
 from imbue.mngr_modal.config import ModalMode
 from imbue.mngr_modal.config import ModalProviderConfig
@@ -50,6 +50,17 @@ from imbue.modal_proxy.testing import TestingModalInterface
 MODAL_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("modal")
 STATE_VOLUME_SUFFIX: Final[str] = "-state"
 MODAL_NAME_MAX_LENGTH: Final[int] = 64
+
+
+def truncate_modal_name(name: str, max_length: int) -> str:
+    """Truncate a name to Modal's length limit, stripping trailing separators.
+
+    Shared by the create path (backend) and the test delete path (e2e conftest)
+    so both arrive at the same env name from the same inputs.
+    """
+    if len(name) <= max_length:
+        return name
+    return name[:max_length].rstrip("-_")
 
 
 def _create_environment(environment_name: str, modal_interface: ModalInterface) -> None:
@@ -465,21 +476,19 @@ Supported build arguments for the modal provider:
         environment_name = f"{prefix}{user_id}"
         default_app_name = f"{prefix}{name}"
 
-        # Truncate environment_name if needed to fit Modal's 64 char limit
         if len(environment_name) > MODAL_NAME_MAX_LENGTH:
             logger.warning(
                 "Truncating Modal environment name to {} characters: {}", MODAL_NAME_MAX_LENGTH, environment_name
             )
-            environment_name = environment_name[:MODAL_NAME_MAX_LENGTH]
+        environment_name = truncate_modal_name(environment_name, max_length=MODAL_NAME_MAX_LENGTH)
 
         app_name = config.app_name if config.app_name is not None else default_app_name
         host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
 
-        # Truncate app_name if needed to fit Modal's 64 char limit (accounting for volume suffix)
         max_app_name_length = MODAL_NAME_MAX_LENGTH - len(STATE_VOLUME_SUFFIX)
         if len(app_name) > max_app_name_length:
             logger.warning("Truncating Modal app name to {} characters: {}", max_app_name_length, app_name)
-            app_name = app_name[:max_app_name_length]
+        app_name = truncate_modal_name(app_name, max_length=max_app_name_length)
 
         # Create the ModalProviderApp that manages the Modal app and its resources
         try:
