@@ -30,12 +30,9 @@ This means every ticket title and every closing summary is **user-facing copy**.
 
 ## How to decompose work into tickets
 
-**One ticket per sequential step. Tickets must be serial — do not start a new one until the previous one is closed.** If a chunk of work consists of operations you'd run in parallel or simultaneously, that whole chunk is *one* ticket, not many.
+**One ticket per sequential step. Tickets must be serial — do not start a new one until the previous one is closed.** If a chunk of work consists of operations you'd run in parallel or simultaneously, that whole chunk is *one* ticket, not many. Multiple tool calls inside one ticket is normal and expected.
 
-- Wrong: three tickets "Search political news" / "Search business news" / "Search tech news", all started at once. The user sees three concurrent spinners with duplicated tool calls underneath; nothing reads as actual progress.
-- Right: one ticket "Pull the day's top news headlines" that internally runs whatever parallel searches it needs. Multiple tool calls inside one ticket is normal and expected.
-
-The principle: a ticket represents a logical step in the user's mental model of the work, not a unit of parallel computation. If you'd describe the work to the user as "first I'll do X, then Y, then Z," that's three tickets. If you'd describe it as "I'm pulling headlines from across the news," that's one ticket — even if it involves a dozen parallel searches.
+A ticket represents a logical step in the user's mental model of the work, not a unit of parallel computation. If you'd describe the work to the user as "first I'll do X, then Y, then Z," that's three tickets. If you'd describe it as a single coherent step — even if it involves several parallel lookups internally — it's one ticket.
 
 Granularity: typically 2-5 sequential tickets per substantive turn. Not one per tool call (way too granular). Not one ticket for the whole turn (defeats the purpose of progress).
 
