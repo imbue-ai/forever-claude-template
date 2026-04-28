@@ -280,6 +280,3 @@ cov.xml
 
 # ignore demos
 recordings
-
-# make sure we don't check in reviewer logs
-.reviewer/logs/
