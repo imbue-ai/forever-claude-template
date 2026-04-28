@@ -12,6 +12,8 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - NEVER amend commits or rebase--always create new commits.
 - If you ever need to work with another *git* repo that is *outside* of this monorepo, you should do so by adding a git subtree under vendor/
 - This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `.tickets/` (gitignored).
+- All relative paths in this repo assume cwd = repo root (`/code`). The bootstrap service manager runs from there; any process started elsewhere (manual launch, subprocess from a different cwd) must either set cwd to the repo root or use absolute paths. State directories live under `runtime/<feature>/`.
+- When adding a new web app, do NOT edit `libs/web_server/` -- it's an example placeholder. Use the `build-web-service` skill, which sets up a new lib + service entry + `forward_port.py` registration on its own port.
 
 # How to get started on any task:
 
