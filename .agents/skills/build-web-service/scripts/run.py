@@ -33,7 +33,6 @@ RESERVED_NAMES = frozenset(
     {
         "web",
         "web-server",
-        "system_interface",
         "system-interface",
         "terminal",
         "cloudflared",
