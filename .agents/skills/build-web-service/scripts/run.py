@@ -27,7 +27,7 @@ from typing import Iterable
 
 import tomlkit
 from tomlkit import TOMLDocument
-from tomlkit.items import AoT, Array, Table
+from tomlkit.items import Array, Table
 
 RESERVED_NAMES = frozenset(
     {
