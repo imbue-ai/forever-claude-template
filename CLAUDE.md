@@ -12,6 +12,112 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - NEVER amend commits or rebase--always create new commits.
 - If you ever need to work with another *git* repo that is *outside* of this monorepo, you should do so by adding a git subtree under vendor/
 
+# Task management (CRITICAL — read this before doing real work)
+
+You manage your work using `tk`, the vendored ticket tracker at `vendor/tk/`. This is the **only** task tracking tool available to you. Claude Code's built-in `TodoWrite` is disabled — attempts to call it will be denied. There is no fallback, no alternative tool, and no exception.
+
+## Why this exists
+
+Your conversation is rendered to the user as a "progress view": each turn shows a clean, vertical timeline of plain-English task steps with one-line summaries on completion. The user does **not** see your raw tool calls unless they explicitly expand a step. Your `tk` tickets are the data source for this view — every ticket you create becomes a step in the timeline; every summary you write on close becomes the result text under that step.
+
+This means every ticket title and every closing summary is **user-facing copy**. Write it for a non-technical reader who doesn't know your codebase, your tools, or your jargon.
+
+## How every turn must start: declare the plan as tickets
+
+**The first thing you do on any user prompt that warrants real work is decompose it into a sequence of tickets and create them all up front, BEFORE doing any of the work.** This is not optional. The sequence of tickets is the user-visible plan; making the user wait while tool calls scroll by before they see the plan defeats the entire purpose of the progress view.
+
+Concretely, the start of every substantive turn looks like:
+
+1. (Optional) One short prose acknowledgement to the user — e.g. "Sure, looking into that now." This renders as plain text above the timeline. Keep it to one line; do not narrate the plan here.
+2. `tk create` for every step you currently expect the work to require, in order. Capture each id. Do NOT call `tk start` on any of them yet.
+3. `tk start` the first ticket and begin the work for that step.
+
+You may add tickets later (`tk create` more as new sub-problems surface) or remove tickets that turn out to be unneeded (`tk close` them with a summary like "No longer needed — the previous step covered this."). What you may NOT do is start working on a step before its ticket exists.
+
+**Tickets must be serial.** Only one ticket is `in_progress` at a time. Do not call `tk start` on the next ticket until the current one is `tk close`d. If a chunk of work consists of operations you'd run in parallel or simultaneously (e.g. several lookups), that whole chunk is *one* ticket, not many. Multiple tool calls inside one ticket is normal and expected.
+
+A ticket represents a logical step in the user's mental model of the work, not a unit of parallel computation. If you'd describe the work to the user as "first I'll do X, then Y, then Z," that's three tickets. If you'd describe it as a single coherent step — even if it involves several parallel lookups internally — it's one ticket.
+
+Granularity: typically 2-5 sequential tickets per substantive turn. Not one per tool call (way too granular). Not one ticket for the whole turn (defeats the purpose of progress).
+
+## When you don't need tickets
+
+Tickets are required for any turn that involves real work. The exceptions:
+
+- Chitchat, single-line acknowledgements, trivial answers ("yes, I can do that", "the file is at src/foo.ts").
+- Pure clarifying-question turns where you have nothing concrete to do until the user answers.
+- A reply that's a single quick read of one file to answer the user's question.
+
+If your turn is truly one of these, just write your reply directly — no tickets, no timeline. If you're not sure, default to creating tickets; an extra small ticket is better than the user watching a turn unfold with no visible plan.
+
+## Ticket lifecycle (must follow exactly)
+
+At the **start of the turn**, create every ticket you currently expect the work to require:
+
+```bash
+ID1=$(tk create "Look through your recent changes to find the new theme")
+ID2=$(tk create "Trace how the dark-mode toggle picks a theme")
+ID3=$(tk create "Register the new theme and update the toggle")
+ID4=$(tk create "Verify the toggle now reaches your new theme")
+```
+
+Title rules: plain English, describes the goal as the user understands it, no file names, no tool names, no internal jargon. The title is what the user sees as the step name.
+
+Then for **each ticket in order**, one at a time:
+
+1. **Start** it:
+   ```bash
+   tk start "$ID1"
+   ```
+2. **Do the work.** Run whatever tools you need.
+3. **Write a summary as a note, then close**:
+   ```bash
+   tk add-note "$ID1" "Read through your recent commits and the theme files to find what's new."
+   tk close "$ID1"
+   ```
+4. Move on to the next ticket. Only one is `in_progress` at a time.
+
+If during the work you discover a sub-problem that warrants its own step, `tk create` a new ticket for it (it'll appear at the bottom of the timeline). If you discover a previously-planned ticket is no longer needed, `tk close` it with a summary like "No longer needed — covered by the previous step."
+
+Summary rules: ONE concise line, plain English, describing **the work you did in this step** — what the user would see if they expanded the block. Think of it as a high-level non-technical caption for the raw tool calls inside.
+
+- It is NOT the *result* / *finding* / *answer* — those go in your final assistant message below the timeline (e.g. "Fixed: the new theme wasn't registered with the toggle. Made it available."). Don't put conclusions, fixes, or recommendations in summaries.
+- It is NOT a list of tool calls or file names. "Ran git log, then read midnight.ts, then grep'd for registerTheme" is wrong — too technical, and the user can already see those tool calls if they expand the block.
+- It IS one short caption-style sentence describing the work, in the same plain-English tone as the title. "Read through your recent commits and the theme files to find what's new." "Edited the theme switcher so it cycles through every registered theme." "Tested the export in a fresh browser to confirm it now opens in Excel."
+
+After all your tickets for the turn are closed, write your final user-facing assistant message — *this* is where the actual results, findings, and recommendations belong. It renders below the progress timeline as the agent's reply to the user.
+
+## Persistent task state across turns
+
+Tickets persist across user turns until you close them. At the start of every new user message, you'll receive a system reminder listing every ticket that is still `open` or `in_progress`. For each one, decide before doing anything else:
+
+- **Keep working on it** — appropriate if the new user message asks you to continue. Run `tk start <id>` if it isn't already in_progress, then proceed.
+- **Replace it** — appropriate if the new user message redirects you. Close the old ticket with a summary of what state you left things in, then create new tickets for the new direction.
+- **Close it** — appropriate if you didn't get to it but you're moving on. Close it with a summary that honestly reports the situation, e.g. "Did not get to this — got pulled into the dark-mode bug instead." Do not silently abandon it.
+
+If a ticket appears in the reminder but you didn't start it, just close it (with a brief summary explaining why) or leave it as-is and start it now.
+
+## No "failed" status
+
+Every ticket terminates as `closed`, regardless of outcome. There is no "failed" or "abandoned" state in this system. If a step didn't pan out:
+
+- Still close the ticket. The summary describes the *work you did* (e.g. "Tried to reproduce the bug by running the export endpoint with several sample inputs."), and your final assistant message reports the *result* honestly (e.g. "I couldn't reproduce — the endpoint returns a valid file in my testing. Could you share a sample input that produces the error?").
+- Don't leave a ticket open hoping to come back. Close it; if the user wants to continue, the next turn can open a fresh ticket.
+
+The combination of an honest work-description summary plus an honest result in the final message is far more useful than a ticket that lingers open across many turns.
+
+## Subagent delegation
+
+When you delegate to a sub-agent via the `launch-task` skill, the entire delegation is **one ticket** in your progress, not many. The sub-agent runs in its own container with its own `.tickets/` and uses tk independently for its own internal progress — that work does not surface in your chat. You represent the delegation in your progress with a single ticket like "Delegate the auth refactor to a sub-agent and review the result", then close it with a summary of the outcome when the sub-agent finishes.
+
+## Read tk's help if you forget the commands
+
+```bash
+tk help
+```
+
+The full lifecycle you need is just `create`, `start`, `add-note`, `close`. Avoid the others (deps, links, types, priorities) — they exist for backlog management but are not used by the chat progress view.
+
 # How to get started on any task:
 
 Always begin your session by reading the relevant READMEs and any other related documentation in the docs/ directory of the project(s) you are working on.
