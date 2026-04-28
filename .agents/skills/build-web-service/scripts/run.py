@@ -12,7 +12,7 @@ entry, and runs `uv sync --all-packages` to materialize the workspace.
 Usage:
     uv run .agents/skills/build-web-service/scripts/run.py \
         --name inbox-status --description "inbox status dashboard" \
-        [--port 8081] [--extra-dep jinja2>=3.1] [--extra-dep anthropic>=0.40]
+        [--port 8081] [--extra-dep "jinja2>=3.1"] [--extra-dep "anthropic>=0.40"]
 
 Run from the repo root (`/code`). Fails non-zero with a clear message on
 any failure (lib already exists, reserved name, sync failure, etc.).
