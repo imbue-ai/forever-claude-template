@@ -5,6 +5,19 @@ description: Create a sub-agent to perform a larger task. Use when work is large
 
 # Launching a task
 
+## 0. Open a single tk ticket for the whole delegation
+
+The progress view treats each delegation as **one** step in your timeline, regardless of how much work the sub-agent does internally. Before doing anything else, create one ticket that describes the delegation in user-facing terms (e.g. "Delegate the dark-mode toggle fix to a sub-agent and review the result") and start it:
+
+```bash
+ID=$(tk create "Delegate <plain-english description of what the sub-agent will do> to a sub-agent")
+tk start "$ID"
+```
+
+The sub-agent will use its own `.tickets/` for its own internal progress — that work renders in the sub-agent's chat, not yours. Don't try to surface the sub-agent's individual steps in your timeline; the user can open the sub-agent's chat if they want that level of detail.
+
+When the sub-agent finishes (Step 5 below), close your ticket with a one-line summary of the outcome (`tk add-note "$ID" "..."` then `tk close "$ID"`).
+
 ## 1. Write a task description
 
 Write a clear task file describing what needs to be done:

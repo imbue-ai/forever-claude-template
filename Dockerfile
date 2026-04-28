@@ -113,6 +113,14 @@ WORKDIR /code/
 # make an extra directory for future worktrees
 RUN mkdir -p /worktree
 
+# Expose the vendored ticket tracker (vendor/tk/ticket) on PATH as `tk` /
+# `ticket`. This is the agent's task primitive (see CLAUDE.md > Task
+# management); the chat UI renders progress from the .tickets/ files it
+# writes. The runtime hook scripts/ensure_tk_on_path.sh covers older built
+# images; this RUN bakes it in for new ones.
+RUN ln -sf /code/vendor/tk/ticket /usr/local/bin/tk && \
+    ln -sf /code/vendor/tk/ticket /usr/local/bin/ticket
+
 # extract our code into the project directory
 RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
 
