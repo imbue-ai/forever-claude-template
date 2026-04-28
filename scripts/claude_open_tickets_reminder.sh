@@ -36,7 +36,7 @@ You have task tickets that are not yet closed:
 
 $open_lines
 
-For each one, decide before continuing: keep working on it (call \`tk start <id>\` if it's not already in_progress), replace it with a fresh ticket, or close it now with an honest summary. Every started ticket must terminate as closed via \`tk close <id>\` (with \`tk add-note <id> "<summary>"\` first to record what you accomplished). There is no "failed" status -- if a goal couldn't be reached, say so in the summary, then close.
+For each one, decide before continuing: keep working on it (call \`tk start <id>\` if it's not already in_progress), replace it with a fresh ticket, or close it now. Every started ticket must terminate as closed via \`tk close <id>\` (with \`tk add-note <id> "<summary>"\` first). The summary is a concise one-line description of the *work done* in this step (the caption a non-technical user sees), not the outcome -- the outcome goes in your final assistant message. Tickets are sequential: do not start a new ticket until the previous one is closed.
 
 See CLAUDE.md > Task management for the full protocol.
 EOF

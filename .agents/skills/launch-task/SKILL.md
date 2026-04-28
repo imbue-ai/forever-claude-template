@@ -16,7 +16,7 @@ tk start "$ID"
 
 The sub-agent will use its own `.tickets/` for its own internal progress — that work renders in the sub-agent's chat, not yours. Don't try to surface the sub-agent's individual steps in your timeline; the user can open the sub-agent's chat if they want that level of detail.
 
-When the sub-agent finishes (Step 5 below), close your ticket with a one-line summary of the outcome (`tk add-note "$ID" "..."` then `tk close "$ID"`).
+When the sub-agent finishes (Step 5 below), close your ticket. The closing summary describes the *work you did* — e.g. "Briefed a sub-agent on the dark-mode toggle fix and reviewed its result." — not the outcome. Save the actual outcome / result for your final assistant message to the user.
 
 ## 1. Write a task description
 

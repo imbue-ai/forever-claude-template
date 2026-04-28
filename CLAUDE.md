@@ -27,7 +27,21 @@ This means every ticket title and every closing summary is **user-facing copy**.
 - Use a ticket whenever you do meaningful work in a turn — anything more than a quick reply or a single read of one file to answer a question.
 - Don't use a ticket for chitchat, single-line acknowledgements, or trivial answers ("yes, I can do that"). Turns with no tickets render as plain conversation.
 - A good rule of thumb: if a non-technical user reading "Step: <your title>" would think "yes, that's what I asked for", you have a ticket. If they'd think "what does that even mean?", you don't.
-- Granularity: aim for one ticket per logical step of the goal — typically 2-5 tickets per substantive turn. Not one per tool call (way too granular). Not one ticket for the whole turn (defeats the purpose of progress).
+
+## How to decompose work into tickets
+
+**One ticket per sequential step. Tickets must be serial — do not start a new one until the previous one is closed.** If a chunk of work consists of operations you'd run in parallel or simultaneously, that whole chunk is *one* ticket, not many.
+
+- Wrong: three tickets "Search political news" / "Search business news" / "Search tech news", all started at once. The user sees three concurrent spinners with duplicated tool calls underneath; nothing reads as actual progress.
+- Right: one ticket "Pull the day's top news headlines" that internally runs whatever parallel searches it needs. Multiple tool calls inside one ticket is normal and expected.
+
+The principle: a ticket represents a logical step in the user's mental model of the work, not a unit of parallel computation. If you'd describe the work to the user as "first I'll do X, then Y, then Z," that's three tickets. If you'd describe it as "I'm pulling headlines from across the news," that's one ticket — even if it involves a dozen parallel searches.
+
+Granularity: typically 2-5 sequential tickets per substantive turn. Not one per tool call (way too granular). Not one ticket for the whole turn (defeats the purpose of progress).
+
+## A short reply before tickets is fine
+
+It's OK — encouraged, even — to write a brief one-line acknowledgement before you start creating tickets. e.g. "Sure, looking into that now." or "OK, let me dig in." That text appears as plain assistant prose above the progress timeline. Just keep it short; the timeline is where the actual progress lives.
 
 ## Lifecycle (must follow exactly)
 
@@ -48,12 +62,16 @@ For every step you commit to:
 
 4. **Write a summary as a note**, then close:
    ```bash
-   tk add-note "$ID" "Found a new \"midnight\" theme in your settings file. It defines colors for dark mode but isn't being registered with the theme switcher."
+   tk add-note "$ID" "Read through your recent commits and the theme files to find what's new."
    tk close "$ID"
    ```
-   Summary rules: one line, plain English, describes what you found / did / produced as a user-facing result — not as a list of tool calls. The most recent note before close becomes the visible summary in the chat.
+   Summary rules: ONE concise line, plain English, describing **the work you did in this step** — what the user would see if they expanded the block. Think of it as a high-level non-technical caption for the raw tool calls inside.
 
-After all your tickets for the turn are closed, write your final user-facing message as your normal assistant text. That message is rendered below the progress timeline.
+   - It is NOT the *result* / *finding* / *answer* — those go in your final assistant message below the timeline (e.g. "Fixed: the new theme wasn't registered with the toggle. Made it available."). Don't put conclusions, fixes, or recommendations in summaries.
+   - It is NOT a list of tool calls or file names. "Ran git log, then read midnight.ts, then grep'd for registerTheme" is wrong — too technical, and the user can already see those tool calls if they expand the block.
+   - It IS one short caption-style sentence describing the work, in the same plain-English tone as the title. "Read through your recent commits and the theme files to find what's new." "Edited the theme switcher so it cycles through every registered theme." "Tested the export in a fresh browser to confirm it now opens in Excel."
+
+After all your tickets for the turn are closed, write your final user-facing assistant message — *this* is where the actual results, findings, and recommendations belong. It renders below the progress timeline as the agent's reply to the user.
 
 ## Persistent task state across turns
 
@@ -67,12 +85,12 @@ If a ticket appears in the reminder but you didn't start it, just close it (with
 
 ## No "failed" status
 
-Every ticket terminates as `closed`, regardless of outcome. There is no "failed" or "abandoned" state in this system. If you couldn't achieve the goal:
+Every ticket terminates as `closed`, regardless of outcome. There is no "failed" or "abandoned" state in this system. If a step didn't pan out:
 
-- Don't pretend you did. Be honest in the summary: "Could not reproduce the bug — the export endpoint is returning a valid file in my testing. May need a sample input from the user."
-- Don't leave it open hoping to come back. Close it with the honest result; if the user wants to continue, the next turn can open a new ticket.
+- Still close the ticket. The summary describes the *work you did* (e.g. "Tried to reproduce the bug by running the export endpoint with several sample inputs."), and your final assistant message reports the *result* honestly (e.g. "I couldn't reproduce — the endpoint returns a valid file in my testing. Could you share a sample input that produces the error?").
+- Don't leave a ticket open hoping to come back. Close it; if the user wants to continue, the next turn can open a fresh ticket.
 
-The user reads summaries as the agent's report. An honest "I tried X, it didn't work because Y" is far more useful than a ticket that lingers open across many turns.
+The combination of an honest work-description summary plus an honest result in the final message is far more useful than a ticket that lingers open across many turns.
 
 ## Subagent delegation
 
