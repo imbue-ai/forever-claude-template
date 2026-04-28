@@ -19,8 +19,11 @@ from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
+from imbue.imbue_common.logging import cleanup_old_rotated_files
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
+from imbue.imbue_common.logging import generate_rotation_timestamp
+from imbue.imbue_common.logging import rotation_lock
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -49,6 +52,7 @@ class DiscoveryEventType(UpperCaseStrEnum):
     HOST_DESTROYED = auto()
     DISCOVERY_FULL = auto()
     HOST_SSH_INFO = auto()
+    DISCOVERY_ERROR = auto()
 
 
 # === Event Data Types ===
@@ -92,6 +96,14 @@ class HostSSHInfoEvent(EventEnvelope):
 
     host_id: HostId = Field(description="ID of the host")
     ssh: SSHInfo = Field(description="SSH connection info for the host")
+
+
+class DiscoveryErrorEvent(EventEnvelope):
+    """Records an error encountered during discovery."""
+
+    error_type: str = Field(description="The type name of the exception (e.g. 'RuntimeError')")
+    error_message: str = Field(description="The error message")
+    source_name: str = Field(description="Provider, host, or agent that caused the error")
 
 
 # === Path Helpers ===
@@ -226,17 +238,49 @@ def make_full_discovery_snapshot_event(
 # === File I/O ===
 
 
+_DISCOVERY_MAX_FILE_SIZE_BYTES: Final[int] = 50 * 1024 * 1024
+_DISCOVERY_MAX_ROTATED_COUNT: Final[int] = 1
+
+
 def append_discovery_event(config: MngrConfig, event: EventEnvelope) -> None:
     """Append a single discovery event to the JSONL file.
 
     Creates parent directories if they do not exist. Uses a single write() call
-    for safe concurrent appending under PIPE_BUF.
+    for safe concurrent appending under PIPE_BUF. Rotates the file when it
+    exceeds _DISCOVERY_MAX_FILE_SIZE_BYTES.
     """
     events_path = get_discovery_events_path(config)
     events_path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_discovery_events_if_needed(events_path)
     line = json.dumps(event.model_dump(mode="json"), separators=(",", ":")) + "\n"
     with open(events_path, "a") as f:
         f.write(line)
+
+
+def _rotate_discovery_events_if_needed(events_path: Path) -> None:
+    """Rotate the discovery events file if it exceeds the size limit."""
+    try:
+        file_size = events_path.stat().st_size
+    except OSError:
+        return
+    if file_size < _DISCOVERY_MAX_FILE_SIZE_BYTES:
+        return
+    with rotation_lock(events_path.parent):
+        # Re-check actual size: another process may have already rotated
+        try:
+            actual_size = events_path.stat().st_size
+        except OSError:
+            return
+        if actual_size < _DISCOVERY_MAX_FILE_SIZE_BYTES:
+            return
+        timestamp = generate_rotation_timestamp()
+        rotated = events_path.with_name(f"{events_path.name}.{timestamp}")
+        try:
+            events_path.rename(rotated)
+        except OSError as e:
+            logger.trace("Failed to rotate discovery events file: {}", e)
+            return
+        cleanup_old_rotated_files(events_path.parent, _DISCOVERY_MAX_ROTATED_COUNT)
 
 
 def emit_agent_discovered(config: MngrConfig, agent: DiscoveredAgent) -> None:
@@ -300,6 +344,43 @@ def emit_host_ssh_info(config: MngrConfig, host_id: HostId, ssh: SSHInfo) -> Non
     )
     append_discovery_event(config, event)
     logger.trace("Emitted host_ssh_info event for {}", host_id)
+
+
+def emit_discovery_error_event(config: MngrConfig, error_type: str, error_message: str, source_name: str) -> None:
+    """Build and append a discovery error event."""
+    timestamp, event_id = _make_envelope_fields()
+    event = DiscoveryErrorEvent(
+        timestamp=timestamp,
+        type=EventType(DiscoveryEventType.DISCOVERY_ERROR),
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        error_type=error_type,
+        error_message=error_message,
+        source_name=source_name,
+    )
+    append_discovery_event(config, event)
+    logger.trace("Emitted discovery_error event: {} from {}", error_type, source_name)
+
+
+def emit_discovery_error_to_stdout(error_type: str, error_message: str, source_name: str) -> None:
+    """Write a discovery error event as a JSONL line to stdout.
+
+    Used in contexts where the events_base_dir is not available (e.g. list.py).
+    The discovery stream tail thread will pick it up from stdout.
+    """
+    timestamp, event_id = _make_envelope_fields()
+    event = DiscoveryErrorEvent(
+        timestamp=timestamp,
+        type=EventType(DiscoveryEventType.DISCOVERY_ERROR),
+        event_id=event_id,
+        source=DISCOVERY_EVENT_SOURCE,
+        error_type=error_type,
+        error_message=error_message,
+        source_name=source_name,
+    )
+    line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
 
 
 def emit_discovery_events_for_host(
@@ -372,6 +453,7 @@ DiscoveryEvent = (
     | HostDestroyedEvent
     | FullDiscoverySnapshotEvent
     | HostSSHInfoEvent
+    | DiscoveryErrorEvent
 )
 
 
@@ -403,6 +485,8 @@ def parse_discovery_event_line(line: str) -> DiscoveryEvent | None:
             return FullDiscoverySnapshotEvent.model_validate(data)
         case DiscoveryEventType.HOST_SSH_INFO:
             return HostSSHInfoEvent.model_validate(data)
+        case DiscoveryEventType.DISCOVERY_ERROR:
+            return DiscoveryErrorEvent.model_validate(data)
         case _:
             return None
 
@@ -606,8 +690,8 @@ def _discovery_stream_tail_events_file(
                         if stop_event.is_set():
                             break
                         _discovery_stream_emit_line(file_line, emitted_event_ids, emit_lock, on_line)
-        except OSError as e:
-            logger.trace("OSError while tailing discovery events file: {}", e)
+        except Exception:
+            logger.exception("Error while tailing discovery events file")
         stop_event.wait(timeout=1.0)
 
 
@@ -632,8 +716,17 @@ def _write_unfiltered_full_snapshot_logged(mngr_ctx: MngrContext, error_behavior
     """Run an unfiltered full snapshot, logging any errors instead of raising."""
     try:
         _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
-    except (BaseMngrError, OSError) as e:
-        logger.warning("Failed to write discovery snapshot: {}", e)
+    except Exception as e:
+        logger.exception("Failed to write discovery snapshot")
+        try:
+            emit_discovery_error_event(
+                mngr_ctx.config,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                source_name="discovery_snapshot",
+            )
+        except (OSError, ValueError):
+            pass
 
 
 def run_discovery_stream(
@@ -709,8 +802,17 @@ def run_discovery_stream(
             try:
                 _write_unfiltered_full_snapshot(mngr_ctx, error_behavior)
                 # The tail thread will pick up the new snapshot and emit it
-            except (BaseMngrError, OSError) as e:
-                logger.warning("Discovery stream poll failed (continuing): {}", e)
+            except Exception as e:
+                logger.exception("Discovery stream poll failed (continuing)")
+                try:
+                    emit_discovery_error_event(
+                        mngr_ctx.config,
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        source_name="discovery_poll",
+                    )
+                except (OSError, ValueError):
+                    pass
     except KeyboardInterrupt:
         pass
     finally:
