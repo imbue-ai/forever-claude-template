@@ -41,13 +41,16 @@ Task names must be unique (git branches are created). Use descriptive names like
 
 ## 3. Wait for completion (background)
 
-Start `mngr wait` as a background task so you can do other work:
+Start `mngr wait` in the background (using the Bash tool with
+`run_in_background: true`) so you can continue working. You will be
+notified when it completes -- do not block on it.
 
 ```bash
-mngr wait <task-name> DONE STOPPED WAITING &
+# Run with Bash run_in_background: true
+mngr wait <task-name> DONE STOPPED WAITING --timeout 30m
 ```
 
-This will return when the agent reaches one of those terminal states.
+This will notify you when the agent reaches one of those terminal states.
 
 ## 4. Check results
 
@@ -78,9 +81,41 @@ mngr capture <task-name>
 - If it asked a question, answer via `mngr message <task-name> -m "your answer"`
 - If it seems stuck, check `mngr capture <task-name>` for dialog boxes or errors
 
+## Worktree isolation and gitignored files
+
+Each sub-agent is created in its own git worktree of the current repo
+(see `worktree_base_folder` in `.mngr/settings.toml`). The worktree is a
+fresh checkout of the branch, so the worker sees committed files but
+**does not** see anything under `.gitignore` — including `runtime/`,
+`memory/`, scratch files in `/tmp`, and uncommitted/untracked files in
+your own working directory.
+
+If the worker needs access to a gitignored file (e.g. a transcript
+dumped under `runtime/`, a dataset, a credential file), push it into
+the worker's working directory after `mngr create` with `mngr push`:
+
+```bash
+# Push a specific directory to the same relative path in the worker
+mngr push <task-name>:path/to/dir path/to/dir
+
+# Push a single file to a specific target path
+mngr push <task-name>:path/to/file.txt path/to/file.txt
+```
+
+`mngr push` uses rsync by default and only modifies the target
+workspace. Do it before the worker reaches the step that needs the
+file — in practice, immediately after `mngr create`, since worker
+startup (provisioning + loading skills) typically gives you a window
+before the task message is acted on. See `mngr push --help` for full
+options.
+
+Committed files are already present in the worker's worktree; you do
+not need to push those.
+
 ## Guidelines
 
 - Always include clear success criteria in your task description
 - Use `mngr wait` in the background -- don't block yourself waiting for a task
 - Check the transcript when a task finishes to see if the agent had questions or concerns
+- If the task references gitignored files, push them with `mngr push` right after `mngr create` (see above)
 - If a task fails, read the transcript to understand why before retrying
