@@ -264,7 +264,6 @@ current.tar.gz
 # Autofix session artifacts
 .autofix/
 .reviewer/outputs/
-.reviewer/logs/
 .reviewer/settings.local.json
 **/.reviewer/.stop_hook_consecutive_blocks
 .reviews/
@@ -280,3 +279,6 @@ cov.xml
 
 # ignore demos
 recordings
+
+# make sure we don't check in reviewer logs
+.reviewer/logs/
