@@ -1,9 +1,9 @@
 ---
 name: send-telegram-message
-description: Send a message to the user via Telegram. Use this whenever you need to communicate with the user.
+description: Telegram-specific implementation for sending a message to the user. Usually invoke `send-user-message` instead -- it probes for the configured channel and dispatches here only when telegram is active. Only invoke this skill directly when you already know the deployment uses telegram (or a caller skill tells you to).
 ---
 
-# Sending a message to the user
+# Sending a message to the user via Telegram
 
 ## Choosing the right conversation
 

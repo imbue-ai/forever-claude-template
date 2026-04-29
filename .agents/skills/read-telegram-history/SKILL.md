@@ -1,6 +1,6 @@
 ---
 name: read-telegram-history
-description: Read recent Telegram conversation history. Use this to understand context before replying to a message.
+description: Telegram-specific implementation for reading recent conversation history. Only use when the deployment is known to use telegram (e.g. invoked from within `send-user-message` after its telegram probe succeeds). Deployments with other channels have their own equivalents.
 ---
 
 # Reading telegram history
