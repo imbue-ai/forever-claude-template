@@ -100,11 +100,10 @@ Follow the layout and frontmatter conventions in
 `.agents/shared/references/spec-summary.md`. Then validate structurally:
 
 ```bash
-uv run .agents/shared/scripts/validate_skill_name.py <name>
 uv run .agents/shared/scripts/validate_skill.py .agents/skills/<name>
 ```
 
-Both must print `ok` before moving on. If either fails, fix and rerun.
+It must print `ok` before moving on. If it fails, fix and rerun.
 
 ## Stage 4: Hand-craft and run scenarios
 

@@ -145,3 +145,29 @@ def test_missing_skill_md(tmp_path: Path) -> None:
 def test_missing_directory(tmp_path: Path) -> None:
     error = validate_skill.validate(tmp_path / "does-not-exist")
     assert error is not None
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "Bad-Name",  # uppercase
+        "bad_name",  # underscore
+        "-leading",  # leading hyphen
+        "trailing-",  # trailing hyphen
+        "double--hyphen",  # consecutive hyphens
+    ],
+)
+def test_invalid_name_format(tmp_path: Path, bad_name: str) -> None:
+    """frontmatter.name must match the kebab-case rules even if dir matches."""
+    skill = _write_skill(tmp_path, bad_name)
+    error = validate_skill.validate(skill)
+    assert error is not None
+    assert "lowercase letters/digits" in error
+
+
+def test_name_too_long(tmp_path: Path) -> None:
+    long_name = "a" * 65
+    skill = _write_skill(tmp_path, long_name)
+    error = validate_skill.validate(skill)
+    assert error is not None
+    assert "length" in error

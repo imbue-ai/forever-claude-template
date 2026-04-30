@@ -80,15 +80,11 @@ you can encode that as subcommands on `run.py` to do the deterministic sections 
 
 ## Validation
 
-Two helpers live under `.agents/shared/scripts/` and are invoked via `uv run`:
-
-- `uv run .agents/shared/scripts/validate_skill_name.py <name>` -- checks the
-  kebab-case rules.
-- `uv run .agents/shared/scripts/validate_skill.py <skill_dir>` -- checks
-  SKILL.md frontmatter, directory name match, description length, 500-line
-  body limit, and PEP 723 run.py presence for crystallized skills.
-
-Both print `ok` and exit 0 on success; exit 1 with a clear error on failure.
+`uv run .agents/shared/scripts/validate_skill.py <skill_dir>` checks SKILL.md
+frontmatter, the kebab-case name rules, directory-name match, description
+length, 500-line body limit, and PEP 723 run.py presence for crystallized
+skills. Prints `ok` and exits 0 on success; exits 1 with a clear error on
+failure.
 
 ## Scenario template
 

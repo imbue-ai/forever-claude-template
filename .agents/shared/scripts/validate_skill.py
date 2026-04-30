@@ -24,6 +24,7 @@ stderr otherwise.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,9 @@ import yaml
 _MAX_BODY_LINES = 500
 _MIN_DESC_LEN = 1
 _MAX_DESC_LEN = 1024
+_MIN_NAME_LEN = 1
+_MAX_NAME_LEN = 64
+_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], list[str]]:
@@ -87,6 +91,17 @@ def validate(skill_dir: Path) -> str | None:
     name = frontmatter.get("name")
     if not isinstance(name, str) or not name:
         return "frontmatter.name is missing or empty"
+    if not (_MIN_NAME_LEN <= len(name) <= _MAX_NAME_LEN):
+        return (
+            f"frontmatter.name length must be {_MIN_NAME_LEN}-{_MAX_NAME_LEN} "
+            f"characters, got {len(name)}"
+        )
+    if not _NAME_PATTERN.fullmatch(name):
+        return (
+            f"frontmatter.name ({name!r}) must match "
+            f"^[a-z0-9]+(?:-[a-z0-9]+)*$ -- lowercase letters/digits "
+            "separated by single hyphens, no leading/trailing or consecutive hyphens"
+        )
     if name != skill_dir.name:
         return (
             f"frontmatter.name ({name!r}) does not match parent directory "
