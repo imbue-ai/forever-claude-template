@@ -15,9 +15,9 @@ and points at a replay transcript on disk. Follow these stages to go from
 a single entry point and one flow. Add surface only when a specific invariant
 demands it.
 
-Consult `references/spec-summary.md` for the agentskills.io layout,
-frontmatter template, PEP 723 script conventions, and the scenario template
-you will use in Stage 4.
+Consult `.agents/shared/references/spec-summary.md` for the agentskills.io
+layout, frontmatter template, PEP 723 script conventions, and the scenario
+template you will use in Stage 4.
 
 ## Reporting back to the lead
 
@@ -51,7 +51,7 @@ transcript is enough.
 Produce a short outline with:
 
 - A kebab-case skill name (see the naming rules in
-  `references/spec-summary.md`).
+  `.agents/shared/references/spec-summary.md`).
 - A one-paragraph description that states what the skill does AND when to
   use it (this becomes the SKILL.md `description` frontmatter field).
 - Inputs: what the skill needs from its caller (CLI args if there's a
@@ -97,7 +97,7 @@ Do not proceed to Stage 3 without an explicit yes.
 ## Stage 3: Build the artifact
 
 Follow the layout and frontmatter conventions in
-`references/spec-summary.md`. Then validate structurally:
+`.agents/shared/references/spec-summary.md`. Then validate structurally:
 
 ```bash
 uv run .agents/shared/scripts/validate_skill_name.py <name>
@@ -115,8 +115,8 @@ Pick 2-3 scenarios that exercise the skill end-to-end:
 3. **Edge case B** (optional): a second non-happy input exercising a
    different code path.
 
-Use the scenario template in `references/spec-summary.md` to record each
-scenario in your transcript. Scenarios are *ephemeral* -- do NOT write
+Use the scenario template in `.agents/shared/references/spec-summary.md` to
+record each scenario in your transcript. Scenarios are *ephemeral* -- do NOT write
 them as files in the skill.
 
 Run each scenario:
@@ -187,25 +187,15 @@ Approve and save? (yes / no with notes)
 
 ## Stage 7: Commit and hand off
 
-Commit on your current branch. Then write a terminal report with
-`type: status`, `name: done`, and a body like:
-
-```
-Committed on branch `<branch-name>`. Ready to merge.
-```
-
-Push it and stop. The lead will merge the branch.
+Commit on your current branch, then emit a `name: done` terminal report (body
+shape per `.agents/shared/references/worker-reporting.md`). The lead will
+merge the branch.
 
 ## If you need to give up
 
-If you cannot produce a good artifact, write a terminal report with
-`type: status`, `name: stuck`, and a body like:
-
-```
-I could not crystallize this task because: <reason>. No skill was saved.
-```
-
-Push it and stop.
+If you cannot produce a good artifact, emit a `name: stuck` terminal report
+(body shape per `.agents/shared/references/worker-reporting.md`); state in
+the body that no skill was saved.
 
 Reasons that genuinely warrant giving up:
 

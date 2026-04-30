@@ -66,8 +66,7 @@ Valid `name:` values for this worker:
 - Include 1-2 additional scenarios that exercise neighbouring code paths
   to make sure the fix didn't regress anything.
 - Scenarios are ephemeral (run in your transcript, not saved to disk).
-  Use the template in
-  `.agents/skills/crystallize-task-worker/references/spec-summary.md`.
+  Use the template in `.agents/shared/references/spec-summary.md`.
 
 ## Stage 5: Code review
 
@@ -90,24 +89,13 @@ Push it and stop, per the reporting procedure above.
 
 ## Stage 7: Commit and hand off
 
-Commit on your current branch. Then write a terminal report with
-`type: status`, `name: done`, and body:
-
-```
-Committed on branch `<branch-name>`. Ready to merge.
-```
-
-Push it and stop.
+Commit on your current branch, then emit a `name: done` terminal report (body
+shape per `.agents/shared/references/worker-reporting.md`).
 
 ## If you cannot fix it
 
-If the root cause is impossible for you to implement or the right fix would change the skill's
-contract in ways the user should decide on, write a terminal report
-with `type: status`, `name: stuck`, and body:
-
-```
-I could not heal `<skill-name>` because: <reason>. Recommend: <next
-step, e.g. a create-new-skill update or manual investigation>.
-```
-
-Push it and stop.
+If the root cause is impossible for you to implement or the right fix would
+change the skill's contract in ways the user should decide on, emit a
+`name: stuck` terminal report (body shape per
+`.agents/shared/references/worker-reporting.md`). Include a recommendation
+(e.g. a create-new-skill update or manual investigation).

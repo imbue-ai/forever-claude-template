@@ -73,3 +73,37 @@ At each gate or terminal status:
 
 The push is the ready signal -- it only happens once you are finished writing.
 Do not push a partial report.
+
+## Terminal status report bodies
+
+Each worker's SKILL.md lists which of these terminal statuses apply. The body
+shapes are shared:
+
+### `name: done`
+
+```
+Committed on branch `<branch-name>`. Ready to merge.
+```
+
+For verify-only flows (no new worker commits), substitute "Verified on branch
+`<branch-name>`. Ready to merge." and optionally add: "No follow-up commits
+needed; the substantive change is already on the branch from the live commit."
+
+### `name: stuck`
+
+A one-sentence reason and, if applicable, a recommendation for next steps:
+
+```
+I could not <do-the-task> because: <reason>. <optional: where work is, recommended next step>.
+```
+
+The flow-specific guidance for *when* to give up lives in each worker's
+SKILL.md.
+
+### `name: no-update-needed`
+
+```
+No update needed. Reason: <one-sentence>.
+```
+
+Do not commit a null change.

@@ -96,11 +96,5 @@ Push it and stop, per the reporting procedure in `../SKILL.md`.
 
 ## Stage 9: Commit and hand off
 
-Commit on your current branch. Then write a terminal report with
-`type: status`, `name: done`, and body:
-
-```
-Committed on branch `<branch-name>`. Ready to merge.
-```
-
-Push it and stop.
+Commit on your current branch, then emit a `name: done` terminal report (body
+shape per `.agents/shared/references/worker-reporting.md`).

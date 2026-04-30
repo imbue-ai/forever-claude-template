@@ -45,8 +45,8 @@ judgement steps as SKILL.md prose.
 single entry point and one flow. Add surface only when a specific
 invariant demands it.
 
-Consult `.agents/skills/crystallize-task-worker/references/spec-summary.md`
-for the layout, frontmatter, validation helpers, and scenario template.
+Consult `.agents/shared/references/spec-summary.md` for the layout,
+frontmatter, validation helpers, and scenario template.
 
 ## Update-in-place vs. create-new-skill (absorb flow only)
 
@@ -87,17 +87,10 @@ incident in the absorb flow; the changed path in the verify flow). Others
 should exercise neighbouring or edge paths.
 
 Scenarios are ephemeral -- they live in the transcript for reproducibility,
-not on disk. Use the template in
-`.agents/skills/crystallize-task-worker/references/spec-summary.md`.
+not on disk. Use the template in `.agents/shared/references/spec-summary.md`.
 
 ## If you decide no change is needed
 
-Applies to both flows. If the right answer turns out to be "leave the
-skill alone", write a terminal report with `type: status`,
-`name: no-update-needed`, and body:
-
-```
-No update needed. Reason: <one-sentence>.
-```
-
-Push it and stop. Do not commit a null change.
+Applies to both flows. If the right answer turns out to be "leave the skill
+alone", emit a `name: no-update-needed` terminal report (body shape per
+`.agents/shared/references/worker-reporting.md`).

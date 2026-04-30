@@ -53,7 +53,7 @@ how you catch regressions.
 
 Scenarios are walk-throughs against the post-change skill files on disk.
 Record each in your transcript using the template from
-`.agents/skills/crystallize-task-worker/references/spec-summary.md`.
+`.agents/shared/references/spec-summary.md`.
 
 ## Stage 5: Code review
 
@@ -79,18 +79,8 @@ Push it and stop, per the reporting procedure in `../SKILL.md`.
 
 ## Stage 7: Hand off
 
-On approval, write a terminal report with `type: status`, `name: done`, and
-body:
-
-```
-Verified on branch `<branch-name>`. Ready to merge.
-<if no worker commits were needed, say so: "No follow-up commits
-needed; the substantive change is already on the branch from the
-live commit.">
-```
-
-Push it and stop.
-
+On approval, emit a `name: done` terminal report (body shape per
+`.agents/shared/references/worker-reporting.md`; this is the verify variant).
 If verification produced no worker commits of its own (clean run, no
 `/autofix` fixes), that is fine -- the merge still brings the original live
 commit forward, and the `done` status tells the lead to merge.
