@@ -66,7 +66,7 @@ On `type: gate`:
   domain knowledge you do not have. `final-artifact` gates always escalate.
   `outline-approval` gates default to answer-yourself; only escalate if the
   worker has surfaced a *genuine process question* (a decision about user
-  intent, scope, or domain that the lead cannot make from context). Most
+  intent, scope, or domain that you cannot make from context). Most
   outline gates do not contain such questions and should not be forwarded.
 - **Mix**: if a gate bundles an approval (escalate) with implementation
   sub-questions, pre-answer the sub-questions in the message you forward to the

@@ -220,17 +220,16 @@ mngr push crystallize-$NAME:<dir>/ \
 
 ## Step 5: Background-poll for worker reports (concurrent with other work)
 
-The lead launches this poll as a background task (`run_in_background: true`)
-and continues with whatever else it was doing -- subsequent skill steps,
+Launch the poll as a background task (`run_in_background: true`) and
+continue with whatever else you were doing -- subsequent skill steps,
 interface design, or other user requests. Reports surface as task
-notifications when they arrive; the lead handles them at that point, not by
+notifications when they arrive; handle them at that point, not by
 blocking on the poll.
 
-If a calling skill (e.g. `do-something-new`) dispatched into this skill
-and then proceeds to other work, the calling skill's lead retains
-responsibility for this poll. Do not assume "fire and forget" -- without
-the poll, Gate 1 / Gate 2 reports never reach the user and the worker
-deadlocks waiting for approval.
+You still own this poll even if you reached this step from another skill
+(e.g. `do-something-new`) and now move on to unrelated work. Do not
+assume "fire and forget" -- without the poll, Gate 1 / Gate 2 reports
+never reach the user and the worker deadlocks waiting for approval.
 
 Follow `.agents/shared/references/lead-proxy.md` for polling, gate
 decisions, the "do not interrupt more recent user work" rule, `mngr push`

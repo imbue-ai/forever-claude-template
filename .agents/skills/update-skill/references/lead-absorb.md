@@ -86,7 +86,7 @@ mngr create update-$TARGET -t crystallize-worker \
 ```
 
 Then push the runtime dir (task file + transcript) into the worker's worktree
--- the worker cannot read files that live only in the lead's worktree, and its
+-- the worker cannot read files that live only in your worktree, and its
 `parse_task_frontmatter.py` helper needs `task.md` on disk to validate the
 schema. See `.agents/shared/references/lead-proxy.md` § "mngr push rationale"
 for the directory-form and `--uncommitted-changes=merge` requirements.

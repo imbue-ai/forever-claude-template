@@ -118,9 +118,9 @@ background. Tell `crystallize-task` that the source artifacts directory is
 task frontmatter as `source_artifacts_dir` and its Step 4 pushes the directory
 to the worker, so the worker has the scripts and sample data you produced.
 
-**The lead is still on the hook for the lead-proxy poll.** Kicking off
-`crystallize-task` is *not* fire-and-forget -- the lead must launch the
-background poll for worker reports (per `crystallize-task` Step 5 / 
+**You are still on the hook for the lead-proxy poll.** Kicking off
+`crystallize-task` is *not* fire-and-forget -- you must launch the
+background poll for worker reports (per `crystallize-task` Step 5 /
 `.agents/shared/references/lead-proxy.md`) *concurrently with* the
 interface-design conversation. The poll is a `run_in_background: true` bash
 invocation; it does not block subsequent steps. Without it, Gate 1 / Gate 2
