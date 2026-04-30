@@ -99,9 +99,6 @@ Flow-specific substitutions:
   `type: status, name: no-update-needed` (no change -- just close the
   ticket; no merge); `type: status, name: stuck` (failure-handling flow).
 
-If the worker decided "create-new-skill" (absorb flow), the new skill
-lands in its own directory; the old skill is unchanged.
-
 On successful merge, close the tracking ticket:
 
 ```bash

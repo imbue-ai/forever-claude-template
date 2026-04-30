@@ -75,10 +75,6 @@ frontmatter.
 TASK_EOF
 ```
 
-The heredoc delimiter is unquoted so `$MNGR_AGENT_NAME` and `$TARGET` expand;
-shell metacharacters inside the body (`$`, backticks) are backslash-escaped so
-they land literal in the task file.
-
 `FLOW: absorb` is required; the worker fails loudly if the marker is missing.
 
 ## 2c: Launch the worker and push the transcript

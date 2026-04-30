@@ -1,12 +1,8 @@
 # Lead-side proxy flow
 
-Shared across `crystallize-task`, `heal-skill`, and `update-skill`: the three
-lifecycle skills use the same file-based protocol to drive their worker to
-completion and surface gate/status reports to the user.
-
-This file covers the generic mechanics. Each caller supplies its own
-flow-specific substitutions (worker name, branch, runtime path, which gate
-names and terminal statuses apply).
+Generic mechanics for driving a worker to completion and surfacing gate/status
+reports to the user. The caller supplies flow-specific substitutions (worker
+name, branch, runtime path, which gate names and terminal statuses apply).
 
 ## Polling for the next report
 

@@ -1,11 +1,8 @@
 # Worker reporting contract
 
-Shared across `crystallize-task-worker`, `heal-skill-worker`, and
-`update-skill-worker`: the three sub-skills use the same file-based protocol to
-signal the lead at each gate and at terminal status.
-
-This file covers the generic protocol. Each worker supplies its own
-flow-specific runtime paths and the enum of allowed `name:` values.
+Generic file-based protocol for signaling the lead at each gate and at
+terminal status. The worker supplies flow-specific runtime paths and the
+enum of allowed `name:` values.
 
 ## Task-file inputs
 

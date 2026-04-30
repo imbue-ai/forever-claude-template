@@ -188,11 +188,6 @@ source_artifacts_dir: runtime/<calling-skill>/<slug>/
 Step 4 then pushes that directory to the worker alongside the standard
 crystallize runtime dir.
 
-The split-heredoc shape keeps variable expansion (`$MNGR_AGENT_NAME`,
-`$NAME`) contained to the small frontmatter block while the larger
-body block stays single-quoted -- so `$` and backticks in the body are
-literal by default, no escaping needed.
-
 ## Step 4: Launch the worker
 
 Follow the `launch-task` skill's conventions for worker lifecycle management

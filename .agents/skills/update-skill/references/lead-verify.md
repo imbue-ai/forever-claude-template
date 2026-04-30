@@ -90,11 +90,6 @@ frontmatter.
 TASK_EOF
 ```
 
-The heredoc delimiter is unquoted so the shell substitutes `$MNGR_AGENT_NAME`,
-`$TARGET`, `$COMMIT_RANGE`, and the two `$(...)` git invocations at write time.
-Shell metacharacters inside the body (`$`, backticks) are backslash-escaped so
-they land literal in the task file.
-
 ## 2c: Launch the worker and push the commit artifacts
 
 ```bash

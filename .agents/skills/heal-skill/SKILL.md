@@ -117,13 +117,6 @@ BODY_EOF
 } > runtime/heal/$TARGET/task.md
 ```
 
-The body heredoc stays unquoted because this task's prose still needs
-`$TARGET` expansion (the target skill name appears in multiple places).
-Backticks in the body are backslash-escaped. If a heal task doesn't need
-any variable expansion in its body, quote the body delimiter
-(`<< 'BODY_EOF'`) and drop the escapes -- see crystallize-task/SKILL.md
-Step 3 for that pattern.
-
 ## Step 4: Launch the worker
 
 ```bash
