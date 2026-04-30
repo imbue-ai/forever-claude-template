@@ -50,7 +50,7 @@ requests come back with the "request not permitted by the user
 message", ask the user for permission first:
 
 ```bash
-curl -XPOST http://localhost:8000/api/permissions/request -d '{"request_type": "LATCHKEY_PERMISSION", "service": "discord", "rationale": "I'd like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
+curl -XPOST http://localhost:8000/api/permissions/request -d '{"request_type": "LATCHKEY_PERMISSION", "service_name": "discord", "rationale": "I'd like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
 ```
 
 After that, wait for a system message to see if the user approved or denied the permission request.
