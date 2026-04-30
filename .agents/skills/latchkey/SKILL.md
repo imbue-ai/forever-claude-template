@@ -18,10 +18,8 @@ Usage:
 2. **Pass through all regular curl arguments** - latchkey is a transparent wrapper.
 3. **Check for `latchkey services list`** to get a list of supported services. Use `--viable` to only show the currently configured ones.
 4. **Use `latchkey services info <service_name>`** to get information about a specific service (auth options, credentials status, API docs links, special requirements, etc.).
-5. **If necessary, ask the user to configure credentials first.** Tell the user to run `latchkey auth set` on the machine where latchkey is installed (using the setCredentialsExample from the `services info` command).
-6. **Alternatively, let the user log in with the browser.** If supported for the given service, run `latchkey auth browser <service_name>` to open a browser login pop-up window.
-7. **Look for the newest documentation of the desired public API online.** If using the `browser` auth command, avoid bot-only endpoints.
-8. **Do not initiate a new login if the credentials status is `valid` or `unknown`** - the user might just not have the necessary permissions for the action you're trying to do.
+5. **Submit a permission request to the user if necessary** by calling `curl -XPOST http://localhost:8000/api/permissions/request` when either there are no credentials for the given service or the curl requests come back with the "request not permitted by the user" message.
+6. **Look for the newest documentation of the desired public API online.** Avoid bot-only endpoints.
 
 
 ## Examples
@@ -44,6 +42,18 @@ latchkey curl -X POST 'https://slack.com/api/conversations.create' \
 ```bash
 latchkey curl 'https://discord.com/api/v10/users/@me'
 ```
+
+### Ask for user permission
+
+When either there are no credentials for the given service yet or our
+requests come back with the "request not permitted by the user
+message", ask the user for permission first:
+
+```bash
+curl -XPOST http://localhost:8000/api/permissions/request -d '{"request_type": "LATCHKEY_PERMISSION", "service": "discord", "rationale": "I'd like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
+```
+
+After that, wait for a system message to see if the user approved or denied the permission request.
 
 ### Detect expired credentials and force a new login to Discord
 ```bash
