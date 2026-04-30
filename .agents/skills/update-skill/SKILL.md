@@ -56,11 +56,9 @@ Then:
 Shared across flows.
 
 ```bash
-if command -v tk >/dev/null 2>&1; then
-    TICKET_ID=$(tk create "update $TARGET" -t task \
-        --acceptance "incident captured; task file written; worker launched; worker DONE; branch merged")
-    tk start "$TICKET_ID"
-fi
+TICKET_ID=$(tk create "update $TARGET" -t task \
+    --acceptance "incident captured; task file written; worker launched; worker DONE; branch merged")
+tk start "$TICKET_ID"
 ```
 
 ## Step 2: Prepare artifacts, task file, and launch the worker
@@ -102,9 +100,7 @@ Flow-specific substitutions:
 On successful merge, close the tracking ticket:
 
 ```bash
-if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
-    tk close "$TICKET_ID"
-fi
+tk close "$TICKET_ID"
 ```
 
 ## Gotchas

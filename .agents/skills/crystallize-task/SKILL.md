@@ -80,15 +80,10 @@ If the user said yes (or the skip rule above applied), open a `tk`
 ticket so the lifecycle is visible after the turn ends:
 
 ```bash
-if command -v tk >/dev/null 2>&1; then
-    TICKET_ID=$(tk create "crystallize $NAME" -t task \
-        --acceptance "transcript extracted; task file written; worker launched; worker DONE; branch merged")
-    tk start "$TICKET_ID"
-fi
+TICKET_ID=$(tk create "crystallize $NAME" -t task \
+    --acceptance "transcript extracted; task file written; worker launched; worker DONE; branch merged")
+tk start "$TICKET_ID"
 ```
-
-If `tk` is not on PATH, skip tracking; the rest of the
-skill is unaffected.
 
 ## Step 2: Extract the just-finished turn
 

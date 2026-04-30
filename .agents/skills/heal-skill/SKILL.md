@@ -48,11 +48,9 @@ Use `$TARGET` for the skill you are healing (e.g. `migrate-config`). Then:
 ## Step 1: Open a tracking ticket
 
 ```bash
-if command -v tk >/dev/null 2>&1; then
-    TICKET_ID=$(tk create "heal $TARGET" -t bug \
-        --acceptance "incident captured; task file written; worker launched; worker DONE; branch merged")
-    tk start "$TICKET_ID"
-fi
+TICKET_ID=$(tk create "heal $TARGET" -t bug \
+    --acceptance "incident captured; task file written; worker launched; worker DONE; branch merged")
+tk start "$TICKET_ID"
 ```
 
 ## Step 2: Capture the incident transcript
@@ -159,9 +157,7 @@ Flow-specific substitutions:
 On successful merge, close the tracking ticket:
 
 ```bash
-if command -v tk >/dev/null 2>&1 && [ -n "${TICKET_ID:-}" ]; then
-    tk close "$TICKET_ID"
-fi
+tk close "$TICKET_ID"
 ```
 
 ## Gotchas
