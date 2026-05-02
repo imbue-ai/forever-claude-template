@@ -117,5 +117,5 @@ not need to push those.
 - Always include clear success criteria in your task description
 - Use `mngr wait` in the background -- don't block yourself waiting for a task
 - Check the transcript when a task finishes to see if the agent had questions or concerns
+- If a task fails, see `references/worker-failure.md` for how to capture context and report to the user (do not retry silently).
 - If the task references gitignored files, push them with `mngr push` right after `mngr create` (see above)
-- If a task fails, read the transcript to understand why before retrying
