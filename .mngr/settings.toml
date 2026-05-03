@@ -62,6 +62,11 @@ is_enabled = false
 # the template that is shared across all agent types
 [create_templates.main]
 type = "main"
+# `/welcome` was previously injected by the minds desktop client at the moment
+# it issued `mngr create`. With minds switching to mngr_imbue_cloud the welcome
+# nudge belongs here so any caller (mngr CLI, minds, or anyone running `mngr
+# create --template main`) gets the same first-message behaviour.
+message = "/welcome"
 env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=0"]
 extra_window = [
     "bootstrap='uv run bootstrap'",
