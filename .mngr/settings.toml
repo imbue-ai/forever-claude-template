@@ -129,6 +129,24 @@ build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "."]
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
 
+# Template for imbue_cloud-leased pool hosts. minds invokes this as
+# `--template main --template imbue_cloud` (mirroring how the other modes
+# use `--template main --template <provider>`), so the imbue_cloud-specific
+# knobs that used to be inlined in `_build_mngr_create_command` live here
+# instead. The actual provider name on the address is per-account
+# (`imbue_cloud_<account-slug>`), so it's not declared here -- the
+# `<name>@<host>.imbue_cloud_<slug>` address tells mngr where to land.
+[create_templates.imbue_cloud]
+# Leased pool hosts must never auto-shutdown -- the host is borrowed for a
+# whole user session, not a one-shot job.
+idle_mode = "disabled"
+# Forward the LiteLLM-minted ANTHROPIC creds + the minds-side MNGR_PREFIX
+# from minds' subprocess env onto the host's ``/mngr/env``. minds writes
+# these into the subprocess env it hands ``mngr create`` (see
+# ``run_mngr_create`` in ``apps/minds/imbue/minds/desktop_client/agent_creator.py``)
+# so the host actually has them at the moment ``--pass-host-env`` reads.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX"]
+
 ## and these templates are for sub-agents created within the sandbox
 
 # Chat template: minimal agent for additional chat sessions in the same work directory
