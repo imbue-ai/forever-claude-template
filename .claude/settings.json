@@ -34,6 +34,10 @@
           {
             "type": "command",
             "command": "[ -e .git ] || { echo \"Be sure to return to the repo root when you finish! Otherwise the other stop hooks cannot run correctly.\" >&2; exit 2; }"
+          },
+          {
+            "type": "command",
+            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/detect_crystallization_candidate.py"
           }
         ]
       }
@@ -45,10 +49,17 @@
         "source": "github",
         "repo": "imbue-ai/code-guardian"
       }
+    },
+    "claude-code-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-code"
+      }
     }
   },
   "enabledPlugins": {
-    "imbue-code-guardian@imbue-code-guardian": true
+    "imbue-code-guardian@imbue-code-guardian": true,
+    "frontend-design@claude-code-plugins": true
   },
   "model": "opus[1m]",
   "effortLevel": "high",

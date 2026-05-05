@@ -11,6 +11,7 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - Run commands by calling "uv run" from the root of the git checkout (ex: "uv run mngr create ...").
 - NEVER amend commits or rebase--always create new commits.
 - If you ever need to work with another *git* repo that is *outside* of this monorepo, you should do so by adding a git subtree under vendor/
+- This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `.tickets/` (gitignored).
 
 # How to get started on any task:
 
@@ -39,12 +40,17 @@ Only after doing all of the above should you begin writing code.
 
 # Always remember these guidelines:
 
+- When the user is actively interacting with you, prioritize delivering a result they care about over technical polish. Technical refinement can happen in the background.
 - Never misrepresent your progress. It is far better to say "I made some progress but didn't finish" than to say "I finished" when you did not.
 - Always finish your response by reflecting on your work and identify any potential issues.
 - If I ask for something that seems misguided, flag that immediately. Then attempt to do whatever makes the most sense given the request, and in your final reflection, be sure to flag that you had to diverge from the request and explain why.
 - During your final reflection, if you see a potentially better way to do something (e.g. by using an existing library or reusing existing code), flag that as a potential task for future improvement.
 - Never use emojis. Remove any emojis you see in the code or docs whenever you are modifying that code or those docs.
 - Be concise in your communications. Don't hype up your results, say "perfect!", or use emojis. Be serious and professional.
+- **Feedback systems combine binary and free-form signals.** When building anything that learns from user feedback, include *both* a basic binary signal (thumbs up/down, keep/skip, or whatever fits) *and* free-form text routed through an LLM judge -- unless the user specifies a different mechanism, which overrides this default. Binary is low-friction; free-form captures nuance you can't anticipate. The exact form depends on what's being built, but both should be present and intuitively accessible. Don't prescribe rigid taxonomies beyond the binary signal upfront.
+- **Default UI is web view.** When exposing a tool to the user, default to a web page. Don't enumerate options (CLI / telegram / status line / web) -- just propose the web view and only deviate when there's a specific reason (CLI for batch jobs, telegram for push-only notifications, etc.).
+- **Naming is informative, not cheeky.** Service names, app names, skill names, command names: prefer something that explains what the thing does (`slack-inbox-checker`) over something clever (`nothing-new`). Cute names tax every later mention.
+- **Platform-internal APIs are valid.** Don't restrict yourself to officially documented public APIs. If a platform's own client (web app, mobile app) uses internal or undocumented endpoints to do something, those endpoints are fair game -- inspect what the official client actually calls and use the same endpoints with the same user-session auth. This is often cleaner than designing brute-force workarounds on top of a limited public API.
 
 # When coding, follow these guidelines:
 
@@ -120,11 +126,16 @@ They are inherently flaky due to timing and useless in CI, but valuable for agen
 
 # Communication
 
-You communicate with the user via Telegram.
-Incoming messages arrive automatically via `mngr message` from the telegram bot running in a background tmux window.
+To talk to the user, always go through the `send-user-message` skill. It
+probes for configured channels (telegram, etc.) and dispatches; if none is
+configured, it falls back to writing the message inline in your current
+response. Do NOT hardcode a specific channel from other skills.
 
-To send a message to the user, use the `send-telegram-message` skill.
-To understand the conversation context before replying, use the `read-telegram-history` skill.
+If the deployment happens to use telegram, incoming messages arrive via
+`mngr message` from the telegram bot running in a background tmux window.
+`send-user-message` handles that case; `send-telegram-message` and
+`read-telegram-history` are the telegram-specific implementation details
+it delegates to.
 
 # Work delegation
 
@@ -155,6 +166,47 @@ Commit your changes to git after making modifications.
 
 Use the `update-self` skill to pull improvements from the upstream template repo, and the `submit-upstream-changes` skill to push shared changes (skills, scripts, config) back upstream.
 The upstream is defined in `parent.toml`.
+
+# Using crystallized skills
+
+- **Prefer an applicable skill over reinventing.** Skill descriptions are
+  injected so you can match by purpose, not by name.
+
+- **Live first, ratify at turn-end via the worker pipeline.** All four
+  lifecycle skills (`do-something-new`, `crystallize-task`, `heal-skill`,
+  `update-skill`) follow the same shape: handle the user's immediate
+  request *live* in the current chat to keep the conversation interactive
+  and iterative; at turn-end, invoke the appropriate worker-backed skill
+  to formalize the work through validation, scenario testing, and proper
+  commits. If you find yourself committing a change to any
+  contract-bearing file (a skill, a hook script with a documented
+  contract, an invariant elsewhere) and stopping there, you've skipped
+  the ratify step. The live phase is necessary but not sufficient -- the
+  worker pipeline exists to add the rigor that's awkward to do
+  interactively.
+
+  Concrete cases:
+  - **Net-new task needing research / experimentation**: invoke
+    `do-something-new` to drive the live phase. It hands off to
+    `crystallize-task` at the end.
+  - **Stop-hook crystallization nudge** after a normal turn that turned
+    out to be cohesive, likely to recur, and mostly deterministic:
+    invoke `crystallize-task` to ratify the just-finished work.
+    Otherwise acknowledge and move on.
+  - **A skill errored or delivered a wrong result**: fulfil the user's
+    request live by working around the failure, then at turn-end invoke
+    `heal-skill`. Never patch the skill inline -- `heal-skill` is the
+    ratify path.
+  - **You and the user discussed and applied a change to an existing
+    skill**: edit live so the user can iterate, then at turn-end invoke
+    `update-skill` (verify flow). Direct Edit + commit skips the
+    ratification. (For non-skill contract-bearing files like hook
+    scripts or CLAUDE.md itself, no worker pipeline exists today --
+    apply the live phase carefully and add manual rigor at turn-end:
+    real test fixtures, end-to-end exercise of new code paths, etc.)
+  - **A skill use was successful but required manual post-processing**:
+    do the post-work live, then at turn-end invoke `update-skill`
+    (absorb flow) so the skill swallows the gap.
 
 # Memory
 
