@@ -2,8 +2,7 @@
 
 Web chat interface for viewing and interacting with mngr-managed Claude agents.
 
-Shows live conversations from Claude session files in a web UI, with real-time
-updates via Server-Sent Events.
+Shows live conversations from Claude session files in a web UI, with real-time updates via Server-Sent Events.
 
 ## Usage
 
@@ -39,7 +38,7 @@ curl -X POST "http://127.0.0.1:8000/api/refresh-service/web"
 
 This appends a `refresh_service` event to the agent's
 `events/refresh/events.jsonl` file. The minds desktop client tails the event
-via `mngr events --follow`, then POSTs back to the workspace server which
+via `mngr event --follow`, then POSTs back to the workspace server which
 broadcasts a WebSocket message telling the frontend to reload every open
 iframe tab tied to the given service (matched by the iframe's
 `data-service-name` attribute). Replace `web` with whichever service name
