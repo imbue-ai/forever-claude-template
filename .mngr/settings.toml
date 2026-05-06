@@ -4,7 +4,7 @@
 [commands.create]
 connect = false
 ensure_clean = false
-pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
+pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
 host_env = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
@@ -37,9 +37,16 @@ settings_overrides = {model = "opus[1m]", fastMode = true}
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
 version = "2.1.116"
 
-# The "main" agent type -- inherits everything from claude
+# The "main" agent type -- inherits everything from claude, then disables every
+# path that pulls user-local content into the workspace. The repo at the
+# requested git ref is the canonical workspace definition; nothing from the
+# invoking user's ~/.claude/ or ~/.mngr/ should leak in.
 [agent_types.main]
 parent_type = "claude"
+sync_home_settings = false
+sync_claude_json = false
+sync_claude_credentials = false
+sync_credentials_on_login = false
 
 # the "worker" agent type -- the default for delegated tasks
 [agent_types.worker]
@@ -62,6 +69,11 @@ is_enabled = false
 # the template that is shared across all agent types
 [create_templates.main]
 type = "main"
+# `/welcome` was previously injected by the minds desktop client at the moment
+# it issued `mngr create`. With minds switching to mngr_imbue_cloud the welcome
+# nudge belongs here so any caller (mngr CLI, minds, or anyone running `mngr
+# create --template main`) gets the same first-message behaviour.
+message = "/welcome"
 env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=0"]
 extra_window = [
     "bootstrap='uv run bootstrap'",
@@ -78,7 +90,7 @@ worktree_base_folder = "/tmp/mngr-worktrees/"
 extra_provision_command = [
     "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/minds_workspace_server && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
 ]
-pass_env = ["MINDS_WORKSPACE_NAME", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR", "LATCHKEY_GATEWAY"]
+pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR", "LATCHKEY_GATEWAY"]
 
 # template for docker provider
 [create_templates.docker]
@@ -112,10 +124,37 @@ extra_provision_command = [
 [create_templates.vultr]
 provider = "vultr"
 target_path = "/code/"
-build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "."]
+# ``--vps-region=sjc`` (Silicon Valley) instead of the mngr_vultr default
+# ``ewr`` (Newark) -- imbue's operators run the bake from west-coast
+# machines, and the New Jersey region routinely produced ~1s SSH RTTs
+# and ~1.6 MB/s effective rsync throughput, which combined with the
+# ~1500-file build context made the cold upload time out at 10 minutes.
+# Keeping the default change at the template level so every minds /
+# imbue_cloud-pool create lands in the same place; CLI users who want
+# a different region can still override per-invocation with
+# ``-b --vps-region=<other>``.
+build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region=sjc", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
+
+# Template for imbue_cloud-leased pool hosts. minds invokes this as
+# `--template main --template imbue_cloud` (mirroring how the other modes
+# use `--template main --template <provider>`), so the imbue_cloud-specific
+# knobs that used to be inlined in `_build_mngr_create_command` live here
+# instead. The actual provider name on the address is per-account
+# (`imbue_cloud_<account-slug>`), so it's not declared here -- the
+# `<name>@<host>.imbue_cloud_<slug>` address tells mngr where to land.
+[create_templates.imbue_cloud]
+# Leased pool hosts must never auto-shutdown -- the host is borrowed for a
+# whole user session, not a one-shot job.
+idle_mode = "disabled"
+# Forward the LiteLLM-minted ANTHROPIC creds + the minds-side MNGR_PREFIX
+# from minds' subprocess env onto the host's ``/mngr/env``. minds writes
+# these into the subprocess env it hands ``mngr create`` (see
+# ``run_mngr_create`` in ``apps/minds/imbue/minds/desktop_client/agent_creator.py``)
+# so the host actually has them at the moment ``--pass-host-env`` reads.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX"]
 
 ## and these templates are for sub-agents created within the sandbox
 
