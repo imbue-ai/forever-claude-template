@@ -79,11 +79,23 @@ For changes outside `vendor/mngr/`.
    ")"
    ```
 
-2. Push the local branch's HEAD to a feature branch on upstream (this picks up *the commits on your local branch only* -- if your branch has unrelated upstream-bound commits ahead of the one you mean to push, push from a narrower local ref instead, e.g. `<sha>` or a temporary branch you reset to the right tip):
+2. Stage the commit(s) you want to push onto a clean throwaway branch rooted at upstream's base, then push that branch. Pushing the local working branch directly (`git push upstream <local_branch>:submit/<short-name>`) would publish every ancestor commit not yet on upstream -- including unrelated WIP, merge, and scaffolding commits that happen to share the branch tip's history -- producing a noisy PR that violates the "one logical fix per PR" rule. Instead:
 
    ```bash
-   git push upstream <local_branch>:submit/<short-name>
+   git fetch upstream
+   BASE=$(python3 -c "
+   import tomllib
+   with open('parent.toml', 'rb') as f:
+       print(tomllib.load(f)['branch'])
+   ")
+   git branch -f submit/<short-name> "upstream/$BASE"
+   git checkout submit/<short-name>
+   git cherry-pick <sha-1> [<sha-2> ...]   # the commit(s) for this logical fix, oldest first
+   git push upstream submit/<short-name>:submit/<short-name>
+   git checkout -   # back to your working branch
    ```
+
+   If the cherry-pick conflicts against current upstream, resolve it the same way you would for any cherry-pick (or rebase your fix on a fresh `update-self` first).
 
 3. Open the PR against the template's default branch (read from `parent.toml`, usually `main`):
 
