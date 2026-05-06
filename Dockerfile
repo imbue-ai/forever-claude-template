@@ -68,7 +68,7 @@ RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && \
     test -x /root/.local/bin/claude
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
-# Install Node.js for building the minds-workspace-server frontend.
+# Install Node.js for building the system_interface frontend.
 # NodeSource's setup_${NODE_MAJOR}.x pins the major, apt resolves within that
 # major. For full determinism we could fetch a static nodejs tarball instead;
 # not doing so keeps the image size and setup simpler.
@@ -116,15 +116,15 @@ RUN mkdir -p /worktree
 # extract our code into the project directory
 RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
 
-# Build the minds-workspace-server frontend
-RUN cd /code/vendor/mngr/apps/minds_workspace_server/frontend && \
+# Build the system_interface frontend
+RUN cd /code/apps/system_interface/frontend && \
     npm ci && \
     npm run build
 
 # add mngr and minds-workspace-server as tools (both need the plugin packages
 # so they can parse plugin-specific config fields like auto_dismiss_dialogs)
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
-    uv tool install -e /code/vendor/mngr/apps/minds_workspace_server \
+    uv tool install -e /code/apps/system_interface \
         --with-editable /code/vendor/mngr/libs/mngr_claude \
         --with-editable /code/vendor/mngr/libs/mngr_modal && \
     mngr plugin add \

@@ -224,6 +224,12 @@ node_modules/
 # Frontend build artifacts
 frontend-dist/
 
+# system_interface frontend build artifacts and binary assets
+# (built fresh on mind creation via `cd apps/system_interface/frontend && npm ci && npm run build`)
+apps/system_interface/imbue/minds_workspace_server/static/
+apps/system_interface/frontend/media/*.ico
+apps/system_interface/frontend/src/assets/*.png
+
 # Claude Code local settings (session-specific permissions)
 .claude/settings.local.json
 
