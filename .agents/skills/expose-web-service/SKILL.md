@@ -172,17 +172,21 @@ appear in error pages too.
 
 ## Step 7: Verify the global URL (if applicable)
 
-If you did *not* pass `--no-global`, the `app-watcher` service
-registers the application with Cloudflare. Once registration
-completes, the URL appears in `runtime/applications.toml` under the
-service entry's `cloudflare_url` key:
+If the workspace has Cloudflare tunneling configured, the
+`cloudflared` service exposes `/service/<name>/` at a public URL in
+addition to the local one. Cloudflare registration is owned by the
+`cloudflared` service, not `app-watcher`, and the public URL is *not*
+written back into `runtime/applications.toml`.
+
+To find the public URL, inspect the cloudflared window:
 
 ```bash
-grep -A3 "name = \"<name>\"" runtime/applications.toml
+tmux capture-pane -t svc-cloudflared -p | tail -40
 ```
 
-If the key is missing, give app-watcher a few seconds; if it stays
-missing, check `tmux capture-pane -t svc-app-watcher -p`.
+If the workspace does not have a tunnel token configured, this step
+does not apply -- the local `http://127.0.0.1:8000/service/<name>/`
+URL from Step 5 is the only entry point.
 
 ## Step 8: Framework gotchas
 
