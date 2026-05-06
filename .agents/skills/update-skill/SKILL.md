@@ -1,28 +1,30 @@
 ---
 name: update-skill
-description: Extend, refactor, or verify a contract-bearing artifact that other skills or the agent depend on -- a crystallized skill under `.agents/skills/`, a shared script or reference under `.agents/shared/` (e.g. `extract_turn.py`, `lead-proxy.md`), or a template/config file with a documented contract (`.mngr/settings.toml` create_templates, `services.toml`, hook scripts, `CLAUDE.md` policy text). Invoke at turn-end when you had to do additional repeatable work around the artifact (absorb flow -- e.g. you worked around a bug in a shared script with a manual flag), or when you and the user discussed a change and you applied it live (verify flow -- e.g. you just edited and committed a template config). Not for arbitrary application code -- the signal is *contract-bearing* / *consumed by other skills or the agent*, not raw file location.
+description: Extend, refactor, or verify a crystallized skill under `.agents/skills/`, or a shared script or reference under `.agents/shared/` that other skills consume (e.g. `scripts/extract_turn.py`, `references/lead-proxy.md`, `references/worker-reporting.md`). Invoke at turn-end when you had to do additional repeatable work around the artifact (absorb flow -- e.g. you worked around a bug in a shared script with a manual flag, or did extra processing the skill should have handled), or when you and the user discussed a change and you applied it live (verify flow -- e.g. you just edited and committed a SKILL.md or a shared script). Not for arbitrary application code, and not for loose template/config files -- the worker pipeline is built around skill-shaped layouts.
 ---
 
 # Updating a contract-bearing artifact
 
-Use this skill when a **contract-bearing artifact** other skills or the
-agent depend on needs a change. The skill is named for its most common
-target (crystallized skills under `.agents/skills/`), but the same
-absorb/verify pipeline applies to any of these classes:
+Use this skill when a **crystallized skill** under `.agents/skills/` or a
+**shared script/reference** under `.agents/shared/` needs a change. Both
+share the same absorb/verify pipeline because both are skill-shaped
+artifacts: a SKILL.md with optional `scripts/` and `references/`, or a
+script/reference consumed by such SKILL.md files. Concretely the two
+classes covered are:
 
 - Crystallized skills under `.agents/skills/`.
 - Shared scripts and references under `.agents/shared/` consumed by other
   skills (e.g. `scripts/extract_turn.py`, `references/lead-proxy.md`,
   `references/worker-reporting.md`).
-- Template / config files with a documented contract -- `.mngr/settings.toml`
-  create_templates, `services.toml` service definitions, hook scripts with
-  a documented contract, `CLAUDE.md` policy text. Anything where a change
-  in one place ripples to behavior other skills or the agent rely on.
 
 This is *not* "edit any file". Ordinary application or product code edits
-go through the regular dev loop. The trigger here is that the artifact
-carries a contract -- if you change it inline without ratification, other
-skills or the agent at large can drift silently. The worker pipeline adds
+go through the regular dev loop. Loose template / config files
+(`.mngr/settings.toml`, `services.toml`, hook scripts, `CLAUDE.md`) are
+also out of scope -- the worker pipeline is built around skill-shaped
+layouts and `validate_skill.py`, so there is no validator or scenario
+shape for those file types yet. The trigger here is that the artifact is
+a skill or directly consumed by skills -- if you change it inline without
+ratification, other skills can drift silently. The worker pipeline adds
 the rigor (scenario testing, validation, gated approval) that's awkward
 to do interactively.
 
@@ -37,12 +39,11 @@ Two flows cover the two ways this happens.
   a design at Gate 1, implements, runs scenarios, presents Gate 2.
 - **verify flow.** You and the user discussed a change to the artifact
   during the turn, agreed on a design, and you committed the change live
-  -- e.g. you just edited and committed a `.mngr/settings.toml`
-  create_template, a `services.toml` entry, or prose in a SKILL.md. You
-  hand the worker the committed diff and the design rationale. The worker
-  skips Gate 1 (the design was approved organically in chat), reads the
-  committed change, runs scenarios, runs `/autofix`, and presents Gate 2
-  with verification findings.
+  -- e.g. you just edited and committed prose in a SKILL.md, or fixed a
+  flag in a shared script. You hand the worker the committed diff and
+  the design rationale. The worker skips Gate 1 (the design was approved
+  organically in chat), reads the committed change, runs scenarios, runs
+  `/autofix`, and presents Gate 2 with verification findings.
 
 Pick the verify flow when the user was explicitly in the design loop for
 this change *and* the change is already committed on the branch.
@@ -67,10 +68,10 @@ the decision is already made by the committed change.
 
 Use `$TARGET` as a short kebab-case identifier for the artifact you are
 updating. For a skill, this is the skill name (e.g. `migrate-config`).
-For a non-skill artifact -- a shared script, template config, hook
-script, or `CLAUDE.md` policy section -- pick a short kebab-case name
-that identifies the artifact (e.g. `services-toml`, `claude-md-memory`,
-`extract-turn`). Then:
+For a shared script or reference under `.agents/shared/`, pick a short
+kebab-case name derived from its filename (e.g. `extract-turn` for
+`scripts/extract_turn.py`, `lead-proxy` for `references/lead-proxy.md`).
+Then:
 
 - Worker agent name: `update-$TARGET`
 - Worker branch: `mngr/update-$TARGET`
@@ -134,10 +135,9 @@ tk close "$TICKET_ID"
 ## Gotchas
 
 - If the target is a built-in artifact from the upstream template (e.g.
-  the `launch-task` or `update-self` skills, shared scripts/references
-  under `.agents/shared/`, hook scripts, or template-provided
-  `CLAUDE.md` policy text), updating it causes local drift from
-  upstream. Reconcile later via `update-self` (pull) or
+  the `launch-task` or `update-self` skills, or shared scripts /
+  references under `.agents/shared/`), updating it causes local drift
+  from upstream. Reconcile later via `update-self` (pull) or
   `submit-upstream-changes` (push).
 - Update is non-blocking -- the user's original request is already
   delivered; the update worker produces a quieter follow-up commit.
