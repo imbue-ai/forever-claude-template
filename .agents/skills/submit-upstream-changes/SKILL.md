@@ -42,11 +42,17 @@ If a single commit straddles both (it shouldn't, but if it does), split it into 
 gh api rate_limit --jq '.resources.graphql | "remaining=\(.remaining) reset=\(.reset)"'
 ```
 
-If `remaining` is 0 (or single-digit and you have several PRs to open), stop. Format the reset epoch for the user and wait, e.g.:
+If `remaining` is 0 (or single-digit and you have several PRs to open), stop. Format the reset epoch for the user and wait. The recipe uses Python rather than `date -d "@..."` because the latter is GNU-only and fails on macOS:
 
 ```bash
-date -u -d "@$(gh api rate_limit --jq '.resources.graphql.reset')" \
-    +'GraphQL quota resets at %Y-%m-%dT%H:%M:%SZ'
+RESET=$(gh api rate_limit --jq '.resources.graphql.reset')
+python3 -c "
+import datetime, sys
+ts = int(sys.argv[1])
+print('GraphQL quota resets at',
+      datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+              .strftime('%Y-%m-%dT%H:%M:%SZ'))
+" "$RESET"
 ```
 
 Do not retry-loop; surface the reset time and hand back to the user.
