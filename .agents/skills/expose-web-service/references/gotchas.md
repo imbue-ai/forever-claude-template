@@ -72,10 +72,19 @@ default.
 
 The workspace_server proxies WebSocket upgrades under
 `/service/<name>/<ws-path>`. Your client code should connect to a
-relative URL (e.g. `new WebSocket("ws://" + location.host +
-"/service/<name>/socket")`), not hardcode `ws://localhost:<port>`.
-Same constraint as HTTP: relative paths "just work"; hardcoded
-absolute backend URLs do not.
+relative URL and derive the scheme from `location.protocol` so that
+HTTPS-served pages (e.g. via the Cloudflare tunnel) use `wss:` --
+hardcoding `ws:` will be blocked by browsers as mixed content on
+HTTPS:
+
+```js
+const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+new WebSocket(scheme + "//" + location.host + "/service/<name>/socket");
+```
+
+Do not hardcode `ws://localhost:<port>` either. Same constraint as
+HTTP: relative paths "just work"; hardcoded absolute backend URLs do
+not.
 
 ## Multiple ports per app
 
