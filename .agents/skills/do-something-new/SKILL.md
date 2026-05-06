@@ -89,7 +89,7 @@ For `latchkey auth set`, include the exact command for the user to run.
 
 Wait for approval before any further work.
 
-## Step 4: Validate the core capability first
+## Step 4: Validate uncontrolled dependencies first
 
 Before any other work, validate the operations whose failure could prevent the
 whole task from working -- specifically those *not fully under your control*:
