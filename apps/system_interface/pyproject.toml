@@ -96,7 +96,7 @@ format-command="uv run ruff format --force-exclude --config pyproject.toml --std
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 # Ruff config mirrors vendor/mngr/pyproject.toml so that lint/isort behavior
