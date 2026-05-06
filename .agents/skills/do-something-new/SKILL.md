@@ -13,7 +13,8 @@ crystallize the process in the background while the conversation continues.
 
 - The user is actively interacting; return results they care about *fast*.
 - The user cares about the experience, not technical details.
-- Validate the absolute core capability *first*, before any other work. Fail fast.
+- Validate dependencies you do not control (external APIs, auth, third-party
+  fetches) *first*, before any other work. Fail fast on those.
 - Scripts written during this flow can be simple. Polish belongs in the
   crystallized version, not here.
 
