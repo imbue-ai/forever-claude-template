@@ -43,10 +43,12 @@ Before editing anything:
 
 - **Bind your app to `127.0.0.1` (or `localhost`), not `0.0.0.0`.**
   The forwarder reaches it from inside the same container; binding
-  to all interfaces is unnecessary and noisy. Some servers default
-  to `0.0.0.0` (e.g. `flask run`, many Node frameworks); pass an
-  explicit host flag (`--host 127.0.0.1`, `HOST=127.0.0.1`, etc.)
-  if your server's default is not loopback.
+  to all interfaces is unnecessary and noisy. Many Node frameworks
+  default to all-interfaces (Node's `http.createServer().listen(port)`
+  binds to `::`/`0.0.0.0` when no host is passed), so pass an explicit
+  host (`HOST=127.0.0.1`, `app.listen(port, "127.0.0.1")`, etc.) if
+  your server's default is not loopback. Python defaults are usually
+  loopback already (e.g. `flask run` defaults to `127.0.0.1:5000`).
 - **Pick a free port** the app will listen on. `ss -tln` lists what's
   bound. Avoid the well-known service ports already used in this
   template:
