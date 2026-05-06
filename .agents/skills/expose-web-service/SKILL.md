@@ -105,9 +105,9 @@ command. Set `restart = "on-failure"` for any long-lived server.
 ## Step 4: Wait for the bootstrap manager to pick up the change
 
 No manual restart needed. The bootstrap service manager watches
-`services.toml` and reconciles tmux windows automatically; a recent
-fix also detects command *changes* (not just additions/removals) and
-recreates the window.
+`services.toml` and reconciles tmux windows automatically. It also
+detects command *changes* (not just additions/removals) and recreates
+the window.
 
 Confirm it picked up the new service:
 
