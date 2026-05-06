@@ -3,7 +3,7 @@ name: update-skill
 description: Extend, refactor, or verify a contract-bearing artifact that other skills or the agent depend on -- a crystallized skill under `.agents/skills/`, a shared script or reference under `.agents/shared/` (e.g. `extract_turn.py`, `lead-proxy.md`), or a template/config file with a documented contract (`.mngr/settings.toml` create_templates, `services.toml`, hook scripts, `CLAUDE.md` policy text). Invoke at turn-end when you had to do additional repeatable work around the artifact (absorb flow -- e.g. you worked around a bug in a shared script with a manual flag), or when you and the user discussed a change and you applied it live (verify flow -- e.g. you just edited and committed a template config). Not for arbitrary application code -- the signal is *contract-bearing* / *consumed by other skills or the agent*, not raw file location.
 ---
 
-# Updating or splitting a skill
+# Updating a contract-bearing artifact
 
 Use this skill when a **contract-bearing artifact** other skills or the
 agent depend on needs a change. The skill is named for its most common
