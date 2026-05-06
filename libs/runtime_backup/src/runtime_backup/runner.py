@@ -79,13 +79,22 @@ def _do_tick(should_push: bool) -> None:
     if should_push:
         # Always attempt push: covers the case where a prior tick committed but
         # failed to push, so the next tick still ships the unpushed commit.
+        # Bootstrap's initial `--set-upstream` push is best-effort; if it
+        # failed, plain `git push` will fail forever with "no upstream". Fall
+        # back to `--set-upstream origin <branch>` to self-heal that case
+        # (mirrors the post-commit hook's chain).
         push_result = _git("push")
         if push_result.returncode != 0:
-            logger.warning(
-                "git push failed (rc={}): {}",
-                push_result.returncode,
-                push_result.stderr.strip(),
-            )
+            branch_result = _git("symbolic-ref", "--short", "HEAD")
+            branch = branch_result.stdout.strip()
+            if branch_result.returncode == 0 and branch:
+                push_result = _git("push", "--set-upstream", "origin", branch)
+            if push_result.returncode != 0:
+                logger.warning(
+                    "git push failed (rc={}): {}",
+                    push_result.returncode,
+                    push_result.stderr.strip(),
+                )
 
 
 def main() -> None:
