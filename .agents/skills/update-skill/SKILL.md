@@ -1,27 +1,51 @@
 ---
 name: update-skill
-description: Extend or refactor a crystallized skill (or split a new one off). Invoke at turn-end when you had to do additional repeatable work around an existing skill (absorb flow), or when you and the user explicitly discussed a change to a skill and you applied it live (verify flow).
+description: Extend, refactor, or verify a contract-bearing artifact that other skills or the agent depend on -- a crystallized skill under `.agents/skills/`, a shared script or reference under `.agents/shared/` (e.g. `extract_turn.py`, `lead-proxy.md`), or a template/config file with a documented contract (`.mngr/settings.toml` create_templates, `services.toml`, hook scripts, `CLAUDE.md` policy text). Invoke at turn-end when you had to do additional repeatable work around the artifact (absorb flow -- e.g. you worked around a bug in a shared script with a manual flag), or when you and the user discussed a change and you applied it live (verify flow -- e.g. you just edited and committed a template config). Not for arbitrary application code -- the signal is *contract-bearing* / *consumed by other skills or the agent*, not raw file location.
 ---
 
 # Updating or splitting a skill
 
-Use this skill when an existing skill in `.agents/skills/` needs a
-change. Two flows cover the two ways this happens.
+Use this skill when a **contract-bearing artifact** other skills or the
+agent depend on needs a change. The skill is named for its most common
+target (crystallized skills under `.agents/skills/`), but the same
+absorb/verify pipeline applies to any of these classes:
 
-- **absorb flow.** A skill ran successfully but you had to do additional
-  *repeatable* work to fully satisfy the user's request. The user was not
+- Crystallized skills under `.agents/skills/`.
+- Shared scripts and references under `.agents/shared/` consumed by other
+  skills (e.g. `scripts/extract_turn.py`, `references/lead-proxy.md`,
+  `references/worker-reporting.md`).
+- Template / config files with a documented contract -- `.mngr/settings.toml`
+  create_templates, `services.toml` service definitions, hook scripts with
+  a documented contract, `CLAUDE.md` policy text. Anything where a change
+  in one place ripples to behavior other skills or the agent rely on.
+
+This is *not* "edit any file". Ordinary application or product code edits
+go through the regular dev loop. The trigger here is that the artifact
+carries a contract -- if you change it inline without ratification, other
+skills or the agent at large can drift silently. The worker pipeline adds
+the rigor (scenario testing, validation, gated approval) that's awkward
+to do interactively.
+
+Two flows cover the two ways this happens.
+
+- **absorb flow.** The artifact was used (or relied on) but you had to do
+  additional *repeatable* work to fully satisfy the user's request --
+  e.g. you patched around a bug in a shared script with a manual flag, or
+  did extra processing the skill should have handled. The user was not
   part of a design conversation about the change. You hand the worker the
   incident transcript and the new contract; the worker replicates, proposes
   a design at Gate 1, implements, runs scenarios, presents Gate 2.
-- **verify flow.** You and the user discussed a change to a skill during
-  the turn, agreed on a design, and you committed the change live. You
+- **verify flow.** You and the user discussed a change to the artifact
+  during the turn, agreed on a design, and you committed the change live
+  -- e.g. you just edited and committed a `.mngr/settings.toml`
+  create_template, a `services.toml` entry, or prose in a SKILL.md. You
   hand the worker the committed diff and the design rationale. The worker
   skips Gate 1 (the design was approved organically in chat), reads the
   committed change, runs scenarios, runs `/autofix`, and presents Gate 2
   with verification findings.
 
 Pick the verify flow when the user was explicitly in the design loop for
-this skill change *and* the change is already committed on the branch.
+this change *and* the change is already committed on the branch.
 Otherwise pick the absorb flow. Absorb is the safe default; its Gate 1
 just re-surfaces the design for an approval pass.
 
