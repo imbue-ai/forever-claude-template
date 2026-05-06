@@ -172,17 +172,29 @@ appear in error pages too.
 
 ## Step 7: Verify the global URL (if applicable)
 
-If the workspace has Cloudflare tunneling configured, the
-`cloudflared` service exposes `/service/<name>/` at a public URL in
-addition to the local one. Cloudflare registration is owned by the
-`cloudflared` service, not `app-watcher`, and the public URL is *not*
-written back into `runtime/applications.toml`.
+If the workspace has Cloudflare tunneling configured, the service is
+also reachable at a public URL in addition to the local one. Two
+caveats matter for verification:
 
-To find the public URL, inspect the cloudflared window:
+- **The public hostname is owned server-side, not by the cloudflared
+  process running in this container.** The `cloudflared` service here
+  runs `cloudflared tunnel run --token <TOKEN>` (a named/preauthenticated
+  tunnel), which does not print a public URL on stdout. The hostname
+  is constructed by `remote_service_connector` as
+  `<service>--<agent>--<user>.<domain>` and registered with Cloudflare's
+  config-service API. Skimming `svc-cloudflared`'s tmux output will
+  not surface a URL -- do not look there.
+- **The public URL is *not* written into `runtime/applications.toml`.**
+  `scripts/forward_port.py` only stores `name` and `url` (the local
+  `http://localhost:<port>` backend address). Do not grep that file for
+  a public URL either.
 
-```bash
-tmux capture-pane -t svc-cloudflared -p | tail -40
-```
+The reliable way to obtain the public URL is through the Minds
+desktop client itself: when the user clicks the service tab, the
+client resolves the public hostname via its services API and renders
+the page at `https://<service>--<agent>--<user>.<domain>/`. If you
+need the exact URL for testing, ask the user to read it from their
+browser's address bar after clicking the tab.
 
 If the workspace does not have a tunnel token configured, this step
 does not apply -- the local `http://127.0.0.1:8000/service/<name>/`
