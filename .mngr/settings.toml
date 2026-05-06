@@ -15,6 +15,10 @@ host_env = [
     "DISABLE_AUTOUPDATER=1",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
     "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1",
+    # Tickets live inside runtime/ so they ride the runtime-backup branch.
+    # tk reads TICKETS_DIR if set; absolute path so it works from worktree
+    # subdirs too. /code/ is the container WORKDIR (set by the Dockerfile).
+    "TICKETS_DIR=/code/runtime/tickets",
 ]
 worktree_base_folder = "/worktree/"
 disable_plugin = ["recursive", "ttyd"]
@@ -173,10 +177,6 @@ type = "main"
 # Worker template: general purpose sub agent for doing tasks reliably (and ensuring that they are verified)
 [create_templates.worker]
 type = "worker"
-# Override pass_env so workers do NOT inherit GH_TOKEN; only the main agent
-# is allowed to push to origin. Without GH_TOKEN, the post-commit hook installed
-# at scripts/git_hooks/post-commit no-ops cleanly inside worker checkouts.
-pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"]
 env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
 agent_args = [
@@ -192,8 +192,6 @@ agent_args = [
 #    under .agents/skills/ that has an assets/worker/ subdir.
 [create_templates.crystallize-worker]
 type = "worker"
-# See [create_templates.worker] for why GH_TOKEN is intentionally omitted.
-pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]
 env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
 extra_provision_command = [
