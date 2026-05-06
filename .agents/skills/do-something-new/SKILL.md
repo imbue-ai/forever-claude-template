@@ -131,16 +131,18 @@ and re-propose. Re-run Step 2 only if the new ask requires fresh research.
 
 ### Sample-first for batch operations
 
-For any step that processes a batch of items (LLM summarization,
-transformations across many records, generation calls, large fetches), run it
-on a small sample (5-10 items) first. Show the user the shape and tone of the
-output and surface measured cost and runtime alongside the sample
-("summarizing 5 items took 12s and cost $0.013 -- extrapolated to 150 items,
-~$0.40 and ~6 min"). Only scale to the full set after the user thumbs-up.
+The same gate applies to *any* batch step, not just the Step 5 sample --
+LLM summarization, transformations across many records, generation calls,
+large fetches, including batch steps that come up later in Step 6
+surfaces. Run on the small sample first, then surface measured cost and
+runtime alongside it with an extrapolation to the full set
+("summarizing 5 items took 12s and cost $0.013 -- extrapolated to 150
+items, ~$0.40 and ~6 min"). Only scale to the full set after the user
+thumbs-up.
 
-Sampling is cheap when the operation is fast and load-bearing when it's slow,
-so don't try to judge in advance whether a step is "long enough" to need this
--- just apply it by default to any batch step.
+Apply by default to any batch step -- don't try to judge in advance
+whether it's "long enough" to need this. Sampling is cheap when the
+operation is fast and load-bearing when it's slow.
 
 ## Step 6: Deliver remaining surfaces one at a time
 
