@@ -45,7 +45,7 @@ def test_explicit_path_wins(tmp_path: Path) -> None:
     explicit.write_text("")
     env = {
         "CLAUDE_TRANSCRIPT_PATH": "/should/be/ignored.jsonl",
-        "MNGR_CLAUDE_SESSION_ID": "abc",
+        "MAIN_CLAUDE_SESSION_ID": "abc",
         "CLAUDE_CONFIG_DIR": str(tmp_path / "unused"),
     }
     assert extract_turn.resolve_transcript_path(explicit, env) == explicit
@@ -65,7 +65,7 @@ def test_session_id_lookup_succeeds(tmp_path: Path) -> None:
     transcript = slug_dir / f"{session_id}.jsonl"
     transcript.write_text("")
     env = {
-        "MNGR_CLAUDE_SESSION_ID": session_id,
+        "MAIN_CLAUDE_SESSION_ID": session_id,
         "CLAUDE_CONFIG_DIR": str(tmp_path),
     }
     assert extract_turn.resolve_transcript_path(None, env) == transcript
@@ -83,7 +83,7 @@ def test_session_id_prefers_non_subagent(tmp_path: Path) -> None:
     subagent = subagents / f"{session_id}.jsonl"
     subagent.write_text("")
     env = {
-        "MNGR_CLAUDE_SESSION_ID": session_id,
+        "MAIN_CLAUDE_SESSION_ID": session_id,
         "CLAUDE_CONFIG_DIR": str(tmp_path),
     }
     assert extract_turn.resolve_transcript_path(None, env) == primary
@@ -121,8 +121,12 @@ def test_state_dir_file_fallback_missing_file_raises(tmp_path: Path) -> None:
         extract_turn.resolve_transcript_path(None, env)
 
 
-def test_session_id_env_wins_over_state_dir_file(tmp_path: Path) -> None:
-    """Explicit MNGR_CLAUDE_SESSION_ID takes precedence over on-disk session id."""
+def test_main_session_id_env_wins_over_stale_state_dir_file(tmp_path: Path) -> None:
+    """Replicates the incident: a transient `claude -p` overwrote the
+    state-dir file with its own session id, but $MAIN_CLAUDE_SESSION_ID still
+    holds the lead's session id. Auto-discovery must follow the env var, not
+    the (stale) file.
+    """
     env_session = "from-env"
     file_session = "from-file"
     state_dir = tmp_path / "state"
@@ -138,7 +142,7 @@ def test_session_id_env_wins_over_state_dir_file(tmp_path: Path) -> None:
     file_transcript = slug_dir / f"{file_session}.jsonl"
     file_transcript.write_text("")
     env = {
-        "MNGR_CLAUDE_SESSION_ID": env_session,
+        "MAIN_CLAUDE_SESSION_ID": env_session,
         "MNGR_AGENT_STATE_DIR": str(state_dir),
         "CLAUDE_CONFIG_DIR": str(tmp_path),
     }
@@ -149,16 +153,57 @@ def test_session_id_without_match_raises(tmp_path: Path) -> None:
     projects = tmp_path / "projects"
     projects.mkdir()
     env = {
-        "MNGR_CLAUDE_SESSION_ID": "missing",
+        "MAIN_CLAUDE_SESSION_ID": "missing",
         "CLAUDE_CONFIG_DIR": str(tmp_path),
     }
     with pytest.raises(FileNotFoundError):
         extract_turn.resolve_transcript_path(None, env)
 
 
+def test_no_resolution_lists_candidates_in_error(tmp_path: Path) -> None:
+    """Loud failure: when nothing resolves, the error message must list
+    candidate JSONLs and instruct the caller to pass --transcript.
+    """
+    projects = tmp_path / "projects"
+    slug_dir = projects / "-some-slug"
+    slug_dir.mkdir(parents=True)
+    candidate_a = slug_dir / "abc.jsonl"
+    candidate_b = slug_dir / "def.jsonl"
+    candidate_a.write_text("")
+    candidate_b.write_text("")
+    env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+    with pytest.raises(FileNotFoundError) as excinfo:
+        extract_turn.resolve_transcript_path(None, env)
+    message = str(excinfo.value)
+    assert str(candidate_a) in message
+    assert str(candidate_b) in message
+    assert "--transcript" in message
+
+
+def test_no_resolution_excludes_subagents_in_candidates(tmp_path: Path) -> None:
+    """Candidate listing must skip subagents/ paths -- they are sub-sessions,
+    never the primary session a caller wants to slice.
+    """
+    projects = tmp_path / "projects"
+    slug_dir = projects / "-some-slug"
+    slug_dir.mkdir(parents=True)
+    primary = slug_dir / "abc.jsonl"
+    primary.write_text("")
+    subagents_dir = slug_dir / "parent" / "subagents"
+    subagents_dir.mkdir(parents=True)
+    sub = subagents_dir / "def.jsonl"
+    sub.write_text("")
+    env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+    with pytest.raises(FileNotFoundError) as excinfo:
+        extract_turn.resolve_transcript_path(None, env)
+    message = str(excinfo.value)
+    assert str(primary) in message
+    assert str(sub) not in message
+
+
 def test_projects_dir_missing_raises(tmp_path: Path) -> None:
     env = {
-        "MNGR_CLAUDE_SESSION_ID": "abc",
+        "MAIN_CLAUDE_SESSION_ID": "abc",
         "CLAUDE_CONFIG_DIR": str(tmp_path / "does-not-exist"),
     }
     with pytest.raises(FileNotFoundError):
