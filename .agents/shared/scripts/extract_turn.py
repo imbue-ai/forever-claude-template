@@ -22,17 +22,26 @@ Slice selection (mutually exclusive):
 Transcript path resolution (in order):
 1. ``--transcript`` command-line flag, if provided.
 2. ``$CLAUDE_TRANSCRIPT_PATH`` env var (set inside Claude Code hook scripts).
-3. ``$MNGR_CLAUDE_SESSION_ID`` combined with ``$CLAUDE_CONFIG_DIR/projects/``
+3. ``$MAIN_CLAUDE_SESSION_ID`` combined with ``$CLAUDE_CONFIG_DIR/projects/``
    -- find a ``<session-id>.jsonl`` file anywhere under the projects tree.
-   This is concurrent-session-safe because every session has a unique id.
-4. ``$MNGR_AGENT_STATE_DIR/claude_session_id`` (a file written by mngr) --
-   read the session id from disk and resolve as in (3). This makes the
-   script work in a standard mngr agent where neither env var from (2) nor
-   (3) is exported into the Bash tool's environment.
+   ``MAIN_CLAUDE_SESSION_ID`` is exported by mngr's claude launcher to track
+   the lead's interactive session id; it is inherited unchanged by
+   subprocess shells (including ``claude -p`` sub-invocations), so it stays
+   pinned to the lead's session even when other transient sessions write
+   to the same projects directory.
+4. ``$MNGR_AGENT_STATE_DIR/claude_session_id`` (a file written by mngr's
+   SessionStart hook) -- read the session id from disk and resolve as in
+   (3). Last-resort fallback for shells where ``MAIN_CLAUDE_SESSION_ID`` is
+   somehow not exported. Note this file can be transiently overwritten by
+   a ``claude -p`` sub-invocation whose own SessionStart hook fires (the
+   guard only checks that ``MAIN_CLAUDE_SESSION_ID`` is non-empty, which
+   it is when inherited from the lead), so prefer step 3 when possible.
 
 We deliberately do NOT fall back to an mtime scan: the most-recently-modified
 transcript may belong to a sibling session writing concurrently, not to the
-caller's session.
+caller's session. When every step misses, the error message lists candidate
+JSONLs found in the projects directory and instructs the caller to
+disambiguate with ``--transcript <path>``.
 """
 
 from __future__ import annotations
@@ -109,12 +118,15 @@ def resolve_transcript_path(
     if hook_path:
         return Path(hook_path)
 
-    session_id = environ.get("MNGR_CLAUDE_SESSION_ID")
+    session_id = environ.get("MAIN_CLAUDE_SESSION_ID")
     state_dir_reason = "MNGR_AGENT_STATE_DIR is unset"
     if not session_id:
         # Fallback: read the session id from $MNGR_AGENT_STATE_DIR/claude_session_id,
         # which is present inside a standard mngr agent even when
-        # MNGR_CLAUDE_SESSION_ID is not exported into the shell environment.
+        # MAIN_CLAUDE_SESSION_ID is not exported into the shell environment.
+        # This file can be transiently stale (a `claude -p` sub-invocation
+        # inherits MAIN_CLAUDE_SESSION_ID and its own SessionStart hook
+        # overwrites the file), so step 3 is preferred when available.
         state_dir = environ.get("MNGR_AGENT_STATE_DIR")
         if state_dir:
             session_file = Path(state_dir) / "claude_session_id"
@@ -124,18 +136,19 @@ def resolve_transcript_path(
                 session_id = session_file.read_text(encoding="utf-8").strip() or None
                 if not session_id:
                     state_dir_reason = f"{session_file} is empty"
-    if not session_id:
-        raise FileNotFoundError(
-            "Cannot auto-discover transcript: no --transcript flag, "
-            "$CLAUDE_TRANSCRIPT_PATH, or $MNGR_CLAUDE_SESSION_ID; "
-            f"and $MNGR_AGENT_STATE_DIR fallback did not resolve ({state_dir_reason})."
-        )
 
     projects_root = Path(environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))) / "projects"
+
+    if not session_id:
+        raise FileNotFoundError(
+            _no_session_id_message(projects_root, state_dir_reason)
+        )
+
     if not projects_root.is_dir():
         raise FileNotFoundError(
             f"Projects directory not found at {projects_root}; cannot find "
-            f"transcript for session {session_id}."
+            f"transcript for session {session_id}. "
+            "Pass --transcript <path> to disambiguate."
         )
 
     # Session IDs are unique, so finding by basename is safe across concurrent
@@ -150,7 +163,33 @@ def resolve_transcript_path(
         return matches[0]
 
     raise FileNotFoundError(
-        f"No transcript matching {session_id}.jsonl under {projects_root}."
+        f"No transcript matching {session_id}.jsonl under {projects_root}. "
+        f"{_candidate_hint(projects_root)}"
+    )
+
+
+def _candidate_hint(projects_root: Path) -> str:
+    """Render a human-readable hint listing JSONL candidates under projects_root."""
+    if not projects_root.is_dir():
+        return "Pass --transcript <path> to disambiguate."
+    candidates = sorted(
+        m for m in projects_root.rglob("*.jsonl") if "subagents" not in m.parts
+    )
+    if not candidates:
+        return "Pass --transcript <path> to disambiguate."
+    listing = "\n  ".join(str(c) for c in candidates)
+    return (
+        "Candidate transcripts under the projects directory:\n  "
+        f"{listing}\nPass --transcript <path> to disambiguate."
+    )
+
+
+def _no_session_id_message(projects_root: Path, state_dir_reason: str) -> str:
+    return (
+        "Cannot auto-discover transcript: no --transcript flag, "
+        "$CLAUDE_TRANSCRIPT_PATH, or $MAIN_CLAUDE_SESSION_ID; "
+        f"and $MNGR_AGENT_STATE_DIR fallback did not resolve ({state_dir_reason}). "
+        f"{_candidate_hint(projects_root)}"
     )
 
 
@@ -163,7 +202,7 @@ def main() -> int:
         help=(
             "Path to the Claude Code session JSONL transcript. "
             "If omitted, the transcript is resolved from $CLAUDE_TRANSCRIPT_PATH, "
-            "$MNGR_CLAUDE_SESSION_ID, or $MNGR_AGENT_STATE_DIR/claude_session_id."
+            "$MAIN_CLAUDE_SESSION_ID, or $MNGR_AGENT_STATE_DIR/claude_session_id."
         ),
     )
     parser.add_argument(
