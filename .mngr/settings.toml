@@ -64,7 +64,17 @@ is_enabled = false
 type = "main"
 env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=0"]
 extra_window = [
-    "bootstrap='uv run bootstrap'",
+    # Re-point ORIGINAL_CLAUDE_CONFIG_DIR at this agent's own config dir before
+    # launching bootstrap. Without this, the inherited host value (a macOS
+    # path like /Users/<user>/.claude) doesn't exist inside non-macOS agents,
+    # which silently breaks credential propagation when bootstrap-managed
+    # services (notably minds_workspace_server) spawn sub-agents via
+    # `mngr create`. Wrapping at the bootstrap entry point ensures every
+    # downstream service inherits the corrected env. The deeper fix lives in
+    # mngr_claude/plugin.py:_provision_local_credentials (gracefully fall
+    # back to $CLAUDE_CONFIG_DIR/.credentials.json); this is a defense-in-depth
+    # measure that also benefits any agent template inheriting `main`.
+    "bootstrap='export ORIGINAL_CLAUDE_CONFIG_DIR=\"$CLAUDE_CONFIG_DIR\" && uv run bootstrap'",
     "telegram='uv run telegram-bot'",
     "terminal='bash scripts/run_ttyd.sh'",
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'",
@@ -148,7 +158,9 @@ extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWE
 env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
 agent_args = [
     "--dangerously-skip-permissions",
-    """--append-system-prompt "You were launched by another agent. List any questions at the end of your final response, along with the assumptions you made." """]
+    "--append-system-prompt",
+    "You were launched by another agent. List any questions at the end of your final response, along with the assumptions you made. Your task file may include a `## Reporting back` section describing how to write a `report.md` and push it back to the lead -- if it does, follow that contract exactly. The lead does not poll your process state; the report file is how it learns you are done, stuck, or have a question.",
+]
 
 # Crystallize-worker template: sub-agent for the crystallize-task / heal-skill /
 # update-skill flows. Inherits from `worker`, adds:
@@ -166,4 +178,6 @@ extra_provision_command = [
 ]
 agent_args = [
     "--dangerously-skip-permissions",
-    """--append-system-prompt "You were launched by the crystallize-task / heal-skill / update-skill flow. Use the bundled crystallize-task-worker / heal-skill-worker / update-skill-worker skill to drive your work. End your turn with any gate question the sub-skill asks for." """]
+    "--append-system-prompt",
+    "You were launched by the crystallize-task / heal-skill / update-skill flow. Use the bundled crystallize-task-worker / heal-skill-worker / update-skill-worker skill to drive your work. End your turn with any gate question the sub-skill asks for.",
+]
