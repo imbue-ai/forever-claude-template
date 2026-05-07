@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Auto-push the active branch after every commit, gated on GH_TOKEN being set.
+#
+# Installed for every checkout in the container via:
+#   git config --global core.hooksPath /code/scripts/git_hooks
+# (set up by the git_auth_setup extra_window in .mngr/settings.toml).
+#
+# Skips silently in three cases that are normal, not errors:
+#   1. GH_TOKEN is unset (e.g. local dev, or worker sub-agents that should
+#      never push).
+#   2. HEAD is detached (no branch to push to).
+#   3. The current branch is under mindsbackup/ -- those branches belong to
+#      the runtime-backup polling service, which handles its own pushes.
+#
+# Runs the push in the background so the commit never blocks. All output
+# (success or failure) is appended to /tmp/post-commit-push.log for debugging;
+# the file is wiped on container restart.
+
+set -u
+
+LOG_FILE=/tmp/post-commit-push.log
+
+# 1. No token, nothing to do.
+if [ -z "${GH_TOKEN:-}" ]; then
+    exit 0
+fi
+
+# 2. Detached HEAD (e.g. mid-rebase or arbitrary checkout) -- nothing to push.
+branch="$(git symbolic-ref --short HEAD 2>/dev/null)" || exit 0
+if [ -z "$branch" ]; then
+    exit 0
+fi
+
+# 3. Runtime backup branches push themselves via the runtime-backup service.
+case "$branch" in
+    mindsbackup/*) exit 0 ;;
+esac
+
+# Background push, never blocking the commit. First try a plain push; if the
+# branch has no upstream yet, fall back to setting upstream as we push.
+{
+    echo "[$(date -Is)] post-commit push for $branch"
+    if ! git push 2>&1; then
+        git push --set-upstream origin "$branch" 2>&1
+    fi
+} >> "$LOG_FILE" 2>&1 &
+
+# Detach so the hook (and the parent commit) returns immediately.
+disown 2>/dev/null || true
+
+exit 0

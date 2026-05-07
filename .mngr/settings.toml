@@ -4,7 +4,7 @@
 [commands.create]
 connect = false
 ensure_clean = false
-pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
+pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
 host_env = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
@@ -15,6 +15,10 @@ host_env = [
     "DISABLE_AUTOUPDATER=1",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
     "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1",
+    # Tickets live inside runtime/ so they ride the runtime-backup branch.
+    # tk reads TICKETS_DIR if set; absolute path so it works from worktree
+    # subdirs too. /code/ is the container WORKDIR (set by the Dockerfile).
+    "TICKETS_DIR=/code/runtime/tickets",
 ]
 worktree_base_folder = "/worktree/"
 disable_plugin = ["recursive", "ttyd"]
@@ -80,7 +84,7 @@ extra_window = [
     "telegram='uv run telegram-bot'",
     "terminal='bash scripts/run_ttyd.sh'",
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'",
-    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && gh auth setup-git'"
+    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && git config --global core.hooksPath /code/scripts/git_hooks && gh auth setup-git'"
 ]
 
 # template for dev mode (runs in-place on local provider)

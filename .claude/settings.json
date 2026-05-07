@@ -1,5 +1,5 @@
 {
-  "autoMemoryDirectory": "memory",
+  "autoMemoryDirectory": "runtime/memory",
   "env": {
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
   },
