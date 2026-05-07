@@ -119,8 +119,10 @@ The bootstrap service manager picks up the new entry automatically
 tmux list-windows | grep "svc-<name>"
 ```
 
-If the window doesn't appear after a few seconds, check the bootstrap
-window itself with `tmux capture-pane -t bootstrap -p | tail -40`.
+If the window doesn't appear after a few seconds, capture the bootstrap
+window to a file (`tmux capture-pane -t bootstrap -p > /tmp/bootstrap.txt`)
+and read it -- do not pipe `tmux capture-pane` through `tail`/`head`,
+since CLAUDE.md disallows that.
 
 ## Step 2: Implement your routes
 
