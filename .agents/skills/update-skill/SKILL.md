@@ -1,27 +1,52 @@
 ---
 name: update-skill
-description: Extend or refactor a crystallized skill (or split a new one off). Invoke at turn-end when you had to do additional repeatable work around an existing skill (absorb flow), or when you and the user explicitly discussed a change to a skill and you applied it live (verify flow).
+description: Extend, refactor, or verify a crystallized skill under `.agents/skills/`, or a shared script or reference under `.agents/shared/` that other skills consume (e.g. `scripts/extract_turn.py`, `references/lead-proxy.md`, `references/worker-reporting.md`). Invoke at turn-end when you had to do additional repeatable work around the artifact (absorb flow -- e.g. you worked around a bug in a shared script with a manual flag, or did extra processing the skill should have handled), or when you and the user discussed a change and you applied it live (verify flow -- e.g. you just edited and committed a SKILL.md or a shared script). Not for arbitrary application code, and not for loose template/config files -- the worker pipeline is built around skill-shaped layouts.
 ---
 
-# Updating or splitting a skill
+# Updating a contract-bearing artifact
 
-Use this skill when an existing skill in `.agents/skills/` needs a
-change. Two flows cover the two ways this happens.
+Use this skill when a **crystallized skill** under `.agents/skills/` or a
+**shared script/reference** under `.agents/shared/` needs a change. Both
+share the same absorb/verify pipeline because both are skill-shaped
+artifacts: a SKILL.md with optional `scripts/` and `references/`, or a
+script/reference consumed by such SKILL.md files. Concretely the two
+classes covered are:
 
-- **absorb flow.** A skill ran successfully but you had to do additional
-  *repeatable* work to fully satisfy the user's request. The user was not
+- Crystallized skills under `.agents/skills/`.
+- Shared scripts and references under `.agents/shared/` consumed by other
+  skills (e.g. `scripts/extract_turn.py`, `references/lead-proxy.md`,
+  `references/worker-reporting.md`).
+
+This is *not* "edit any file". Ordinary application or product code edits
+go through the regular dev loop. Loose template / config files
+(`.mngr/settings.toml`, `services.toml`, hook scripts, `CLAUDE.md`) are
+also out of scope -- the worker pipeline is built around skill-shaped
+layouts and `validate_skill.py`, so there is no validator or scenario
+shape for those file types yet. The trigger here is that the artifact is
+a skill or directly consumed by skills -- if you change it inline without
+ratification, other skills can drift silently. The worker pipeline adds
+the rigor (scenario testing, validation, gated approval) that's awkward
+to do interactively.
+
+Two flows cover the two ways this happens.
+
+- **absorb flow.** The artifact was used (or relied on) but you had to do
+  additional *repeatable* work to fully satisfy the user's request --
+  e.g. you patched around a bug in a shared script with a manual flag, or
+  did extra processing the skill should have handled. The user was not
   part of a design conversation about the change. You hand the worker the
   incident transcript and the new contract; the worker replicates, proposes
   a design at Gate 1, implements, runs scenarios, presents Gate 2.
-- **verify flow.** You and the user discussed a change to a skill during
-  the turn, agreed on a design, and you committed the change live. You
-  hand the worker the committed diff and the design rationale. The worker
-  skips Gate 1 (the design was approved organically in chat), reads the
-  committed change, runs scenarios, runs `/autofix`, and presents Gate 2
-  with verification findings.
+- **verify flow.** You and the user discussed a change to the artifact
+  during the turn, agreed on a design, and you committed the change live
+  -- e.g. you just edited and committed prose in a SKILL.md, or fixed a
+  flag in a shared script. You hand the worker the committed diff and
+  the design rationale. The worker skips Gate 1 (the design was approved
+  organically in chat), reads the committed change, runs scenarios, runs
+  `/autofix`, and presents Gate 2 with verification findings.
 
 Pick the verify flow when the user was explicitly in the design loop for
-this skill change *and* the change is already committed on the branch.
+this change *and* the change is already committed on the branch.
 Otherwise pick the absorb flow. Absorb is the safe default; its Gate 1
 just re-surfaces the design for an approval pass.
 
@@ -41,7 +66,11 @@ the decision is already made by the committed change.
 
 ## Conventions
 
-Use `$TARGET` for the skill you are updating (e.g. `migrate-config`).
+Use `$TARGET` as a short kebab-case identifier for the artifact you are
+updating. For a skill, this is the skill name (e.g. `migrate-config`).
+For a shared script or reference under `.agents/shared/`, pick a short
+kebab-case name derived from its filename (e.g. `extract-turn` for
+`scripts/extract_turn.py`, `lead-proxy` for `references/lead-proxy.md`).
 Then:
 
 - Worker agent name: `update-$TARGET`
@@ -105,9 +134,10 @@ tk close "$TICKET_ID"
 
 ## Gotchas
 
-- If the target is a built-in skill from the upstream template (e.g.
-  `launch-task`, `update-self`), updating it causes local drift from
-  upstream. Reconcile later via `update-self` (pull) or
+- If the target is a built-in artifact from the upstream template (e.g.
+  the `launch-task` or `update-self` skills, or shared scripts /
+  references under `.agents/shared/`), updating it causes local drift
+  from upstream. Reconcile later via `update-self` (pull) or
   `submit-upstream-changes` (push).
 - Update is non-blocking -- the user's original request is already
   delivered; the update worker produces a quieter follow-up commit.

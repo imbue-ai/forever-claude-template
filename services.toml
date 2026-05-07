@@ -3,7 +3,12 @@
 # See the edit-services skill for details.
 
 [services.system_interface]
-command = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && minds-workspace-server"
+# Re-point ORIGINAL_CLAUDE_CONFIG_DIR at this agent's CLAUDE_CONFIG_DIR. The
+# inherited value (a macOS host path) doesn't exist inside the lima VM, which
+# breaks credential propagation when the workspace server spawns sub-agents
+# via `mngr create`. Sourcing $CLAUDE_CONFIG_DIR/.credentials.json is what we
+# actually want.
+command = 'export ORIGINAL_CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" && python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && minds-workspace-server'
 
 [services.web]
 command = "python3 scripts/forward_port.py --url http://localhost:8080 --name web && uv run web-server"
