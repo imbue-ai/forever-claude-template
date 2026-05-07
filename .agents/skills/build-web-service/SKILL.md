@@ -32,6 +32,10 @@ Adding a Python proxy in front of the third-party server adds a hop,
 costs an extra process, and complicates WebSocket and streaming
 behavior. Use the escape hatch instead.
 
+Do not extend `libs/web_server/` to add a new view. That lib runs the
+top-level workspace UI; new web views go in their own scaffolded lib
+under `libs/<your-package>/` so they get an isolated tab and prefix.
+
 ## Pre-flight (both paths)
 
 - **Pick a kebab-case service name.** Becomes the URL segment
