@@ -128,10 +128,8 @@ The starter `runner.py` has just `GET /` (a placeholder HTML page)
 and `GET /health` (returns `{"status": "ok"}`). Replace the
 placeholder with your real routes.
 
-Use **sync handlers** (`def`, not `async def`). The ratchet
-`check_asyncio_import` is at zero and the starter is fully sync. If
-you genuinely need async, bump the asyncio ratchet baseline and import
-asyncio explicitly -- but most pages don't need it.
+Use **sync handlers** (`def`, not `async def`). The starter is fully
+sync and most pages don't need otherwise.
 
 ### File-path conventions
 
@@ -146,24 +144,6 @@ Two cases, two patterns:
 - **Static assets shipped alongside the .py file** (templates,
   default configs, bundled JSON): `Path(__file__).parent / "assets/..."`
   is the right pattern.
-
-### Bumping ratchets
-
-The starter ratchets file mirrors the `web_server` example with all
-baselines at zero. The starter passes those zeros, so initial
-generation is clean. Once you write real code, if you legitimately
-need:
-
-- `time.sleep(...)` in a polling loop -> bump `test_prevent_time_sleep`
-- `while True:` in a long-running loop -> bump `test_prevent_while_true`
-- `import asyncio` for async handlers/tasks -> bump `test_prevent_asyncio_import`
-- `import dataclasses` for typed records -> bump `test_prevent_dataclasses_import`
-
-...bump the matching `snapshot(0)` to the actual count. Do not contort
-the code to dodge the regex (e.g. `threading.Event().wait()` instead
-of `time.sleep`, `while not stop.is_set():` instead of `while True:`)
--- that's evading the ratchet, which is worse than the original
-violation.
 
 ## Step 3: Verify
 
