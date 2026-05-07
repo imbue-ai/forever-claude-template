@@ -74,7 +74,8 @@ def _do_tick(should_push: bool) -> None:
                 commit_result.returncode,
                 commit_result.stderr.strip(),
             )
-            return
+            # Fall through to push: any prior unpushed commits should still
+            # be shipped even if this tick's commit failed.
 
     if should_push:
         # Always attempt push: covers the case where a prior tick committed but
