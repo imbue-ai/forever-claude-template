@@ -1,6 +1,8 @@
-# Forever Claude runtime state
+# Forever Claude runtime state.
+# memory/ now lives at runtime/memory/ (configured via .claude/settings.json's
+# autoMemoryDirectory) so the runtime-backup service backs it up alongside
+# the rest of runtime/.
 runtime/
-memory/
 
 # tk tickets (tracker is vendored at vendor/tk; the tickets themselves are local state)
 .tickets/
