@@ -4,7 +4,7 @@
 [commands.create]
 connect = false
 ensure_clean = false
-pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
+pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
 host_env = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
@@ -15,6 +15,10 @@ host_env = [
     "DISABLE_AUTOUPDATER=1",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
     "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1",
+    # Tickets live inside runtime/ so they ride the runtime-backup branch.
+    # tk reads TICKETS_DIR if set; absolute path so it works from worktree
+    # subdirs too. /code/ is the container WORKDIR (set by the Dockerfile).
+    "TICKETS_DIR=/code/runtime/tickets",
 ]
 worktree_base_folder = "/worktree/"
 disable_plugin = ["recursive", "ttyd"]
@@ -80,7 +84,7 @@ extra_window = [
     "telegram='uv run telegram-bot'",
     "terminal='bash scripts/run_ttyd.sh'",
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'",
-    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && gh auth setup-git'"
+    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && git config --global core.hooksPath /code/scripts/git_hooks && gh auth setup-git'"
 ]
 
 # template for dev mode (runs in-place on local provider)
@@ -90,7 +94,20 @@ worktree_base_folder = "/tmp/mngr-worktrees/"
 extra_provision_command = [
     "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/minds_workspace_server && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
 ]
-pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "UV_TOOL_BIN_DIR", "UV_TOOL_DIR", "LATCHKEY_GATEWAY"]
+# DEV runs the agent on the bare host (no new host is created), so the
+# Anthropic creds need to land in the *agent* env -- ``pass_env``, not
+# ``pass_host_env``. ``GH_TOKEN`` is already in
+# ``[commands.create].pass_env`` so it's covered for every mode.
+pass_env = [
+    "MINDS_WORKSPACE_NAME",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_USER_NAME",
+    "UV_TOOL_BIN_DIR",
+    "UV_TOOL_DIR",
+    "LATCHKEY_GATEWAY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+]
 
 # template for docker provider
 [create_templates.docker]
@@ -101,6 +118,11 @@ build_arg = ["--file=Dockerfile", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
+# Forward Anthropic creds + GH_TOKEN from minds' subprocess env onto the
+# new container's env. The agent process inherits the container env, so
+# this is what gives the agent its ANTHROPIC_API_KEY (etc.) in
+# non-IMBUE_CLOUD compute modes.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # I guess it can pass a volume in too if you want
 
 # template for lima VM provider
@@ -109,6 +131,8 @@ provider = "lima"
 target_path = "/code/"
 idle_mode = "disabled"
 start_arg = ["--cpus=2", "--memory=4", "--disk=20"]
+# Same forwarding as the docker template; see comment there.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 extra_provision_command = [
     "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
     "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
@@ -137,6 +161,8 @@ build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region=sjc", "
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
+# Same forwarding as the docker template; see comment there.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 
 # Template for imbue_cloud-leased pool hosts. minds invokes this as
 # `--template main --template imbue_cloud` (mirroring how the other modes
@@ -150,11 +176,12 @@ idle_mode = "disabled"
 # whole user session, not a one-shot job.
 idle_mode = "disabled"
 # Forward the LiteLLM-minted ANTHROPIC creds + the minds-side MNGR_PREFIX
-# from minds' subprocess env onto the host's ``/mngr/env``. minds writes
-# these into the subprocess env it hands ``mngr create`` (see
-# ``run_mngr_create`` in ``apps/minds/imbue/minds/desktop_client/agent_creator.py``)
-# so the host actually has them at the moment ``--pass-host-env`` reads.
-pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX"]
+# + an optional GH_TOKEN from minds' subprocess env onto the host's
+# ``/mngr/env``. minds writes these into the subprocess env it hands
+# ``mngr create`` (see ``run_mngr_create`` in
+# ``apps/minds/imbue/minds/desktop_client/agent_creator.py``) so the host
+# actually has them at the moment ``--pass-host-env`` reads.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX", "GH_TOKEN"]
 
 ## and these templates are for sub-agents created within the sandbox
 
