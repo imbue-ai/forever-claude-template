@@ -134,14 +134,24 @@ start_arg = ["--cpus=2", "--memory=4", "--disk=20"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 extra_provision_command = [
+    # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
+    # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
+    "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
     "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
     "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
+    # Install latchkey CLI globally; pinned to the same version as Dockerfile's
+    # LATCHKEY_VERSION ARG. Bump both together.
+    "sudo npm install -g latchkey@2.7.2",
     "curl -LsSf https://astral.sh/uv/install.sh | sh",
     "ARCH=$(uname -m) && sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && sudo chmod +x /usr/local/bin/ttyd",
     "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh",
     "cd vendor/mngr/apps/minds_workspace_server/frontend && npm ci && npm run build",
     "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install vendor/mngr/apps/minds_workspace_server --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
     "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
+    # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
+    # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
+    # because the uv installer prepends it.
+    "mkdir -p $HOME/.local/bin && ln -sf /code/vendor/tk/ticket $HOME/.local/bin/tk",
 ]
 
 # template for vultr VPS provider (cloud mode)
