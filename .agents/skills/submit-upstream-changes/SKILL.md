@@ -1,66 +1,91 @@
 ---
 name: submit-upstream-changes
-description: Push local improvements to shared infrastructure (skills, scripts, CLAUDE.md scaffolding, Dockerfile, services.toml) back to the upstream template repo so other agents derived from the template can benefit. Do not push agent-specific content (PURPOSE.md, memory, runtime state). For pulling updates from upstream, use the `update-self` skill instead.
+description: Push local improvements to shared infrastructure (skills, scripts, CLAUDE.md scaffolding, Dockerfile, services.toml) back to the parent template repo so other agents derived from the template benefit. Opens a separate per-feature PR per logical fix; never pushes directly to upstream `main`. Do not push agent-specific content (PURPOSE.md, memory, runtime state). For pulling updates from upstream, use the `update-self` skill instead.
 ---
 
-# Pushing changes to the upstream template
+# Pushing changes upstream
 
-This repo was created from a template repo. The two share git history and stay connected via a git remote. The template URL and branch are defined in `parent.toml`:
-
-```toml
-url = "https://github.com/imbue-ai/forever-claude-template.git"
-branch = "main"
-```
+This repo was created from a parent template repo (see `parent.toml` for the upstream URL and branch). The default flow for pushing improvements back is: **one logical fix per PR, on a `submit/<short-name>` branch**. We do not push directly to upstream `main`.
 
 ## What to push (and what not to)
 
-Push changes to **shared infrastructure** that would benefit other agents derived from the template:
+Push **shared infrastructure** that benefits other agents derived from the template:
 
 - Skills (`.agents/skills/`)
-- Scripts (`scripts/`)
-- CLAUDE.md scaffolding (the template-level sections)
+- Scripts (`scripts/`, `.agents/shared/scripts/`)
+- CLAUDE.md scaffolding (template-level sections only)
 - Dockerfile
 - `services.toml` (template-level entries)
 
-Do **not** push agent-specific customizations:
+Do **not** push agent-specific content:
 
 - `PURPOSE.md`
 - Memory contents
-- Runtime state
+- Runtime state (`runtime/`)
 - Agent-specific services, settings, or CLAUDE.md sections
 
-## Setup
+## PR conventions
 
-Ensure the `upstream` remote exists:
+- **Branch name:** `submit/<short-feature-name>` (kebab-case, ~3-5 words). Same name on the upstream remote.
+- **One logical fix per PR.** Multiple commits are fine if they form one logical unit; otherwise split them across PRs so each can be reviewed/CI'd/merged independently.
+- **Title:** short, imperative, scoped. e.g. `forwarder: redirect HTTPS by default`.
+- **Body:** a single paragraph explaining the *why* (the motivating bug, missing capability, or constraint). Reviewers can read the diff for the *what*. Skip checklists and section headers.
+- **Co-Authored-By trailer** on the commit (the standard one used in this repo).
 
-```bash
-git remote get-url upstream 2>/dev/null || git remote add upstream "$(python3 -c "
-import tomllib
-with open('parent.toml', 'rb') as f:
-    print(tomllib.load(f)['url'])
-")"
-```
+## Recipe
 
-## Pushing changes
+The upstream URL and base branch are in `parent.toml`.
 
-```bash
-BRANCH=$(python3 -c "
-import tomllib
-with open('parent.toml', 'rb') as f:
-    print(tomllib.load(f)['branch'])
-")
-git push upstream HEAD:"$BRANCH"
-```
+1. Ensure the `upstream` remote points at the template (idempotent):
 
-If you need to push to a different branch on the template (e.g., a feature branch), replace `"$BRANCH"` with the target branch name.
+   ```bash
+   git remote get-url upstream 2>/dev/null || git remote add upstream "$(python3 -c "
+   import tomllib
+   with open('parent.toml', 'rb') as f:
+       print(tomllib.load(f)['url'])
+   ")"
+   ```
+
+2. Stage the commit(s) you want to push onto a clean throwaway branch rooted at upstream's base, then push that branch. Pushing the local working branch directly (`git push upstream <local_branch>:submit/<short-name>`) would publish every ancestor commit not yet on upstream -- including unrelated WIP, merge, and scaffolding commits that happen to share the branch tip's history -- producing a noisy PR that violates the "one logical fix per PR" rule. Instead:
+
+   ```bash
+   git fetch upstream
+   BASE=$(python3 -c "
+   import tomllib
+   with open('parent.toml', 'rb') as f:
+       print(tomllib.load(f)['branch'])
+   ")
+   git branch -f submit/<short-name> "upstream/$BASE"
+   git checkout submit/<short-name>
+   git cherry-pick <sha-1> [<sha-2> ...]   # the commit(s) for this logical fix, oldest first
+   git push upstream submit/<short-name>:submit/<short-name>
+   git checkout -   # back to your working branch
+   ```
+
+   If the cherry-pick conflicts against current upstream, resolve it the same way you would for any cherry-pick (or rebase your fix on a fresh `update-self` first).
+
+3. Open the PR against the template's default branch (read from `parent.toml`, usually `main`):
+
+   ```bash
+   gh pr create \
+       --repo imbue-ai/forever-claude-template \
+       --base main \
+       --head submit/<short-name> \
+       --title "<short imperative title>" \
+       --body  "<one-paragraph why>"
+   ```
+
+4. Report the PR URL back to the user.
 
 ## When to push
 
-- When the user asks you to push changes upstream
-- After improving shared skills, scripts, or configuration that would benefit other agents
+- When the user asks you to push changes upstream.
+- After improving shared skills, scripts, or configuration that would benefit other agents.
 
 ## Important
 
-- Always commit your local changes before pushing
-- Double-check the diff — make sure you're not about to push agent-specific content
-- To pull updates from upstream, use the `update-self` skill
+- Always commit your local changes before pushing.
+- Double-check the diff: `git show <sha>` -- make sure no agent-specific content is in the commit.
+- One upstream PR per logical fix. Don't bundle.
+- Never push directly to upstream `main`.
+- To pull updates from upstream, use the `update-self` skill.
