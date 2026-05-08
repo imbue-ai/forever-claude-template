@@ -361,6 +361,48 @@ def test_push_files_merge_mode_when_both_modify_different_files(
 
 
 @pytest.mark.rsync
+def test_push_files_merge_mode_into_untracked_dir_with_existing_files_succeeds(
+    push_ctx: SyncTestContext,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Regression test for push --uncommitted-changes=merge into an untracked dir.
+
+    Reproduces the failure where `git stash -u` includes pre-existing untracked
+    files, rsync delivers new files into the same untracked directory, and the
+    final `git stash pop` aborts with "untracked working tree file would be
+    overwritten by stash pop". MERGE mode now stashes only tracked changes, so
+    the rsync target may freely overlap with untracked content.
+    """
+    # Tracked-file modification ensures the destination has uncommitted changes.
+    (push_ctx.agent_dir / "README.md").write_text("agent modified content")
+
+    # Untracked directory on the destination with a pre-existing file.
+    untracked_dir = push_ctx.agent_dir / "reports"
+    untracked_dir.mkdir()
+    (untracked_dir / "existing.md").write_text("pre-existing report")
+
+    # Source carries a new file destined for the same directory.
+    (push_ctx.local_dir / "new.md").write_text("new report")
+
+    push_files(
+        agent=push_ctx.agent,
+        host=push_ctx.host,
+        source=push_ctx.local_dir,
+        destination_path=untracked_dir,
+        is_dry_run=False,
+        is_delete=False,
+        uncommitted_changes=UncommittedChangesMode.MERGE,
+        cg=cg,
+    )
+
+    # Both the pre-existing untracked file and the freshly pushed file are present.
+    assert (untracked_dir / "existing.md").read_text() == "pre-existing report"
+    assert (untracked_dir / "new.md").read_text() == "new report"
+    # Tracked-file modification was preserved across the sync.
+    assert (push_ctx.agent_dir / "README.md").read_text() == "agent modified content"
+
+
+@pytest.mark.rsync
 def test_push_files_merge_mode_with_no_uncommitted_changes(
     push_ctx: SyncTestContext,
     cg: ConcurrencyGroup,

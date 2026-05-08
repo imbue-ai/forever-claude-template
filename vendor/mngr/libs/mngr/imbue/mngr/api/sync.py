@@ -148,8 +148,14 @@ class GitContextInterface(MutableModel, ABC):
         """Check if the path has uncommitted git changes."""
 
     @abstractmethod
-    def git_stash(self, path: Path) -> bool:
-        """Stash uncommitted changes. Returns True if something was stashed."""
+    def git_stash(self, path: Path, include_untracked: bool = True) -> bool:
+        """Stash uncommitted changes. Returns True if something was stashed.
+
+        When `include_untracked` is True (default), untracked files are also
+        stashed (`git stash push -u`). Set to False when the caller will write
+        new files into directories whose untracked content would otherwise
+        collide on stash pop.
+        """
 
     @abstractmethod
     def git_stash_pop(self, path: Path) -> None:
@@ -183,10 +189,14 @@ class LocalGitContext(GitContextInterface):
             raise MngrError(f"git status failed in {path}: {e.stderr}") from e
         return len(result.stdout.strip()) > 0
 
-    def git_stash(self, path: Path) -> bool:
+    def git_stash(self, path: Path, include_untracked: bool = True) -> bool:
+        cmd = ["git", "stash", "push"]
+        if include_untracked:
+            cmd.append("-u")
+        cmd.extend(["-m", "mngr-sync-stash"])
         try:
             result = self.cg.run_process_to_completion(
-                ["git", "stash", "push", "-u", "-m", "mngr-sync-stash"],
+                cmd,
                 cwd=path,
             )
         except ProcessError as e:
@@ -245,9 +255,10 @@ class RemoteGitContext(GitContextInterface):
             raise MngrError(f"git status failed in {path}: {result.stderr}")
         return len(result.stdout.strip()) > 0
 
-    def git_stash(self, path: Path) -> bool:
+    def git_stash(self, path: Path, include_untracked: bool = True) -> bool:
+        untracked_flag = " -u" if include_untracked else ""
         result = self._host.execute_stateful_command(
-            'git stash push -u -m "mngr-sync-stash"',
+            f'git stash push{untracked_flag} -m "mngr-sync-stash"',
             cwd=path,
         )
         if not result.success:
@@ -300,10 +311,14 @@ def handle_uncommitted_changes(
             raise UncommittedChangesError(path)
         case UncommittedChangesMode.STASH:
             logger.debug("Stashing uncommitted changes")
-            return git_ctx.git_stash(path)
+            return git_ctx.git_stash(path, include_untracked=True)
         case UncommittedChangesMode.MERGE:
-            logger.debug("Stashing uncommitted changes for merge")
-            return git_ctx.git_stash(path)
+            # MERGE mode preserves only tracked-file changes through the sync.
+            # Untracked files are intentionally NOT stashed: rsync may write into
+            # an untracked/gitignored directory, and a `git stash pop` of those
+            # files would collide with the freshly-rsynced contents.
+            logger.debug("Stashing uncommitted changes for merge (tracked only)")
+            return git_ctx.git_stash(path, include_untracked=False)
         case UncommittedChangesMode.CLOBBER:
             logger.debug("Clobbering uncommitted changes")
             git_ctx.git_reset_hard(path)
