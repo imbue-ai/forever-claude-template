@@ -1,6 +1,6 @@
 ---
 name: do-something-new
-description: Use immediately when the user asks you to do something net-new -- a task you haven't done before, no existing skill applies, and getting it right will require nontrivial research, exploration, or experimentation. When doing this, give a very short confirmation message to the user's request, then load this immediately before responding further. Don't mention loading the skill. Skip when an applicable single skill already exists or for pure dev/code-writing work.
+description: Use immediately when the user asks you to do something net-new -- a task you haven't done before, no existing skill applies, and getting it right will require nontrivial research, exploration, or experimentation. When doing this, give a very short confirmation message to the user's request, then load this immediately before responding further. Your confirmation message shouldn't mention loading the skill. Skip when an applicable single skill already exists or for pure dev/code-writing work.
 ---
 
 # Doing something new
@@ -110,6 +110,8 @@ Generate and present a *small* sample (5-10 items, or one representative slice
 for non-list outputs) in the user's intended delivery channel -- not the full
 production pipeline. The point is a fast feedback gate on shape / tone /
 density / layout before any long-running step runs at full scale.
+
+This is especially important when doing anything involving LLMs - don't spend a ton of the user's money without having confirmed they will like the result!
 
 Default presentation: a brief natural-language summary, e.g.
 
