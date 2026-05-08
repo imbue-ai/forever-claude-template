@@ -1,6 +1,6 @@
 ---
 name: do-something-new
-description: Use immediately when the user asks you to do something net-new -- a task you haven't done before, no existing skill applies, and getting it right will require nontrivial research, exploration, or experimentation. When doing this, give a very short confirmation message to the user's request, then load this immediately before responding further. Skip when an applicable single skill already exists or for pure dev/code-writing work.
+description: Use immediately when the user asks you to do something net-new -- a task you haven't done before, no existing skill applies, and getting it right will require nontrivial research, exploration, or experimentation. When doing this, give a very short confirmation message to the user's request, then load this immediately before responding further. Don't mention loading the skill. Skip when an applicable single skill already exists or for pure dev/code-writing work.
 ---
 
 # Doing something new
