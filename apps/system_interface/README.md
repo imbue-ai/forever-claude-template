@@ -17,11 +17,11 @@ Opens at http://127.0.0.1:8000 by default.
 
 ```bash
 # Backend
-cd apps/minds_workspace_server
+cd apps/system_interface
 uv run minds-workspace-server
 
 # Frontend (with hot reload)
-cd apps/minds_workspace_server/frontend
+cd apps/system_interface/frontend
 npm install
 npm run dev
 ```
@@ -49,7 +49,7 @@ refresh.
 ## Building
 
 ```bash
-cd apps/minds_workspace_server/frontend
+cd apps/system_interface/frontend
 npm run build
 ```
 

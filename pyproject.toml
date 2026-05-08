@@ -31,7 +31,7 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup"]
+members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "apps/system_interface"]
 
 [tool.uv.sources]
 telegram-bot = { workspace = true }
@@ -40,7 +40,10 @@ cloudflare-tunnel = { workspace = true }
 app-watcher = { workspace = true }
 web-server = { workspace = true }
 runtime-backup = { workspace = true }
-imbue-common = { path = "vendor/mngr/libs/imbue_common" }
+imbue-common = { path = "vendor/mngr/libs/imbue_common", editable = true }
+imbue-mngr = { path = "vendor/mngr/libs/mngr", editable = true }
+resource-guards = { path = "vendor/mngr/libs/resource_guards", editable = true }
+concurrency-group = { path = "vendor/mngr/libs/concurrency_group", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["."]
@@ -49,15 +52,18 @@ addopts = [
     "--timeout=10",
     "--ignore=vendor/mngr",
     "--ignore=vendor/tk",
+    # apps/system_interface has its own pytest config (coverage, slow-test reporting,
+    # ratchets) that conflicts with the root config; it is run from inside its own dir.
+    "--ignore=apps/system_interface",
 ]
 
 [tool.ruff]
 target-version = "py311"
-exclude = ["vendor/mngr", "vendor/tk"]
+exclude = ["vendor/mngr", "vendor/tk", "apps/system_interface"]
 
 [tool.ruff.lint]
 select = ["F", "I", "UP006", "UP007"]
 
 [tool.pyright]
 pythonVersion = "3.11"
-exclude = ["vendor/mngr", "vendor/tk"]
+exclude = ["vendor/mngr", "vendor/tk", "apps/system_interface"]

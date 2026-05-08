@@ -3,7 +3,7 @@ name = "minds-workspace-server"
 version = "0.1.0"
 description = "Web chat interface for mngr-managed Claude agents"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "httpx>=0.27",
@@ -25,6 +25,21 @@ license-files = [
 dev = [
     "playwright>=1.40",
     "pytest-playwright>=0.4",
+    # Test infrastructure used by imbue.imbue_common.conftest_hooks
+    # (previously provided transitively by vendor/mngr's uv workspace dev group)
+    "pytest>=9.0",
+    "pytest-cov>=7.0.0",
+    "pytest-timeout>=2.3.0",
+    "coverage",
+    "inline-snapshot>=0.13",
+    "resource-guards",
+    "import-linter>=2.0",
+    "ruff~=0.12.8",
+    # Used by check_no_type_errors in test_ratchets.py. Pinned to 0.0.24 because
+    # that is the version the source was last verified clean against in
+    # vendor/mngr's uv.lock; newer versions surface stricter checks that don't
+    # match what this code was reviewed under.
+    "ty==0.0.24",
 ]
 
 [project.scripts]
@@ -33,10 +48,6 @@ minds-workspace-server = "imbue.minds_workspace_server.main:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.uv.sources]
-imbue-common = { workspace = true }
-imbue-mngr = { workspace = true }
 
 [tool.hatch.build]
 artifacts = [
@@ -83,10 +94,41 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.pyright]
-venvPath = "../.."
+venvPath = "."
 venv = ".venv"
-pythonVersion = "3.11"
+pythonVersion = "3.12"
 strict = ["**/*.py"]
+
+# Ruff config mirrors vendor/mngr/pyproject.toml so that lint/isort behavior
+# matches what this code was previously checked under (it was a workspace
+# member of vendor/mngr before being promoted into apps/system_interface).
+[tool.ruff]
+line-length = 119
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "B",
+    "I",
+    "UP006",
+    "UP007",
+]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint.isort]
+force-single-line = true
+case-sensitive = true
+order-by-type = false
+known-first-party = [
+    "imbue",
+    "imbue_common",
+    "mngr",
+]
 
 [tool.coverage.report]
 fail_under = 75

@@ -15,8 +15,12 @@ that has already happened and just polls.
 - Each tick: `git add -A`, commit (only if dirty) with message
   `runtime backup: <ISO-8601 UTC timestamp>`, push (only when `GH_TOKEN`
   is set in env). All `git` operations target the runtime worktree.
-- Push uses default args (no `--force`, no `--set-upstream`). Bootstrap
-  set the upstream during init. The per-agent branch model means there is
+- Push first tries default args (no `--force`). Bootstrap normally sets
+  the upstream during init, but if that best-effort push failed, the
+  next tick's plain `git push` fails with "no upstream" -- so on push
+  failure the runner retries once with `git push --set-upstream origin
+  <branch>` to self-heal that case (mirroring the post-commit hook).
+  `--force` is never used; the per-agent branch model means there is
   only ever one writer, so non-fast-forwards should not happen.
 - `runtime/secrets` is excluded via the worktree's own `.gitignore`
   (written by bootstrap during init), so the Cloudflare tunnel token
