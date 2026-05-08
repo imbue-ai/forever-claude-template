@@ -30,8 +30,9 @@ task file. You are looking for:
   contain, and any major change in the diff that the rationale does not
   explain.
 - **Consistency:** does the edited SKILL.md stay coherent? References to
-  removed content, orphaned sections, or broken links are verification
-  findings, not judgement calls about the design.
+  removed content, orphaned sections, broken links, or cross-reference
+  drift from the localized edit are verification findings, not judgement
+  calls about the design.
 - **Backward compatibility:** if the rationale claims backward
   compatibility, do existing callers still work? (E.g. old task-file shapes
   still route correctly.)

@@ -56,6 +56,38 @@ user's reply (delivered via `mngr message`) before coding.
   outline explicitly calls for a breaking change.
 - Keep SKILL.md under ~500 lines; split long content into `references/`.
 
+### Cross-section alignment sweep
+
+After the localized edit, sweep the rest of the SKILL.md (and any
+sibling `references/*.md`) and update every cross-reference point that
+names or summarizes the changed material.
+
+Sweep checklist (skip anything not present in the file):
+
+- **Frontmatter `description`** -- often a one-liner that summarizes
+  the body or names the skill's matching surface. If the change
+  touches scope, framing, or matching surface, the description usually
+  needs to follow.
+- **H1 / opening prose** -- the title and the paragraph after it tend
+  to summarize the whole body. Update if the change shifts the skill's
+  purpose or the headline framing.
+- **`## Principles` bullets (or equivalent top-of-file summaries)** --
+  these are often one-line abstractions of a Step further down. If you
+  rewrote the underlying Step, the bullet must follow.
+- **Section headings** -- "Step 4: Validate the core capability first"
+  describes its body; if the body's framing changes, the heading must
+  too.
+- **Subsection examples and analogies** -- callouts inside a section
+  that illustrate the section's framing.
+- **Cross-references between sections** -- "see Step 5", "as
+  established in Step 4", etc. become wrong if section numbers or
+  framings shift.
+- **`## Conventions` and `## Gotchas` (if present)** -- frequently
+  reference earlier sections by topic and need re-checking when those
+  sections move.
+
+Treat the sweep as part of the substantive edit, not a follow-up.
+
 ### Create-new-skill
 
 Delegate to `crystallize-task-worker`: follow its Stage 3 (Build the
