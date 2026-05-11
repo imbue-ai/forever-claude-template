@@ -404,10 +404,13 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       if (userNode !== null) {
         messageNodes.push(userNode);
       }
-      // Non-boundary user_messages (skill expansions, stop-hook feedback)
-      // arrive inside the turn's window -- render them as chips in their
-      // natural chronological order so the user can see which skills the
-      // agent invoked without breaking the progress timeline.
+      // Non-boundary user_messages (stop-hook feedback, skill expansions,
+      // etc.) fall inside the turn's window. Skill expansions are folded
+      // into the matching Skill tool call's output by
+      // buildToolResultsWithSkillExpansions and are hidden here (their
+      // renderUserMessage returns null). Anything still visible -- mostly
+      // stop-hook feedback chips -- is pushed above the progress block so
+      // it brackets the work rather than splitting the timeline.
       const nonBoundaryUserEvents = turn.body_events.filter((e) => e.type === "user_message");
       if (turn.tasks.length > 0) {
         // Final message: latest non-empty assistant_message text in the
