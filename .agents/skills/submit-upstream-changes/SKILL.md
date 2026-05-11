@@ -46,7 +46,27 @@ The upstream URL and base branch are in `parent.toml`.
    ")"
    ```
 
-2. Stage the commit(s) you want to push onto a clean throwaway branch rooted at upstream's base, then push that branch. Pushing the local working branch directly (`git push upstream <local_branch>:submit/<short-name>`) would publish every ancestor commit not yet on upstream -- including unrelated WIP, merge, and scaffolding commits that happen to share the branch tip's history -- producing a noisy PR that violates the "one logical fix per PR" rule. Instead:
+2. Stage the commit(s) you want to push onto a clean throwaway branch rooted at upstream's base, then push that branch. Pushing the local working branch directly (`git push upstream <local_branch>:submit/<short-name>`) would publish every ancestor commit not yet on upstream -- including unrelated WIP, merge, and scaffolding commits that happen to share the branch tip's history -- producing a noisy PR that violates the "one logical fix per PR" rule.
+
+   **If your working tree is dirty** (`git status` shows modifications you don't want to disturb), do the cherry-pick in a fresh `git worktree` rooted at `upstream/<base>`. Switching branches in-place would either carry the dirty tracked changes into the submit branch (and into the cherry-pick context, where they cause conflicts) or refuse the checkout outright. A worktree sidesteps both:
+
+   ```bash
+   git fetch upstream
+   BASE=$(python3 -c "
+   import tomllib
+   with open('parent.toml', 'rb') as f:
+       print(tomllib.load(f)['branch'])
+   ")
+   git worktree add /tmp/wt-<short-name> "upstream/$BASE"
+   (cd /tmp/wt-<short-name> \
+        && git checkout -b submit/<short-name> \
+        && git cherry-pick <sha-1> [<sha-2> ...] \
+        && git push upstream submit/<short-name>:submit/<short-name>)
+   git worktree remove /tmp/wt-<short-name>
+   git branch -D submit/<short-name>   # the throwaway local branch
+   ```
+
+   With a clean working tree, the simpler in-place form is fine:
 
    ```bash
    git fetch upstream
@@ -62,7 +82,7 @@ The upstream URL and base branch are in `parent.toml`.
    git checkout -   # back to your working branch
    ```
 
-   If the cherry-pick conflicts against current upstream, resolve it the same way you would for any cherry-pick (or rebase your fix on a fresh `update-self` first).
+   If the cherry-pick conflicts against current upstream (a real conflict, not the dirty-tree case above), resolve it the same way you would for any cherry-pick (or rebase your fix on a fresh `update-self` first).
 
 3. Open the PR against the template's default branch (read from `parent.toml`, usually `main`):
 
