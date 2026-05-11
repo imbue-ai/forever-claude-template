@@ -6,7 +6,11 @@
 set -euo pipefail
 
 repo_root="${MNGR_AGENT_WORK_DIR:-$(pwd)}"
-tickets_dir="${repo_root}/.tickets"
+# Honor any externally-set TICKETS_DIR (the agent's env normally pins it
+# via .mngr/settings.toml -- e.g. /code/runtime/tickets -- so the tk
+# tickets live alongside the runtime-backup branch). Fall back to tk's
+# unset-default of <repo>/.tickets when nothing is set.
+tickets_dir="${TICKETS_DIR:-${repo_root}/.tickets}"
 
 # Drain stdin.
 cat > /dev/null
@@ -16,8 +20,9 @@ cat > /dev/null
 tk_script="${repo_root}/vendor/tk/ticket"
 [[ -x "$tk_script" ]] || exit 0
 
-# Setting TICKETS_DIR explicitly avoids tk's parent-walk falling back to a
-# random ancestor when this hook runs from outside the repo root.
+# Re-export so tk picks up the resolved value even when this hook runs
+# from outside the repo root (which would otherwise trigger tk's
+# parent-walk and potentially land on a random ancestor).
 export TICKETS_DIR="$tickets_dir"
 
 # `tk ready` is a built-in (no plugin-on-PATH needed) that lists every
