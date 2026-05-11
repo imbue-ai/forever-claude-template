@@ -77,22 +77,18 @@ TASK_EOF
 
 ## 2c: Launch the worker and push the transcript
 
-```bash
-mngr create update-$TARGET -t crystallize-worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file runtime/update/$TARGET/task.md
-```
-
-Then push the runtime dir (task file + transcript) into the worker's worktree
--- the worker cannot read files that live only in your worktree, and its
-`parse_task_frontmatter.py` helper needs `task.md` on disk to validate the
-schema. See `.agents/shared/references/lead-proxy.md` § "mngr push rationale"
-for the directory-form and `--uncommitted-changes=merge` requirements.
+The shared `launch-task` dispatcher runs `mngr create`, pushes the runtime
+dir (task file + transcript) into the worker's worktree, and sends the task
+as a follow-up message so the worker sees the runtime dir first. The
+worker's `parse_task_frontmatter.py` helper needs `task.md` on disk to
+validate the schema, which is why the push is part of the lifecycle.
 
 ```bash
-mngr push update-$TARGET:runtime/update/$TARGET/ \
-    --source runtime/update/$TARGET/ \
-    --uncommitted-changes=merge
+uv run .agents/skills/launch-task/scripts/dispatch.py \
+    --name update-$TARGET \
+    --template crystallize-worker \
+    --runtime-dir runtime/update/$TARGET/ \
+    --task-file runtime/update/$TARGET/task.md
 ```
 
 Return to `SKILL.md` Step 3 to proxy gates through to the user.

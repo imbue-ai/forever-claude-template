@@ -117,24 +117,18 @@ BODY_EOF
 
 ## Step 4: Launch the worker
 
-```bash
-mngr create heal-$TARGET -t crystallize-worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file runtime/heal/$TARGET/task.md
-```
-
-The `crystallize-worker` template pre-installs `heal-skill-worker`
+The shared `launch-task` dispatcher runs `mngr create`, pushes the
+runtime dir (task file + transcript) into the worker's worktree, and
+sends the task as a follow-up message so the worker sees the runtime dir
+first. The `crystallize-worker` template pre-installs `heal-skill-worker`
 alongside the other worker sub-skills.
 
-Push the runtime dir (task file + transcript) into the worker's worktree
--- see `.agents/shared/references/lead-proxy.md` § "mngr push rationale"
-for why the directory form and `--uncommitted-changes=merge` are
-required:
-
 ```bash
-mngr push heal-$TARGET:runtime/heal/$TARGET/ \
-    --source runtime/heal/$TARGET/ \
-    --uncommitted-changes=merge
+uv run .agents/skills/launch-task/scripts/dispatch.py \
+    --name heal-$TARGET \
+    --template crystallize-worker \
+    --runtime-dir runtime/heal/$TARGET/ \
+    --task-file runtime/heal/$TARGET/task.md
 ```
 
 ## Step 5: Proxy Gate 2, then merge

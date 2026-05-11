@@ -92,21 +92,17 @@ TASK_EOF
 
 ## 2c: Launch the worker and push the commit artifacts
 
-```bash
-mngr create update-$TARGET -t crystallize-worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file runtime/update/$TARGET/task.md
-```
-
-Push the `runtime/update/$TARGET/` dir so the worker has `task.md`,
-`commit.log`, and `commit.diff` under its worktree. See
-`.agents/shared/references/lead-proxy.md` § "mngr push rationale" for the
-directory-form and `--uncommitted-changes=merge` requirements.
+The shared `launch-task` dispatcher runs `mngr create`, pushes the
+`runtime/update/$TARGET/` dir (so the worker has `task.md`, `commit.log`,
+and `commit.diff` under its worktree), and sends the task as a follow-up
+message so the worker sees the runtime dir first.
 
 ```bash
-mngr push update-$TARGET:runtime/update/$TARGET/ \
-    --source runtime/update/$TARGET/ \
-    --uncommitted-changes=merge
+uv run .agents/skills/launch-task/scripts/dispatch.py \
+    --name update-$TARGET \
+    --template crystallize-worker \
+    --runtime-dir runtime/update/$TARGET/ \
+    --task-file runtime/update/$TARGET/task.md
 ```
 
 Return to `SKILL.md` Step 3 to proxy the Gate 2 (final-artifact) report
