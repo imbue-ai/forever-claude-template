@@ -90,7 +90,7 @@ it so the new path takes effect:
 
 ## 5. Close the tracking ticket
 
-`dispatch.py` wrote the ticket ID to
+`crystallize-task` Step 2 wrote the ticket ID to
 `runtime/crystallize/<slug>/ticket_id.txt` at launch time. Read it and
 close:
 

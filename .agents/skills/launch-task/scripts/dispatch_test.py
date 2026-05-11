@@ -2,11 +2,10 @@
 
 Run via: ``uv run pytest .agents/skills/launch-task/scripts/dispatch_test.py``
 
-The tests inject a recording ``Runner`` so no real ``mngr`` / ``tk``
-processes are spawned. We assert on (a) the exact argv lists dispatch.py
-hands to subprocess (so the lifecycle contract with ``mngr`` cannot drift
-silently), (b) pre-flight validation, (c) ticket-id persistence, and (d)
-graceful behaviour when ``tk`` is missing or fails.
+The tests inject a recording ``Runner`` so no real ``mngr`` processes are
+spawned. We assert on (a) the exact argv lists dispatch.py hands to
+subprocess (so the lifecycle contract with ``mngr`` cannot drift silently)
+and (b) pre-flight validation.
 """
 
 from __future__ import annotations
@@ -46,7 +45,6 @@ class _RecordingRunner(dispatch_mod.Runner):  # type: ignore[name-defined]
     """Records every ``run`` call; returns canned results keyed by argv prefix."""
 
     calls: list[_RecordedCall] = field(default_factory=list)
-    # Map first-2-tokens tuple ("tk","create") -> result or callable raising.
     _responses: dict[tuple[str, ...], Any] = field(default_factory=dict)
 
     def respond(self, prefix: tuple[str, ...], result: Any) -> None:
@@ -74,7 +72,7 @@ def _make_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     return runtime, task, extra
 
 
-def test_happy_path_no_ticket_no_extras(tmp_path: Path) -> None:
+def test_happy_path_no_extras(tmp_path: Path) -> None:
     runtime, task, _ = _make_layout(tmp_path)
     runner = _RecordingRunner()
 
@@ -85,8 +83,6 @@ def test_happy_path_no_ticket_no_extras(tmp_path: Path) -> None:
         task_file=task,
         extra_pushes=(),
         workspace="ws-1",
-        ticket_title=None,
-        ticket_acceptance="acc",
         runner=runner,
     )
 
@@ -104,7 +100,6 @@ def test_happy_path_no_ticket_no_extras(tmp_path: Path) -> None:
         ],
         ["mngr", "message", "demo-worker", "--message-file", str(task)],
     ]
-    assert not (runtime / "ticket_id.txt").exists()
 
 
 def test_extra_push_dirs_are_pushed_after_runtime(tmp_path: Path) -> None:
@@ -118,8 +113,6 @@ def test_extra_push_dirs_are_pushed_after_runtime(tmp_path: Path) -> None:
         task_file=task,
         extra_pushes=(extra,),
         workspace="ws-1",
-        ticket_title=None,
-        ticket_acceptance="acc",
         runner=runner,
     )
 
@@ -157,8 +150,6 @@ def test_runtime_dir_must_exist(
         task_file=task,
         extra_pushes=(),
         workspace="ws",
-        ticket_title=None,
-        ticket_acceptance="",
         runner=runner,
     )
     assert rc == 2
@@ -178,8 +169,6 @@ def test_task_file_must_exist(
         task_file=runtime / "missing.md",
         extra_pushes=(),
         workspace="ws",
-        ticket_title=None,
-        ticket_acceptance="",
         runner=runner,
     )
     assert rc == 2
@@ -199,108 +188,11 @@ def test_extra_push_must_exist(
         task_file=task,
         extra_pushes=(tmp_path / "missing",),
         workspace="ws",
-        ticket_title=None,
-        ticket_acceptance="",
         runner=runner,
     )
     assert rc == 2
     assert runner.calls == []
     assert "extra-push" in capsys.readouterr().err
-
-
-def test_ticket_happy_path_writes_ticket_id_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime, task, _ = _make_layout(tmp_path)
-    monkeypatch.setattr(dispatch_mod.shutil, "which", lambda _name: "/usr/bin/tk")
-    runner = _RecordingRunner()
-    runner.respond(("tk", "create"), _StubResult(stdout="\nT-42\n"))
-    runner.respond(("tk", "start"), _StubResult())
-
-    rc = dispatch_mod.dispatch(
-        name="demo-worker",
-        template="worker",
-        runtime_dir=runtime,
-        task_file=task,
-        extra_pushes=(),
-        workspace="ws",
-        ticket_title="demo ticket",
-        ticket_acceptance="acc",
-        runner=runner,
-    )
-
-    assert rc == 0
-    ticket_file = runtime / "ticket_id.txt"
-    assert ticket_file.read_text() == "T-42\n"
-    # tk create was invoked with title and acceptance, then tk start with the ID.
-    tk_calls = [c.argv for c in runner.calls if c.argv[0] == "tk"]
-    assert tk_calls == [
-        ["tk", "create", "demo ticket", "-t", "task", "--acceptance", "acc"],
-        ["tk", "start", "T-42"],
-    ]
-
-
-def test_ticket_skipped_when_tk_missing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime, task, _ = _make_layout(tmp_path)
-    monkeypatch.setattr(dispatch_mod.shutil, "which", lambda _name: None)
-    runner = _RecordingRunner()
-
-    rc = dispatch_mod.dispatch(
-        name="demo-worker",
-        template="worker",
-        runtime_dir=runtime,
-        task_file=task,
-        extra_pushes=(),
-        workspace="ws",
-        ticket_title="demo ticket",
-        ticket_acceptance="acc",
-        runner=runner,
-    )
-
-    assert rc == 0
-    assert not (runtime / "ticket_id.txt").exists()
-    assert all(c.argv[0] != "tk" for c in runner.calls)
-    err = capsys.readouterr().err
-    assert "tk not on PATH" in err
-
-
-def test_ticket_create_failure_is_visible_and_nonfatal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    runtime, task, _ = _make_layout(tmp_path)
-    monkeypatch.setattr(dispatch_mod.shutil, "which", lambda _name: "/usr/bin/tk")
-    runner = _RecordingRunner()
-    runner.respond(
-        ("tk", "create"),
-        subprocess.CalledProcessError(returncode=3, cmd=["tk"], stderr="db locked"),
-    )
-
-    rc = dispatch_mod.dispatch(
-        name="demo-worker",
-        template="worker",
-        runtime_dir=runtime,
-        task_file=task,
-        extra_pushes=(),
-        workspace="ws",
-        ticket_title="demo ticket",
-        ticket_acceptance="acc",
-        runner=runner,
-    )
-
-    assert rc == 0
-    assert not (runtime / "ticket_id.txt").exists()
-    err = capsys.readouterr().err
-    assert "tk create failed" in err
-    assert "db locked" in err
-    # mngr still ran despite the tk failure.
-    assert any(c.argv[:2] == ["mngr", "create"] for c in runner.calls)
 
 
 def test_mngr_failure_is_fatal(
@@ -321,8 +213,6 @@ def test_mngr_failure_is_fatal(
             task_file=task,
             extra_pushes=(),
             workspace="ws",
-            ticket_title=None,
-            ticket_acceptance="",
             runner=runner,
         )
 

@@ -82,13 +82,20 @@ Otherwise send a one-line pre-gate question via the `send-user-message` skill:
 
 Wait for the user's reply. If no, stop here.
 
-## Step 2: Extract the just-finished turn
+## Step 2: Open a tracking ticket and extract the just-finished turn
 
-See `.agents/shared/references/lead-proxy.md` § "Capturing a turn" for the
+The ticket survives until the post-merge migration in Step 6, so the ID
+goes to disk under the runtime dir for that step to read back. See
+`.agents/shared/references/lead-proxy.md` § "Capturing a turn" for the
 `mngr transcript` invocation contract.
 
 ```bash
 mkdir -p runtime/crystallize/$NAME
+TICKET_ID=$(tk create "crystallize $NAME" -t task \
+    --acceptance "transcript extracted; task file written; worker launched; worker DONE; branch merged")
+tk start "$TICKET_ID"
+echo "$TICKET_ID" > runtime/crystallize/$NAME/ticket_id.txt
+
 mngr transcript --last-completed-turn --format jsonl \
     > runtime/crystallize/$NAME/turn.jsonl
 ```
@@ -183,18 +190,14 @@ crystallize runtime dir.
 
 The shared `launch-task` dispatcher runs the lifecycle commands
 (`mngr create` + `mngr push` of the runtime dir + optional extra pushes
-+ `mngr message` of the task file) and opens a `tk` tracking ticket
-when one is requested. It writes the ticket ID to
-`runtime/crystallize/$NAME/ticket_id.txt` so Step 6 can close it.
++ `mngr message` of the task file).
 
 ```bash
 uv run .agents/skills/launch-task/scripts/dispatch.py \
     --name crystallize-$NAME \
     --template crystallize-worker \
     --runtime-dir runtime/crystallize/$NAME/ \
-    --task-file runtime/crystallize/$NAME/task.md \
-    --ticket-title "crystallize $NAME" \
-    --ticket-acceptance "transcript extracted; task file written; worker launched; worker DONE; branch merged"
+    --task-file runtime/crystallize/$NAME/task.md
 ```
 
 If the task frontmatter sets `source_artifacts_dir: <dir>`, add

@@ -15,11 +15,9 @@ gitignored auxiliary state -- under ``runtime/<feature>/<slug>/`` before
 calling this script. ``dispatch.py`` orchestrates the lifecycle commands;
 it does not compose task content.
 
-Optional ``tk`` ticket integration: when ``--ticket-title`` is given, opens
-a tracking ticket via the local ``tk`` CLI before dispatching. Failures are
-printed to stderr (not silenced) and dispatch continues -- ``tk`` is
-auxiliary infra, not load-bearing for the worker itself. The ticket ID is
-written to ``<runtime-dir>/ticket_id.txt`` so the lead can close it later.
+Ticket bookkeeping (``tk create`` / ``tk start`` / ``tk close``) is the
+caller's responsibility -- it lives in the calling skill's prose so each
+flow can shape the ticket title, type, and acceptance criteria itself.
 
 Lifecycle commands:
 
@@ -44,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -54,48 +51,6 @@ from typing import Sequence
 def _normalize_dir(value: str) -> str:
     """Return ``value`` with exactly one trailing slash."""
     return value.rstrip("/") + "/"
-
-
-def open_ticket(
-    title: str,
-    acceptance: str,
-    runner: "Runner",
-) -> str | None:
-    """Open and start a ``tk`` ticket; return its ID or ``None`` on failure.
-
-    Failures (tk not installed, create/start non-zero exit) are reported on
-    stderr but do not raise -- ticket tracking is auxiliary.
-    """
-    if not shutil.which("tk"):
-        print("dispatch: tk not on PATH; skipping ticket creation", file=sys.stderr)
-        return None
-    try:
-        created = runner.run(
-            ["tk", "create", title, "-t", "task", "--acceptance", acceptance],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip() or f"exit {exc.returncode}"
-        print(f"dispatch: tk create failed: {stderr}", file=sys.stderr)
-        return None
-    stdout_lines = (created.stdout or "").strip().splitlines()
-    ticket_id = stdout_lines[-1].strip() if stdout_lines else ""
-    if not ticket_id:
-        print("dispatch: tk create returned empty ticket ID", file=sys.stderr)
-        return None
-    try:
-        runner.run(
-            ["tk", "start", ticket_id],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip() or f"exit {exc.returncode}"
-        print(f"dispatch: tk start {ticket_id} failed: {stderr}", file=sys.stderr)
-    return ticket_id
 
 
 def push(name: str, source_dir: str, runner: "Runner") -> None:
@@ -137,16 +92,12 @@ def dispatch(
     task_file: Path,
     extra_pushes: Sequence[Path],
     workspace: str,
-    ticket_title: str | None,
-    ticket_acceptance: str,
     runner: Runner | None = None,
 ) -> int:
     """Run the dispatch lifecycle. Returns the process exit code.
 
     Pre-flight checks (existence of ``runtime_dir``, ``task_file``, every
     ``extra_pushes`` entry) run first so a typo doesn't half-create a worker.
-    Ticket opening (if requested) happens between pre-flight and the first
-    ``mngr`` call so the ticket exists by the time the worker is created.
     """
     runner = runner or Runner()
 
@@ -165,14 +116,6 @@ def dispatch(
                 f"dispatch: --extra-push is not a directory: {extra}", file=sys.stderr
             )
             return 2
-
-    ticket_id: str | None = None
-    if ticket_title is not None:
-        ticket_id = open_ticket(ticket_title, ticket_acceptance, runner)
-        if ticket_id is not None:
-            (runtime_dir / "ticket_id.txt").write_text(
-                ticket_id + "\n", encoding="utf-8"
-            )
 
     runner.run(
         [
@@ -202,8 +145,6 @@ def dispatch(
         check=True,
     )
 
-    if ticket_id is not None:
-        print(f"dispatch: opened ticket {ticket_id}")
     print(f"dispatch: worker {name} launched and runtime pushed")
     return 0
 
@@ -238,15 +179,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="DIR",
         help="Additional directory to push after --runtime-dir; pass multiple times.",
     )
-    parser.add_argument(
-        "--ticket-title",
-        help="If given, open a tk ticket with this title before dispatching.",
-    )
-    parser.add_argument(
-        "--ticket-acceptance",
-        default="worker reached terminal status; branch merged",
-        help="Acceptance criteria for the tk ticket (only used with --ticket-title).",
-    )
     args = parser.parse_args(argv)
 
     workspace = os.environ.get("MINDS_WORKSPACE_NAME", "default")
@@ -258,8 +190,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         task_file=args.task_file,
         extra_pushes=tuple(args.extra_push),
         workspace=workspace,
-        ticket_title=args.ticket_title,
-        ticket_acceptance=args.ticket_acceptance,
     )
 
 
