@@ -133,6 +133,20 @@ placeholder with your real routes.
 Use **sync handlers** (`def`, not `async def`). The starter is fully
 sync and most pages don't need otherwise.
 
+### Rendering HTML for a human
+
+If your service renders HTML that a person will look at (anything
+beyond a pure JSON API, a webhook receiver, or a transparent proxy of
+a third-party tool), invoke the `frontend-design` skill **before**
+writing the markup. Default hand-rolled CSS produces the bland
+card-with-system-font-stack look that `frontend-design` is specifically
+designed to replace; running it up-front is much cheaper than reskinning
+later.
+
+Skip this step for routes that emit only JSON, only redirects, or that
+serve an existing third-party UI through the escape hatch below --
+there's no markup to design.
+
 ### File-path conventions
 
 Two cases, two patterns:

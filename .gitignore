@@ -7,6 +7,10 @@ runtime/
 # tk tickets (tracker is vendored at vendor/tk; the tickets themselves are local state)
 .tickets/
 
+# External repos we're actively working on (e.g. mngr) live here as standalone
+# clones, separate from the read-only vendor/ subtrees. See CLAUDE.md.
+.external_worktrees/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -226,6 +230,12 @@ node_modules/
 # Frontend build artifacts
 frontend-dist/
 
+# system_interface frontend build artifacts and binary assets
+# (built fresh on mind creation via `cd apps/system_interface/frontend && npm ci && npm run build`)
+apps/system_interface/imbue/minds_workspace_server/static/
+apps/system_interface/frontend/media/*.ico
+apps/system_interface/frontend/src/assets/*.png
+
 # Claude Code local settings (session-specific permissions)
 .claude/settings.local.json
 
@@ -235,6 +245,9 @@ frontend-dist/
 
 # Local Claude settings backup files
 .claude/*.bak
+
+# ScheduleWakeup lockfile written by Claude Code at runtime
+.claude/scheduled_tasks.lock
 
 # Local mngr settings (not committed)
 .mngr/settings.local.toml

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ['**']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: apps/system_interface/frontend/package-lock.json
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: Install Playwright browsers
+        run: uv run playwright install --with-deps chromium
+
+      - name: Build apps/system_interface frontend
+        working-directory: apps/system_interface/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run root tests
+        run: PYTEST_MAX_DURATION_SECONDS=300 uv run pytest
+
+      - name: Run apps/system_interface tests
+        working-directory: apps/system_interface
+        run: PYTEST_MAX_DURATION_SECONDS=300 uv run pytest
