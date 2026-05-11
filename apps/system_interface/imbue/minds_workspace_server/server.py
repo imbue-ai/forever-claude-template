@@ -29,6 +29,7 @@ from imbue.concurrency_group.subprocess_utils import run_local_command_modern_ve
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_discovery import discover_agents
 from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
+from imbue.minds_workspace_server.agent_discovery import read_tickets_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
@@ -192,7 +193,7 @@ def _get_or_create_tickets_watcher(request: Request, agent_info: AgentInfo) -> A
 
     watcher = AgentTicketsWatcher(
         agent_id=agent_info.id,
-        tickets_dir=Path(agent_info.work_dir) / ".tickets",
+        tickets_dir=read_tickets_dir_from_env_file(agent_info.agent_state_dir, Path(agent_info.work_dir)),
         on_events=on_events,
     )
     tickets_watchers[agent_info.id] = watcher

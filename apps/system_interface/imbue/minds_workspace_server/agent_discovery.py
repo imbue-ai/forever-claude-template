@@ -66,6 +66,28 @@ def read_claude_config_dir_from_env_file(agent_state_dir: Path) -> Path:
     return Path.home() / ".claude"
 
 
+def read_tickets_dir_from_env_file(agent_state_dir: Path, work_dir: Path) -> Path:
+    """Read TICKETS_DIR from the agent's env file, falling back to
+    <work_dir>/.tickets when unset.
+
+    The repo's `.mngr/settings.toml` sets TICKETS_DIR (e.g. to
+    /code/runtime/tickets) so tk's tickets live inside the backed-up
+    runtime/ tree rather than at the repo's `.tickets/` default. The
+    workspace server needs the same resolution to know which directory
+    to watch for ticket changes.
+    """
+    env_file = agent_state_dir / "env"
+    if env_file.exists():
+        try:
+            env_vars = parse_env_file(env_file.read_text())
+            tickets_dir = env_vars.get("TICKETS_DIR", "").strip()
+            if tickets_dir:
+                return Path(tickets_dir)
+        except OSError:
+            logger.debug("Failed to read env file: {}", env_file)
+    return work_dir / ".tickets"
+
+
 def discover_agents(
     provider_names: tuple[str, ...] | None = None,
     include_filters: tuple[str, ...] = (),
