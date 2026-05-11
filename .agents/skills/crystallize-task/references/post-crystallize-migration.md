@@ -22,8 +22,8 @@ Look for code on the merged branch that referenced either:
 Use ripgrep (or your grep tool) with the slug as the search anchor:
 
 ```bash
-rg -n "runtime/do-something-new/<slug>" -- '!runtime'
-rg -n "<slug>/fetch.py" -- '!runtime'
+rg -n "runtime/do-something-new/<slug>" -g '!runtime/'
+rg -n "<slug>/fetch.py" -g '!runtime/'
 ```
 
 For each hit, decide whether the consumer should switch to the
