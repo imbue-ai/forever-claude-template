@@ -190,6 +190,46 @@ describe("buildTurns", () => {
     expect(turns[1].tasks).toHaveLength(0);
   });
 
+  it("carries a still-open task across multiple subsequent turns", () => {
+    // Scenario: agent opens a ticket in turn 0, user replies twice
+    // (e.g. mid-task permission grant + follow-up) before the task ever
+    // closes. The progress block must stay visible in BOTH replies so
+    // the user can see the ongoing work, not just raw tool calls.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "start"),
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Long task" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
+      userMsg("2026-04-28T01:01:00Z", "grant the permission"),
+      userMsg("2026-04-28T01:02:00Z", "still good?"),
+    ];
+    const turns = buildTurns(events);
+    expect(turns).toHaveLength(3);
+    expect(turns[0].tasks).toHaveLength(1);
+    expect(turns[0].tasks[0]).toMatchObject({ ticket_id: "t1", is_carryover: false, status: "active" });
+    expect(turns[1].tasks).toHaveLength(1);
+    expect(turns[1].tasks[0]).toMatchObject({ ticket_id: "t1", is_carryover: true, status: "active" });
+    expect(turns[2].tasks).toHaveLength(1);
+    expect(turns[2].tasks[0]).toMatchObject({ ticket_id: "t1", is_carryover: true, status: "active" });
+  });
+
+  it("stops carrying a task forward once it closes", () => {
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "start"),
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Mid task" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
+      userMsg("2026-04-28T01:01:00Z", "reply 1"),
+      taskEvent("t1", "closed", "2026-04-28T01:01:30Z", { summary: "Done.", summary_at: "2026-04-28T01:01:25Z" }),
+      userMsg("2026-04-28T01:02:00Z", "reply 2"),
+    ];
+    const turns = buildTurns(events);
+    expect(turns).toHaveLength(3);
+    expect(turns[0].tasks).toHaveLength(1);
+    expect(turns[1].tasks).toHaveLength(1);
+    expect(turns[1].tasks[0]).toMatchObject({ ticket_id: "t1", is_carryover: true, status: "done" });
+    // Turn 2 starts AFTER the close: no more carryover.
+    expect(turns[2].tasks).toHaveLength(0);
+  });
+
   it("orders carryover tasks above own tasks in a turn", () => {
     const events: TranscriptEvent[] = [
       userMsg("2026-04-28T01:00:00Z", "first"),

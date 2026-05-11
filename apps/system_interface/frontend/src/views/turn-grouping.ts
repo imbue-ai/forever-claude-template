@@ -14,11 +14,15 @@
  *      status wins; closed > in_progress > open). Track each transition
  *      timestamp (created_at / started_at / closed_at).
  *   2. Each task is "owned" by the turn whose window contains its
- *      created_at. Tasks whose status was not closed at the END of
- *      their owning turn appear ALSO in the next turn as a carryover
- *      entry. The owning turn renders the task in its state-as-of-turn-end
- *      (frozen); the carryover-receiving turn renders the same task in
- *      its state-as-of-that-turn-end (live).
+ *      created_at. Tasks that are still open at the END of their owning
+ *      turn appear ALSO in every subsequent turn as a carryover entry,
+ *      up to and including the turn during which they get closed. The
+ *      owning turn renders the task in its state-as-of-turn-end
+ *      (frozen); each carryover-receiving turn renders the same task in
+ *      its state-as-of-that-turn-end. This keeps a long-running ticket
+ *      visible while the user replies (e.g. granting a permission)
+ *      mid-task rather than leaving the new turn with only raw tool
+ *      calls and no progress block.
  */
 
 import type { TranscriptEvent, TaskEventStatus } from "../models/Response";
@@ -177,14 +181,16 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
       // Owning turn entry.
       turn.tasks.push(makeTaskInTurn(record, turn, /* is_carryover */ false));
 
-      // Carryover entry on the next turn if this task wasn't closed
-      // before the next turn started.
-      if (i + 1 < turns.length) {
-        const next = turns[i + 1];
+      // Carryover: propagate to every subsequent turn that began before
+      // the task closed. Stop as soon as we hit a turn whose start is
+      // past the task's closed_at, because every later turn also starts
+      // past closed_at. Tasks that never close stay visible in every
+      // subsequent turn (closed_at is null -> the predicate is false).
+      for (let j = i + 1; j < turns.length; j++) {
+        const next = turns[j];
         const closedBeforeNext = record.closed_at !== null && record.closed_at < next.start_ts;
-        if (!closedBeforeNext) {
-          next.tasks.unshift(makeTaskInTurn(record, next, /* is_carryover */ true));
-        }
+        if (closedBeforeNext) break;
+        next.tasks.unshift(makeTaskInTurn(record, next, /* is_carryover */ true));
       }
       break;
     }
