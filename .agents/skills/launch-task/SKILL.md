@@ -159,5 +159,8 @@ Flow-specific substitutions when reading `lead-proxy.md`:
 - If a task fails (stuck report, or 30m poll timeout with no report and
   the worker is dead), see `references/worker-failure.md` -- do not
   silently retry.
+- If a worker's claude session dies mid-iteration with uncommitted work
+  in its worktree, see `references/dead-worker-recovery.md` -- recover
+  the work *before* destroying the agent.
 - If the task references gitignored files beyond the runtime dir, push
   them with `mngr push` before sending the task message (see Step 3).

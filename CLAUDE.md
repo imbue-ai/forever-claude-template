@@ -227,6 +227,8 @@ A `post-commit` hook installed via `core.hooksPath = /code/scripts/git_hooks` au
 
 If `GH_TOKEN` is unset, both auto-pushes silently no-op; commits stay local.
 
+- Don't include auto-generated lockfile churn (`uv.lock`, `package-lock.json`, etc.) in commits unless the change intentionally bumps a dependency.
+
 # Silly error workarounds
 
 If you get a failure in `test_no_type_errors` that seems spurious, try running `uv sync --all-packages` and then re-running the tests. If that doesn't work, the error is probably real, and should be fixed.

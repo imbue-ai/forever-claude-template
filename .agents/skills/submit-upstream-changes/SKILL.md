@@ -106,6 +106,7 @@ The upstream URL and base branch are in `parent.toml`.
 
 - Always commit your local changes before pushing.
 - Double-check the diff: `git show <sha>` -- make sure no agent-specific content is in the commit.
+- When finalizing a worker's branch, review and cherry-pick only the substantive commits -- skip scaffolding or auto-generated commits that don't belong upstream.
 - One upstream PR per logical fix. Don't bundle.
 - Never push directly to upstream `main`.
 - To pull updates from upstream, use the `update-self` skill.
