@@ -188,8 +188,14 @@ def _get_or_create_tickets_watcher(request: Request, agent_info: AgentInfo) -> A
         return tickets_watchers[agent_info.id]
 
     def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
+        # IGNORE: task events are persisted as .md files on disk and
+        # recoverable via the REST /events endpoint (which folds in the
+        # watcher's full get_all_events() on every fetch); storing them in
+        # the in-memory replay buffer would grow unboundedly for the
+        # agent's lifetime as tickets are created and updated. Mirrors the
+        # _get_or_create_watcher session-events branch.
         for event in events:
-            event_queues.broadcast(agent_id, event)
+            event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
 
     watcher = AgentTicketsWatcher(
         agent_id=agent_info.id,
