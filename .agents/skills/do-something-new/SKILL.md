@@ -49,7 +49,9 @@ task, not to design the final feature.
 Cap: ~2-3 minutes / a handful of tool calls. Goal: don't bullshit about
 feasibility, but don't take long.
 
-For external services, run:
+For external services, load the `latchkey` skill first (it documents auth
+flows, permission requests, and credential handling that you need before
+running any `latchkey` command), then run:
 
 ```bash
 latchkey services list --viable
@@ -96,7 +98,9 @@ latency without de-risking. If no, validate it now.
 For multi-service asks, validate each uncontrolled dependency independently
 *first*, then the combined operation.
 
-- Latchkey setup is part of the normal flow, NOT a failure.
+- Latchkey setup is part of the normal flow, NOT a failure. Follow the
+  `latchkey` skill for auth/permission handling -- load it if you haven't
+  already.
 - A failure is when setup itself fails, or post-setup calls don't work. On
   failure, surface a specific cause AND propose 1-2 concrete alternatives
   before asking the user to choose.
