@@ -70,45 +70,27 @@ BODY_EOF
 } > runtime/launch-task/$NAME/task.md
 ```
 
-## 2. Create the sub-agent
+## 2. Dispatch the worker
+
+`scripts/dispatch.py` runs the lifecycle commands -- `mngr create` (no
+`--message-file` to avoid racing with the push), `mngr push` of the
+runtime dir, optional extra pushes for gitignored auxiliary state, and
+`mngr message` of the task file. Sending the message *after* the push
+guarantees the worker sees the runtime dir before reading the task.
 
 ```bash
-mngr create $NAME -t worker \
-    --label workspace=$MINDS_WORKSPACE_NAME
-```
-
-Omit `--message-file` here. Sending the task message at create time
-races with the runtime-dir push in Step 3 -- the worker could read the
-message and try to find `runtime/launch-task/$NAME/` before it has been
-pushed into its worktree. Send the task as a follow-up in Step 4
-instead.
-
-## 3. Push the runtime dir to the worker
-
-The worker's worktree is a fresh checkout that does not see your
-gitignored `runtime/`. Push the runtime dir so the worker has the task
-file (and a writable home for its `report.md`) at the path the
-frontmatter names.
-
-```bash
-mngr push $NAME:runtime/launch-task/$NAME/ \
-    --source runtime/launch-task/$NAME/ \
-    --uncommitted-changes=merge
+uv run .agents/skills/launch-task/scripts/dispatch.py \
+    --name $NAME \
+    --template worker \
+    --runtime-dir runtime/launch-task/$NAME/ \
+    --task-file runtime/launch-task/$NAME/task.md
 ```
 
 If the task references other gitignored files (datasets, credentials,
-extra transcripts), push them now too with the same pattern.
+extra transcripts), pass them as `--extra-push <dir>/` (repeatable) so
+they land in the worker's worktree alongside the runtime dir.
 
-## 4. Send the task message
-
-Now that the runtime dir is in place, send the task file as the
-worker's first message:
-
-```bash
-mngr message $NAME --message-file runtime/launch-task/$NAME/task.md
-```
-
-## 5. Background-poll for the worker's report
+## 3. Background-poll for the worker's report
 
 Launch the poll as a background task (`run_in_background: true`) and
 continue with whatever else you were doing. The report file appears at
@@ -128,7 +110,7 @@ reports never reach the user and the worker deadlocks waiting for a
 reply. Reports surface as task notifications when the background job
 completes; handle them at that point, not by blocking on the poll.
 
-## 6. Handle the report
+## 4. Handle the report
 
 Follow `.agents/shared/references/lead-proxy.md` for parsing the
 report's frontmatter (`type` + `name`), deciding whether to answer a
@@ -159,5 +141,6 @@ Flow-specific substitutions when reading `lead-proxy.md`:
 - If a task fails (stuck report, or 30m poll timeout with no report and
   the worker is dead), see `references/worker-failure.md` -- do not
   silently retry.
-- If the task references gitignored files beyond the runtime dir, push
-  them with `mngr push` before sending the task message (see Step 3).
+- If the task references gitignored files beyond the runtime dir, pass
+  them as `--extra-push <dir>/` (repeatable) to `dispatch.py` so they
+  land in the worker's worktree before it reads the task message.
