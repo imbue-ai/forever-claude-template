@@ -25,7 +25,7 @@ interface ProgressBlockAttrs {
   agentId: string;
 }
 
-function statusIcon(status: TaskUiStatus): m.Vnode {
+function statusIcon(status: TaskUiStatus, continues_forward: boolean): m.Vnode {
   if (status === "done") {
     return m(
       "svg.pv-icon.pv-icon--done",
@@ -36,6 +36,19 @@ function statusIcon(status: TaskUiStatus): m.Vnode {
     );
   }
   if (status === "active") {
+    // Frozen "in flight" variant when the task is still going but this
+    // turn has already ended: no animation, just a static partial ring
+    // visually echoing the spinner's shape.
+    if (continues_forward) {
+      return m(
+        "svg.pv-icon.pv-icon--in-flight",
+        { width: 16, height: 16, viewBox: "0 0 16 16", fill: "none" },
+        m.trust(
+          '<circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" opacity="0.35"/>' +
+            '<path d="M8 2 A6 6 0 0 1 14 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+        ),
+      );
+    }
     return m("span.pv-icon.pv-icon--active", m("span.pv-spinner"));
   }
   return m(
@@ -110,7 +123,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
           .join(" ");
 
         return m("div", { class: nodeClasses, key: task.ticket_id + (task.is_carryover ? "-carry" : "") }, [
-          m("div.pv-tl-bullet", statusIcon(task.status)),
+          m("div.pv-tl-bullet", statusIcon(task.status, task.continues_forward)),
           m("div.pv-tl-body", [
             m(
               "button",
@@ -122,8 +135,12 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
               },
               [
                 task.title,
-                task.is_carryover
-                  ? m("span.pv-carryover-tag", { title: "Continued from a previous turn" }, "continued")
+                task.continues_forward
+                  ? m(
+                      "span.pv-carryover-tag",
+                      { title: "This task continues in the next turn" },
+                      "continued in next turn",
+                    )
                   : null,
                 canExpand
                   ? m("span", { class: `pv-chev ${isExpanded ? "pv-chev--open" : ""}` }, m.trust("&rsaquo;"))

@@ -1468,6 +1468,11 @@ body {
   width: 16px;
   height: 16px;
 }
+.pv-icon--in-flight {
+  color: var(--pv-active);
+  width: 16px;
+  height: 16px;
+}
 .pv-icon--pending {
   color: var(--pv-pending);
 }

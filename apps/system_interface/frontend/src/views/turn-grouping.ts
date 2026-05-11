@@ -55,9 +55,16 @@ export interface TaskInTurn {
   status: TaskUiStatus;
   /** Summary text only when status === "done" (rendered under the task). */
   summary: string | null;
-  /** True if this task was first created in a prior turn; rendered with a
-   *  faint "carryover" marker so the user can tell it's continuing work. */
+  /** True if this task was first created in a prior turn. Used internally
+   *  for ordering; the UI distinguishes "in flight" from "live" via
+   *  continues_forward rather than this flag. */
   is_carryover: boolean;
+  /** True when this task is still open at the end of this turn AND a
+   *  later turn exists. The UI uses this to swap the live spinner for a
+   *  frozen "in flight" icon and to attach a "continued in next turn"
+   *  badge -- because from the user's vantage point looking at a past
+   *  turn, the work is not actively spinning in that turn anymore. */
+  continues_forward: boolean;
   /** Inclusive lower bound of the active window for tool-call attribution. */
   active_window_start: string | null;
   /** Inclusive upper bound of the active window. null = still active at
@@ -179,7 +186,7 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
       const inWindow = record.created_at >= turn.start_ts && (turn.end_ts === "" || record.created_at < turn.end_ts);
       if (!inWindow) continue;
       // Owning turn entry.
-      turn.tasks.push(makeTaskInTurn(record, turn, /* is_carryover */ false));
+      turn.tasks.push(makeTaskInTurn(record, turn, /* is_carryover */ false, turns.length, /* turn_index */ i));
 
       // Carryover: propagate to every subsequent turn that began before
       // the task closed. Stop as soon as we hit a turn whose start is
@@ -190,7 +197,7 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
         const next = turns[j];
         const closedBeforeNext = record.closed_at !== null && record.closed_at < next.start_ts;
         if (closedBeforeNext) break;
-        next.tasks.unshift(makeTaskInTurn(record, next, /* is_carryover */ true));
+        next.tasks.unshift(makeTaskInTurn(record, next, /* is_carryover */ true, turns.length, /* turn_index */ j));
       }
       break;
     }
@@ -209,7 +216,13 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
   return turns;
 }
 
-function makeTaskInTurn(record: TaskRecord, turn: Turn, is_carryover: boolean): TaskInTurn {
+function makeTaskInTurn(
+  record: TaskRecord,
+  turn: Turn,
+  is_carryover: boolean,
+  total_turns: number,
+  turn_index: number,
+): TaskInTurn {
   // Status as of THIS turn's end. Determined by walking the record's
   // transitions: if closed_at is before turn end, status is done; else
   // if started_at is before turn end, status is active; else pending.
@@ -221,6 +234,11 @@ function makeTaskInTurn(record: TaskRecord, turn: Turn, is_carryover: boolean): 
   if (record.closed_at !== null && (turnEnd === "" || record.closed_at < turnEnd)) {
     status = "done";
   }
+  // continues_forward: still-open at end of this turn AND another turn
+  // exists after this one. The latest turn never qualifies because its
+  // tasks are still live (the spinner is honest there).
+  const is_last_turn = turn_index === total_turns - 1;
+  const continues_forward = status !== "done" && !is_last_turn;
   return {
     ticket_id: record.ticket_id,
     title: record.title,
@@ -229,6 +247,7 @@ function makeTaskInTurn(record: TaskRecord, turn: Turn, is_carryover: boolean): 
     // too if they got closed during this turn.
     summary: status === "done" ? record.summary : null,
     is_carryover,
+    continues_forward,
     active_window_start: record.started_at ?? record.created_at,
     active_window_end: status === "done" ? record.closed_at : null,
   };

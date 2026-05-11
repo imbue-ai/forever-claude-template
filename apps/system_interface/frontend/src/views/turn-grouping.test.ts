@@ -253,6 +253,7 @@ describe("eventsInTaskWindow", () => {
       status: "done" as const,
       summary: "Did it",
       is_carryover: false,
+      continues_forward: false,
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
     };
@@ -273,6 +274,7 @@ describe("eventsInTaskWindow", () => {
       status: "active" as const,
       summary: null,
       is_carryover: false,
+      continues_forward: false,
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: null,
     };
@@ -290,6 +292,7 @@ describe("eventsInTaskWindow", () => {
       status: "done" as const,
       summary: "Did it",
       is_carryover: false,
+      continues_forward: false,
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
     };
