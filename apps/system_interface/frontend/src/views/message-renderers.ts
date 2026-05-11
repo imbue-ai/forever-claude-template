@@ -8,6 +8,24 @@ import { MarkdownContent } from "../markdown";
 import type { TranscriptEvent, ToolCall } from "../models/Response";
 import { openSubagentTab } from "./DockviewWorkspace";
 
+/**
+ * True for user_message events that are NOT a genuine user prompt --
+ * skill expansions, stop-hook feedback, and command-name invocations
+ * that Claude Code emits as user_message events while a single logical
+ * turn is still in flight. These must not be treated as turn boundaries
+ * (doing so splits one logical turn into several visible turns and
+ * scatters the tasks across them).
+ */
+export function isNonBoundaryUserMessage(content: string): boolean {
+  if (isHiddenUserMessage(content)) {
+    return true;
+  }
+  if (isCollapsibleUserMessage(content) !== null) {
+    return true;
+  }
+  return false;
+}
+
 export function isCollapsibleUserMessage(content: string): { label: string } | null {
   if (content.startsWith("Stop hook feedback:\n")) {
     return { label: "Stop hook feedback" };

@@ -410,6 +410,11 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       if (userNode !== null) {
         messageNodes.push(userNode);
       }
+      // Non-boundary user_messages (skill expansions, stop-hook feedback)
+      // arrive inside the turn's window -- render them as chips in their
+      // natural chronological order so the user can see which skills the
+      // agent invoked without breaking the progress timeline.
+      const nonBoundaryUserEvents = turn.body_events.filter((e) => e.type === "user_message");
       if (turn.tasks.length > 0) {
         // Final message: latest non-empty assistant_message text in the
         // turn. The activity indicator (in the footer) handles the
@@ -421,6 +426,12 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           if (ev.type === "assistant_message" && ev.text) {
             finalMessage = ev.text;
             break;
+          }
+        }
+        for (const ev of nonBoundaryUserEvents) {
+          const chipNode = renderUserMessage(ev);
+          if (chipNode !== null) {
+            messageNodes.push(chipNode);
           }
         }
         // ProgressBlock must carry a key: messageNodes is a homogeneous
@@ -443,6 +454,11 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
         for (const ev of turn.body_events) {
           if (ev.type === "assistant_message") {
             messageNodes.push(renderAssistantMessage(ev, toolResults, agentId));
+          } else if (ev.type === "user_message") {
+            const chipNode = renderUserMessage(ev);
+            if (chipNode !== null) {
+              messageNodes.push(chipNode);
+            }
           }
         }
       }

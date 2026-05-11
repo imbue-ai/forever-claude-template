@@ -230,6 +230,63 @@ describe("buildTurns", () => {
     expect(turns[2].tasks).toHaveLength(0);
   });
 
+  it("does not split a turn when a skill-expansion user_message arrives mid-turn", () => {
+    // Skill expansions arrive as user_message events whose content starts
+    // with "Base directory for this skill:". They must NOT be treated as
+    // turn boundaries or one logical turn would visibly fracture into
+    // many, scattering its tasks across the fragments.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "do the thing"),
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "First" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:15Z"),
+      userMsg(
+        "2026-04-28T01:00:20Z",
+        "Base directory for this skill: /home/.claude/skills/build-web-service/\n...",
+        "skill-1",
+      ),
+      taskEvent("t2", "open", "2026-04-28T01:00:30Z", { created_at: "2026-04-28T01:00:30Z", title: "Second" }),
+      taskEvent("t1", "closed", "2026-04-28T01:00:40Z", { summary: "Did it." }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].tasks.map((t) => t.title)).toEqual(["First", "Second"]);
+    // The skill chip is included in body_events so ChatPanel can render it
+    // inline without it acting as a boundary.
+    expect(turns[0].body_events.some((e) => e.event_id === "skill-1")).toBe(true);
+  });
+
+  it("does not split a turn when a stop-hook-feedback user_message arrives mid-turn", () => {
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
+      userMsg("2026-04-28T01:00:20Z", "Stop hook feedback:\n...", "stop-1"),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:25Z"),
+    ];
+    const turns = buildTurns(events);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].tasks).toHaveLength(1);
+    expect(turns[0].body_events.some((e) => e.event_id === "stop-1")).toBe(true);
+  });
+
+  it("gives pending tasks no active window so they own no body events", () => {
+    // A pending task that ALSO has an active sibling must not scoop up
+    // the sibling's tool calls when expanded. (Before the fix the
+    // pending task's window defaulted to created_at..end-of-turn.)
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      taskEvent("active", "open", "2026-04-28T01:00:05Z", { created_at: "2026-04-28T01:00:05Z", title: "Active" }),
+      taskEvent("active", "in_progress", "2026-04-28T01:00:10Z"),
+      taskEvent("pending", "open", "2026-04-28T01:00:12Z", { created_at: "2026-04-28T01:00:12Z", title: "Pending" }),
+      toolUse("2026-04-28T01:00:20Z", "Read", "tc-active"),
+    ];
+    const turns = buildTurns(events);
+    const pendingTask = turns[0].tasks.find((t) => t.ticket_id === "pending");
+    expect(pendingTask).toBeDefined();
+    expect(pendingTask?.status).toBe("pending");
+    expect(pendingTask?.active_window_start).toBeNull();
+    expect(eventsInTaskWindow(pendingTask!, turns[0].body_events)).toEqual([]);
+  });
+
   it("orders carryover tasks above own tasks in a turn", () => {
     const events: TranscriptEvent[] = [
       userMsg("2026-04-28T01:00:00Z", "first"),
@@ -254,6 +311,7 @@ describe("eventsInTaskWindow", () => {
       summary: "Did it",
       is_carryover: false,
       continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
     };
@@ -275,6 +333,7 @@ describe("eventsInTaskWindow", () => {
       summary: null,
       is_carryover: false,
       continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: null,
     };
@@ -293,6 +352,7 @@ describe("eventsInTaskWindow", () => {
       summary: "Did it",
       is_carryover: false,
       continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
     };

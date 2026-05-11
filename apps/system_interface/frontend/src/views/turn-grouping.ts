@@ -26,6 +26,7 @@
  */
 
 import type { TranscriptEvent, TaskEventStatus } from "../models/Response";
+import { isNonBoundaryUserMessage } from "./message-renderers";
 
 export type TaskUiStatus = "pending" | "active" | "done";
 
@@ -65,6 +66,10 @@ export interface TaskInTurn {
    *  badge -- because from the user's vantage point looking at a past
    *  turn, the work is not actively spinning in that turn anymore. */
   continues_forward: boolean;
+  /** Timestamp the ticket was created. Used for ordering tasks within a
+   *  turn (so a still-pending task created later than an active task
+   *  renders below it, not above). */
+  created_at: string;
   /** Inclusive lower bound of the active window for tool-call attribution. */
   active_window_start: string | null;
   /** Inclusive upper bound of the active window. null = still active at
@@ -141,9 +146,13 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
 
 /** Group events into turns and attribute tasks per turn. */
 export function buildTurns(events: TranscriptEvent[]): Turn[] {
-  // Identify turn boundaries by user_message timestamps, in order.
+  // Identify turn boundaries by REAL user_message timestamps, in order.
+  // Skill expansions, stop-hook feedback, and similar internal pseudo-user
+  // events also arrive as user_message events but must not split a turn --
+  // see isNonBoundaryUserMessage. They are included in body_events instead
+  // so the ChatPanel can still render them inline as collapsible chips.
   const userMessages: TranscriptEvent[] = events
-    .filter((e) => e.type === "user_message")
+    .filter((e) => e.type === "user_message" && !isNonBoundaryUserMessage(e.content ?? ""))
     .slice()
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
@@ -162,7 +171,8 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
     const body_events: TranscriptEvent[] = [];
     for (const e of events) {
       if (e === userEvent) continue;
-      if (e.type !== "assistant_message" && e.type !== "tool_result") continue;
+      const isNonBoundaryUser = e.type === "user_message" && isNonBoundaryUserMessage(e.content ?? "");
+      if (e.type !== "assistant_message" && e.type !== "tool_result" && !isNonBoundaryUser) continue;
       if (e.timestamp < start_ts) continue;
       if (end_ts !== "" && e.timestamp >= end_ts) continue;
       body_events.push(e);
@@ -203,13 +213,12 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
     }
   }
 
-  // Within a turn, sort own (non-carryover) tasks by created_at (carryovers
-  // already at the top from unshift).
+  // Within a turn, sort own (non-carryover) tasks by created_at so a
+  // still-pending task created later than the in-progress task renders
+  // below it (carryovers already at the top from unshift).
   for (const turn of turns) {
     const carry = turn.tasks.filter((t) => t.is_carryover);
-    const own = turn.tasks
-      .filter((t) => !t.is_carryover)
-      .sort((a, b) => (a.active_window_start ?? "").localeCompare(b.active_window_start ?? ""));
+    const own = turn.tasks.filter((t) => !t.is_carryover).sort((a, b) => a.created_at.localeCompare(b.created_at));
     turn.tasks = [...carry, ...own];
   }
 
@@ -248,7 +257,12 @@ function makeTaskInTurn(
     summary: status === "done" ? record.summary : null,
     is_carryover,
     continues_forward,
-    active_window_start: record.started_at ?? record.created_at,
+    created_at: record.created_at,
+    // Pending tasks have no active window -- they haven't started yet,
+    // so they own none of the body events. (Without this guard a pending
+    // task's window would default to created_at..end-of-turn and scoop
+    // up the in-progress task's tool calls when the user expanded it.)
+    active_window_start: status === "pending" ? null : (record.started_at ?? record.created_at),
     active_window_end: status === "done" ? record.closed_at : null,
   };
 }
