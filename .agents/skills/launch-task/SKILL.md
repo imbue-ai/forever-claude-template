@@ -5,12 +5,28 @@ description: Create a sub-agent to perform a larger task. Use when work is large
 
 # Launching a task
 
-## 1. Write a task description
+Pick a short kebab-case slug `$NAME` for this dispatch (e.g.
+`fix-login-bug`, `add-search-feature`). It is used for the worker name,
+its branch (`mngr/$NAME`), and the local runtime path
+(`runtime/launch-task/$NAME/`). Names must be unique.
 
-Write a clear task file describing what needs to be done:
+## 1. Write the task file
+
+Write a clear task file with YAML frontmatter (so the worker can address
+reports back to you) followed by the human-readable task description.
+The frontmatter contains `lead_agent` and `lead_report_dir`.
 
 ```bash
-cat > /tmp/task-<name>.md << 'TASK_EOF'
+mkdir -p runtime/launch-task/$NAME
+{
+cat << FRONTMATTER_EOF
+---
+lead_agent: $MNGR_AGENT_NAME
+lead_report_dir: runtime/launch-task/$NAME/reports/
+---
+FRONTMATTER_EOF
+cat << 'BODY_EOF'
+
 # Task: <title>
 
 ## What to do
@@ -21,102 +37,130 @@ cat > /tmp/task-<name>.md << 'TASK_EOF'
 
 ## Success criteria
 <what "done" looks like -- be specific>
-TASK_EOF
+
+## Reporting back
+When you reach a terminal state (success or stuck) or have a
+mid-flight question that blocks progress, write a single
+`report.md` to the directory given by the `lead_report_dir`
+frontmatter field above (resolved relative to your worktree --
+the lead has already pushed that directory into your worktree
+before sending this task; create the directory yourself with
+`mkdir -p` if it does not yet exist). Frontmatter shape:
+
+    ---
+    type: status   # or `gate` for a mid-flight question
+    name: done     # or `stuck` for a terminal failure; or `question` for a gate
+    ---
+
+    <body: address the user directly; one short paragraph for terminal
+    statuses, the question itself for gate reports>
+
+Then push the report directory back to the lead:
+
+    mngr push <lead_agent>:<lead_report_dir> \
+        --source <lead_report_dir> \
+        --uncommitted-changes=merge
+
+(Substitute the actual values from the frontmatter; the trailing
+slashes matter, and `--uncommitted-changes=merge` is required because
+the lead's worktree usually has uncommitted state.) For a mid-flight
+gate, stop your turn after pushing -- the lead will reply via
+`mngr message` and you resume. For terminal statuses, the run ends.
+BODY_EOF
+} > runtime/launch-task/$NAME/task.md
 ```
 
 ## 2. Create the sub-agent
 
 ```bash
-mngr create <task-name> -t worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file /tmp/task-<name>.md
+mngr create $NAME -t worker \
+    --label workspace=$MINDS_WORKSPACE_NAME
 ```
 
-The `worker` template automatically configures the agent with:
-- `--dangerously-skip-permissions`
-- Code review (imbue-code-guardian) settings
-- A system prompt telling it to commit changes and not ask unnecessary questions
+Omit `--message-file` here. Sending the task message at create time
+races with the runtime-dir push in Step 3 -- the worker could read the
+message and try to find `runtime/launch-task/$NAME/` before it has been
+pushed into its worktree. Send the task as a follow-up in Step 4
+instead.
 
-Task names must be unique (git branches are created). Use descriptive names like `fix-login-bug` or `add-search-feature`.
+## 3. Push the runtime dir to the worker
 
-## 3. Wait for completion (background)
+The worker's worktree is a fresh checkout that does not see your
+gitignored `runtime/`. Push the runtime dir so the worker has the task
+file (and a writable home for its `report.md`) at the path the
+frontmatter names.
 
-Start `mngr wait` in the background (using the Bash tool with
-`run_in_background: true`) so you can continue working. You will be
-notified when it completes -- do not block on it.
+```bash
+mngr push $NAME:runtime/launch-task/$NAME/ \
+    --source runtime/launch-task/$NAME/ \
+    --uncommitted-changes=merge
+```
+
+If the task references other gitignored files (datasets, credentials,
+extra transcripts), push them now too with the same pattern.
+
+## 4. Send the task message
+
+Now that the runtime dir is in place, send the task file as the
+worker's first message:
+
+```bash
+mngr message $NAME --message-file runtime/launch-task/$NAME/task.md
+```
+
+## 5. Background-poll for the worker's report
+
+Launch the poll as a background task (`run_in_background: true`) and
+continue with whatever else you were doing. The report file appears at
+`runtime/launch-task/$NAME/reports/report.md` once the worker pushes
+back.
 
 ```bash
 # Run with Bash run_in_background: true
-mngr wait <task-name> DONE STOPPED WAITING --timeout 30m
+timeout 30m bash -c '
+  while [ ! -f runtime/launch-task/'"$NAME"'/reports/report.md ]; do sleep 5; done
+  cat runtime/launch-task/'"$NAME"'/reports/report.md
+'
 ```
 
-This will notify you when the agent reaches one of those terminal states.
+You own this poll for the lifetime of the dispatch. Without it, gate
+reports never reach the user and the worker deadlocks waiting for a
+reply. Reports surface as task notifications when the background job
+completes; handle them at that point, not by blocking on the poll.
 
-## 4. Check results
+## 6. Handle the report
 
-When the wait completes, check what happened:
+Follow `.agents/shared/references/lead-proxy.md` for parsing the
+report's frontmatter (`type` + `name`), deciding whether to answer a
+gate yourself vs. escalate to the user, consuming the report so the
+next push can land a fresh `report.md`, and acting on terminal statuses
+(`done` -> merge the worker's branch; `stuck` or 30m timeout without a
+report -> diagnose worker liveness, then surface to the user per
+`references/worker-failure.md` if the worker is genuinely wedged).
 
-```bash
-# See current state
-mngr list --label workspace=$MINDS_WORKSPACE_NAME --format jsonl
+Flow-specific substitutions when reading `lead-proxy.md`:
 
-# Read the agent's conversation
-mngr transcript <task-name> --role=user --role=assistant | tail -n 30
-
-# See what's on screen right now
-mngr capture <task-name>
-```
-
-## 5. Handle the outcome
-
-**Agent finished (DONE/STOPPED):**
-- Check the transcript for any questions the agent had (look at the last few assistant messages)
-- If the code review (autofix) ran, the agent likely finished successfully
-- Results are on a git branch (`mngr/<task-name>`), accessible via `git log mngr/<task-name>`
-- Optionally destroy: `mngr destroy <task-name>`
-
-**Agent is WAITING:**
-- Check if the code reviewer ran and the agent is waiting for permission -- in this case it likely finished
-- Look at earlier assistant messages to see if the agent asked a question
-- If it asked a question, answer via `mngr message <task-name> -m "your answer"`
-- If it seems stuck, check `mngr capture <task-name>` for dialog boxes or errors
-
-## Worktree isolation and gitignored files
-
-Each sub-agent is created in its own git worktree of the current repo
-(see `worktree_base_folder` in `.mngr/settings.toml`). The worktree is a
-fresh checkout of the branch, so the worker sees committed files but
-**does not** see anything under `.gitignore` — including `runtime/`,
-`memory/`, scratch files in `/tmp`, and uncommitted/untracked files in
-your own working directory.
-
-If the worker needs access to a gitignored file (e.g. a transcript
-dumped under `runtime/`, a dataset, a credential file), push it into
-the worker's working directory after `mngr create` with `mngr push`:
-
-```bash
-# Push a specific directory to the same relative path in the worker
-mngr push <task-name>:path/to/dir path/to/dir
-
-# Push a single file to a specific target path
-mngr push <task-name>:path/to/file.txt path/to/file.txt
-```
-
-`mngr push` uses rsync by default and only modifies the target
-workspace. Do it before the worker reaches the step that needs the
-file — in practice, immediately after `mngr create`, since worker
-startup (provisioning + loading skills) typically gives you a window
-before the task message is acted on. See `mngr push --help` for full
-options.
-
-Committed files are already present in the worker's worktree; you do
-not need to push those.
+- Worker name: `$NAME`
+- Branch: `mngr/$NAME`
+- Reports dir: `runtime/launch-task/$NAME/reports/`
+- Consumed dir: `runtime/launch-task/$NAME/reports/consumed/`
+- Gate names: `question` (mid-flight; default-escalate to the user
+  unless you can answer from context).
+- Terminal statuses: `done` (merge); `stuck` (failure flow).
 
 ## Guidelines
 
-- Always include clear success criteria in your task description
-- Use `mngr wait` in the background -- don't block yourself waiting for a task
-- Check the transcript when a task finishes to see if the agent had questions or concerns
-- If a task fails, see `references/worker-failure.md` for how to capture context and report to the user (do not retry silently).
-- If a worker's claude session dies mid-iteration with uncommitted work in its worktree, see `references/dead-worker-recovery.md` -- recover the work *before* destroying the agent.
-- If the task references gitignored files, push them with `mngr push` right after `mngr create` (see above)
+- Always include clear success criteria in the task description.
+- Background-poll the report file -- never block on it. The reply you
+  need is a file appearing on disk, not the worker process exiting.
+- Do not use `mngr wait` for completion signaling on these workers;
+  it does not interact reliably with stop hooks or worker-spawned
+  sub-agents. The report file is the contract.
+- If a task fails (stuck report, or 30m poll timeout with no report and
+  the worker is dead), see `references/worker-failure.md` -- do not
+  silently retry.
+- If a worker's claude session dies mid-iteration with uncommitted work
+  in its worktree, see `references/dead-worker-recovery.md` -- recover
+  the work *before* destroying the agent.
+- If the task references gitignored files beyond the runtime dir, push
+  them with `mngr push` before sending the task message (see Step 3).

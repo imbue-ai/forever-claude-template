@@ -2,6 +2,7 @@ import copy
 import fcntl
 import json
 import os
+import re
 import shutil
 from collections.abc import Generator
 from collections.abc import Mapping
@@ -92,11 +93,21 @@ def get_user_claude_config_dir() -> Path:
     credentials or settings) should call this function instead.
 
     Resolution order:
-    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents)
+    1. $ORIGINAL_CLAUDE_CONFIG_DIR (set by mngr when creating agents), but
+       only if that path actually exists as a directory on disk.
     2. Falls back to get_claude_config_dir() ($CLAUDE_CONFIG_DIR or ~/.claude/)
+
+    The directory-existence check on $ORIGINAL_CLAUDE_CONFIG_DIR handles
+    nested-sandbox scenarios (e.g. a Linux lima VM running on a macOS host):
+    the env var is inherited from when the agent was first created on the
+    host, so it points at a host path like /Users/<user>/.claude that does
+    not exist inside the VM. Treating that as if the var were unset lets
+    callers (most importantly the credentials provisioner) fall through to
+    the per-agent CLAUDE_CONFIG_DIR, which is where the live credentials
+    actually live in that scenario.
     """
     original = os.environ.get("ORIGINAL_CLAUDE_CONFIG_DIR")
-    if original:
+    if original and Path(original).is_dir():
         return Path(original)
     return get_claude_config_dir()
 
@@ -452,15 +463,26 @@ def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, An
 # Project Directory Encoding
 # =============================================================================
 
+# Matches every character that Claude Code's project-dir encoder maps to '-'
+# (i.e. everything that is not an ASCII alphanumeric or literal '-').
+_NON_DASH_ALNUM_ASCII: Final = re.compile(r"[^A-Za-z0-9-]")
+
 
 @pure
 def encode_claude_project_dir_name(path: Path) -> str:
     """Encode a filesystem path into Claude Code's project directory name.
 
     Claude Code stores per-project data in ~/.claude/projects/<encoded-path>/.
-    The encoding replaces '/' and '.' with '-'.
+    The encoding keeps only ASCII alphanumerics and ``-``, mapping every
+    other character (``/``, ``.``, ``_``, space, ``@``, ``+``, accented
+    letters, CJK, etc.) to ``-`` -- per the algorithm documented in
+    anthropics/claude-code#19972. If this encoder diverges from Claude
+    Code's, ``on_after_provisioning`` writes the adopted JSONL to a
+    project subdir Claude Code never reads on resume, the find guard in
+    ``assemble_command`` returns no match, and ``--adopt-session``
+    silently spawns a fresh session via the ``||`` fallback.
     """
-    return str(path).replace("/", "-").replace(".", "-")
+    return _NON_DASH_ALNUM_ASCII.sub("-", str(path))
 
 
 # =============================================================================

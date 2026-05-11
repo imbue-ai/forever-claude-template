@@ -10,8 +10,9 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - This is a monorepo.
 - Run commands by calling "uv run" from the root of the git checkout (ex: "uv run mngr create ...").
 - NEVER amend commits or rebase--always create new commits.
-- If you ever need to work with another *git* repo that is *outside* of this monorepo, you should do so by adding a git subtree under vendor/
-- This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `.tickets/` (gitignored).
+- If you ever need to work with another *git* repo that is *outside* of this monorepo as a read-only dependency, you should do so by adding a git subtree under `vendor/`.
+- If you need to *actively develop* against an external repo (e.g. `mngr`), check out a standalone clone of it under `.external_worktrees/<repo-name>/`. This directory is gitignored so the external clones don't pollute the monorepo. The branch in the external clone should mirror the branch you're on in this monorepo.
+- This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `runtime/tickets/` (the path is set via the `TICKETS_DIR` env var so tickets ride the `mindsbackup/$MNGR_AGENT_ID` runtime-backup branch).
 
 # How to get started on any task:
 
@@ -147,10 +148,6 @@ Use your judgment on when to do work directly vs delegating. Delegation is usefu
 - Multi-file changes that benefit from verification before merging
 - Long-running operations you don't want to block on
 
-# Responding to events
-
-You can create a persistent background watcher using the `create-event-processor` skill if you would like to automatically respond to certain events (e.g. new messages, tickets, or specific times of day).
-
 # Self-modification
 
 You can (and should) modify your own configuration to improve yourself:
@@ -210,8 +207,8 @@ The upstream is defined in `parent.toml`.
 
 # Memory
 
-Use Claude's built-in memory system. Your memory directory is `memory/` (configured via autoMemoryDirectory).
-Memory is gitignored -- it persists on the filesystem but is not version controlled.
+Use Claude's built-in memory system. Your memory directory is `runtime/memory/` (configured via `autoMemoryDirectory` in `.claude/settings.json`).
+Memory is gitignored from the main branch but is backed up automatically by the runtime-backup service onto the `mindsbackup/$MNGR_AGENT_ID` branch when `GH_TOKEN` is set, so it survives container loss.
 
 # Services
 
@@ -221,9 +218,14 @@ See the `edit-services` skill for details.
 
 # Git
 
-Commit your changes locally. 
-`runtime/` and `memory/` are gitignored.
-Do not push to remote.
+Commit your changes locally.
+`runtime/` is gitignored from the main branch (it includes `runtime/memory/` for Claude memory and other transient state).
+
+A `post-commit` hook installed via `core.hooksPath = /code/scripts/git_hooks` auto-pushes the active branch to `origin` in the background, but only when `GH_TOKEN` is set in the environment. You do not need to push manually. The hook never blocks the commit; output is captured at `/tmp/post-commit-push.log`.
+
+`runtime/` is backed up automatically by the `runtime-backup` service onto a separate orphan branch (`mindsbackup/$MNGR_AGENT_ID`) on the same `origin`, also gated on `GH_TOKEN`. See `libs/runtime_backup/README.md`.
+
+If `GH_TOKEN` is unset, both auto-pushes silently no-op; commits stay local.
 
 - Don't include auto-generated lockfile churn (`uv.lock`, `package-lock.json`, etc.) in commits unless the change intentionally bumps a dependency.
 

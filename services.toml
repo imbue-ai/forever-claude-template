@@ -16,3 +16,11 @@ restart = "on-failure"
 [services.app-watcher]
 command = "uv run app-watcher"
 restart = "on-failure"
+
+# Periodically commits + pushes runtime/ to mindsbackup/$MNGR_AGENT_ID so that
+# Claude memory, ticket state, transcripts, telegram history, etc. survive
+# container loss. The worktree itself (and the orphan branch) are created
+# by bootstrap before this service starts. See libs/runtime_backup/README.md.
+[services.runtime-backup]
+command = "uv run runtime-backup"
+restart = "on-failure"
