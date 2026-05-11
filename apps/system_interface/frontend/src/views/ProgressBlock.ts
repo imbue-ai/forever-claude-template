@@ -12,7 +12,7 @@
 import m from "mithril";
 import { MarkdownContent } from "../markdown";
 import type { TranscriptEvent } from "../models/Response";
-import { renderAssistantMessageChildren } from "./message-renderers";
+import { buildToolResultsWithSkillExpansions, renderAssistantMessageChildren } from "./message-renderers";
 import type { TaskInTurn, TaskUiStatus } from "./turn-grouping";
 import { eventsInTaskWindow } from "./turn-grouping";
 
@@ -62,13 +62,9 @@ function renderExpandedTaskBody(events: TranscriptEvent[], agentId: string): m.V
   // Callers must only mount this when there are events to render
   // (ProgressBlock guards on canExpand = taskEvents.length > 0).
   // Collect tool_results so renderAssistantMessageChildren can match them
-  // back to tool_use entries.
-  const toolResults = new Map<string, TranscriptEvent>();
-  for (const e of events) {
-    if (e.type === "tool_result" && e.tool_call_id) {
-      toolResults.set(e.tool_call_id, e);
-    }
-  }
+  // back to tool_use entries -- and fold skill-expansion user_messages
+  // into the matching Skill tool call's output.
+  const toolResults = buildToolResultsWithSkillExpansions(events);
 
   // Reuse renderAssistantMessageChildren so the expanded panel renders
   // assistant text + tool calls identically to the rest of the chat

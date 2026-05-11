@@ -16,14 +16,13 @@ import {
   getFirstEventId,
   isConversationNotFound,
   isBackfillComplete,
-  type TranscriptEvent,
 } from "../models/Response";
 import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
+import { renderUserMessage, renderAssistantMessage, buildToolResultsWithSkillExpansions } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
 import { buildTurns } from "./turn-grouping";
 import { ProgressBlock } from "./ProgressBlock";
@@ -367,12 +366,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     startBackfill(agentId);
 
-    const toolResults = new Map<string, TranscriptEvent>();
-    for (const event of events) {
-      if (event.type === "tool_result" && event.tool_call_id) {
-        toolResults.set(event.tool_call_id, event);
-      }
-    }
+    const toolResults = buildToolResultsWithSkillExpansions(events);
 
     // Group events into turns and decide per turn whether to render the
     // tk-driven progress view or the plain (legacy) chat view. A turn is

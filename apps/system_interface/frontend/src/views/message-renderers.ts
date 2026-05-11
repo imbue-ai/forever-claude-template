@@ -37,6 +37,10 @@ export function isCollapsibleUserMessage(content: string): { label: string } | n
   return null;
 }
 
+export function isSkillExpansionUserMessage(content: string): boolean {
+  return content.startsWith("Base directory for this skill:");
+}
+
 export function isHiddenUserMessage(content: string): boolean {
   // The minds desktop client seeds every new agent with "/welcome" as its
   // initial message so the welcome skill can produce a friendly greeting.
@@ -47,15 +51,64 @@ export function isHiddenUserMessage(content: string): boolean {
   //      "Base directory for this skill: .../skills/welcome/..." and
   //      carries the SKILL.md body.
   // Hide both so the first visible turn is just the assistant's greeting.
-  // Restricted to the welcome skill specifically -- any OTHER slash
-  // command the user later runs still renders normally.
   if (content.includes("<command-name>/welcome</command-name>")) {
     return true;
   }
-  if (content.startsWith("Base directory for this skill:") && /skills\/welcome(\/|\b)/.test(content)) {
+  // Other skill expansions are folded into the corresponding "Tool: Skill"
+  // tool-call block (see buildToolResultsWithSkillExpansions) so they
+  // don't need to render inline as a separate chip.
+  if (isSkillExpansionUserMessage(content)) {
     return true;
   }
   return false;
+}
+
+/** Build a tool_call_id -> tool_result map, merging skill-expansion
+ *  user_messages into the output of their preceding "Skill" tool call so
+ *  the SKILL.md body renders inside the same dropdown rather than as a
+ *  separate inline chip. */
+export function buildToolResultsWithSkillExpansions(events: TranscriptEvent[]): Map<string, TranscriptEvent> {
+  const sorted = [...events].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const toolResults = new Map<string, TranscriptEvent>();
+  for (const e of sorted) {
+    if (e.type === "tool_result" && e.tool_call_id) {
+      toolResults.set(e.tool_call_id, e);
+    }
+  }
+  // Walk chronologically; each skill-expansion user_message belongs to
+  // the most recent unclaimed Skill tool call. Two Skill calls back-to-back
+  // each get their own expansion in order of arrival.
+  let pendingSkillCallId: string | null = null;
+  for (const e of sorted) {
+    if (e.type === "assistant_message" && e.tool_calls) {
+      for (const tc of e.tool_calls) {
+        if (tc.tool_name === "Skill") {
+          pendingSkillCallId = tc.tool_call_id;
+        }
+      }
+      continue;
+    }
+    if (e.type === "user_message" && isSkillExpansionUserMessage(e.content ?? "") && pendingSkillCallId !== null) {
+      const existing = toolResults.get(pendingSkillCallId);
+      const expansion = e.content ?? "";
+      const baseOutput = existing?.output ?? "";
+      const mergedOutput = baseOutput ? `${baseOutput}\n\n${expansion}` : expansion;
+      if (existing) {
+        toolResults.set(pendingSkillCallId, { ...existing, output: mergedOutput });
+      } else {
+        toolResults.set(pendingSkillCallId, {
+          timestamp: e.timestamp,
+          type: "tool_result",
+          event_id: `skill-expansion-${pendingSkillCallId}`,
+          source: e.source,
+          tool_call_id: pendingSkillCallId,
+          output: mergedOutput,
+        });
+      }
+      pendingSkillCallId = null;
+    }
+  }
+  return toolResults;
 }
 
 export function StableUserMessage(): m.Component<{ event: TranscriptEvent }> {
