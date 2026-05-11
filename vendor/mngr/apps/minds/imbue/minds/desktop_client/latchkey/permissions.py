@@ -21,6 +21,7 @@ the latchkey-specific work lives here.
 import asyncio
 import html as html_module
 import json
+import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
@@ -39,6 +40,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.core import CredentialStatus
 from imbue.minds.desktop_client.latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.minds.desktop_client.latchkey.core import Latchkey
@@ -118,7 +120,12 @@ class MngrMessageSender(MutableModel):
         cg = ConcurrencyGroup(name="mngr-message")
         with cg:
             result = cg.run_process_to_completion(
-                command=[self.mngr_binary, "message", str(agent_id), text],
+                # ``-m`` and ``--`` are required: ``mngr message`` treats every
+                # positional argument as an agent identifier (``nargs=-1``), so
+                # passing the text as a positional would be parsed as a second
+                # agent and the actual message content would be read from
+                # stdin (silently empty in this subprocess context).
+                command=[self.mngr_binary, "message", "-m", text, "--", str(agent_id)],
                 timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
                 is_checked_after=False,
             )
@@ -152,15 +159,25 @@ def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
 
 
 def _format_manual_credentials_message(service_display_name: str) -> str:
-    return (
-        f"{service_display_name} does not support browser sign-in. Run the suggested "
-        f"``latchkey auth set`` command in a terminal, then click Approve again."
-    )
+    return f"{service_display_name} does not support browser sign-in; manual credentials are required."
 
 
 def _fallback_set_credentials_example(service_name: str) -> str:
     """Return a generic ``latchkey auth set`` invocation when latchkey didn't supply one."""
     return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
+
+
+def _prepend_latchkey_directory(command: str, latchkey_directory: Path | None) -> str:
+    """Prefix ``command`` with ``LATCHKEY_DIRECTORY=<dir>`` so the credential
+    written by the user lands in the same store the desktop client uses.
+
+    No-op when the desktop client doesn't pin a custom directory (then the
+    user's terminal will inherit latchkey's own default, matching what the
+    desktop client also does).
+    """
+    if latchkey_directory is None:
+        return command
+    return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
 
 
 def _json_error(message: str, status_code: int) -> Response:
@@ -296,9 +313,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     outcome=GrantOutcome.NEEDS_MANUAL_CREDENTIALS,
                     message=_format_manual_credentials_message(service_info.display_name),
                     response_event=None,
-                    set_credentials_example=(
+                    set_credentials_example=_prepend_latchkey_directory(
                         latchkey_service_info.set_credentials_example
-                        or _fallback_set_credentials_example(service_info.name)
+                        or _fallback_set_credentials_example(service_info.name),
+                        self.latchkey.latchkey_directory,
                     ),
                 )
             logger.info(
@@ -391,6 +409,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
+        mngr_forward_origin: str,
     ) -> Response:
         """Render the dialog HTML for a latchkey permission request.
 
@@ -410,6 +429,20 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         ws_name = _resolve_workspace_name(backend_resolver, parsed_id, fallback=req_event.agent_id)
         pre_checked = self._initial_checked_permissions(parsed_id, service_info)
 
+        # Match ``grant()``: ``latchkey auth browser`` runs only when
+        # credentials are not VALID AND the service either advertises a
+        # browser flow or returns no auth options at all (legacy fallback).
+        # Computed up front so the dialog's progress notice tells the
+        # truth about whether to expect a browser pop-up. If the status
+        # changes between render and submit (rare), the user may see a
+        # slightly inaccurate notice for one cycle; the actual outcome
+        # is unaffected.
+        latchkey_service_info = self.latchkey.services_info(service_info.name)
+        will_open_browser = latchkey_service_info.credential_status != CredentialStatus.VALID and (
+            LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
+            or not latchkey_service_info.auth_options
+        )
+
         rendered = render_latchkey_permission_dialog(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
@@ -417,6 +450,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             rationale=req_event.rationale,
             service=service_info,
             checked_permissions=pre_checked,
+            will_open_browser=will_open_browser,
+            mngr_forward_origin=mngr_forward_origin,
         )
         return HTMLResponse(content=rendered)
 
@@ -600,8 +635,15 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         The on-disk event-sourcing log is the source of truth; this update
         is just so the requests panel doesn't show the resolved request as
         still pending until the next desktop-client restart.
+
+        Also wakes the chrome SSE so the new ``request_count`` is pushed
+        right away -- otherwise the panel would keep showing the resolved
+        card for up to 30s while the SSE poll waits for its next tick.
         """
         inbox: RequestInbox | None = request.app.state.request_inbox
         if inbox is None:
             return
         request.app.state.request_inbox = inbox.add_response(response_event)
+        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+        if isinstance(backend_resolver, MngrCliBackendResolver):
+            backend_resolver.notify_change()

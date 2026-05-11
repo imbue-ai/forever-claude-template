@@ -1,12 +1,13 @@
 ---
 name: update-skill
-description: Extend or refactor a crystallized skill (or split a new one off). Invoke at turn-end when you had to do additional repeatable work around an existing skill (absorb flow), or when you and the user explicitly discussed a change to a skill and you applied it live (verify flow).
+description: Extend, refactor, or verify a crystallized skill under `.agents/skills/`, or a shared script or reference under `.agents/shared/` that other skills consume. Invoke at turn-end when you had to do additional repeatable work around the artifact (absorb flow), or when you and the user discussed a change and you applied it live (verify flow).
 ---
 
 # Updating or splitting a skill
 
-Use this skill when an existing skill in `.agents/skills/` needs a
-change. Two flows cover the two ways this happens.
+Use this skill when an existing skill in `.agents/skills/`, or a shared
+script or reference under `.agents/shared/` consumed by other skills,
+needs a change. Two flows cover the two ways this happens.
 
 - **absorb flow.** A skill ran successfully but you had to do additional
   *repeatable* work to fully satisfy the user's request. The user was not

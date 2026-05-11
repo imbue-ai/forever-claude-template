@@ -61,14 +61,21 @@ Pick a short kebab-case slug `$NAME` for this crystallization (e.g.
 
 Use that same slug everywhere below.
 
+If you were invoked from `do-something-new`, reuse its slug (`$SLUG`) as
+`$NAME` -- the `source_artifacts_dir` frontmatter assumes matched paths.
+
 ## Step 1: Confirm and open a tracking ticket
 
 **Skip the pre-gate question if the user explicitly invoked this skill.**
-Triggers that count as explicit invocation: the user typed
-`/crystallize-task`, said "crystallize this / yes crystallize / make a
-skill out of this" in the immediately-prior turn, or otherwise named
-the skill by hand. In that case go straight to the ticket -- asking
-again is redundant and annoying.
+Triggers that count as explicit invocation:
+
+- The user typed `/crystallize-task`, said "crystallize this / yes
+  crystallize / make a skill out of this" in the immediately-prior
+  turn, or otherwise named the skill by hand.
+- The calling skill is `do-something-new` (sample-approval at its Step 5 is the go-ahead).
+
+In any of those cases go straight to the ticket -- asking again is
+redundant and annoying.
 
 Otherwise send a one-line pre-gate question via the `send-user-message` skill:
 

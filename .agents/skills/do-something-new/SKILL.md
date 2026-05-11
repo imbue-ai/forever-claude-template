@@ -1,6 +1,6 @@
 ---
 name: do-something-new
-description: Use when the user asks you to do something net-new -- a task you haven't done before, no existing skill applies, and getting it right will require nontrivial research, exploration, or experimentation. Skip when an applicable single skill already exists or for pure dev/code-writing work.
+description: Use immediately when the user asks you to do something net-new -- a task you haven't done before, no existing skill applies, and getting it right will require nontrivial research, exploration, or experimentation. When doing this, give a very short confirmation message to the user's request, then load this immediately before responding further. Your confirmation message shouldn't mention loading the skill. Skip when an applicable single skill already exists or for pure dev/code-writing work.
 ---
 
 # Doing something new
@@ -13,7 +13,8 @@ crystallize the process in the background while the conversation continues.
 
 - The user is actively interacting; return results they care about *fast*.
 - The user cares about the experience, not technical details.
-- Validate the absolute core capability *first*, before any other work. Fail fast.
+- Validate dependencies you do not control (external APIs, auth, third-party
+  fetches) *first*, before any other work. Fail fast on those.
 - Scripts written during this flow can be simple. Polish belongs in the
   crystallized version, not here.
 
@@ -24,7 +25,7 @@ Pick a short kebab-case slug `$SLUG` for the task (e.g. `fetch-emails`,
 
 - Runtime path: `runtime/do-something-new/$SLUG/`
 - Sample data path: `runtime/do-something-new/$SLUG/sample.json`
-- Slug passed to `crystallize-task` at the end
+- Slug passed to `crystallize-task` at the end (reused as its `$NAME`)
 
 ## Step 0: Existing-skill scan
 
@@ -82,11 +83,18 @@ For `latchkey auth set`, include the exact command for the user to run.
 
 Wait for approval before any further work.
 
-## Step 4: Validate the core capability first
+## Step 4: Validate uncontrolled dependencies first
 
-Before any other work, validate the absolute minimum capability the task hinges
-on. For multi-service asks, validate each service independently *first*, then
-the combined operation.
+Before any other work, validate the operations whose failure could prevent the
+whole task from working -- specifically those *not fully under your control*:
+external API calls, third-party fetches, auth flows. The test: *if this step
+fails, can I work around it without abandoning the user's core ask?* If yes
+(your own code, a well-defined transform, an LLM model call with a trivial
+fallback), it does *not* belong in this validation pass -- testing it just adds
+latency without de-risking. If no, validate it now.
+
+For multi-service asks, validate each uncontrolled dependency independently
+*first*, then the combined operation.
 
 - Latchkey setup is part of the normal flow, NOT a failure.
 - A failure is when setup itself fails, or post-setup calls don't work. On
@@ -96,7 +104,14 @@ the combined operation.
 Keep validation code simple -- inline bash, `uv run python -c`, or short
 scripts under `runtime/do-something-new/$SLUG/` if substantive.
 
-## Step 5: Generate and present the data sample
+## Step 5: Generate and present a small minimum-viable sample
+
+Generate and present a *small* sample (5-10 items, or one representative slice
+for non-list outputs) in the user's intended delivery channel -- not the full
+production pipeline. The point is a fast feedback gate on shape / tone /
+density / layout before any long-running step runs at full scale.
+
+This is especially important when doing anything involving LLMs - don't spend a ton of the user's money without having confirmed they will like the result!
 
 Default presentation: a brief natural-language summary, e.g.
 
@@ -110,30 +125,52 @@ more useful.
 If the user rejects the sample ("this isn't what I wanted"), go back to Step 3
 and re-propose. Re-run Step 2 only if the new ask requires fresh research.
 
-## Step 6: Crystallize in the background and hand off to interface design
+### Sample-first for batch operations
 
-When the user approves the sample, kick off `crystallize-task` in the
-background. Tell `crystallize-task` that the source artifacts directory is
-`runtime/do-something-new/$SLUG/`; its Step 3 includes the directory in the
-task frontmatter as `source_artifacts_dir` and its Step 4 pushes the directory
-to the worker, so the worker has the scripts and sample data you produced.
+The same gate applies to *any* batch step, not just the Step 5 sample --
+LLM summarization, transformations across many records, generation calls,
+large fetches, including batch steps that come up later in Step 6
+surfaces. Run on the small sample first, then surface measured cost and
+runtime alongside it with an extrapolation to the full set
+("summarizing 5 items took 12s and cost $0.013 -- extrapolated to 150
+items, ~$0.40 and ~6 min"). Only scale to the full set after the user
+thumbs-up.
 
-**You are still on the hook for the lead-proxy poll.** Kicking off
-`crystallize-task` is *not* fire-and-forget -- you must launch the
-background poll for worker reports (per `crystallize-task` Step 5 /
-`.agents/shared/references/lead-proxy.md`) *concurrently with* the
-interface-design conversation. The poll is a `run_in_background: true` bash
-invocation; it does not block subsequent steps. Without it, Gate 1 / Gate 2
-reports never reach the user and the worker deadlocks waiting for approval.
+Apply by default to any batch step -- don't try to judge in advance
+whether it's "long enough" to need this. Sampling is cheap when the
+operation is fast and load-bearing when it's slow.
 
-Once crystallize is launched and the lead-proxy poll is running in the
-background, transition the conversation toward interface design.
-Acknowledge that the worker is now formalizing the capability, then
-either follow up on the interface the user named in their original
-prompt (if they did) or ask how they'd like to interact with the thing.
+## Step 6: Deliver remaining surfaces one at a time
 
-The skill's responsibility ends here. Interface design happens in
-subsequent turns.
+Once the user approves the Step 5 sample, additional surfaces (scheduling,
+persistence, history, live integration with a forwarded service, etc.) each
+get their *own* delivery and feedback gate. Don't bundle them. Build one,
+ship it, ask "want me to add scheduling next, or stop here?", wait, then
+build the next.
+
+This applies even when the user's original prompt enumerated several
+surfaces -- a single approval on the sample is not blanket approval for the
+rest. The user needs to be able to thumbs-up / thumbs-down each surface
+independently, which is impossible if four of them land at once.
+
+## Step 7: Crystallize in the background and hand off to interface design
+
+1. **Kick off `crystallize-task`** with `source_artifacts_dir:
+   runtime/do-something-new/$SLUG/`.
+2. **Launch the lead-proxy poll** (`run_in_background: true`) for
+   worker reports, per `crystallize-task` Step 5 /
+   `.agents/shared/references/lead-proxy.md`. Do this *before*
+   returning to the user. The poll does not block subsequent steps.
+   Without it, Gate 1 / Gate 2 reports never reach the user and the
+   worker deadlocks waiting for approval.
+3. **Hand off to interface design.** Acknowledge that the worker is
+   now formalizing the capability, then either follow up on the
+   interface the user named in their original prompt (if they did) or
+   ask how they'd like to interact with the thing.
+
+The skill's *flow* responsibility ends here; lead-proxy ownership for
+the dispatched worker continues until that worker reports terminal
+status. Interface design happens in subsequent turns.
 
 ## Re-fetch while crystallize is running
 

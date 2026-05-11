@@ -30,8 +30,20 @@ def render_latchkey_permission_dialog(
     rationale: str,
     service: ServicePermissionInfo,
     checked_permissions: Sequence[str],
+    will_open_browser: bool,
+    mngr_forward_origin: str = "",
 ) -> str:
-    """Render the latchkey permission approval dialog HTML."""
+    """Render the latchkey permission approval dialog HTML.
+
+    ``will_open_browser`` controls the in-progress notice shown after the
+    user clicks Approve: when True (latchkey will run ``auth browser``),
+    the notice tells the user to expect a browser pop-up; when False
+    (credentials are already valid, or the service requires manual
+    credentials), it shows a generic ``Granting permission...`` message.
+
+    ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
+    the workspace link in the dialog points at ``{mngr_forward_origin}/goto/<agent>/``.
+    """
     return JINJA_ENV.get_template("latchkey_permissions.html").render(
         agent_id=agent_id,
         request_id=request_id,
@@ -41,4 +53,6 @@ def render_latchkey_permission_dialog(
         permission_schemas=service.permission_schemas,
         checked_permissions=set(checked_permissions),
         accent=workspace_accent(agent_id),
+        will_open_browser=will_open_browser,
+        mngr_forward_origin=mngr_forward_origin,
     )

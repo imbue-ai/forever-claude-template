@@ -86,27 +86,12 @@ extra_window = [
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'",
     "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && git config --global core.hooksPath /code/scripts/git_hooks && gh auth setup-git'"
 ]
-
-# template for dev mode (runs in-place on local provider)
-[create_templates.dev]
-provider = "local"
-worktree_base_folder = "/tmp/mngr-worktrees/"
+# Write a sane default tmux config on every minds host. tuple-typed
+# `extra_provision_command` stacks across templates (see
+# `apply_create_template` in vendor/mngr/.../common_opts.py), so the
+# mode-specific templates (docker/lima/...) keep their own commands.
 extra_provision_command = [
-    "uv tool install -e vendor/mngr/libs/mngr && uv tool install -e vendor/mngr/apps/minds_workspace_server && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
-]
-# DEV runs the agent on the bare host (no new host is created), so the
-# Anthropic creds need to land in the *agent* env -- ``pass_env``, not
-# ``pass_host_env``. ``GH_TOKEN`` is already in
-# ``[commands.create].pass_env`` so it's covered for every mode.
-pass_env = [
-    "MINDS_WORKSPACE_NAME",
-    "TELEGRAM_BOT_TOKEN",
-    "TELEGRAM_USER_NAME",
-    "UV_TOOL_BIN_DIR",
-    "UV_TOOL_DIR",
-    "LATCHKEY_GATEWAY",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_BASE_URL",
+    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' > "$HOME/.tmux.conf"''',
 ]
 
 # template for docker provider
@@ -115,6 +100,10 @@ provider = "docker"
 target_path = "/code/"
 setting = ["providers.docker.is_enabled=true"]
 build_arg = ["--file=Dockerfile", "."]
+# `--cap-add=SYS_PTRACE` is a `docker run` flag (not `docker build`), so it
+# rides on `start_arg` rather than `build_arg`. Lets us attach gdb / strace
+# inside the container for debugging without rebuilding the image.
+start_arg = ["--cap-add=SYS_PTRACE"]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
@@ -134,14 +123,24 @@ start_arg = ["--cpus=2", "--memory=4", "--disk=20"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 extra_provision_command = [
+    # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
+    # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
+    "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
     "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
     "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
+    # Install latchkey CLI globally; pinned to the same version as Dockerfile's
+    # LATCHKEY_VERSION ARG. Bump both together.
+    "sudo npm install -g latchkey@2.7.2",
     "curl -LsSf https://astral.sh/uv/install.sh | sh",
     "ARCH=$(uname -m) && sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && sudo chmod +x /usr/local/bin/ttyd",
     "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh",
-    "cd vendor/mngr/apps/minds_workspace_server/frontend && npm ci && npm run build",
-    "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install vendor/mngr/apps/minds_workspace_server --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
+    "cd apps/system_interface/frontend && npm ci && npm run build",
+    "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
     "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
+    # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
+    # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
+    # because the uv installer prepends it.
+    "mkdir -p $HOME/.local/bin && ln -sf /code/vendor/tk/ticket $HOME/.local/bin/tk",
 ]
 
 # template for vultr VPS provider (cloud mode)
@@ -179,8 +178,8 @@ idle_mode = "disabled"
 # + an optional GH_TOKEN from minds' subprocess env onto the host's
 # ``/mngr/env``. minds writes these into the subprocess env it hands
 # ``mngr create`` (see ``run_mngr_create`` in
-# ``apps/minds/imbue/minds/desktop_client/agent_creator.py``) so the host
-# actually has them at the moment ``--pass-host-env`` reads.
+# ``vendor/mngr/apps/minds/imbue/minds/desktop_client/agent_creator.py``)
+# so the host actually has them at the moment ``--pass-host-env`` reads.
 pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX", "GH_TOKEN"]
 
 ## and these templates are for sub-agents created within the sandbox
@@ -204,7 +203,9 @@ extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWE
 env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
 agent_args = [
     "--dangerously-skip-permissions",
-    """--append-system-prompt "You were launched by another agent. List any questions at the end of your final response, along with the assumptions you made." """]
+    "--append-system-prompt",
+    "You were launched by another agent. List any questions at the end of your final response, along with the assumptions you made.",
+]
 
 # Crystallize-worker template: sub-agent for the crystallize-task / heal-skill /
 # update-skill flows. Inherits from `worker`, adds:
@@ -222,4 +223,4 @@ extra_provision_command = [
 ]
 agent_args = [
     "--dangerously-skip-permissions",
-    """--append-system-prompt "You were launched by the crystallize-task / heal-skill / update-skill flow. Use the bundled crystallize-task-worker / heal-skill-worker / update-skill-worker skill to drive your work. End your turn with any gate question the sub-skill asks for." """]
+]

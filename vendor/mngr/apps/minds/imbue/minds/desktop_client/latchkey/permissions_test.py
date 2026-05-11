@@ -1,8 +1,11 @@
 import json
+import shlex
 from pathlib import Path
 
 import pytest
+from starlette.responses import HTMLResponse
 
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.core import Latchkey
 from imbue.minds.desktop_client.latchkey.permissions import GrantOutcome
 from imbue.minds.desktop_client.latchkey.permissions import LatchkeyPermissionFlowError
@@ -12,6 +15,7 @@ from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissi
 from imbue.minds.desktop_client.latchkey.store import load_permissions
 from imbue.minds.desktop_client.latchkey.store import permissions_path_for_agent
 from imbue.minds.desktop_client.request_events import RequestStatus
+from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
 
@@ -77,6 +81,7 @@ def _make_latchkey_with_status(
     auth_browser_stderr: str = "",
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
     set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
+    latchkey_directory: Path | None = None,
 ) -> Latchkey:
     """Build a ``Latchkey`` that uses two fake binaries.
 
@@ -114,7 +119,7 @@ def _make_latchkey_with_status(
         "    sys.exit(99)\n"
     )
     binary.chmod(0o755)
-    return Latchkey(latchkey_binary=str(binary))
+    return Latchkey(latchkey_binary=str(binary), latchkey_directory=latchkey_directory)
 
 
 def _build_handler(
@@ -125,6 +130,7 @@ def _build_handler(
     auth_browser_stderr: str = "",
     auth_options_json: str = _DEFAULT_AUTH_OPTIONS_JSON,
     set_credentials_example: str = _DEFAULT_SET_EXAMPLE,
+    latchkey_directory: Path | None = None,
 ) -> LatchkeyPermissionGrantHandler:
     latchkey = _make_latchkey_with_status(
         tmp_path,
@@ -133,6 +139,7 @@ def _build_handler(
         auth_browser_stderr=auth_browser_stderr,
         auth_options_json=auth_options_json,
         set_credentials_example=set_credentials_example,
+        latchkey_directory=latchkey_directory,
     )
     mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     return LatchkeyPermissionGrantHandler(
@@ -154,7 +161,11 @@ def test_mngr_message_sender_invokes_message_subcommand(tmp_path: Path) -> None:
     sender.send(agent_id, "hello")
 
     recording = _read_recording(tmp_path / "mngr_report.jsonl")
-    assert recording == [{"argv": ["message", str(agent_id), "hello"], "env_LATCHKEY_DIRECTORY": ""}]
+    # ``mngr message`` collects every positional into ``agents`` (nargs=-1),
+    # so the message text MUST be passed via ``-m`` -- otherwise it would be
+    # parsed as a second agent identifier and the message content would be
+    # read from (silently empty) stdin in this subprocess context.
+    assert recording == [{"argv": ["message", "-m", "hello", "--", str(agent_id)], "env_LATCHKEY_DIRECTORY": ""}]
 
 
 def test_mngr_message_sender_does_not_raise_on_failure(tmp_path: Path) -> None:
@@ -400,6 +411,68 @@ def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: P
     assert "latchkey auth set slack" in result.set_credentials_example
 
 
+def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path: Path) -> None:
+    """User-facing command must write into the same store the desktop client uses.
+
+    The desktop client passes ``LATCHKEY_DIRECTORY`` to all its own latchkey
+    invocations; if we don't tell the user to do the same, ``latchkey auth
+    set`` writes credentials into ``~/.latchkey`` while the desktop client
+    keeps reading from the pinned directory and the second Approve click
+    still reports ``MISSING``.
+    """
+    pinned = tmp_path / "pinned latchkey dir"
+    pinned.mkdir()
+    base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=base_example,
+        latchkey_directory=pinned,
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+    assert result.set_credentials_example is not None
+    # The directory contains a space, so the path must be shell-quoted to
+    # survive a copy-paste into a terminal.
+    expected_prefix = f"LATCHKEY_DIRECTORY={shlex.quote(str(pinned))} "
+    assert result.set_credentials_example.startswith(expected_prefix)
+    assert result.set_credentials_example.endswith(base_example)
+
+
+def test_grant_does_not_prefix_set_example_when_no_latchkey_directory(tmp_path: Path) -> None:
+    """Without a pinned directory the command must not carry an env override.
+
+    Otherwise we'd be inventing an empty ``LATCHKEY_DIRECTORY=`` prefix
+    that doesn't reflect what the desktop client actually does.
+    """
+    base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=base_example,
+        latchkey_directory=None,
+    )
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        service_info=_SLACK_SERVICE_INFO,
+        granted_permissions=("slack-read-all",),
+    )
+
+    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
+    assert result.set_credentials_example == base_example
+
+
 def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path: Path) -> None:
     """Simulate the user running ``latchkey auth set`` between two Approve clicks.
 
@@ -452,6 +525,61 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
     )
     assert second.outcome == GrantOutcome.GRANTED
     assert second.response_event is not None
+
+
+# -- LatchkeyPermissionGrantHandler.render_request_page --
+
+
+def _render_dialog_html(handler: LatchkeyPermissionGrantHandler) -> str:
+    """Run ``render_request_page`` for a fixed Slack request and return its HTML."""
+    request = create_latchkey_permission_request_event(
+        agent_id=str(AgentId()),
+        service_name=_SLACK_SERVICE_INFO.name,
+        rationale="need slack access",
+    )
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    response = handler.render_request_page(
+        req_event=request,
+        backend_resolver=backend_resolver,
+        mngr_forward_origin="http://localhost:8421",
+    )
+    assert isinstance(response, HTMLResponse)
+    # ``Response.body`` is typed ``bytes | memoryview[int]``; ``bytes()``
+    # round-trips both into a plain ``bytes`` we can decode.
+    return bytes(response.body).decode("utf-8")
+
+
+def test_render_request_page_omits_browser_notice_when_credentials_valid(tmp_path: Path) -> None:
+    """Valid credentials skip ``latchkey auth browser``; the dialog must not falsely promise one."""
+    handler = _build_handler(tmp_path, credential_status="valid")
+
+    html = _render_dialog_html(handler)
+
+    assert "opening a browser window" not in html
+    assert "Granting permission" in html
+
+
+def test_render_request_page_shows_browser_notice_when_credentials_missing(tmp_path: Path) -> None:
+    """Missing credentials with browser auth supported -> dialog warns about the browser pop-up."""
+    handler = _build_handler(tmp_path, credential_status="missing")
+
+    html = _render_dialog_html(handler)
+
+    assert "opening a browser window" in html
+
+
+def test_render_request_page_omits_browser_notice_when_browser_auth_unsupported(tmp_path: Path) -> None:
+    """Service that only supports manual creds -> dialog must not promise a browser pop-up."""
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+    )
+
+    html = _render_dialog_html(handler)
+
+    assert "opening a browser window" not in html
+    assert "Granting permission" in html
 
 
 # -- LatchkeyPermissionGrantHandler.deny --

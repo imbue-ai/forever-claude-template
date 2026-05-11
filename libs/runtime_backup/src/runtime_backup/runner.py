@@ -21,11 +21,6 @@ RUNTIME_DIR = Path("runtime")
 TICK_INTERVAL_SECONDS = 60
 LOG_FILE = Path("/tmp/runtime-backup.log")
 
-# Tee stderr-bound logs into LOG_FILE so operators can `tail` the file across
-# restarts of just this service window. /tmp wipes on container restart, which
-# is the intended scope for the debug log.
-logger.add(LOG_FILE, level="INFO")
-
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
     """Run a git command inside the runtime worktree, never raising."""
@@ -74,7 +69,8 @@ def _do_tick(should_push: bool) -> None:
                 commit_result.returncode,
                 commit_result.stderr.strip(),
             )
-            return
+            # Fall through to push: any prior unpushed commits should still
+            # be shipped even if this tick's commit failed.
 
     if should_push:
         # Always attempt push: covers the case where a prior tick committed but
@@ -99,6 +95,13 @@ def _do_tick(should_push: bool) -> None:
 
 def main() -> None:
     """Main loop: poll runtime/ on a fixed interval and back up changes."""
+    # Tee stderr-bound logs into LOG_FILE so operators can `tail` the file
+    # across restarts of just this service window. /tmp wipes on container
+    # restart, which is the intended scope for the debug log. Set up here
+    # rather than at module import so that merely importing this module
+    # (e.g. from tests) does not start writing to the log file.
+    logger.add(LOG_FILE, level="INFO")
+
     logger.info("Starting runtime-backup (interval={}s)", TICK_INTERVAL_SECONDS)
 
     if not (RUNTIME_DIR / ".git").exists():
