@@ -80,8 +80,8 @@ def open_ticket(
         stderr = (exc.stderr or "").strip() or f"exit {exc.returncode}"
         print(f"dispatch: tk create failed: {stderr}", file=sys.stderr)
         return None
-    last_line = (created.stdout or "").strip().splitlines()
-    ticket_id = last_line[-1].strip() if last_line else ""
+    stdout_lines = (created.stdout or "").strip().splitlines()
+    ticket_id = stdout_lines[-1].strip() if stdout_lines else ""
     if not ticket_id:
         print("dispatch: tk create returned empty ticket ID", file=sys.stderr)
         return None
