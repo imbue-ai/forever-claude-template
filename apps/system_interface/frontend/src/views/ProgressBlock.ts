@@ -26,9 +26,17 @@ interface ProgressBlockAttrs {
    *  per-task O(n log n) rebuild of the same map. Lookups by id work
    *  fine even though only a subset of events is in this turn. */
   toolResults: Map<string, TranscriptEvent>;
-  /** Final assistant message text for this turn (rendered below the
-   *  Timeline). */
-  final_message: string | null;
+  /** Text-only assistant messages from this turn (in chronological order)
+   *  that should appear at the top level rather than buried inside a
+   *  task's expanded panel. ChatPanel selects assistant_messages with
+   *  non-empty text and no tool_calls; together they cover both:
+   *    - the agent's "between tasks" or "after all tasks" prose, and
+   *    - the agent's final reply when a task was left open at turn end
+   *      (which would otherwise land inside the open task's window and
+   *      be hidden in its dropdown).
+   *  Rendered as separate blocks below the Timeline in arrival order so
+   *  no substantive text gets dropped. */
+  final_messages: TranscriptEvent[];
   agentId: string;
 }
 
@@ -82,6 +90,12 @@ function renderExpandedTaskBody(
   const children: m.Children[] = [];
   for (const e of events) {
     if (e.type !== "assistant_message") continue;
+    // Text-only assistant_messages are pulled to the top level (rendered
+    // as separate `pv-final` blocks below the timeline) so they remain
+    // visible even when a task is left open at turn end. Skipping them
+    // here avoids rendering the same prose twice.
+    const hasTools = !!(e.tool_calls && e.tool_calls.length > 0);
+    if (!hasTools && e.text) continue;
     children.push(...renderAssistantMessageChildren(e, toolResults, agentId));
   }
 
@@ -103,7 +117,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
   return {
     view(vnode) {
-      const { tasks, body_events, toolResults, final_message, agentId } = vnode.attrs;
+      const { tasks, body_events, toolResults, final_messages, agentId } = vnode.attrs;
       if (tasks.length === 0) {
         // Defensive: callers should not mount ProgressBlock when there
         // are no tasks. Fall back to no-op.
@@ -119,10 +133,15 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
       const taskNodes = tasks.map((task, idx) => {
         const isLast = idx === tasks.length - 1;
         const taskEvents = eventsInTaskWindow(task, body_events);
-        // A task is "expandable" only if there are raw events to show.
-        // Expanding is allowed for done/active tasks; pending tasks
-        // typically have no events anyway.
-        const canExpand = taskEvents.length > 0;
+        // A task is "expandable" only if it has assistant_messages with
+        // tool_calls to show. Text-only assistant_messages get pulled to
+        // the top level (see ProgressBlockAttrs.final_messages), so a
+        // task whose window contains only text-only messages would have
+        // an empty expanded panel -- avoid offering expansion in that
+        // case.
+        const canExpand = taskEvents.some(
+          (e) => e.type === "assistant_message" && !!(e.tool_calls && e.tool_calls.length > 0),
+        );
         const isExpanded = expanded.has(task.ticket_id);
         const nodeClasses = ["pv-tl-node", `pv-tl-node--${task.status}`, isLast ? "pv-tl-node--last" : ""]
           .filter(Boolean)
@@ -164,7 +183,9 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
           m("div.pv-timeline-thread", { "aria-hidden": "true" }),
           m("div.pv-timeline-nodes", taskNodes),
         ]),
-        final_message ? m("div.pv-final", m(MarkdownContent, { content: final_message })) : null,
+        final_messages.length > 0
+          ? final_messages.map((ev) => m("div.pv-final", m(MarkdownContent, { content: ev.text ?? "" })))
+          : null,
       ]);
     },
   };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEvent } from "../models/Response";
-import { buildTaskRecords, buildTurns, eventsInTaskWindow } from "./turn-grouping";
+import { buildTaskRecords, buildTurns, eventsInTaskWindow, selectFinalMessages } from "./turn-grouping";
 
 function userMsg(ts: string, content: string, eventId: string = `u-${ts}`): TranscriptEvent {
   return {
@@ -392,5 +392,51 @@ describe("eventsInTaskWindow", () => {
     ];
     const result = eventsInTaskWindow(task, body);
     expect(result.map((e) => e.event_id)).toEqual(["a-tc-late", "r-tc-late"]);
+  });
+});
+
+describe("selectFinalMessages", () => {
+  it("returns every text-only assistant_message in chronological order", () => {
+    // Regression: the previous "last non-empty assistant_message" heuristic
+    // dropped earlier prose. With multiple separate text-only messages in
+    // a single turn (e.g. a summary table followed by a "waiting on your
+    // input" line) the user only saw the second one. Now both must come
+    // back, in arrival order.
+    const a1 = assistantMsg("2026-04-28T01:00:10Z", "Here is the summary table...", "msg-summary");
+    const a2 = assistantMsg("2026-04-28T01:00:20Z", "Waiting on your input.", "msg-waiting");
+    const events = [a1, toolUse("2026-04-28T01:00:15Z", "Bash", "tc-1"), a2];
+    expect(selectFinalMessages(events).map((e) => e.event_id)).toEqual(["msg-summary", "msg-waiting"]);
+  });
+
+  it("excludes tool-bearing assistant_messages even when they have text", () => {
+    // Tool-bearing messages live inside the task's expanded panel where
+    // their tool_calls render. Pulling them up would orphan the tool
+    // calls.
+    const withTextAndTools: TranscriptEvent = {
+      timestamp: "2026-04-28T01:00:00Z",
+      type: "assistant_message",
+      event_id: "a-mixed",
+      source: "test",
+      text: "Calling out to a tool.",
+      tool_calls: [{ tool_call_id: "tc-x", tool_name: "Bash", input_preview: "{}" }],
+    };
+    expect(selectFinalMessages([withTextAndTools])).toEqual([]);
+  });
+
+  it("excludes empty-text assistant_messages", () => {
+    // Streaming/partial messages and pure tool_use events both serialize
+    // with text="". They aren't substantive prose and should not surface
+    // as top-level final blocks.
+    const empty = assistantMsg("2026-04-28T01:00:00Z", "", "a-empty");
+    expect(selectFinalMessages([empty])).toEqual([]);
+  });
+
+  it("ignores non-assistant events", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "hello"),
+      taskEvent("t1", "open", "2026-04-28T01:00:01Z"),
+      assistantMsg("2026-04-28T01:00:02Z", "hi back", "a-hi"),
+    ];
+    expect(selectFinalMessages(events).map((e) => e.event_id)).toEqual(["a-hi"]);
   });
 });

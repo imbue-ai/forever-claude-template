@@ -305,3 +305,27 @@ export function eventsInTaskWindow(task: TaskInTurn, body_events: TranscriptEven
   if (trailingResults.length === 0) return inWindow;
   return [...inWindow, ...trailingResults].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }
+
+/**
+ * Pick the assistant_messages from a turn that should render at the top
+ * level of the progress block rather than be hidden inside a task's
+ * expandable panel. The rule is "text-only": non-empty `text` and no
+ * `tool_calls`. This covers two distinct cases that a single
+ * "last-non-empty-message" heuristic silently dropped:
+ *
+ *   1. Multiple separate prose messages in one turn (e.g. a summary
+ *      followed by a "waiting on your input" note). Both must remain
+ *      visible, in chronological order.
+ *   2. The agent leaves a task open at turn end and replies with a
+ *      final text message. That message's timestamp lands inside the
+ *      open task's window and would otherwise be buried in its
+ *      dropdown.
+ *
+ * Tool-bearing assistant_messages are intentionally excluded -- they
+ * stay inside their task's expanded panel where the tool calls live.
+ */
+export function selectFinalMessages(body_events: TranscriptEvent[]): TranscriptEvent[] {
+  return body_events.filter(
+    (ev) => ev.type === "assistant_message" && !!ev.text && !(ev.tool_calls && ev.tool_calls.length > 0),
+  );
+}
