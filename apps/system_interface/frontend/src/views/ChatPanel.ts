@@ -24,7 +24,7 @@ import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { renderUserMessage, renderAssistantMessage, buildToolResultsWithSkillExpansions } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import { buildTurns } from "./turn-grouping";
+import { buildTurns, selectFinalMessages } from "./turn-grouping";
 import { ProgressBlock } from "./ProgressBlock";
 import { ActivityIndicator } from "./ActivityIndicator";
 
@@ -413,18 +413,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       // it brackets the work rather than splitting the timeline.
       const nonBoundaryUserEvents = turn.body_events.filter((e) => e.type === "user_message");
       if (turn.tasks.length > 0) {
-        // Final message: latest non-empty assistant_message text in the
-        // turn. The activity indicator (in the footer) handles the
-        // "still working" case; we just show whatever the agent has
-        // written so far.
-        let finalMessage: string | null = null;
-        for (let i = turn.body_events.length - 1; i >= 0; i--) {
-          const ev = turn.body_events[i];
-          if (ev.type === "assistant_message" && ev.text) {
-            finalMessage = ev.text;
-            break;
-          }
-        }
+        const finalMessages = selectFinalMessages(turn.body_events);
         for (const ev of nonBoundaryUserEvents) {
           const chipNode = renderUserMessage(ev);
           if (chipNode !== null) {
@@ -444,7 +433,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
             tasks: turn.tasks,
             body_events: turn.body_events,
             toolResults,
-            final_message: finalMessage,
+            final_messages: finalMessages,
             agentId,
           }),
         );
