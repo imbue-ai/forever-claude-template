@@ -301,7 +301,39 @@ describe("buildTurns", () => {
     expect(turns[1].tasks[1].is_carryover).toBe(false);
   });
 
-  it("orders multiple carryover tasks by created_at, not by reverse insertion", () => {
+  it("orders own tasks by started_at, not created_at, when the agent starts them out of order", () => {
+    // Agent plans two tickets up-front (t1 then t2), then starts t2
+    // FIRST and t1 SECOND. The end-of-turn order must reflect what the
+    // agent actually did (t2 above t1), not the order they were planned.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "do it"),
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "First planned" }),
+      taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Second planned" }),
+      taskEvent("t2", "in_progress", "2026-04-28T01:00:30Z"),
+      taskEvent("t2", "closed", "2026-04-28T01:00:40Z", { summary: "Did t2 first." }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:50Z"),
+    ];
+    const turns = buildTurns(events);
+    expect(turns[0].tasks.map((t) => t.title)).toEqual(["Second planned", "First planned"]);
+  });
+
+  it("sorts not-yet-started tasks by created_at after started ones", () => {
+    // t1 and t2 are planned and t1 is started; t3 is planned later and
+    // never started this turn. Started t1 sorts by its started_at;
+    // pending t2 and t3 fall back to created_at.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Alpha" }),
+      taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Bravo" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:25Z"),
+      taskEvent("t3", "open", "2026-04-28T01:00:30Z", { created_at: "2026-04-28T01:00:30Z", title: "Charlie" }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns[0].tasks.map((t) => t.title)).toEqual(["Alpha", "Bravo", "Charlie"]);
+    expect(turns[0].tasks.map((t) => t.status)).toEqual(["active", "pending", "pending"]);
+  });
+
+  it("orders multiple carryover tasks by started_at, not by reverse insertion", () => {
     // Repro of the chat-progress bug: a clarifying-question turn plans
     // two tickets up-front; the next turn starts the FIRST one. Both are
     // carryovers in the second turn, and the earlier-created (active) one
@@ -330,6 +362,7 @@ describe("eventsInTaskWindow", () => {
       is_carryover: false,
       continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
     };
@@ -352,6 +385,7 @@ describe("eventsInTaskWindow", () => {
       is_carryover: false,
       continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: null,
     };
@@ -371,6 +405,7 @@ describe("eventsInTaskWindow", () => {
       is_carryover: false,
       continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
     };

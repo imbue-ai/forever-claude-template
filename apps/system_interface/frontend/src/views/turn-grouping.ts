@@ -66,10 +66,15 @@ export interface TaskInTurn {
    *  badge -- because from the user's vantage point looking at a past
    *  turn, the work is not actively spinning in that turn anymore. */
   continues_forward: boolean;
-  /** Timestamp the ticket was created. Used for ordering tasks within a
-   *  turn (so a still-pending task created later than an active task
-   *  renders below it, not above). */
+  /** Timestamp the ticket was created. Fallback sort key for tasks that
+   *  haven't started yet by the end of THIS turn. */
   created_at: string;
+  /** Timestamp the ticket transitioned to in_progress, but only if that
+   *  transition happened by the end of THIS turn. Null for tasks still
+   *  pending in this turn. Used as the primary sort key so tasks within
+   *  a turn render in the order the agent actually started them, not the
+   *  order they were planned/created. */
+  started_at: string | null;
   /** Inclusive lower bound of the active window for tool-call attribution. */
   active_window_start: string | null;
   /** Inclusive upper bound of the active window. null = still active at
@@ -213,15 +218,23 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
     }
   }
 
-  // Within a turn, carryovers sit above own tasks; within each group sort
-  // by created_at so a later-created task renders below an earlier one.
-  // (The carryover unshift loop above happens to reverse insertion order,
-  // so without sorting carry too, multiple carryovers would render in
-  // reverse creation order.)
-  const byCreated = (a: TaskInTurn, b: TaskInTurn) => a.created_at.localeCompare(b.created_at);
+  // Within a turn, carryovers sit above own tasks; within each group, sort
+  // by the task's started_at (when the agent transitioned it to
+  // in_progress) so the order at end-of-turn matches the order the agent
+  // actually started tasks rather than the order they were planned. Tasks
+  // not yet started in this turn sink to the bottom of the group and sort
+  // among themselves by created_at. So e.g. if the agent plans t1 then t2
+  // up-front but starts t2 first, t2 renders above t1; a still-pending t3
+  // created after both renders below both.
+  const byStart = (a: TaskInTurn, b: TaskInTurn) => {
+    if (a.started_at !== null && b.started_at !== null) return a.started_at.localeCompare(b.started_at);
+    if (a.started_at !== null) return -1;
+    if (b.started_at !== null) return 1;
+    return a.created_at.localeCompare(b.created_at);
+  };
   for (const turn of turns) {
-    const carry = turn.tasks.filter((t) => t.is_carryover).sort(byCreated);
-    const own = turn.tasks.filter((t) => !t.is_carryover).sort(byCreated);
+    const carry = turn.tasks.filter((t) => t.is_carryover).sort(byStart);
+    const own = turn.tasks.filter((t) => !t.is_carryover).sort(byStart);
     turn.tasks = [...carry, ...own];
   }
 
@@ -251,6 +264,12 @@ function makeTaskInTurn(
   // tasks are still live (the spinner is honest there).
   const is_last_turn = turn_index === total_turns - 1;
   const continues_forward = status !== "done" && !is_last_turn;
+  // Turn-local started_at: only expose it as a sort key if the start
+  // actually happened by the end of THIS turn. A task whose record has a
+  // started_at in a FUTURE turn must still be treated as pending here, so
+  // its turn-local started_at is null and it sorts by created_at.
+  const started_at_in_turn =
+    record.started_at !== null && (turnEnd === "" || record.started_at < turnEnd) ? record.started_at : null;
   return {
     ticket_id: record.ticket_id,
     title: record.title,
@@ -261,6 +280,7 @@ function makeTaskInTurn(
     is_carryover,
     continues_forward,
     created_at: record.created_at,
+    started_at: started_at_in_turn,
     // Pending tasks have no active window -- they haven't started yet,
     // so they own none of the body events. (Without this guard a pending
     // task's window would default to created_at..end-of-turn and scoop
