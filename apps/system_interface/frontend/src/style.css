@@ -1660,7 +1660,12 @@ body {
    ─────────────────────────────────────────────────────────────────── */
 
 .agent-activity-indicator {
-  display: inline-flex;
+  /* `display: flex` (not inline-flex) so the auto side-margins can
+     horizontally center the indicator within the footer; an inline-flex
+     box's auto margins do not center, so on wide screens the indicator
+     would stick to the footer's left edge instead of sitting above the
+     centered input. */
+  display: flex;
   align-items: center;
   gap: 8px;
   margin: 0 auto 8px auto;
