@@ -125,7 +125,7 @@ def browser_context_args(
     # to function scope because it transitively depends on `playwright`,
     # which we've pinned to function scope above. Without this override
     # pytest raises ScopeMismatch at setup time for every test that uses
-    # `page` / `context` (i.e. the entire minds_workspace_server e2e suite).
+    # `page` / `context` (i.e. the entire system_interface e2e suite).
     context_args: dict[str, Any] = {}
     if device:
         context_args.update(playwright.devices[device])

@@ -168,7 +168,7 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
 
 
 def _inject_base_path_meta_tag(html_content: str, root_path: str) -> str:
-    meta_tag = f'<meta name="minds-workspace-server-base-path" content="{root_path}">'
+    meta_tag = f'<meta name="system-interface-base-path" content="{root_path}">'
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 
@@ -190,7 +190,7 @@ def _read_host_name() -> str:
 
 def _inject_hostname_meta_tag(html_content: str) -> str:
     hostname = _read_host_name()
-    meta_tag = f'<meta name="minds-workspace-server-hostname" content="{hostname}">'
+    meta_tag = f'<meta name="system-interface-hostname" content="{hostname}">'
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 
@@ -796,7 +796,7 @@ async def _refresh_service_broadcast_endpoint(service_name: str, request: Reques
 def _inject_agent_id_meta_tag(html_content: str) -> str:
     """Inject the primary agent ID as a meta tag for the frontend."""
     agent_id = os.environ.get("MNGR_AGENT_ID", "")
-    meta_tag = f'<meta name="minds-workspace-server-agent-id" content="{agent_id}">'
+    meta_tag = f'<meta name="system-interface-agent-id" content="{agent_id}">'
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 

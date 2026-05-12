@@ -121,7 +121,7 @@ RUN cd /code/apps/system_interface/frontend && \
     npm ci && \
     npm run build
 
-# add mngr and minds-workspace-server as tools (both need the plugin packages
+# add mngr and system-interface as tools (both need the plugin packages
 # so they can parse plugin-specific config fields like auto_dismiss_dialogs)
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     uv tool install -e /code/apps/system_interface \

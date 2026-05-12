@@ -43,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-minds-workspace-server = "imbue.system_interface.main:main"
+system-interface = "imbue.system_interface.main:main"
 
 [build-system]
 requires = ["hatchling"]

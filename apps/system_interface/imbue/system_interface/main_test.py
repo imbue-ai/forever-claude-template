@@ -12,7 +12,7 @@ def test_main_starts_server() -> None:
         patch("imbue.system_interface.main.load_config") as mock_load_config,
         patch("imbue.system_interface.main.create_application") as mock_create_app,
         patch("imbue.system_interface.main.uvicorn") as mock_uvicorn,
-        patch("sys.argv", ["minds-workspace-server"]),
+        patch("sys.argv", ["system-interface"]),
     ):
         mock_config = Config()
         mock_load_config.return_value = mock_config
@@ -43,7 +43,7 @@ def test_main_passes_filters() -> None:
         patch(
             "sys.argv",
             [
-                "minds-workspace-server",
+                "system-interface",
                 "--provider",
                 "local",
                 "--include",

@@ -1,4 +1,4 @@
-"""Route handlers for ``/service/<name>/...`` forwarding inside minds_workspace_server.
+"""Route handlers for ``/service/<name>/...`` forwarding inside system_interface.
 
 Mirrors the pattern used by the desktop client's ``/forwarding/...`` routes
 but strictly local (all target services run on 127.0.0.1 inside the same

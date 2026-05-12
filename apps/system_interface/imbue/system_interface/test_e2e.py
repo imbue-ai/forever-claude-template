@@ -138,7 +138,7 @@ def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], N
     agent_info, session_file = _make_agent_fixture(tmp_path)
     agents = [agent_info]
 
-    config = Config(minds_workspace_server_host="127.0.0.1", minds_workspace_server_port=_PORT)
+    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
     app = create_application(config)
 
     # Patch discover_agents globally to return our mock agents
@@ -304,7 +304,7 @@ def test_tool_calls_render_as_collapsible(tmp_path: Path, page: Page) -> None:
     agent_info, _ = _make_agent_fixture(tmp_path, session_events=session_events)
     agents = [agent_info]
 
-    config = Config(minds_workspace_server_host="127.0.0.1", minds_workspace_server_port=_PORT + 1)
+    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT + 1)
     app = create_application(config)
 
     with (
@@ -378,7 +378,7 @@ def test_sse_stream_delivers_new_events(e2e_server: tuple[str, list[AgentInfo], 
 @_STALE_DOCKVIEW_SKIP
 def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
     """When there are no agents, the sidebar shows an empty message."""
-    config = Config(minds_workspace_server_host="127.0.0.1", minds_workspace_server_port=_PORT + 2)
+    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT + 2)
     app = create_application(config)
 
     with (
