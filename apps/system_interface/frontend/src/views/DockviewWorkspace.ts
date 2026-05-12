@@ -19,12 +19,14 @@ import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
+  addOpenTabListener,
   addRefreshServiceListener,
   getAgentById,
   getAgents,
   getApplications,
   getProtoAgents,
   removeAgentLocally,
+  type OpenTabListener,
   type RefreshServiceListener,
 } from "../models/AgentManager";
 
@@ -92,7 +94,13 @@ let dockviewContainer: HTMLElement | null = null;
 const panelParams = new Map<string, PanelParams>();
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let _refreshServiceListener: RefreshServiceListener | null = null;
+let _openTabListener: OpenTabListener | null = null;
 let initialized = false;
+
+// Target fraction of horizontal space that the newly-opened service panel
+// takes when it splits alongside the primary agent's chat. Picked so the
+// just-built view dominates while the chat stays legible.
+const OPEN_TAB_SPLIT_FRACTION = 0.6;
 
 function createMithrilRenderer(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -478,6 +486,83 @@ function openIframeTab(url: string, title: string, panelType: PanelType = "ifram
   });
 }
 
+/** Find the panel id of the primary agent's chat tab, or null if absent. */
+function findPrimaryChatPanelId(): string | null {
+  const primaryId = getPrimaryAgentId();
+  if (!primaryId || !dockview) return null;
+  const id = `chat-${primaryId}`;
+  return dockview.panels.find((p) => p.id === id) ? id : null;
+}
+
+/** Find an existing iframe panel for ``serviceName``, or null. */
+function findIframePanelIdForService(serviceName: string): string | null {
+  for (const [panelId, params] of panelParams) {
+    if (params.panelType === "iframe" && params.serviceName === serviceName) {
+      return panelId;
+    }
+  }
+  return null;
+}
+
+/** Handle an agent-driven open_tab broadcast for ``serviceName``.
+ *
+ *  Resolution order:
+ *    1. If a panel for ``serviceName`` is already open, focus it.
+ *    2. If the primary agent's chat panel is open, add a right-split iframe
+ *       sized to ``OPEN_TAB_SPLIT_FRACTION`` of the dockview container width.
+ *    3. Otherwise, add a plain iframe tab with dockview's default placement.
+ *  Drop silently if the service isn't registered in ``applications`` yet --
+ *  the script polls registration, but the WS broadcast itself is fire-and-
+ *  forget. */
+export function handleOpenTabRequest(serviceName: string): void {
+  if (!dockview) return;
+
+  const existingPanelId = findIframePanelIdForService(serviceName);
+  if (existingPanelId !== null) {
+    const existing = dockview.panels.find((p) => p.id === existingPanelId);
+    if (existing) {
+      dockview.setActivePanel(existing);
+    }
+    return;
+  }
+
+  const app = getApplications().find((a) => a.name === serviceName);
+  if (!app) return;
+
+  const primaryId = getPrimaryAgentId();
+  const panelId = `iframe-${primaryId}-${Date.now()}`;
+  const params: PanelParams = {
+    panelType: "iframe",
+    agentId: primaryId,
+    url: getServiceUrl(serviceName),
+    title: serviceName,
+    serviceName,
+  };
+  panelParams.set(panelId, params);
+
+  const chatPanelId = findPrimaryChatPanelId();
+  if (chatPanelId !== null) {
+    const containerWidth = dockviewContainer?.getBoundingClientRect().width ?? 0;
+    const initialWidth = containerWidth > 0 ? Math.round(containerWidth * OPEN_TAB_SPLIT_FRACTION) : undefined;
+    dockview.addPanel({
+      id: panelId,
+      component: "iframe",
+      title: serviceName,
+      params,
+      position: { referencePanel: chatPanelId, direction: "right" },
+      initialWidth,
+    });
+    return;
+  }
+
+  dockview.addPanel({
+    id: panelId,
+    component: "iframe",
+    title: serviceName,
+    params,
+  });
+}
+
 export function openIframeTabForAgent(_agentId: string, url: string, title: string): void {
   openIframeTab(url, title);
 }
@@ -718,6 +803,14 @@ function initializeDockview(parentElement: HTMLElement): void {
     reloadIframesForService(serviceName);
   };
   addRefreshServiceListener(_refreshServiceListener);
+
+  // Agent-triggered open_tab: surface a workspace service as a split-view
+  // panel alongside the primary chat. Arrives as {type: "open_tab",
+  // service_name} on the same workspace-server WebSocket.
+  _openTabListener = (serviceName: string) => {
+    handleOpenTabRequest(serviceName);
+  };
+  addOpenTabListener(_openTabListener);
 
   // Load saved layout or create default
   loadLayout().then((saved) => {

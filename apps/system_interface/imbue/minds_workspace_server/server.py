@@ -48,7 +48,6 @@ from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
 from imbue.minds_workspace_server.request_writer import KNOWN_REQUEST_TYPES
 from imbue.minds_workspace_server.request_writer import UnknownRequestTypeError
-from imbue.minds_workspace_server.request_writer import write_refresh_request
 from imbue.minds_workspace_server.request_writer import write_request_event
 from imbue.minds_workspace_server.service_dispatcher import register_service_routes
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
@@ -759,29 +758,13 @@ async def _request_event_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(content={"ok": True, "event_id": event["event_id"]})
 
 
-async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
-    """Append a refresh-service event to the agent's refresh events file.
-
-    Called by agents inside the container to tell the minds desktop client
-    that an open web-service tab should reload. The desktop client picks the
-    event up via ``mngr event --follow`` and POSTs back to the broadcast
-    endpoint below.
-    """
-    try:
-        await run_in_threadpool(write_refresh_request, service_name)
-        return JSONResponse(content={"ok": True})
-    except (RuntimeError, OSError) as e:
-        error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=500)
-
-
 async def _refresh_service_broadcast_endpoint(service_name: str, request: Request) -> JSONResponse:
     """Broadcast a refresh_service WebSocket message for the given service_name.
 
-    Called by the desktop client after it observes a refresh event on the
-    mngr event stream. Locked to loopback clients since no authentication
-    exists between the desktop client and the workspace server inside the
-    container.
+    Called by the shared agent-facing ``web_view`` script over loopback to
+    tell every connected frontend to reload any open iframe tab tied to the
+    named service. Locked to loopback clients since no authentication
+    exists between callers and the workspace server inside the container.
     """
     client_host = request.client.host if request.client is not None else ""
     if client_host not in _LOOPBACK_CLIENT_HOSTS:
@@ -790,6 +773,25 @@ async def _refresh_service_broadcast_endpoint(service_name: str, request: Reques
 
     broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
     broadcaster.broadcast_refresh_service(service_name)
+    return JSONResponse(content={"ok": True})
+
+
+async def _open_tab_broadcast_endpoint(service_name: str, request: Request) -> JSONResponse:
+    """Broadcast an open_tab WebSocket message for the given service_name.
+
+    Called by the shared agent-facing ``web_view`` script over loopback to
+    ask every connected frontend to surface the named service as a tab.
+    The frontend decides whether to focus an existing panel, split it
+    alongside the chat, or fall back to a plain tab. Locked to loopback
+    clients (same reasoning as ``refresh-service/broadcast``).
+    """
+    client_host = request.client.host if request.client is not None else ""
+    if client_host not in _LOOPBACK_CLIENT_HOSTS:
+        error = ErrorResponse(detail="open-tab broadcast is only callable from loopback")
+        return JSONResponse(content=error.model_dump(), status_code=403)
+
+    broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
+    broadcaster.broadcast_open_tab(service_name)
     return JSONResponse(content={"ok": True})
 
 
@@ -842,10 +844,10 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
     application.add_api_route("/api/permissions/request", _request_event_endpoint, methods=["POST"])
     application.add_api_route(
-        "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
+        "/api/refresh-service/{service_name}/broadcast", _refresh_service_broadcast_endpoint, methods=["POST"]
     )
     application.add_api_route(
-        "/api/refresh-service/{service_name}/broadcast", _refresh_service_broadcast_endpoint, methods=["POST"]
+        "/api/open-tab/{service_name}/broadcast", _open_tab_broadcast_endpoint, methods=["POST"]
     )
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]

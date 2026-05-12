@@ -26,25 +26,30 @@ npm install
 npm run dev
 ```
 
-## Refreshing web-service tabs from an agent
+## Surfacing and refreshing web-service tabs from an agent
 
-An agent running inside the workspace container can tell the user's Minds UI
-to reload any open tab for one of its web services. The agent POSTs to the
-workspace server on localhost (default port 8000, matching
-`Config.minds_workspace_server_port`):
+An agent running inside the workspace container can tell the workspace UI
+to either open a tab for one of its services or reload any already-open
+tab. Both flows go through the agent-facing `scripts/web_view.py` helper:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/refresh-service/web"
+# Print every registered service name (one per line).
+python3 scripts/web_view.py list
+
+# Open the given service in a tab split alongside the primary chat
+# (focuses an existing tab if one is already open).
+python3 scripts/web_view.py open web
+
+# Reload every open iframe tab for the given service.
+python3 scripts/web_view.py refresh web
 ```
 
-This appends a `refresh_service` event to the agent's
-`events/refresh/events.jsonl` file. The minds desktop client tails the event
-via `mngr event --follow`, then POSTs back to the workspace server which
-broadcasts a WebSocket message telling the frontend to reload every open
-iframe tab tied to the given service (matched by the iframe's
-`data-service-name` attribute). Replace `web` with whichever service name
-(as listed in `runtime/applications.toml` / the tab dropdown) you want to
-refresh.
+The script POSTs to loopback-only endpoints on the workspace server
+(`/api/open-tab/<name>/broadcast` and `/api/refresh-service/<name>/broadcast`)
+which emit `open_tab` / `refresh_service` messages over the workspace-server
+WebSocket. The frontend matches iframe tabs by their `data-service-name`
+attribute. Replace `web` with whichever service name (as listed in
+`runtime/applications.toml` / the tab dropdown) you want to act on.
 
 ## Building
 

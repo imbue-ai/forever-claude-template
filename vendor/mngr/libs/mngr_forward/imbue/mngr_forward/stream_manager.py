@@ -52,7 +52,6 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _SERVICES_SOURCE = "services"
 _REQUESTS_SOURCE = "requests"
-_REFRESH_SOURCE = "refresh"
 
 
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
@@ -76,7 +75,7 @@ class ForwardStreamManager(MutableModel):
         description="CEL exclude filters for which agents the plugin tracks",
     )
     event_sources: tuple[str, ...] = Field(
-        default=(_SERVICES_SOURCE, _REQUESTS_SOURCE, _REFRESH_SOURCE),
+        default=(_SERVICES_SOURCE, _REQUESTS_SOURCE),
         frozen=True,
         description="Source streams to follow per-agent (passed to ``mngr event``)",
     )

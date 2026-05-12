@@ -173,6 +173,36 @@ dockview tab bar", redirect loop, broken WebSockets), see
 [references/cross-flow-gotchas.md](references/cross-flow-gotchas.md)
 -- it's symptom-indexed.
 
+## Step 4: Surface the view to the user
+
+Once verification passes, tell the workspace UI to actually open the
+new tab. Without this step the user would have to discover it via the
+"+" dropdown -- skip the surfacing step only for services with no UI
+(pure JSON APIs, webhook receivers, etc.).
+
+```bash
+python3 scripts/web_view.py open <name>
+```
+
+`web_view.py` POSTs to a loopback-only workspace_server endpoint that
+broadcasts an `open_tab` message over its WebSocket. The frontend
+focuses the panel if a tab for `<name>` is already open, otherwise
+splits a new iframe alongside the primary chat (60% web / 40% chat).
+The script briefly waits for the service to appear in
+`runtime/applications.toml` so it's safe to run immediately after the
+`forward_port.py` call.
+
+To force a reload of an already-open tab (e.g. after redeploying the
+service) without prompting the user to click Refresh:
+
+```bash
+python3 scripts/web_view.py refresh <name>
+```
+
+`web_view.py list` prints every registered service name (one per
+line), which is useful when the user is asking about what tabs are
+available.
+
 ## Escape hatch: wrap an existing server
 
 For pre-existing third-party tools, do not scaffold a lib. Add a

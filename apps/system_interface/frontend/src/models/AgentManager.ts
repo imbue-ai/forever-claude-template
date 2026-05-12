@@ -37,14 +37,17 @@ type WsEvent =
       parent_agent_id: string | null;
     }
   | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null }
-  | { type: "refresh_service"; service_name: string };
+  | { type: "refresh_service"; service_name: string }
+  | { type: "open_tab"; service_name: string };
 
 export type RefreshServiceListener = (serviceName: string) => void;
+export type OpenTabListener = (serviceName: string) => void;
 
 let agents: AgentState[] = [];
 let applications: ApplicationEntry[] = [];
 let protoAgents: ProtoAgent[] = [];
 let refreshListeners: RefreshServiceListener[] = [];
+let openTabListeners: OpenTabListener[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let connected = false;
@@ -131,6 +134,12 @@ function handleEvent(event: WsEvent): void {
         listener(event.service_name);
       }
       break;
+
+    case "open_tab":
+      for (const listener of openTabListeners) {
+        listener(event.service_name);
+      }
+      break;
   }
 }
 
@@ -168,4 +177,12 @@ export function addRefreshServiceListener(listener: RefreshServiceListener): voi
 
 export function removeRefreshServiceListener(listener: RefreshServiceListener): void {
   refreshListeners = refreshListeners.filter((l) => l !== listener);
+}
+
+export function addOpenTabListener(listener: OpenTabListener): void {
+  openTabListeners.push(listener);
+}
+
+export function removeOpenTabListener(listener: OpenTabListener): void {
+  openTabListeners = openTabListeners.filter((l) => l !== listener);
 }
