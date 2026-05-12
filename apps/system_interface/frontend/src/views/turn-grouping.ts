@@ -213,12 +213,15 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
     }
   }
 
-  // Within a turn, sort own (non-carryover) tasks by created_at so a
-  // still-pending task created later than the in-progress task renders
-  // below it (carryovers already at the top from unshift).
+  // Within a turn, carryovers sit above own tasks; within each group sort
+  // by created_at so a later-created task renders below an earlier one.
+  // (The carryover unshift loop above happens to reverse insertion order,
+  // so without sorting carry too, multiple carryovers would render in
+  // reverse creation order.)
+  const byCreated = (a: TaskInTurn, b: TaskInTurn) => a.created_at.localeCompare(b.created_at);
   for (const turn of turns) {
-    const carry = turn.tasks.filter((t) => t.is_carryover);
-    const own = turn.tasks.filter((t) => !t.is_carryover).sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const carry = turn.tasks.filter((t) => t.is_carryover).sort(byCreated);
+    const own = turn.tasks.filter((t) => !t.is_carryover).sort(byCreated);
     turn.tasks = [...carry, ...own];
   }
 
