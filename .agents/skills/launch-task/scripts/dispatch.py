@@ -53,14 +53,25 @@ def _normalize_dir(value: str) -> str:
     return value.rstrip("/") + "/"
 
 
-def push(name: str, source_dir: str, runner: "Runner") -> None:
+class Runner:
+    """Indirection over ``subprocess.run`` so tests can intercept commands.
+
+    The default implementation calls ``subprocess.run`` directly. Tests
+    inject a recording stub instead.
+    """
+
+    def run(self, argv: Sequence[str], **kwargs):
+        return subprocess.run(list(argv), **kwargs)
+
+
+def push(name: str, source_dir: Path, runner: Runner) -> None:
     """Push ``source_dir`` into worker ``name``'s worktree at the same path.
 
     Uses the directory form (trailing slash on both sides) and
     ``--uncommitted-changes=merge`` -- see lead-proxy.md § "mngr push
     rationale" for why both are required.
     """
-    normalized = _normalize_dir(source_dir)
+    normalized = _normalize_dir(str(source_dir))
     runner.run(
         [
             "mngr",
@@ -72,17 +83,6 @@ def push(name: str, source_dir: str, runner: "Runner") -> None:
         ],
         check=True,
     )
-
-
-class Runner:
-    """Indirection over ``subprocess.run`` so tests can intercept commands.
-
-    The default implementation calls ``subprocess.run`` directly. Tests
-    inject a recording stub instead.
-    """
-
-    def run(self, argv: Sequence[str], **kwargs):
-        return subprocess.run(list(argv), **kwargs)
 
 
 def dispatch(
@@ -130,9 +130,9 @@ def dispatch(
         check=True,
     )
 
-    push(name, str(runtime_dir), runner)
+    push(name, runtime_dir, runner)
     for extra in extra_pushes:
-        push(name, str(extra), runner)
+        push(name, extra, runner)
 
     runner.run(
         [
