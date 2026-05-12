@@ -12,13 +12,20 @@
 import m from "mithril";
 import { MarkdownContent } from "../markdown";
 import type { TranscriptEvent } from "../models/Response";
-import { buildToolResultsWithSkillExpansions, renderAssistantMessageChildren } from "./message-renderers";
+import { renderAssistantMessageChildren } from "./message-renderers";
 import type { TaskInTurn, TaskUiStatus } from "./turn-grouping";
 import { eventsInTaskWindow } from "./turn-grouping";
 
 interface ProgressBlockAttrs {
   tasks: TaskInTurn[];
   body_events: TranscriptEvent[];
+  /** Prebuilt tool_call_id -> tool_result map for the WHOLE event stream,
+   *  with skill-expansion user_messages already folded into their
+   *  matching Skill tool call. ChatPanel builds this once per redraw and
+   *  threads it through so that expanding a task doesn't trigger a
+   *  per-task O(n log n) rebuild of the same map. Lookups by id work
+   *  fine even though only a subset of events is in this turn. */
+  toolResults: Map<string, TranscriptEvent>;
   /** Final assistant message text for this turn (rendered below the
    *  Timeline). */
   final_message: string | null;
@@ -58,13 +65,16 @@ function statusIcon(status: TaskUiStatus, continues_forward: boolean): m.Vnode {
   );
 }
 
-function renderExpandedTaskBody(events: TranscriptEvent[], agentId: string): m.Vnode {
+function renderExpandedTaskBody(
+  events: TranscriptEvent[],
+  toolResults: Map<string, TranscriptEvent>,
+  agentId: string,
+): m.Vnode {
   // Callers must only mount this when there are events to render
   // (ProgressBlock guards on canExpand = taskEvents.length > 0).
-  // Collect tool_results so renderAssistantMessageChildren can match them
-  // back to tool_use entries -- and fold skill-expansion user_messages
-  // into the matching Skill tool call's output.
-  const toolResults = buildToolResultsWithSkillExpansions(events);
+  // toolResults is the full prebuilt map from ChatPanel; lookups by
+  // tool_call_id work fine even though `events` is only this task's
+  // window.
 
   // Reuse renderAssistantMessageChildren so the expanded panel renders
   // assistant text + tool calls identically to the rest of the chat
@@ -93,7 +103,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
   return {
     view(vnode) {
-      const { tasks, body_events, final_message, agentId } = vnode.attrs;
+      const { tasks, body_events, toolResults, final_message, agentId } = vnode.attrs;
       if (tasks.length === 0) {
         // Defensive: callers should not mount ProgressBlock when there
         // are no tasks. Fall back to no-op.
@@ -144,7 +154,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
               ],
             ),
             task.status === "done" && task.summary ? m("div.pv-tl-summary", task.summary) : null,
-            isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, agentId)) : null,
+            isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, toolResults, agentId)) : null,
           ]),
         ]);
       });

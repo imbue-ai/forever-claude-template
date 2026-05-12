@@ -443,6 +443,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
             key: `progress-${turn.user_event.event_id}`,
             tasks: turn.tasks,
             body_events: turn.body_events,
+            toolResults,
             final_message: finalMessage,
             agentId,
           }),
