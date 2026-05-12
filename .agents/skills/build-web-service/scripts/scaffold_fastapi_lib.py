@@ -156,7 +156,7 @@ Services run from /code (the repo root). Conventions:
 
 The ``ROOT_PATH`` env var is read so FastAPI emits prefix-aware
 absolute URLs (OpenAPI links, redirects) when this app is reached
-through the workspace_server proxy at ``/service/{name}/``. The
+through the system_interface proxy at ``/service/{name}/``. The
 services.toml command sets ``ROOT_PATH=/service/{name}`` for that
 case. Standalone ``uv run {name}`` leaves it empty so the app serves
 at ``/``.
