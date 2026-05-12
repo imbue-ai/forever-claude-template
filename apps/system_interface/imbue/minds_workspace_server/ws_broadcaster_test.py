@@ -120,6 +120,16 @@ def test_broadcast_refresh_service() -> None:
     assert msg == {"type": "refresh_service", "service_name": "web"}
 
 
+def test_broadcast_open_tab() -> None:
+    broadcaster = WebSocketBroadcaster()
+    q = broadcaster.register()
+
+    broadcaster.broadcast_open_tab("web")
+
+    msg = json.loads(_get_message(q))
+    assert msg == {"type": "open_tab", "service_name": "web"}
+
+
 def test_shutdown_sends_none_sentinel() -> None:
     broadcaster = WebSocketBroadcaster()
     q = broadcaster.register()

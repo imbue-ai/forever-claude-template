@@ -7,37 +7,62 @@ import m from "mithril";
 import { MarkdownContent } from "../markdown";
 import type { TranscriptEvent, ToolCall } from "../models/Response";
 import { openSubagentTab } from "./DockviewWorkspace";
+import {
+  isCollapsibleUserMessage,
+  isHiddenUserMessage,
+  isSkillExpansionUserMessage,
+} from "./user-message-classification";
 
-export function isCollapsibleUserMessage(content: string): { label: string } | null {
-  if (content.startsWith("Stop hook feedback:\n")) {
-    return { label: "Stop hook feedback" };
+/** Build a tool_call_id -> tool_result map, merging skill-expansion
+ *  user_messages into the output of their preceding "Skill" tool call so
+ *  the SKILL.md body renders inside the same dropdown rather than as a
+ *  separate inline chip. */
+export function buildToolResultsWithSkillExpansions(events: TranscriptEvent[]): Map<string, TranscriptEvent> {
+  const sorted = [...events].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const toolResults = new Map<string, TranscriptEvent>();
+  for (const e of sorted) {
+    if (e.type === "tool_result" && e.tool_call_id) {
+      toolResults.set(e.tool_call_id, e);
+    }
   }
-  if (content.startsWith("Base directory for this skill:")) {
-    const match = content.match(/skills\/([^\n/]+)/);
-    return { label: match ? `Skill: ${match[1]}` : "Skill expansion" };
+  // Walk chronologically. Skill tool_call_ids are queued in FIFO order as
+  // they appear and matched to skill-expansion user_messages in the same
+  // order. A single assistant_message may carry multiple Skill calls; a
+  // second assistant_message may queue another Skill call before any
+  // expansion for the previous one has arrived. In both cases each
+  // expansion must land on the right call, hence a queue rather than a
+  // single "most recent" slot.
+  const pendingSkillCallIds: string[] = [];
+  for (const e of sorted) {
+    if (e.type === "assistant_message" && e.tool_calls) {
+      for (const tc of e.tool_calls) {
+        if (tc.tool_name === "Skill") {
+          pendingSkillCallIds.push(tc.tool_call_id);
+        }
+      }
+      continue;
+    }
+    if (e.type === "user_message" && isSkillExpansionUserMessage(e.content ?? "") && pendingSkillCallIds.length > 0) {
+      const targetCallId = pendingSkillCallIds.shift() as string;
+      const existing = toolResults.get(targetCallId);
+      const expansion = e.content ?? "";
+      const baseOutput = existing?.output ?? "";
+      const mergedOutput = baseOutput ? `${baseOutput}\n\n${expansion}` : expansion;
+      if (existing) {
+        toolResults.set(targetCallId, { ...existing, output: mergedOutput });
+      } else {
+        toolResults.set(targetCallId, {
+          timestamp: e.timestamp,
+          type: "tool_result",
+          event_id: `skill-expansion-${targetCallId}`,
+          source: e.source,
+          tool_call_id: targetCallId,
+          output: mergedOutput,
+        });
+      }
+    }
   }
-  return null;
-}
-
-export function isHiddenUserMessage(content: string): boolean {
-  // The minds desktop client seeds every new agent with "/welcome" as its
-  // initial message so the welcome skill can produce a friendly greeting.
-  // Claude Code expands that invocation into TWO transcript events:
-  //   1. the invocation itself, whose content wraps "/welcome" in
-  //      <command-name>.../</command-name> (plus a <command-message>...),
-  //   2. the skill expansion, which starts with
-  //      "Base directory for this skill: .../skills/welcome/..." and
-  //      carries the SKILL.md body.
-  // Hide both so the first visible turn is just the assistant's greeting.
-  // Restricted to the welcome skill specifically -- any OTHER slash
-  // command the user later runs still renders normally.
-  if (content.includes("<command-name>/welcome</command-name>")) {
-    return true;
-  }
-  if (content.startsWith("Base directory for this skill:") && /skills\/welcome(\/|\b)/.test(content)) {
-    return true;
-  }
-  return false;
+  return toolResults;
 }
 
 export function StableUserMessage(): m.Component<{ event: TranscriptEvent }> {

@@ -35,9 +35,19 @@ Valid `name:` values for this worker:
 
 ## Stage 1: Replicate
 
-1. Read the task file.
-2. Read the replay transcript it points at. Understand what tools were
-   called, with what inputs, and why.
+1. Read the task file. Pay close attention to the `## What was done`
+   description and the `## Anchors` verbatim quotes -- these are your
+   primary guide.
+2. Explore the lead's transcript with `mngr transcript $LEAD_AGENT`
+   (substitute the value parsed from frontmatter). Start with
+   `--role user --role assistant` to strip tool-call noise, and search
+   for the anchor quotes to locate the relevant turns. Then re-read
+   those turns with full tool detail (default format, scoped with
+   `--tail` once you know where to look) to understand what tools were
+   called, with what inputs, and why. The crystallize-task invocation
+   is the most recent turn in the lead's transcript; the work you are
+   crystallizing is *prior* to it. Do not crystallize the task-handoff
+   turn itself.
 3. Research the relevant APIs, libraries, and existing utilities you will
    need. Prefer reusing existing functions over reimplementing.
 4. If anything is unclear, add your question to the list you will surface

@@ -28,7 +28,9 @@ from starlette.websockets import WebSocketDisconnect
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_discovery import discover_agents
+from imbue.minds_workspace_server.agent_discovery import interrupt_agent, get_host_dir
 from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
+from imbue.minds_workspace_server.agent_discovery import read_tickets_dir_from_env_file
 from imbue.minds_workspace_server.agent_discovery import send_message
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
@@ -42,16 +44,17 @@ from imbue.minds_workspace_server.models import CreateChatRequest
 from imbue.minds_workspace_server.models import CreateWorktreeRequest
 from imbue.minds_workspace_server.models import DestroyAgentResponse
 from imbue.minds_workspace_server.models import ErrorResponse
+from imbue.minds_workspace_server.models import InterruptAgentResponse
 from imbue.minds_workspace_server.models import RandomNameResponse
 from imbue.minds_workspace_server.models import SendMessageRequest
 from imbue.minds_workspace_server.models import SendMessageResponse
 from imbue.minds_workspace_server.plugins import get_plugin_manager
 from imbue.minds_workspace_server.request_writer import KNOWN_REQUEST_TYPES
 from imbue.minds_workspace_server.request_writer import UnknownRequestTypeError
-from imbue.minds_workspace_server.request_writer import write_refresh_request
 from imbue.minds_workspace_server.request_writer import write_request_event
 from imbue.minds_workspace_server.service_dispatcher import register_service_routes
 from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
+from imbue.minds_workspace_server.tickets_watcher import AgentTicketsWatcher
 from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 
 _LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -82,6 +85,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     event_queues = AgentEventQueues()
     application.state.event_queues = event_queues
     application.state.watchers = {}
+    application.state.tickets_watchers = {}
 
     preconfigured_agent_manager: AgentManager | None = application.state.preconfigured_agent_manager
     if preconfigured_agent_manager is None:
@@ -139,15 +143,28 @@ def _stop_all_watchers(application: FastAPI) -> None:
     for watcher in watchers.values():
         watcher.stop()
     watchers.clear()
+    tickets_watchers: dict[str, AgentTicketsWatcher] = getattr(application.state, "tickets_watchers", {})
+    for tickets_watcher in tickets_watchers.values():
+        tickets_watcher.stop()
+    tickets_watchers.clear()
 
 
 def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSessionWatcher:
     """Get an existing watcher for an agent, or create one."""
     watchers: dict[str, AgentSessionWatcher] = request.app.state.watchers
     event_queues: AgentEventQueues = request.app.state.event_queues
+    agent_manager: AgentManager = request.app.state.agent_manager
 
     if agent_info.id in watchers:
         return watchers[agent_info.id]
+
+    # Single-element holder so the ``on_events`` closure can reach the watcher
+    # we are about to construct. Capturing the watcher directly (rather than
+    # looking it up in ``watchers`` by id on every event) keeps the callback
+    # self-contained: it cannot KeyError if the dict entry has since been
+    # removed, and it does not depend on the implicit invariant that the
+    # entry was already inserted before the first event fires.
+    watcher_holder: list[AgentSessionWatcher] = []
 
     def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
         # IGNORE: session events are persisted in JSONL and recoverable via
@@ -155,6 +172,12 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         # buffer would grow unboundedly for the agent's lifetime.
         for event in events:
             event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
+        # Recompute the per-agent activity state from the full transcript.
+        # The session watcher's incremental ``events`` argument only contains
+        # the newest lines, but the activity tracker needs the full transcript
+        # to detect unmatched tool_uses across turns and to read the last
+        # event's type.
+        agent_manager.update_session_events(agent_id, watcher_holder[0].get_all_events())
 
     watcher = AgentSessionWatcher(
         agent_id=agent_info.id,
@@ -162,7 +185,45 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         claude_config_dir=agent_info.claude_config_dir,
         on_events=on_events,
     )
+    watcher_holder.append(watcher)
     watchers[agent_info.id] = watcher
+    watcher.start()
+    # Seed transcript-derived activity signals once at watcher creation so the
+    # indicator does not lag a turn behind on first connect.
+    agent_manager.update_session_events(agent_info.id, watcher.get_all_events())
+    return watcher
+
+
+def _get_or_create_tickets_watcher(request: Request, agent_info: AgentInfo) -> AgentTicketsWatcher | None:
+    """Get an existing tickets watcher for an agent, or create one. Returns
+    None if the agent has no resolvable working directory (in which case
+    there's no .tickets/ to watch)."""
+    if agent_info.work_dir is None:
+        return None
+
+    tickets_watchers: dict[str, AgentTicketsWatcher] = request.app.state.tickets_watchers
+    event_queues: AgentEventQueues = request.app.state.event_queues
+
+    if agent_info.id in tickets_watchers:
+        return tickets_watchers[agent_info.id]
+
+    def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
+        # IGNORE: task events are persisted as .md files on disk and
+        # recoverable via the REST /events endpoint (which folds in the
+        # watcher's full get_all_events() on every fetch); storing them in
+        # the in-memory replay buffer would grow unboundedly for the
+        # agent's lifetime as tickets are created and updated. Mirrors the
+        # _get_or_create_watcher session-events branch.
+        for event in events:
+            event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
+
+    watcher = AgentTicketsWatcher(
+        agent_id=agent_info.id,
+        agent_name=agent_info.name,
+        tickets_dir=read_tickets_dir_from_env_file(agent_info.agent_state_dir, Path(agent_info.work_dir)),
+        on_events=on_events,
+    )
+    tickets_watchers[agent_info.id] = watcher
     watcher.start()
     return watcher
 
@@ -237,11 +298,6 @@ def _list_agents_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(content=AgentListResponse(agents=items).model_dump())
 
 
-def _get_host_dir() -> Path:
-    """Get the mngr host directory from the environment."""
-    return Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
-
-
 def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
     """Find a specific agent by ID.
 
@@ -254,7 +310,7 @@ def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
     if agent_state is None:
         return None
 
-    host_dir = _get_host_dir()
+    host_dir = get_host_dir()
     agent_state_dir = host_dir / "agents" / agent_id
     claude_config_dir = read_claude_config_dir_from_env_file(agent_state_dir)
 
@@ -274,15 +330,41 @@ def _agent_not_found_response(agent_id: str) -> JSONResponse:
     return JSONResponse(content=error.model_dump(), status_code=404)
 
 
+def _get_combined_events(request: Request, agent_info: AgentInfo) -> list[dict[str, Any]]:
+    """Merged ordered event list for an agent: main session events plus
+    task events (tk tickets). New per-source watchers can be plugged in
+    here without growing per-source merging logic in route handlers.
+    """
+    watcher = _get_or_create_watcher(request, agent_info)
+    tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
+    merged = watcher.get_all_events()
+    if tickets_watcher is not None:
+        merged.extend(tickets_watcher.get_all_events())
+    merged.sort(key=lambda e: e.get("timestamp", ""))
+    return merged
+
+
+def _backfill_slice(merged: list[dict[str, Any]], before_event_id: str, limit: int) -> list[dict[str, Any]]:
+    """Slice of `merged` containing the `limit` events immediately before
+    the event with id `before_event_id`. Returns [] if the id isn't
+    found or sits at index 0."""
+    target_idx = -1
+    for i, event in enumerate(merged):
+        if event["event_id"] == before_event_id:
+            target_idx = i
+            break
+    if target_idx <= 0:
+        return []
+    start_idx = max(0, target_idx - limit)
+    return merged[start_idx:target_idx]
+
+
 def _get_events(agent_id: str, request: Request) -> Response:
     """Get events for an agent. Supports tail-first loading and backfill."""
     agent_info = _find_agent(agent_id, request)
     if agent_info is None:
         return _agent_not_found_response(agent_id)
 
-    watcher = _get_or_create_watcher(request, agent_info)
-
-    # Check for backfill parameters
     before_event_id = request.query_params.get("before")
     limit_str = request.query_params.get("limit", str(_DEFAULT_TAIL_COUNT))
     try:
@@ -290,12 +372,8 @@ def _get_events(agent_id: str, request: Request) -> Response:
     except ValueError:
         limit = _DEFAULT_TAIL_COUNT
 
-    if before_event_id:
-        events = watcher.get_backfill_events(before_event_id, limit=limit)
-    else:
-        # Return only main-session events (not subagent events)
-        events = watcher.get_all_events()
-
+    merged = _get_combined_events(request, agent_info)
+    events = _backfill_slice(merged, before_event_id, limit) if before_event_id else merged
     return JSONResponse(content={"events": events})
 
 
@@ -306,6 +384,7 @@ def _stream_events(agent_id: str, request: Request) -> Response:
         return _agent_not_found_response(agent_id)
 
     _get_or_create_watcher(request, agent_info)
+    _get_or_create_tickets_watcher(request, agent_info)
 
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)
@@ -352,6 +431,26 @@ def _send_message_endpoint(agent_id: str, send_message_request: SendMessageReque
         return JSONResponse(content=error.model_dump(), status_code=500)
 
     return JSONResponse(content=SendMessageResponse(status="ok").model_dump())
+
+
+def _interrupt_agent_endpoint(agent_id: str, request: Request) -> JSONResponse:
+    """Interrupt an agent's current turn.
+
+    Returns 404 if the agent is unknown, 500 on interrupt failure (including
+    when the agent type does not support interrupt), 200 otherwise. Idle
+    agents return 200 because the underlying capability is a no-op when
+    nothing is running.
+    """
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    success, error_detail = interrupt_agent(agent_info.name)
+    if not success:
+        error = ErrorResponse(detail=error_detail or f"Failed to interrupt agent '{agent_info.name}'")
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    return JSONResponse(content=InterruptAgentResponse(status="ok").model_dump())
 
 
 def _get_subagent_events(agent_id: str, subagent_session_id: str, request: Request) -> Response:
@@ -426,7 +525,7 @@ def _primary_agent_layout_dir() -> Path | None:
     agent_id = os.environ.get("MNGR_AGENT_ID", "")
     if not agent_id:
         return None
-    return _get_host_dir() / "agents" / agent_id / "workspace_layout"
+    return get_host_dir() / "agents" / agent_id / "workspace_layout"
 
 
 def _get_layout() -> Response:
@@ -759,29 +858,13 @@ async def _request_event_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(content={"ok": True, "event_id": event["event_id"]})
 
 
-async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
-    """Append a refresh-service event to the agent's refresh events file.
-
-    Called by agents inside the container to tell the minds desktop client
-    that an open web-service tab should reload. The desktop client picks the
-    event up via ``mngr event --follow`` and POSTs back to the broadcast
-    endpoint below.
-    """
-    try:
-        await run_in_threadpool(write_refresh_request, service_name)
-        return JSONResponse(content={"ok": True})
-    except (RuntimeError, OSError) as e:
-        error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=500)
-
-
 async def _refresh_service_broadcast_endpoint(service_name: str, request: Request) -> JSONResponse:
     """Broadcast a refresh_service WebSocket message for the given service_name.
 
-    Called by the desktop client after it observes a refresh event on the
-    mngr event stream. Locked to loopback clients since no authentication
-    exists between the desktop client and the workspace server inside the
-    container.
+    Called by the shared agent-facing ``web_view`` script over loopback to
+    tell every connected frontend to reload any open iframe tab tied to the
+    named service. Locked to loopback clients since no authentication
+    exists between callers and the workspace server inside the container.
     """
     client_host = request.client.host if request.client is not None else ""
     if client_host not in _LOOPBACK_CLIENT_HOSTS:
@@ -790,6 +873,25 @@ async def _refresh_service_broadcast_endpoint(service_name: str, request: Reques
 
     broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
     broadcaster.broadcast_refresh_service(service_name)
+    return JSONResponse(content={"ok": True})
+
+
+async def _open_tab_broadcast_endpoint(service_name: str, request: Request) -> JSONResponse:
+    """Broadcast an open_tab WebSocket message for the given service_name.
+
+    Called by the shared agent-facing ``web_view`` script over loopback to
+    ask every connected frontend to surface the named service as a tab.
+    The frontend decides whether to focus an existing panel, split it
+    alongside the chat, or fall back to a plain tab. Locked to loopback
+    clients (same reasoning as ``refresh-service/broadcast``).
+    """
+    client_host = request.client.host if request.client is not None else ""
+    if client_host not in _LOOPBACK_CLIENT_HOSTS:
+        error = ErrorResponse(detail="open-tab broadcast is only callable from loopback")
+        return JSONResponse(content=error.model_dump(), status_code=403)
+
+    broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
+    broadcaster.broadcast_open_tab(service_name)
     return JSONResponse(content={"ok": True})
 
 
@@ -836,16 +938,17 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/events", _get_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/stream", _stream_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])
+    application.add_api_route("/api/agents/{agent_id}/interrupt", _interrupt_agent_endpoint, methods=["POST"])
     application.add_api_route("/api/layout", _get_layout, methods=["GET"])
     application.add_api_route("/api/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
     application.add_api_route("/api/permissions/request", _request_event_endpoint, methods=["POST"])
     application.add_api_route(
-        "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
+        "/api/refresh-service/{service_name}/broadcast", _refresh_service_broadcast_endpoint, methods=["POST"]
     )
     application.add_api_route(
-        "/api/refresh-service/{service_name}/broadcast", _refresh_service_broadcast_endpoint, methods=["POST"]
+        "/api/open-tab/{service_name}/broadcast", _open_tab_broadcast_endpoint, methods=["POST"]
     )
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]

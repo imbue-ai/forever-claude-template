@@ -63,11 +63,6 @@ def _get_request_events_file() -> Path:
     return _agent_state_dir() / "events" / "requests" / "events.jsonl"
 
 
-def _get_refresh_events_file() -> Path:
-    """Return the path to the refresh events file for this agent."""
-    return _agent_state_dir() / "events" / "refresh" / "events.jsonl"
-
-
 def _append_event_line(events_file: Path, event: dict[str, object]) -> None:
     """Append a single JSONL-encoded event to the given file, creating parents as needed."""
     events_file.parent.mkdir(parents=True, exist_ok=True)
@@ -115,22 +110,3 @@ def write_request_event(
     _append_event_line(_get_request_events_file(), event)
     logger.info("Wrote {} request event for agent {}", request_type, agent_id)
     return event
-
-
-def write_refresh_request(service_name: str) -> None:
-    """Write a refresh-service event to the agent's refresh events file.
-
-    Appended to ``events/refresh/events.jsonl`` (source=``refresh``). The minds
-    desktop client tails this file via ``mngr event --follow`` and turns each
-    line into a WebSocket broadcast that tells the workspace frontend to reload
-    any open tabs whose web-service name matches ``service_name``.
-    """
-    event: dict[str, object] = {
-        "timestamp": _now_iso(),
-        "type": "refresh_service",
-        "event_id": _generate_event_id(),
-        "source": "refresh",
-        "service_name": service_name,
-    }
-    _append_event_line(_get_refresh_events_file(), event)
-    logger.info("Wrote refresh event for service {}", service_name)

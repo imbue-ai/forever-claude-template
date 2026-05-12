@@ -174,6 +174,15 @@ class WebSocketBroadcaster(MutableModel):
         """Broadcast a refresh_service event telling the frontend to reload a web-service tab."""
         self.broadcast({"type": "refresh_service", "service_name": service_name})
 
+    def broadcast_open_tab(self, service_name: str) -> None:
+        """Broadcast an open_tab event telling the frontend to surface a web-service tab.
+
+        The frontend decides whether to split alongside the chat, focus an
+        existing panel, or fall back to a plain tab; this method just
+        delivers the request.
+        """
+        self.broadcast({"type": "open_tab", "service_name": service_name})
+
     def shutdown(self) -> None:
         """Signal all clients to disconnect by sending None sentinel."""
         with self._lock:

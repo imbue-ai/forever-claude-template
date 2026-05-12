@@ -1,5 +1,5 @@
 import m from "mithril";
-import { sendMessage } from "../models/Response";
+import { interruptAgent, sendMessage } from "../models/Response";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
 
@@ -61,6 +61,19 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         });
       }
 
+      async function handleInterrupt(): Promise<void> {
+        if (!agentId) {
+          return;
+        }
+        try {
+          await interruptAgent(agentId);
+        } catch (err) {
+          const reqErr = err as { response?: { detail?: string }; message?: string };
+          const detail = reqErr.response?.detail ?? reqErr.message ?? String(err);
+          console.error(`Failed to interrupt agent ${agentId}: ${detail}`);
+        }
+      }
+
       function handleKeydown(event: KeyboardEvent): void {
         if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault();
@@ -71,9 +84,9 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
       const hasMessageText = messageText.trim().length > 0;
 
       return m("div", { class: "message-input mx-auto w-full" }, [
-        m("div", { class: "message-input-box flex flex-col" }, [
+        m("div", { class: "message-input-box flex flex-row items-center" }, [
           m("textarea", {
-            class: "message-input-textbox w-full resize-none focus:outline-none",
+            class: "message-input-textbox flex-1 resize-none focus:outline-none",
             placeholder: "Type a message...",
             rows: 1,
             value: messageText,
@@ -98,7 +111,17 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
             onkeydown: handleKeydown,
           }),
           m("div", { class: "message-input-toolbar" }, [
-            m("div", { class: "message-input-toolbar-left" }),
+            m(
+              "button",
+              {
+                class: "message-input-stop-button",
+                title: "Interrupt current turn",
+                onclick: handleInterrupt,
+              },
+              m.trust(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+              ),
+            ),
             hasMessageText
               ? m(
                   "button",

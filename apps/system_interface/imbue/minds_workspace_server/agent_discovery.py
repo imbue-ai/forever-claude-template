@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from loguru import logger as _loguru_logger
@@ -9,6 +10,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.api.interrupt import interrupt_agents
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
@@ -18,6 +20,16 @@ from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.utils.env_utils import parse_env_file
 
 logger = _loguru_logger
+
+
+def get_host_dir() -> Path:
+    """Return the mngr host directory from the environment.
+
+    Falls back to ``~/.mngr`` when ``MNGR_HOST_DIR`` is unset. This is the
+    canonical resolver shared by both the API layer (``server._find_agent``)
+    and the activity-state tracker (``AgentManager``).
+    """
+    return Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
 
 
 class AgentInfo(FrozenModel):
@@ -64,6 +76,36 @@ def read_claude_config_dir_from_env_file(agent_state_dir: Path) -> Path:
     if conventional.exists():
         return conventional
     return Path.home() / ".claude"
+
+
+def read_tickets_dir_from_env_file(agent_state_dir: Path, work_dir: Path) -> Path:
+    """Resolve the TICKETS_DIR for an agent.
+
+    Priority:
+      1. ``TICKETS_DIR`` in the agent's env file at ``<agent_state_dir>/env``.
+      2. ``TICKETS_DIR`` in the workspace server's own process environment.
+      3. ``<work_dir>/.tickets`` (tk's default).
+
+    Minds sets ``TICKETS_DIR=/code/runtime/tickets`` via ``host_env`` in
+    ``.mngr/settings.toml`` so tickets ride the runtime-backup branch.
+    ``host_env`` entries are forwarded to the container's process
+    environment but are *not* written into the per-agent env file, so the
+    env-file lookup alone misses them; the os.environ fallback catches
+    that case for the co-located workspace server.
+    """
+    env_file = agent_state_dir / "env"
+    if env_file.exists():
+        try:
+            env_vars = parse_env_file(env_file.read_text())
+            tickets_dir = env_vars.get("TICKETS_DIR", "").strip()
+            if tickets_dir:
+                return Path(tickets_dir)
+        except OSError:
+            logger.debug("Failed to read env file: {}", env_file)
+    process_env_value = os.environ.get("TICKETS_DIR", "").strip()
+    if process_env_value:
+        return Path(process_env_value)
+    return work_dir / ".tickets"
 
 
 def discover_agents(
@@ -128,3 +170,21 @@ def send_message(agent_name: str, message: str) -> bool:
     finally:
         cg.__exit__(None, None, None)
     return len(result.successful_agents) > 0
+
+
+def interrupt_agent(agent_name: str) -> tuple[bool, str | None]:
+    """Interrupt an agent's current turn. Returns (success, error_detail_or_None)."""
+    mngr_ctx, cg = _get_mngr_context()
+    try:
+        result = interrupt_agents(
+            mngr_ctx=mngr_ctx,
+            include_filters=(f'(name == "{agent_name}" || id == "{agent_name}")',),
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
+    finally:
+        cg.__exit__(None, None, None)
+    if len(result.successful_agents) > 0:
+        return True, None
+    if len(result.failed_agents) > 0:
+        return False, result.failed_agents[0][1]
+    return False, "No matching agent found"

@@ -48,9 +48,9 @@ Then:
 - Worker agent name: `update-$TARGET`
 - Worker branch: `mngr/update-$TARGET`
 - Runtime path: `runtime/update/$TARGET/`
-- Task file: `runtime/update/$TARGET/task.md` (sits alongside `turn.jsonl`
-  / `commit.diff` so the absorb / verify `mngr push` syncs it to the
-  worker for free)
+- Task file: `runtime/update/$TARGET/task.md` (the verify flow stages
+  `commit.diff` / `commit.log` alongside; the absorb flow ships only the
+  task file)
 
 ## Step 1: Open a tracking ticket
 
