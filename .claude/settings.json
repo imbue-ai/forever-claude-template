@@ -63,7 +63,7 @@
           },
           {
             "type": "command",
-            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_open_tickets_stop_nudge.sh"
+            "command": "[ -n \"$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD\" ] && exit 0; ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_open_tickets_stop_nudge.sh"
           }
         ]
       }
