@@ -43,6 +43,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.backend_resolver import REFRESH_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import SERVICES_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecord
@@ -502,7 +503,7 @@ class EnvelopeStreamConsumer(MutableModel):
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_provider_error callback failed for {}: {}", provider_name, e)
 
-    # -- Per-agent event lines (services / requests) ----------------------
+    # -- Per-agent event lines (services / requests / refresh) ------------
 
     def _handle_event_payload(self, agent_id: AgentId, payload: dict[str, Any]) -> None:
         source = payload.get("source", "")
@@ -510,6 +511,10 @@ class EnvelopeStreamConsumer(MutableModel):
         if source == REQUESTS_EVENT_SOURCE_NAME:
             raw_line = json.dumps(payload, separators=(",", ":"))
             self.resolver.fire_on_request(aid_str, raw_line)
+            return
+        if source == REFRESH_EVENT_SOURCE_NAME:
+            raw_line = json.dumps(payload, separators=(",", ":"))
+            self.resolver.fire_on_refresh(aid_str, raw_line)
             return
         if source != SERVICES_EVENT_SOURCE_NAME:
             return
