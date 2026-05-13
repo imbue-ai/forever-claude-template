@@ -19,15 +19,14 @@ import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
-  addOpenTabListener,
-  addRefreshServiceListener,
+  addLayoutOpListener,
   getAgentById,
   getAgents,
   getApplications,
   getProtoAgents,
   removeAgentLocally,
-  type OpenTabListener,
-  type RefreshServiceListener,
+  type LayoutOpEvent,
+  type LayoutOpListener,
 } from "../models/AgentManager";
 
 const AUTOSAVE_DEBOUNCE_MS = 1500;
@@ -93,8 +92,7 @@ let dockview: DockviewComponent | null = null;
 let dockviewContainer: HTMLElement | null = null;
 const panelParams = new Map<string, PanelParams>();
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let _refreshServiceListener: RefreshServiceListener | null = null;
-let _openTabListener: OpenTabListener | null = null;
+let _layoutOpListener: LayoutOpListener | null = null;
 let initialized = false;
 
 // Target fraction of horizontal space that the newly-opened service panel
@@ -699,6 +697,401 @@ async function loadLayout(): Promise<SavedLayout | null> {
   }
 }
 
+// ---------- Agent-driven layout op handlers ----------
+
+/** First eight hex chars of the panel id's SHA-256, matching the
+ *  server-side ``_short_hash`` used to build ``terminal:`` / ``url:`` refs. */
+async function shortHash(panelId: string): Promise<string> {
+  const data = new TextEncoder().encode(panelId);
+  const buffer = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(buffer);
+  let hex = "";
+  for (let i = 0; i < 4; i++) {
+    hex += bytes[i].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+/** Map a ``direction`` from the layout op (left/right/above/below) onto
+ *  dockview's ``Position`` enum used by ``panel.api.moveTo``. */
+function directionToPosition(direction: string): "top" | "bottom" | "left" | "right" {
+  switch (direction) {
+    case "above":
+      return "top";
+    case "below":
+      return "bottom";
+    case "left":
+      return "left";
+    case "right":
+      return "right";
+    default:
+      return "right";
+  }
+}
+
+/** Resolve a layout-op ref (or the literal "self") to a live dockview
+ *  panel id. Returns null when no matching panel is currently open --
+ *  callers decide whether that's fatal (close/focus) or a no-op cue to
+ *  fall back to a creation path (open/split). */
+async function resolveRefToPanelId(ref: string): Promise<string | null> {
+  if (!dockview) return null;
+  if (ref === "self") {
+    // ``self`` is the caller's chat panel. Each workspace_server serves
+    // exactly one primary mngr agent, and the layout helper script
+    // always POSTs to its local server, so ``self`` resolves to that
+    // primary chat tab.
+    const primaryId = getPrimaryAgentId();
+    const candidate = `chat-${primaryId}`;
+    return dockview.panels.find((p) => p.id === candidate) ? candidate : null;
+  }
+  if (ref.startsWith("service:")) {
+    const serviceName = ref.substring("service:".length);
+    for (const [panelId, p] of panelParams) {
+      if (p.panelType === "iframe" && p.serviceName === serviceName) return panelId;
+    }
+    return null;
+  }
+  if (ref.startsWith("chat:")) {
+    const agentName = ref.substring("chat:".length);
+    const agent = getAgents().find((a) => a.name === agentName);
+    if (!agent) return null;
+    const candidate = `chat-${agent.id}`;
+    return dockview.panels.find((p) => p.id === candidate) ? candidate : null;
+  }
+  if (ref.startsWith("subagent:")) {
+    const sessionId = ref.substring("subagent:".length);
+    for (const [panelId, p] of panelParams) {
+      if (p.panelType === "subagent" && p.subagentSessionId === sessionId) return panelId;
+    }
+    return null;
+  }
+  if (ref.startsWith("url:") || ref.startsWith("terminal:")) {
+    const hash = ref.split(":")[1] ?? "";
+    for (const panelId of panelParams.keys()) {
+      const candidateHash = await shortHash(panelId);
+      if (candidateHash === hash) return panelId;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Resolve a ``service:<name>[/<path>]`` shorthand URL (sent by
+ *  ``replace-url``) to the on-origin ``/service/<name>/<path>`` path that
+ *  the dispatcher serves. Plain ``https://`` URLs pass through. */
+function resolveReplaceUrl(url: string): string {
+  if (url.startsWith("service:")) {
+    const remainder = url.substring("service:".length);
+    const slashIndex = remainder.indexOf("/");
+    if (slashIndex === -1) return getServiceUrl(remainder);
+    const serviceName = remainder.substring(0, slashIndex);
+    const path = remainder.substring(slashIndex + 1);
+    return `/service/${serviceName}/${path}`;
+  }
+  return url;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+async function handleLayoutOp(event: LayoutOpEvent): Promise<void> {
+  if (!dockview) return;
+  switch (event.op) {
+    case "open":
+      await handleOpen(event.args);
+      return;
+    case "focus":
+      await handleFocus(event.args);
+      return;
+    case "split":
+      await handleSplit(event.args);
+      return;
+    case "close":
+      await handleClose(event.args);
+      return;
+    case "move":
+      await handleMove(event.args);
+      return;
+    case "rename":
+      await handleRename(event.args);
+      return;
+    case "maximize":
+      await handleMaximize(event.args);
+      return;
+    case "restore":
+      handleRestore();
+      return;
+    case "replace-url":
+      await handleReplaceUrl(event.args);
+      return;
+    case "refresh":
+      await handleRefresh(event.args);
+      return;
+  }
+}
+
+async function handleOpen(args: Record<string, unknown>): Promise<void> {
+  const ref = asString(args.ref);
+  if (!ref || !dockview) return;
+  const existing = await resolveRefToPanelId(ref);
+  if (existing !== null) {
+    const panel = dockview.panels.find((p) => p.id === existing);
+    if (panel) dockview.setActivePanel(panel);
+    return;
+  }
+  if (ref.startsWith("service:")) {
+    handleOpenTabRequest(ref.substring("service:".length));
+    return;
+  }
+  if (ref.startsWith("chat:")) {
+    const agentName = ref.substring("chat:".length);
+    const agent = getAgents().find((a) => a.name === agentName);
+    if (agent) addChatPanel(agent.id, agent.name);
+    return;
+  }
+  // Other ref kinds (subagent/terminal/url) are not creatable from an
+  // ``open`` op: their stable refs only exist after creation through
+  // the surrounding code paths (e.g. SubagentView, "New URL" dialog).
+}
+
+async function handleFocus(args: Record<string, unknown>): Promise<void> {
+  if (!dockview) return;
+  const ref = asString(args.ref);
+  if (!ref) return;
+  const panelId = await resolveRefToPanelId(ref);
+  if (panelId === null) return;
+  const panel = dockview.panels.find((p) => p.id === panelId);
+  if (panel) dockview.setActivePanel(panel);
+}
+
+async function handleSplit(args: Record<string, unknown>): Promise<void> {
+  if (!dockview) return;
+  const ref = asString(args.ref);
+  const relativeTo = asString(args.relative_to);
+  const direction = asString(args.direction) ?? "right";
+  const ratio = asNumber(args.ratio);
+  if (!ref || !relativeTo) return;
+
+  const referencePanelId = await resolveRefToPanelId(relativeTo);
+  if (referencePanelId === null) return;
+
+  if (!ref.startsWith("service:") && !ref.startsWith("chat:")) {
+    // ``split`` only creates new service/chat panels in v1; terminal,
+    // subagent, and ad-hoc URL panels are created through other UI
+    // paths and addressed by short-hash refs once they exist.
+    return;
+  }
+
+  const containerRect = dockviewContainer?.getBoundingClientRect();
+  const sizes = computeInitialSize(direction, ratio, containerRect);
+
+  if (ref.startsWith("service:")) {
+    const serviceName = ref.substring("service:".length);
+    const primaryId = getPrimaryAgentId();
+    const panelId = `iframe-${primaryId}-${Date.now()}`;
+    const params: PanelParams = {
+      panelType: "iframe",
+      agentId: primaryId,
+      url: getServiceUrl(serviceName),
+      title: serviceName,
+      serviceName,
+    };
+    panelParams.set(panelId, params);
+    dockview.addPanel({
+      id: panelId,
+      component: "iframe",
+      title: serviceName,
+      params,
+      position: { referencePanel: referencePanelId, direction: directionFromArg(direction) },
+      ...sizes,
+    });
+    return;
+  }
+  // ref starts with "chat:"
+  const agentName = ref.substring("chat:".length);
+  const agent = getAgents().find((a) => a.name === agentName);
+  if (!agent) return;
+  const panelId = `chat-${agent.id}`;
+  if (dockview.panels.some((p) => p.id === panelId)) return;
+  const params: PanelParams = { panelType: "chat", agentId: agent.id, chatAgentId: agent.id };
+  panelParams.set(panelId, params);
+  dockview.addPanel({
+    id: panelId,
+    component: "chat",
+    title: agent.name,
+    params,
+    renderer: "always",
+    position: { referencePanel: referencePanelId, direction: directionFromArg(direction) },
+    ...sizes,
+  });
+}
+
+function directionFromArg(direction: string): "left" | "right" | "above" | "below" {
+  if (direction === "left" || direction === "right" || direction === "above" || direction === "below") {
+    return direction;
+  }
+  return "right";
+}
+
+function computeInitialSize(
+  direction: string,
+  ratio: number | null,
+  containerRect: DOMRect | undefined,
+): { initialWidth?: number; initialHeight?: number } {
+  if (ratio === null || !containerRect) return {};
+  if (direction === "above" || direction === "below") {
+    const h = containerRect.height > 0 ? Math.round(containerRect.height * ratio) : undefined;
+    return h ? { initialHeight: h } : {};
+  }
+  const w = containerRect.width > 0 ? Math.round(containerRect.width * ratio) : undefined;
+  return w ? { initialWidth: w } : {};
+}
+
+async function handleClose(args: Record<string, unknown>): Promise<void> {
+  if (!dockview) return;
+  const ref = asString(args.ref);
+  if (!ref) return;
+  const panelId = await resolveRefToPanelId(ref);
+  if (panelId === null) return;
+  const panel = dockview.panels.find((p) => p.id === panelId);
+  if (panel) dockview.removePanel(panel);
+}
+
+async function handleMove(args: Record<string, unknown>): Promise<void> {
+  if (!dockview) return;
+  const ref = asString(args.ref);
+  const relativeTo = asString(args.relative_to);
+  const direction = asString(args.direction);
+  if (!ref || !relativeTo || !direction) return;
+  const targetPanelId = await resolveRefToPanelId(ref);
+  const referencePanelId = await resolveRefToPanelId(relativeTo);
+  if (targetPanelId === null || referencePanelId === null) return;
+  const targetPanel = dockview.panels.find((p) => p.id === targetPanelId);
+  const referencePanel = dockview.panels.find((p) => p.id === referencePanelId);
+  if (!targetPanel || !referencePanel) return;
+  targetPanel.api.moveTo({
+    group: referencePanel.api.group,
+    position: directionToPosition(direction),
+  });
+}
+
+async function handleRename(args: Record<string, unknown>): Promise<void> {
+  if (!dockview) return;
+  const ref = asString(args.ref);
+  const title = asString(args.title);
+  if (!ref || !title) return;
+  const panelId = await resolveRefToPanelId(ref);
+  if (panelId === null) return;
+  const panel = dockview.panels.find((p) => p.id === panelId);
+  if (!panel) return;
+  panel.api.setTitle(title);
+  const params = panelParams.get(panelId);
+  if (params) {
+    params.title = title;
+  }
+}
+
+async function handleMaximize(args: Record<string, unknown>): Promise<void> {
+  if (!dockview) return;
+  const ref = asString(args.ref);
+  if (!ref) return;
+  const panelId = await resolveRefToPanelId(ref);
+  if (panelId === null) return;
+  const panel = dockview.panels.find((p) => p.id === panelId);
+  if (panel) panel.api.maximize();
+}
+
+function handleRestore(): void {
+  if (!dockview) return;
+  for (const panel of dockview.panels) {
+    if (panel.api.isMaximized()) {
+      panel.api.exitMaximized();
+      return;
+    }
+  }
+}
+
+async function handleReplaceUrl(args: Record<string, unknown>): Promise<void> {
+  const ref = asString(args.ref);
+  const url = asString(args.url);
+  if (!ref || !url) return;
+  const panelId = await resolveRefToPanelId(ref);
+  if (panelId === null) return;
+  const params = panelParams.get(panelId);
+  if (!params || params.panelType !== "iframe") return;
+  params.url = resolveReplaceUrl(url);
+  m.redraw();
+  scheduleSave();
+}
+
+async function handleRefresh(args: Record<string, unknown>): Promise<void> {
+  const ref = asString(args.ref);
+  if (!ref) return;
+  if (ref.startsWith("service:")) {
+    reloadIframesForService(ref.substring("service:".length));
+    return;
+  }
+  const panelId = await resolveRefToPanelId(ref);
+  if (panelId === null) return;
+  const params = panelParams.get(panelId);
+  if (!params || params.panelType !== "iframe") return;
+  // Single-panel reload by tagging an opaque sentinel attribute so the
+  // existing data-service-name-driven reload pathway hits exactly this
+  // iframe. Use a fresh attr per call to avoid clobbering real services.
+  const iframe = document.querySelector<HTMLIFrameElement>(`iframe[data-panel-id="${CSS.escape(panelId)}"]`);
+  if (iframe) {
+    try {
+      const win = iframe.contentWindow;
+      if (win !== null) {
+        win.location.reload();
+        return;
+      }
+    } catch {
+      // Cross-origin: fall through to src reassignment.
+    }
+    const currentSrc = iframe.getAttribute("src");
+    if (currentSrc !== null) iframe.setAttribute("src", currentSrc);
+  }
+}
+
+/** Build a dockview content renderer for an iframe panel that re-reads
+ *  ``panelParams[panelId]`` on every mithril redraw. This keeps the
+ *  iframe in sync with agent-driven mutations to ``url``/``title`` so
+ *  ``replace-url`` doesn't need to remove-and-recreate the panel. */
+function createReactiveIframeRenderer(panelId: string): IContentRenderer {
+  const element = document.createElement("div");
+  element.style.width = "100%";
+  element.style.height = "100%";
+  element.style.display = "flex";
+  element.style.flexDirection = "column";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const iframePanelComponent: m.ComponentTypes<any, any> = IframePanel;
+  return {
+    element,
+    init() {
+      m.mount(element, {
+        view: () => {
+          const p = panelParams.get(panelId);
+          return m(iframePanelComponent, {
+            url: p?.url ?? "",
+            title: p?.title ?? "Tab",
+            serviceName: p?.serviceName,
+            panelId,
+          });
+        },
+      });
+    },
+    dispose() {
+      m.mount(element, null);
+    },
+  };
+}
+
 function initializeDockview(parentElement: HTMLElement): void {
   if (initialized) return;
   initialized = true;
@@ -743,11 +1136,11 @@ function initializeDockview(parentElement: HTMLElement): void {
           });
 
         case "iframe":
-          return createMithrilRenderer(IframePanel, {
-            url: params?.url ?? "",
-            title: params?.title ?? "Tab",
-            serviceName: params?.serviceName,
-          });
+          // Pull live values out of ``panelParams`` on every redraw so an
+          // agent-driven ``replace-url`` (which mutates the stored
+          // params) re-renders the iframe with the new src instead of
+          // staying frozen on the initial url captured at mount time.
+          return createReactiveIframeRenderer(options.id);
 
         case "subagent":
           return createMithrilRenderer(SubagentView, {
@@ -795,22 +1188,13 @@ function initializeDockview(parentElement: HTMLElement): void {
     }
   });
 
-  // Agent-triggered refresh: reload every open iframe tab whose
-  // data-service-name attribute matches the service_name the agent named.
-  // This arrives over the existing workspace server WebSocket as
-  // {type: "refresh_service", service_name}.
-  _refreshServiceListener = (serviceName: string) => {
-    reloadIframesForService(serviceName);
+  // Agent-driven layout ops arrive as {type: "layout_op", op, args} on
+  // the workspace-server WebSocket. ``scripts/layout.py`` is the source
+  // of those messages; per-op handlers below dispatch on ``event.op``.
+  _layoutOpListener = (event: LayoutOpEvent) => {
+    void handleLayoutOp(event);
   };
-  addRefreshServiceListener(_refreshServiceListener);
-
-  // Agent-triggered open_tab: surface a workspace service as a split-view
-  // panel alongside the primary chat. Arrives as {type: "open_tab",
-  // service_name} on the same workspace-server WebSocket.
-  _openTabListener = (serviceName: string) => {
-    handleOpenTabRequest(serviceName);
-  };
-  addOpenTabListener(_openTabListener);
+  addLayoutOpListener(_layoutOpListener);
 
   // Load saved layout or create default
   loadLayout().then((saved) => {

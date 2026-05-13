@@ -170,18 +170,15 @@ class WebSocketBroadcaster(MutableModel):
             }
         )
 
-    def broadcast_refresh_service(self, service_name: str) -> None:
-        """Broadcast a refresh_service event telling the frontend to reload a web-service tab."""
-        self.broadcast({"type": "refresh_service", "service_name": service_name})
+    def broadcast_layout_op(self, op: str, args: dict[str, Any]) -> None:
+        """Broadcast a layout_op event telling the frontend to mutate the dockview layout.
 
-    def broadcast_open_tab(self, service_name: str) -> None:
-        """Broadcast an open_tab event telling the frontend to surface a web-service tab.
-
-        The frontend decides whether to split alongside the chat, focus an
-        existing panel, or fall back to a plain tab; this method just
-        delivers the request.
+        The frontend dispatches on ``op`` (e.g. ``open``, ``focus``, ``split``,
+        ``move``, ``close``, ``rename``, ``maximize``, ``restore``, ``replace-url``,
+        ``refresh``) and applies the corresponding dockview primitive. ``args`` is
+        an op-specific payload (e.g. ``{"service_name": "web"}`` for ``open``).
         """
-        self.broadcast({"type": "open_tab", "service_name": service_name})
+        self.broadcast({"type": "layout_op", "op": op, "args": args})
 
     def shutdown(self) -> None:
         """Signal all clients to disconnect by sending None sentinel."""

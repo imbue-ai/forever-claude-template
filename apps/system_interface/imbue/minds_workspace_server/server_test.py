@@ -289,49 +289,166 @@ def test_websocket_endpoint_sends_initial_snapshot(client: TestClient) -> None:
 
 
 @pytest.mark.timeout(10)
-def test_refresh_service_broadcast_emits_ws_message(app: FastAPI) -> None:
-    """POST /api/refresh-service/{service_name}/broadcast sends a refresh_service WS message."""
+def test_layout_broadcast_open_emits_ws_message(app: FastAPI) -> None:
+    """POST /api/layout/broadcast with op=open emits a layout_op WS message."""
     with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
         with loopback_client.websocket_connect("/api/ws") as ws:
             # Drain the initial snapshot messages.
             json.loads(ws.receive_text())
             json.loads(ws.receive_text())
 
-            response = loopback_client.post("/api/refresh-service/web/broadcast")
+            response = loopback_client.post(
+                "/api/layout/broadcast",
+                json={"op": "open", "args": {"ref": "service:web"}, "agent_id": "agent-42"},
+            )
             assert response.status_code == 200
 
             msg = json.loads(ws.receive_text())
-            assert msg == {"type": "refresh_service", "service_name": "web"}
-
-
-def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
-    """The broadcast endpoint refuses requests whose client host isn't loopback."""
-    with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
-        response = remote_client.post("/api/refresh-service/web/broadcast")
-    assert response.status_code == 403
+            assert msg == {"type": "layout_op", "op": "open", "args": {"ref": "service:web"}}
 
 
 @pytest.mark.timeout(10)
-def test_open_tab_broadcast_emits_ws_message(app: FastAPI) -> None:
-    """POST /api/open-tab/{service_name}/broadcast sends an open_tab WS message."""
+def test_layout_broadcast_refresh_bypasses_mutex(app: FastAPI) -> None:
+    """``refresh`` is read-only and never acquires the mutex."""
     with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
         with loopback_client.websocket_connect("/api/ws") as ws:
-            # Drain the initial snapshot messages.
             json.loads(ws.receive_text())
             json.loads(ws.receive_text())
 
-            response = loopback_client.post("/api/open-tab/web/broadcast")
+            response = loopback_client.post(
+                "/api/layout/broadcast",
+                json={"op": "refresh", "args": {"ref": "service:web"}, "agent_id": "agent-42"},
+            )
             assert response.status_code == 200
-
             msg = json.loads(ws.receive_text())
-            assert msg == {"type": "open_tab", "service_name": "web"}
+            assert msg == {"type": "layout_op", "op": "refresh", "args": {"ref": "service:web"}}
 
 
-def test_open_tab_broadcast_rejects_non_loopback(app: FastAPI) -> None:
-    """The open-tab broadcast endpoint refuses non-loopback callers."""
+def test_layout_broadcast_rejects_non_loopback(app: FastAPI) -> None:
+    """The layout broadcast endpoint refuses non-loopback callers."""
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
-        response = remote_client.post("/api/open-tab/web/broadcast")
+        response = remote_client.post(
+            "/api/layout/broadcast",
+            json={"op": "open", "args": {"ref": "service:web"}, "agent_id": "agent-42"},
+        )
     assert response.status_code == 403
+
+
+def test_layout_broadcast_rejects_unknown_op(app: FastAPI) -> None:
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "explode", "args": {}, "agent_id": "agent-42"},
+        )
+    assert response.status_code == 400
+    assert "Unknown layout op" in response.json()["detail"]
+
+
+def test_layout_broadcast_rejects_non_dict_args(app: FastAPI) -> None:
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "open", "args": ["not", "a", "dict"], "agent_id": "agent-42"},
+        )
+    assert response.status_code == 400
+
+
+def test_layout_broadcast_mutex_returns_409_with_holder_metadata(app: FastAPI) -> None:
+    """While agent A holds the mutex, agent B's mutating op is rejected with 409."""
+    from imbue.minds_workspace_server.layout_ops import LayoutMutex
+
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        # Pre-acquire the mutex on behalf of agent-a so the test's request
+        # races against an active holder deterministically (no thread timing).
+        mutex: LayoutMutex = app.state.layout_mutex
+        held = mutex.try_acquire("agent-a", "move", {"ref": "service:web"})
+        assert held is None
+
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "split", "args": {"ref": "service:api"}, "agent_id": "agent-b"},
+        )
+    assert response.status_code == 409
+    body = response.json()
+    assert body["retry_after_ms"] > 0
+    in_flight = body["in_flight"]
+    assert in_flight["agent_id"] == "agent-a"
+    assert in_flight["operation"] == "move"
+    assert in_flight["args"] == {"ref": "service:web"}
+
+
+def test_layout_broadcast_inspect_reads_layout_json(
+    app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``inspect`` returns a ref-resolved summary of the saved layout."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-42")
+    layout_dir = tmp_path / "agents" / "agent-42" / "workspace_layout"
+    layout_dir.mkdir(parents=True)
+    (layout_dir / "layout.json").write_text(
+        json.dumps(
+            {
+                "dockview": {
+                    "panels": {
+                        "panel-1": {"id": "panel-1", "title": "web"},
+                        "panel-2": {"id": "panel-2", "title": "chat"},
+                    },
+                    "grid": {
+                        "root": {
+                            "type": "leaf",
+                            "data": {"views": ["panel-1", "panel-2"], "activeView": "panel-1", "size": 1.0},
+                        },
+                    },
+                },
+                "panelParams": {
+                    "panel-1": {"panelType": "iframe", "serviceName": "web"},
+                    "panel-2": {"panelType": "chat", "chatAgentId": "agent-42"},
+                },
+            }
+        )
+    )
+
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "inspect", "args": {}, "agent_id": "agent-42"},
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    layout_summary = payload["layout"]
+    refs = [p["ref"] for p in layout_summary["panels"]]
+    assert "service:web" in refs
+
+
+def test_layout_broadcast_list_includes_open_flag(
+    app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``list`` reads the saved layout to compute ``is_open`` per service."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-42")
+    layout_dir = tmp_path / "agents" / "agent-42" / "workspace_layout"
+    layout_dir.mkdir(parents=True)
+    (layout_dir / "layout.json").write_text(
+        json.dumps(
+            {
+                "dockview": {"panels": {"panel-1": {"id": "panel-1", "title": "web"}}},
+                "panelParams": {"panel-1": {"panelType": "iframe", "serviceName": "web"}},
+            }
+        )
+    )
+
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "list", "args": {}, "agent_id": "agent-42"},
+        )
+    assert response.status_code == 200
+    entries = response.json()["entries"]
+    # We don't know what services the agent_manager seeded; assert the
+    # endpoint shape and that ``is_open`` is bool-typed if any entry exists.
+    for entry in entries:
+        assert set(entry.keys()) == {"ref", "kind", "display_name", "is_open", "is_running"}
+        assert isinstance(entry["is_open"], bool)
 
 
 @pytest.mark.timeout(5)

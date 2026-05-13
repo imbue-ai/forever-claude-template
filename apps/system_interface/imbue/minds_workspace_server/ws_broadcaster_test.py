@@ -110,24 +110,26 @@ def test_broadcast_proto_agent_completed() -> None:
     assert msg["error"] is None
 
 
-def test_broadcast_refresh_service() -> None:
+def test_broadcast_layout_op_open() -> None:
     broadcaster = WebSocketBroadcaster()
     q = broadcaster.register()
 
-    broadcaster.broadcast_refresh_service("web")
+    broadcaster.broadcast_layout_op("open", {"ref": "service:web"})
 
     msg = json.loads(_get_message(q))
-    assert msg == {"type": "refresh_service", "service_name": "web"}
+    assert msg == {"type": "layout_op", "op": "open", "args": {"ref": "service:web"}}
 
 
-def test_broadcast_open_tab() -> None:
+def test_broadcast_layout_op_passes_args_through_unchanged() -> None:
+    """Each op gets a distinct ``args`` payload; the broadcaster should not interpret it."""
     broadcaster = WebSocketBroadcaster()
     q = broadcaster.register()
 
-    broadcaster.broadcast_open_tab("web")
+    payload = {"ref": "service:web", "relative_to": "chat:alice", "direction": "right", "ratio": 0.5}
+    broadcaster.broadcast_layout_op("split", payload)
 
     msg = json.loads(_get_message(q))
-    assert msg == {"type": "open_tab", "service_name": "web"}
+    assert msg == {"type": "layout_op", "op": "split", "args": payload}
 
 
 def test_shutdown_sends_none_sentinel() -> None:

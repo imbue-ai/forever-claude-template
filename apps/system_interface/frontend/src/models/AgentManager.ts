@@ -26,6 +26,28 @@ export interface ProtoAgent {
   parent_agent_id: string | null;
 }
 
+// Names of the layout-mutation ops the agent-facing ``scripts/layout.py``
+// helper can emit. The frontend dispatches on this in DockviewWorkspace.
+export type LayoutOpName =
+  | "open"
+  | "focus"
+  | "split"
+  | "close"
+  | "move"
+  | "rename"
+  | "maximize"
+  | "restore"
+  | "replace-url"
+  | "refresh";
+
+export interface LayoutOpEvent {
+  op: LayoutOpName;
+  // Op-specific arguments. Shape is verified at the call site (DockviewWorkspace)
+  // rather than at the listener boundary -- the WS broadcast is the source of
+  // truth and ``scripts/layout.py`` enforces shape before broadcasting.
+  args: Record<string, unknown>;
+}
+
 type WsEvent =
   | { type: "agents_updated"; agents: AgentState[] }
   | { type: "applications_updated"; applications: ApplicationEntry[] }
@@ -37,17 +59,14 @@ type WsEvent =
       parent_agent_id: string | null;
     }
   | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null }
-  | { type: "refresh_service"; service_name: string }
-  | { type: "open_tab"; service_name: string };
+  | { type: "layout_op"; op: LayoutOpName; args: Record<string, unknown> };
 
-export type RefreshServiceListener = (serviceName: string) => void;
-export type OpenTabListener = (serviceName: string) => void;
+export type LayoutOpListener = (event: LayoutOpEvent) => void;
 
 let agents: AgentState[] = [];
 let applications: ApplicationEntry[] = [];
 let protoAgents: ProtoAgent[] = [];
-let refreshListeners: RefreshServiceListener[] = [];
-let openTabListeners: OpenTabListener[] = [];
+let layoutOpListeners: LayoutOpListener[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let connected = false;
@@ -129,15 +148,9 @@ function handleEvent(event: WsEvent): void {
       break;
     }
 
-    case "refresh_service":
-      for (const listener of refreshListeners) {
-        listener(event.service_name);
-      }
-      break;
-
-    case "open_tab":
-      for (const listener of openTabListeners) {
-        listener(event.service_name);
+    case "layout_op":
+      for (const listener of layoutOpListeners) {
+        listener({ op: event.op, args: event.args });
       }
       break;
   }
@@ -171,18 +184,10 @@ export function getProtoAgents(): ProtoAgent[] {
   return protoAgents;
 }
 
-export function addRefreshServiceListener(listener: RefreshServiceListener): void {
-  refreshListeners.push(listener);
+export function addLayoutOpListener(listener: LayoutOpListener): void {
+  layoutOpListeners.push(listener);
 }
 
-export function removeRefreshServiceListener(listener: RefreshServiceListener): void {
-  refreshListeners = refreshListeners.filter((l) => l !== listener);
-}
-
-export function addOpenTabListener(listener: OpenTabListener): void {
-  openTabListeners.push(listener);
-}
-
-export function removeOpenTabListener(listener: OpenTabListener): void {
-  openTabListeners = openTabListeners.filter((l) => l !== listener);
+export function removeLayoutOpListener(listener: LayoutOpListener): void {
+  layoutOpListeners = layoutOpListeners.filter((l) => l !== listener);
 }
