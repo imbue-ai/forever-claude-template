@@ -164,6 +164,44 @@ def test_split_passes_relative_to_and_direction(monkeypatch: pytest.MonkeyPatch)
     assert args == {"ref": "url:abc12345", "relative_to": "chat:alice", "direction": "above", "ratio": 0.6}
 
 
+def test_split_preserves_self_in_relative_to(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--relative-to self`` is the documented default and must reach the server verbatim."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+    monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
+
+    rc = layout.main(["split", "service:web", "--relative-to", "self"])
+    assert rc == 0
+    op, args = posted[0]
+    assert op == "split"
+    assert args["relative_to"] == "self"
+
+
+def test_split_normalizes_bare_service_in_relative_to(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--relative-to web`` (bare service name) must be expanded to ``service:web``."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+    monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
+
+    rc = layout.main(["split", "service:api", "--relative-to", "web"])
+    assert rc == 0
+    op, args = posted[0]
+    assert op == "split"
+    assert args["relative_to"] == "service:web"
+
+
+def test_move_preserves_self_in_relative_to(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``move --relative-to self`` must NOT get rewritten to ``service:self``."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+
+    rc = layout.main(["move", "service:web", "--relative-to", "self", "--direction", "right"])
+    assert rc == 0
+    op, args = posted[0]
+    assert op == "move"
+    assert args["relative_to"] == "self"
+
+
 def test_move_requires_known_direction(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))

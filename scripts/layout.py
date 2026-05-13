@@ -104,11 +104,21 @@ def _wait_for_registration(name: str, timeout: float) -> bool:
         time.sleep(_REGISTRATION_POLL_INTERVAL_SECONDS)
 
 
+# Sentinel ref the frontend resolves to the caller's own chat panel. Valid as
+# a ``--relative-to`` value for ``split`` / ``move`` and as a target for any
+# op (e.g. ``focus self``).
+_SELF_REF = "self"
+
+
 def _normalize_ref(value: str) -> str:
     """Expand bare service-name shorthand into a full ``service:`` ref.
 
-    Anything that already carries a known prefix is returned as-is.
+    Anything that already carries a known prefix is returned as-is, and the
+    ``self`` sentinel (resolved frontend-side to the caller's chat panel)
+    is preserved verbatim.
     """
+    if value == _SELF_REF:
+        return value
     for prefix in _REF_PREFIXES:
         if value.startswith(prefix):
             return value
@@ -116,7 +126,12 @@ def _normalize_ref(value: str) -> str:
 
 
 def _validate_ref(ref: str) -> None:
-    """Raise SystemExit if the ref carries an unknown prefix."""
+    """Raise SystemExit if the ref carries an unknown prefix.
+
+    The ``self`` sentinel is accepted in addition to the prefix forms.
+    """
+    if ref == _SELF_REF:
+        return
     if not any(ref.startswith(p) for p in _REF_PREFIXES):
         sys.stderr.write(
             f"error: ref {ref!r} must start with one of {_REF_PREFIXES} or be a bare service name\n"
@@ -258,9 +273,11 @@ def _cmd_split(args: argparse.Namespace) -> int:
             )
             return EXIT_NOT_REGISTERED
     _validate_ref(ref)
+    relative_to = _normalize_ref(args.relative_to)
+    _validate_ref(relative_to)
     payload: dict[str, Any] = {
         "ref": ref,
-        "relative_to": args.relative_to,
+        "relative_to": relative_to,
         "direction": args.direction,
         "ratio": args.ratio,
     }
