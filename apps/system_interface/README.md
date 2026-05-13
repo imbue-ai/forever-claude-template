@@ -36,19 +36,19 @@ close / move / rename / maximize / restore / replace-url / refresh`.
 ```bash
 # Print every addressable thing (registered services + mngr agents)
 # with open/running flags. YAML by default, ``--json`` to switch.
-python3 scripts/layout.py list
+uv run python scripts/layout.py list
 
 # Surface the given service in a tab split alongside the primary chat
 # (focuses an existing tab if one is already open).
-python3 scripts/layout.py open web
+uv run python scripts/layout.py open web
 
 # Reload one tab (or, for ``service:<name>``, every iframe tied to
 # that service).
-python3 scripts/layout.py refresh web
+uv run python scripts/layout.py refresh web
 
 # Inspect the live grid tree -- orientations, sizes, active panel,
 # ref-resolved panel list.
-python3 scripts/layout.py inspect
+uv run python scripts/layout.py inspect
 ```
 
 Every op POSTs `{op, args, agent_id}` to the loopback-only
