@@ -12,7 +12,7 @@ import {
   type SerializedDockview,
 } from "dockview-core";
 import { ChatPanel } from "./ChatPanel";
-import { IframePanel, reloadIframesForService } from "./IframePanel";
+import { IframePanel, IFRAME_PANEL_PANEL_ID_ATTR, reloadIframesForService } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
@@ -1044,7 +1044,9 @@ async function handleRefresh(args: Record<string, unknown>): Promise<void> {
   // and trigger a same-origin ``contentWindow.location.reload()``. If the
   // panel is cross-origin the ``reload()`` call throws a SecurityError and
   // we fall back to re-assigning ``src`` to force the browser to refetch.
-  const iframe = document.querySelector<HTMLIFrameElement>(`iframe[data-panel-id="${CSS.escape(panelId)}"]`);
+  const iframe = document.querySelector<HTMLIFrameElement>(
+    `iframe[${IFRAME_PANEL_PANEL_ID_ATTR}="${CSS.escape(panelId)}"]`,
+  );
   if (iframe) {
     try {
       const win = iframe.contentWindow;
