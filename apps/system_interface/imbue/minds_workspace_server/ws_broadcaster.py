@@ -176,7 +176,8 @@ class WebSocketBroadcaster(MutableModel):
         The frontend dispatches on ``op`` (e.g. ``open``, ``focus``, ``split``,
         ``move``, ``close``, ``rename``, ``maximize``, ``restore``, ``replace-url``,
         ``refresh``) and applies the corresponding dockview primitive. ``args`` is
-        an op-specific payload (e.g. ``{"service_name": "web"}`` for ``open``).
+        an op-specific payload keyed by ref (e.g. ``{"ref": "service:web"}`` for
+        ``open``).
         """
         self.broadcast({"type": "layout_op", "op": op, "args": args})
 
