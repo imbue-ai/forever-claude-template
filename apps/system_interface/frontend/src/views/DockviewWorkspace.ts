@@ -512,7 +512,7 @@ function findIframePanelIdForService(serviceName: string): string | null {
  *  Drop silently if the service isn't registered in ``applications`` yet --
  *  the script polls registration, but the WS broadcast itself is fire-and-
  *  forget. */
-export function handleOpenTabRequest(serviceName: string): void {
+function handleOpenTabRequest(serviceName: string): void {
   if (!dockview) return;
 
   const existingPanelId = findIframePanelIdForService(serviceName);
