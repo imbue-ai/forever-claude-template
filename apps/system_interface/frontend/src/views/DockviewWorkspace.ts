@@ -63,8 +63,8 @@ interface PanelParams {
   // Workspace service name this iframe is tied to (e.g. "web", "api").
   // Set only for iframe tabs that proxy an actual workspace service; left
   // undefined for ad-hoc URL tabs, terminals, and agent-owned iframes.
-  // Drives both the WS-driven `refresh_service` broadcast match and the
-  // presence of the per-tab Refresh button.
+  // Drives both the WS-driven `layout_op` (op="refresh") service-wide
+  // reload match and the presence of the per-tab Refresh button.
   serviceName?: string;
 }
 
