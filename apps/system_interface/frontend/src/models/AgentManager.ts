@@ -146,8 +146,49 @@ export function getAgents(): AgentState[] {
   return agents;
 }
 
+/**
+ * Return the set of agents the user can chat with -- everything except the
+ * system-services agent that owns this workspace_server. The system-services
+ * agent runs `uv run bootstrap` (no chat transcript) and is identified by
+ * `labels.is_primary === "true"`. The frontend filters it out of the
+ * sidebar, the "+" menu, and the initial chat-tab selection.
+ */
+export function getChatAgents(): AgentState[] {
+  return agents.filter((a) => !isSystemServicesAgent(a));
+}
+
 export function getAgentById(id: string): AgentState | undefined {
   return agents.find((a) => a.id === id);
+}
+
+/**
+ * True when this agent is the system-services bootstrap agent rather than
+ * a user-chattable agent. The contract is set by the FCT
+ * `[create_templates.system_services]` template, which stamps
+ * `is_primary=true` on every system-services agent.
+ */
+export function isSystemServicesAgent(agent: AgentState): boolean {
+  return agent.labels?.is_primary === "true";
+}
+
+/**
+ * Return the agent the ChatPanel should default-select on first load --
+ * the agent named `assistant` (bootstrap creates one per workspace), or
+ * the most recently-created non-system chat agent if `assistant` is gone.
+ * Returns null when no chat agents exist yet.
+ */
+export function getDefaultChatAgentId(): string | null {
+  const chatAgents = getChatAgents();
+  if (chatAgents.length === 0) {
+    return null;
+  }
+  const assistant = chatAgents.find((a) => a.name === "assistant");
+  if (assistant) {
+    return assistant.id;
+  }
+  // Fall back to the last entry in the agents list -- AgentManager preserves
+  // arrival order, so "most recent" is the tail.
+  return chatAgents[chatAgents.length - 1].id;
 }
 
 export function removeAgentLocally(agentId: string): void {

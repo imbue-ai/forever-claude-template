@@ -415,11 +415,12 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
 _LAYOUT_FILENAME = "layout.json"
 
 
-def _primary_agent_layout_dir() -> Path | None:
-    """Return the workspace layout directory for this workspace's primary agent.
+def _workspace_layout_dir() -> Path | None:
+    """Return the workspace layout directory for this workspace.
 
-    The workspace_server always serves a single workspace (its own primary
-    agent); the layout lives at $MNGR_HOST_DIR/agents/<MNGR_AGENT_ID>/workspace_layout/.
+    Layouts are keyed by the system-services agent (the workspace_server's
+    own ``MNGR_AGENT_ID``) since every workspace has exactly one of those.
+    The path is ``$MNGR_HOST_DIR/agents/<MNGR_AGENT_ID>/workspace_layout/``.
     Returns None if either env var is missing, which should only happen in
     dev/test setups that don't care about persistence.
     """
@@ -430,8 +431,8 @@ def _primary_agent_layout_dir() -> Path | None:
 
 
 def _get_layout() -> Response:
-    """Get the saved workspace layout for this workspace's primary agent."""
-    layout_dir = _primary_agent_layout_dir()
+    """Get the saved workspace layout for this workspace."""
+    layout_dir = _workspace_layout_dir()
     if layout_dir is None:
         return JSONResponse(content=None, status_code=404)
 
@@ -447,10 +448,10 @@ def _get_layout() -> Response:
 
 
 async def _save_layout(request: Request) -> Response:
-    """Save the workspace layout for this workspace's primary agent."""
-    layout_dir = _primary_agent_layout_dir()
+    """Save the workspace layout for this workspace."""
+    layout_dir = _workspace_layout_dir()
     if layout_dir is None:
-        error = ErrorResponse(detail="No primary agent configured for this workspace")
+        error = ErrorResponse(detail="No system-services agent configured for this workspace")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
     try:
