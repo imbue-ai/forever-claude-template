@@ -37,8 +37,9 @@ Every panel has a stable, type-prefixed ref:
 
 Subcommands that take a "service or ref" argument (`open`, `split`,
 `refresh`) also accept a bare service name (`web`) -- it expands to
-`service:web`. The literal `self` (only valid as `--relative-to`)
-resolves to the caller's own chat panel.
+`service:web`. The literal `self` resolves to the caller's own chat
+panel; it is accepted as a ref anywhere (most usefully as
+`--relative-to=self` for `split` / `move`).
 
 Run `uv run python scripts/layout.py inspect` to see refs for the
 currently-open panels.
