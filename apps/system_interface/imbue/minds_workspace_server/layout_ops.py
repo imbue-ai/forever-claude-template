@@ -191,7 +191,7 @@ def _resolve_ref(
         ref = f"subagent:{subagent_session_id or _short_hash(panel_id)}"
     elif panel_type == "iframe" and service_name:
         ref = f"service:{service_name}"
-    elif panel_type == "iframe" and isinstance(url, str) and url.startswith("/service/terminal"):
+    elif panel_type == "iframe" and isinstance(url, str) and url.startswith("/service/terminal/"):
         ref = f"terminal:{_short_hash(panel_id)}"
     elif panel_type == "iframe":
         ref = f"url:{_short_hash(panel_id)}"
