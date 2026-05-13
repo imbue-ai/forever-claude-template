@@ -255,12 +255,12 @@ class AgentManager:
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def get_applications(self) -> list[ApplicationEntry]:
-        """Return the primary agent's application list."""
+        """Return the system-services agent's application list."""
         with self._lock:
             return list(self._applications)
 
     def get_applications_serialized(self) -> list[dict[str, str]]:
-        """Return the primary agent's application list serialized for JSON."""
+        """Return the system-services agent's application list serialized for JSON."""
         with self._lock:
             return [{"name": app.name, "url": app.url} for app in self._applications]
 
@@ -375,16 +375,22 @@ class AgentManager:
         return agent_id
 
     def create_chat_agent(self, name: str) -> str:
-        """Create a new chat agent in the primary agent's work dir. Returns the pre-generated agent ID."""
+        """Create a new chat agent in the system-services agent's work dir.
+
+        Returns the pre-generated agent ID. The "+" -> "New Chat" button
+        invokes this path; the bootstrap-created ``assistant`` agent (the
+        first chat agent on every workspace) is the structural twin, just
+        created from a different entry point.
+        """
         agent_id = str(AgentId())
 
         with self._lock:
             work_dir = self._resolve_agent_work_dir(self._own_agent_id)
-            primary = self._agents.get(self._own_agent_id)
-            primary_labels = dict(primary.labels) if primary else {}
+            own_agent = self._agents.get(self._own_agent_id)
+            own_labels = dict(own_agent.labels) if own_agent else {}
 
         if work_dir is None:
-            msg = f"Cannot determine work directory for primary agent {self._own_agent_id}"
+            msg = f"Cannot determine work directory for system-services agent {self._own_agent_id}"
             raise AgentCreationError(msg)
 
         cmd = [
@@ -400,10 +406,10 @@ class AgentManager:
             "--no-connect",
         ]
 
-        # Inherit workspace and project labels from the primary agent
+        # Inherit workspace and project labels from the system-services agent.
         for key in ("workspace", "project"):
-            if key in primary_labels:
-                cmd.extend(["--label", f"{key}={primary_labels[key]}"])
+            if key in own_labels:
+                cmd.extend(["--label", f"{key}={own_labels[key]}"])
 
         log_queue: queue.Queue[str | None] = queue.Queue(maxsize=10000)
 
@@ -426,8 +432,8 @@ class AgentManager:
 
         labels: dict[str, str] = {}
         for key in ("workspace", "project"):
-            if key in primary_labels:
-                labels[key] = primary_labels[key]
+            if key in own_labels:
+                labels[key] = own_labels[key]
         self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
@@ -621,10 +627,11 @@ class AgentManager:
         Prefers ``MNGR_AGENT_WORK_DIR`` so observe picks up the same
         project-local ``.mngr/settings.toml`` that agent-creation commands
         run against -- the things observe lists should match what the
-        primary agent could create. Falls back to ``$HOME`` when the work
-        dir is unset or does not exist (e.g. tests that stub the env var
-        with a non-existent path); ``$HOME`` avoids inheriting whatever
-        project config happens to live under the spawning process's cwd.
+        system-services agent could create. Falls back to ``$HOME`` when
+        the work dir is unset or does not exist (e.g. tests that stub the
+        env var with a non-existent path); ``$HOME`` avoids inheriting
+        whatever project config happens to live under the spawning
+        process's cwd.
         """
         work_dir = os.environ.get("MNGR_AGENT_WORK_DIR", "")
         if work_dir:
@@ -849,7 +856,7 @@ class AgentManager:
             observer.stop()
 
     def _on_applications_changed(self, agent_id: str) -> None:
-        """Called when the primary agent's applications.toml changes."""
+        """Called when the system-services agent's applications.toml changes."""
         with self._lock:
             agent = self._agents.get(agent_id)
             work_dir = agent.work_dir if agent is not None else None
@@ -862,7 +869,7 @@ class AgentManager:
         self._broadcaster.broadcast_applications_updated(self.get_applications_serialized())
 
     def _read_applications(self, toml_path: Path) -> None:
-        """Read and parse runtime/applications.toml for the primary agent."""
+        """Read and parse runtime/applications.toml for the system-services agent."""
         apps: list[ApplicationEntry] = []
         if toml_path.exists():
             try:

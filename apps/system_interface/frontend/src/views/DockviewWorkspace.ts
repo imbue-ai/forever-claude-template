@@ -21,9 +21,11 @@ import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
   addRefreshServiceListener,
   getAgentById,
-  getAgents,
+  getChatAgents,
   getApplications,
+  getDefaultChatAgentId,
   getProtoAgents,
+  isSystemServicesAgent,
   removeAgentLocally,
   type RefreshServiceListener,
 } from "../models/AgentManager";
@@ -204,17 +206,18 @@ function createCustomTab(options: { id: string; name: string }): {
         );
       }
 
-      // Destroy button -- on chat/agent tabs (except the primary agent)
+      // Destroy button -- on chat/agent tabs (except the system-services agent,
+      // which owns the workspace_server and can't be destroyed from inside).
       if (panelType === "chat") {
         const chatAgentId = pp?.chatAgentId ?? pp?.agentId ?? "";
-        const primaryAgentId = getPrimaryAgentId();
-        const isPrimary = chatAgentId === primaryAgentId;
+        const ownAgent = getAgentById(chatAgentId);
+        const isSystemServices = ownAgent !== undefined && isSystemServicesAgent(ownAgent);
 
         const destroyBtn = createTabActionButton(
-          isPrimary ? "Cannot destroy the primary agent" : "Destroy agent",
+          isSystemServices ? "Cannot destroy the system-services agent" : "Destroy agent",
           SVG_TRASH,
           () => {
-            if (isPrimary) return;
+            if (isSystemServices) return;
             const agent = getAgentById(chatAgentId);
             destroyTargetAgentId = chatAgentId;
             destroyTargetAgentName = agent?.name ?? chatAgentId;
@@ -222,9 +225,9 @@ function createCustomTab(options: { id: string; name: string }): {
             showDestroyDialog = true;
             m.redraw();
           },
-          isPrimary ? "dv-custom-tab-action-disabled" : "dv-custom-tab-action-destructive",
+          isSystemServices ? "dv-custom-tab-action-disabled" : "dv-custom-tab-action-destructive",
         );
-        if (isPrimary) {
+        if (isSystemServices) {
           destroyBtn.disabled = true;
         }
         actions.appendChild(destroyBtn);
@@ -302,8 +305,10 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
     }
   }
 
-  // Agents/chats that don't have open tabs
-  const allAgents = getAgents();
+  // Agents/chats that don't have open tabs. ``getChatAgents`` already
+  // filters out the system-services agent (no chat transcript), so it
+  // never shows up in this dropdown.
+  const allAgents = getChatAgents();
   for (const agent of allAgents) {
     if (!openChatIds.has(agent.id)) {
       items.push({
@@ -456,12 +461,25 @@ function addChatPanel(chatAgentId: string, chatAgentName: string): void {
   });
 }
 
-function openPrimaryAgentChat(): void {
-  const primaryId = getPrimaryAgentId();
-  if (!primaryId) return;
-  const agent = getAgentById(primaryId);
+/**
+ * Open the default chat tab on first load (or after the user closes the
+ * last open tab). Targets the user-facing chat agent -- ``assistant`` by
+ * default, falling back to the most recently-created chat agent if the
+ * user has destroyed ``assistant``. Never opens the system-services
+ * agent because it has no chat transcript.
+ */
+function openDefaultChat(): void {
+  const defaultChatId = getDefaultChatAgentId();
+  if (!defaultChatId) {
+    // No chat agents exist yet -- bootstrap is still creating ``assistant``,
+    // or the user destroyed every chat agent. Either way, the dockview
+    // stays empty for one tick; the AgentManager WebSocket will redraw
+    // when the assistant comes online.
+    return;
+  }
+  const agent = getAgentById(defaultChatId);
   const agentName = agent?.name ?? "Chat";
-  addChatPanel(primaryId, agentName);
+  addChatPanel(defaultChatId, agentName);
 }
 
 function openIframeTab(url: string, title: string, panelType: PanelType = "iframe", serviceName?: string): void {
@@ -654,7 +672,14 @@ function initializeDockview(parentElement: HTMLElement): void {
       switch (options.name) {
         case "chat":
           return createMithrilRenderer(ChatPanel, {
-            agentId: params?.chatAgentId ?? params?.agentId ?? getPrimaryAgentId(),
+            // Defensive fallback when ``params`` was lost (saved-layout
+            // round-trip glitch, etc.). Prefer the default chat agent
+            // (assistant) so the user doesn't land on an empty
+            // system-services ChatPanel; fall back to the
+            // workspace_server's own agent id as a last resort because
+            // ChatPanel needs *some* string.
+            agentId:
+              params?.chatAgentId ?? params?.agentId ?? getDefaultChatAgentId() ?? getPrimaryAgentId(),
           });
 
         case "iframe":
@@ -671,7 +696,9 @@ function initializeDockview(parentElement: HTMLElement): void {
           });
 
         default:
-          return createMithrilRenderer(ChatPanel, { agentId: getPrimaryAgentId() });
+          return createMithrilRenderer(ChatPanel, {
+            agentId: getDefaultChatAgentId() ?? getPrimaryAgentId(),
+          });
       }
     },
     createTabComponent(options) {
@@ -691,9 +718,9 @@ function initializeDockview(parentElement: HTMLElement): void {
 
   // Listen for panel removal to clean up params. If the user closes the
   // last remaining tab the dockview would otherwise be a blank screen with
-  // no recovery path, so reopen the primary agent's chat tab.
+  // no recovery path, so reopen the default chat tab (the assistant).
   //
-  // The re-add is deferred to a microtask: when the user closes the primary
+  // The re-add is deferred to a microtask: when the user closes the default
   // chat itself, adding a panel with the same id synchronously inside the
   // remove listener races with dockview's own teardown of the just-removed
   // panel and produces a tab that appears to "stay open" but with a blank
@@ -704,7 +731,7 @@ function initializeDockview(parentElement: HTMLElement): void {
     if (dv.panels.length === 0) {
       queueMicrotask(() => {
         if (dv.panels.length === 0) {
-          openPrimaryAgentChat();
+          openDefaultChat();
         }
       });
     }
@@ -732,10 +759,10 @@ function initializeDockview(parentElement: HTMLElement): void {
       }
     }
 
-    // Open primary agent's chat tab if no panels were restored (no saved
+    // Open the default chat tab if no panels were restored (no saved
     // layout, restore failed, or the saved layout was empty).
     if (dv.panels.length === 0) {
-      openPrimaryAgentChat();
+      openDefaultChat();
     }
   });
 }

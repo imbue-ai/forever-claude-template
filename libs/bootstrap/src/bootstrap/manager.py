@@ -16,6 +16,7 @@ Environment:
     Expects to run inside a tmux session (uses the current session name).
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -42,6 +43,15 @@ RUNTIME_DIR = Path("runtime")
 RUNTIME_PREEXISTING_DIR = Path("runtime.preexisting")
 RUNTIME_BACKUP_USER_NAME = "runtime-backup"
 RUNTIME_BACKUP_USER_EMAIL = "runtime-backup@mindsbackup.local"
+
+# Sentinel file recording that we've already created the user-facing
+# ``assistant`` chat agent on this workspace. Lives inside runtime/ so it
+# rides along with the runtime-backup branch and survives container loss.
+# A user who deliberately ``mngr destroy``'s the assistant will not see it
+# re-created -- they'd need to delete this file and restart bootstrap.
+ASSISTANT_SENTINEL = RUNTIME_DIR / ".assistant-created"
+ASSISTANT_AGENT_NAME = "assistant"
+ASSISTANT_WELCOME_MESSAGE = "/welcome"
 
 
 def _get_session_name() -> str:
@@ -189,7 +199,9 @@ def _compute_actions(
     return stops, starts
 
 
-def _reconcile(session: str, desired: dict[str, dict], current: dict[str, dict[str, str]]) -> None:
+def _reconcile(
+    session: str, desired: dict[str, dict], current: dict[str, dict[str, str]]
+) -> None:
     """Reconcile the desired services with the currently running windows."""
     stops, starts = _compute_actions(desired, current)
     for name in stops:
@@ -353,6 +365,113 @@ def _init_runtime_worktree() -> None:
         logger.info("No GH_TOKEN; skipping initial push")
 
 
+def _read_own_agent_labels() -> dict[str, str]:
+    """Return the bootstrap agent's mngr labels via ``mngr list --format json``.
+
+    Returns an empty dict on any failure -- assistant creation falls back
+    to no inherited labels in that case, which is fine for the happy-path
+    case (the user can still chat with the assistant; only label-driven
+    sub-agent filtering will miss it).
+    """
+    agent_id = os.environ.get("MNGR_AGENT_ID", "")
+    if not agent_id:
+        return {}
+    result = subprocess.run(
+        ["mngr", "list", "--format", "json", "--include", f'id == "{agent_id}"'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        logger.warning(
+            "mngr list for own agent labels failed: {}", result.stderr.strip()
+        )
+        return {}
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        logger.warning("Could not parse own-agent label JSON: {}", e)
+        return {}
+    agents: list[dict[str, object]] = []
+    if isinstance(data, dict) and "agents" in data:
+        agents = data["agents"]
+    elif isinstance(data, list):
+        agents = data
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        if agent.get("id") != agent_id:
+            continue
+        labels = agent.get("labels", {})
+        if isinstance(labels, dict):
+            return {str(k): str(v) for k, v in labels.items()}
+    return {}
+
+
+def _ensure_assistant_agent() -> None:
+    """Create the user-facing ``assistant`` chat agent if one doesn't exist.
+
+    Idempotent: gated on the ``runtime/.assistant-created`` sentinel file.
+    Runs once per workspace lifetime; on container restarts the sentinel
+    is preserved by the runtime-backup branch, so this is effectively a
+    "first-ever-boot" hook. A user who deliberately ``mngr destroy``'s
+    the assistant won't see it re-created -- the sentinel is sticky.
+
+    Inherits ``workspace`` and ``project`` labels from the system-services
+    agent so the assistant is discoverable by the same CEL filters used
+    for chat-agent listing today.
+
+    Best-effort: any failure logs and continues -- bootstrap's primary
+    responsibility is service reconciliation, not chat-agent creation,
+    so a transient ``mngr create`` failure should not prevent
+    ``svc-system_interface`` etc. from coming up.
+    """
+    if ASSISTANT_SENTINEL.exists():
+        logger.info("Assistant sentinel present; skipping create")
+        return
+
+    inherited_labels = _read_own_agent_labels()
+    workspace_label = inherited_labels.get("workspace", "")
+    project_label = inherited_labels.get("project", "")
+
+    cmd: list[str] = [
+        "mngr",
+        "create",
+        ASSISTANT_AGENT_NAME,
+        "--transfer",
+        "none",
+        "--template",
+        "chat",
+        "--no-connect",
+        "--message",
+        ASSISTANT_WELCOME_MESSAGE,
+    ]
+    if workspace_label:
+        cmd.extend(["--label", f"workspace={workspace_label}"])
+    if project_label:
+        cmd.extend(["--label", f"project={project_label}"])
+
+    logger.info("Creating assistant agent: {}", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        logger.warning(
+            "Assistant create failed (rc={}); leaving sentinel absent so we retry next boot: {}",
+            result.returncode,
+            result.stderr.strip() or result.stdout.strip(),
+        )
+        return
+
+    try:
+        ASSISTANT_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
+        ASSISTANT_SENTINEL.write_text("")
+    except OSError as e:
+        logger.warning(
+            "Could not write assistant sentinel {}: {}", ASSISTANT_SENTINEL, e
+        )
+        return
+    logger.info("Assistant agent ready; sentinel written at {}", ASSISTANT_SENTINEL)
+
+
 def main() -> None:
     session = _get_session_name()
     if not session:
@@ -362,6 +481,7 @@ def main() -> None:
     logger.info("Bootstrap service manager started (session: {})", session)
 
     _init_runtime_worktree()
+    _ensure_assistant_agent()
 
     last_mtime = None
 
