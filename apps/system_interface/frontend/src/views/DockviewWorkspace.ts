@@ -1040,9 +1040,10 @@ async function handleRefresh(args: Record<string, unknown>): Promise<void> {
   if (panelId === null) return;
   const params = panelParams.get(panelId);
   if (!params || params.panelType !== "iframe") return;
-  // Single-panel reload by tagging an opaque sentinel attribute so the
-  // existing data-service-name-driven reload pathway hits exactly this
-  // iframe. Use a fresh attr per call to avoid clobbering real services.
+  // Single-panel reload: look the iframe up by its panel-id attribute
+  // and trigger a same-origin ``contentWindow.location.reload()``. If the
+  // panel is cross-origin the ``reload()`` call throws a SecurityError and
+  // we fall back to re-assigning ``src`` to force the browser to refetch.
   const iframe = document.querySelector<HTMLIFrameElement>(`iframe[data-panel-id="${CSS.escape(panelId)}"]`);
   if (iframe) {
     try {
