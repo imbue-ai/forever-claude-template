@@ -775,9 +775,10 @@ async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
 
     Dispatch:
 
-    - ``list`` / ``inspect``: pure server-side queries that read
-      ``applications.toml`` and the persisted ``layout.json`` and return
-      a structured payload. Bypass the mutex.
+    - ``list`` / ``inspect``: pure server-side queries that read the
+      ``agent_manager``'s in-memory service/agent registry plus the
+      persisted ``layout.json`` (for ``is_open`` flags / tree layout)
+      and return a structured payload. Bypass the mutex.
     - ``refresh``: a state-preserving broadcast that doesn't mutate
       serialized layout. Bypass the mutex.
     - All other ops (``open``, ``focus``, ``split``, ``close``, ``move``,
