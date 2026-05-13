@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.layout_ops import LayoutMutex
 from imbue.minds_workspace_server.server import create_application
 
 # Placeholder client-side port used by the layout broadcast tests. Only the
@@ -370,8 +371,6 @@ def test_layout_broadcast_rejects_null_args(app: FastAPI) -> None:
 
 def test_layout_broadcast_mutex_returns_409_with_holder_metadata(app: FastAPI) -> None:
     """While agent A holds the mutex, agent B's mutating op is rejected with 409."""
-    from imbue.minds_workspace_server.layout_ops import LayoutMutex
-
     with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
         # Pre-acquire the mutex on behalf of agent-a so the test's request
         # races against an active holder deterministically (no thread timing).

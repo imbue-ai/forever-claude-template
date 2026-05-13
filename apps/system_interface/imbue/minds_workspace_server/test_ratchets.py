@@ -78,7 +78,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(6))
+    rc.check_inline_imports(_DIR, snapshot(5))
 
 
 def test_prevent_relative_imports() -> None:
