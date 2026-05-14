@@ -2,12 +2,15 @@
 
 # Default create command settings -- apply to all mngr create from this repo
 [commands.create]
+type = "claude"
 connect = false
 ensure_clean = false
 pass_env = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
 host_env = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
+    # might as well use the latest model if we actually do want to try fast mode, sure
+    "CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE=1",
     # Lock Claude Code to the version pinned in agent_types.claude.version and the
     # Dockerfile's CLAUDE_CODE_VERSION; disable the auto-updater + background
     # feedback pings so the installed binary cannot silently drift. Tracks the
@@ -35,11 +38,11 @@ include = ["""has(labels.workspace)"""]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions"""
-settings_overrides = {model = "opus[1m]", fastMode = true}
+settings_overrides = {model = "opus[1m]", fastMode = false}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
-version = "2.1.116"
+version = "2.1.141"
 # Share the services agent's CLAUDE_CONFIG_DIR across every other agent so
 # auth, plugins, marketplaces, and settings are configured exactly once
 # (inside the services agent) and inherited via the host env file the
