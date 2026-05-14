@@ -84,6 +84,11 @@ _BROADCASTING_OPS: frozenset[str] = frozenset(
 # wedged op can't lock the workspace for an annoying length of time.
 _MUTEX_TTL_SECONDS: float = 0.5
 
+# Reserved service entries that aren't user-facing tabs. Filtered out of
+# ``layout_list`` so every caller (script, direct HTTP, future SDKs) gets
+# the same view of "addressable things" without duplicating the filter.
+_HIDDEN_SERVICES: frozenset[str] = frozenset({"system_interface"})
+
 
 def is_known_op(op: str) -> bool:
     return op in _KNOWN_OPS
@@ -299,6 +304,8 @@ def layout_list(
     open_refs = _collect_open_refs(layout_json_path, agent_name_by_id)
     entries: list[dict[str, Any]] = []
     for service_name in service_names:
+        if service_name in _HIDDEN_SERVICES:
+            continue
         ref = f"service:{service_name}"
         entries.append(
             {

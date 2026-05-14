@@ -49,9 +49,6 @@ MNGR_AGENT_ID_HEADER = "X-Mngr-Agent-Id"
 _REGISTRATION_TIMEOUT_SECONDS = 5.0
 _REGISTRATION_POLL_INTERVAL_SECONDS = 0.25
 
-# Reserved entries that aren't user-facing tabs.
-_HIDDEN_SERVICES = frozenset({"system_interface"})
-
 # Set of accepted ref prefixes.
 _REF_PREFIXES = ("service:", "chat:", "terminal:", "url:", "subagent:")
 # Set of accepted directions for split/move.
@@ -221,8 +218,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     if status != 200 or not isinstance(body, dict):
         return _report_failure("list", status, body)
     entries = body.get("entries", [])
-    visible = [e for e in entries if e.get("kind") != "service" or e.get("display_name") not in _HIDDEN_SERVICES]
-    _emit_structured(visible, args.json)
+    _emit_structured(entries, args.json)
     return EXIT_OK
 
 

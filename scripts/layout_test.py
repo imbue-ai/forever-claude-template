@@ -56,19 +56,15 @@ def _make_fake_post(
     return fake_post
 
 
-def test_list_filters_system_interface_and_emits_yaml(
+def test_list_emits_server_entries_as_yaml(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """``list`` is a thin pass-through: the server (layout_ops.layout_list)
+    is the single source of truth for which entries are user-facing, and
+    the script prints whatever the server returns."""
     posted: list[tuple[str, dict[str, Any]]] = []
     entries = [
         {"ref": "service:web", "kind": "service", "display_name": "web", "is_open": True, "is_running": True},
-        {
-            "ref": "service:system_interface",
-            "kind": "service",
-            "display_name": "system_interface",
-            "is_open": True,
-            "is_running": True,
-        },
         {"ref": "chat:alice", "kind": "agent", "display_name": "alice", "is_open": False, "is_running": True},
     ]
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted, (200, {"ok": True, "entries": entries})))
@@ -77,7 +73,6 @@ def test_list_filters_system_interface_and_emits_yaml(
     assert rc == 0
     assert posted == [("list", {})]
     out = capsys.readouterr().out
-    assert "system_interface" not in out
     assert "service:web" in out
     assert "chat:alice" in out
 
