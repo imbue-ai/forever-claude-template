@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from imbue.minds_workspace_server.agent_discovery import AgentInfo
 from imbue.minds_workspace_server.agent_manager import AgentManager
 from imbue.minds_workspace_server.config import Config
+from imbue.minds_workspace_server.models import AgentStateItem
 from imbue.minds_workspace_server.server import create_application
 
 # Placeholder client-side port used by the refresh-service broadcast tests.
@@ -372,8 +373,6 @@ def test_destroy_rejects_is_primary_agent(client: TestClient, app: FastAPI) -> N
     server-side guard prevents direct callers (curl, scripted use, etc.)
     from accidentally tearing down the workspace.
     """
-    from imbue.minds_workspace_server.models import AgentStateItem
-
     agent_manager: AgentManager = app.state.agent_manager
     services_agent = AgentStateItem(
         id="services-1",
