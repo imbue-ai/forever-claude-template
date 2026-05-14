@@ -56,6 +56,9 @@ class _FakePexpectProcess:
     def terminate(self, force: bool = False) -> None:
         pass
 
+    def close(self) -> None:
+        pass
+
 
 @pytest.fixture
 def app() -> FastAPI:

@@ -259,11 +259,8 @@ def _safe_close(process: Any) -> None:
     Swallow + log both since the only thing we can do at this point is
     drop the reference anyway.
     """
-    close = getattr(process, "close", None)
-    if close is None:
-        return
     try:
-        close()
+        process.close()
     except (OSError, pexpect.ExceptionPexpect) as e:
         logger.warning("OAuth subprocess close raised: {}", e)
 

@@ -45,6 +45,7 @@ class _FakePexpectProcess:
         self._expect_call_count = 0
         self.sendline_calls: list[str] = []
         self.terminate_calls = 0
+        self.close_calls = 0
         self.timeout: float | None = None
         self.match: Any = None
         if url_match is not None:
@@ -65,6 +66,9 @@ class _FakePexpectProcess:
 
     def terminate(self, force: bool = False) -> None:
         self.terminate_calls += 1
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 @pytest.fixture(autouse=True)
