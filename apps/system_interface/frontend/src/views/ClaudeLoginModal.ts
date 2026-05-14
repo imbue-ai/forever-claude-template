@@ -84,6 +84,19 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
         successStatus = status;
         mode = "success";
         m.redraw();
+        // Notify the backend so the welcome-resend chokepoint fires for
+        // the poll-detected path too. The endpoint is idempotent (the
+        // welcome resend skips when the agent's pane already shows the
+        // greeting) so failures here are harmless to swallow.
+        try {
+          await m.request({
+            method: "POST",
+            url: apiUrl("/api/claude-auth/notify-success"),
+            body: { chat_agent_name: attrsRef?.chatAgentName ?? null },
+          });
+        } catch {
+          // Best-effort; the user can still re-run /welcome manually.
+        }
       }
     } catch {
       // Silently ignore poll failures; the user can still drive the flow.

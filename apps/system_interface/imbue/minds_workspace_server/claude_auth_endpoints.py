@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse
 from imbue.minds_workspace_server import claude_auth
 from imbue.minds_workspace_server import welcome_resend
 from imbue.minds_workspace_server.models import ClaudeAuthApiKeyRequest
+from imbue.minds_workspace_server.models import ClaudeAuthNotifySuccessRequest
 from imbue.minds_workspace_server.models import ClaudeAuthStatusResponse
 from imbue.minds_workspace_server.models import ClaudeOAuthStartRequest
 from imbue.minds_workspace_server.models import ClaudeOAuthStartResponse
@@ -124,6 +125,25 @@ async def abort_oauth(request: Request) -> JSONResponse:
     return JSONResponse(content={"status": "ok"})
 
 
+async def notify_success(request: Request) -> JSONResponse:
+    """POST /api/claude-auth/notify-success — modal poll detected external auth.
+
+    Runs the same `_on_auth_success` chokepoint that the paste and API-key
+    paths converge on. Keeps the welcome-resend behavior uniform across
+    every auth-success path.
+    """
+    try:
+        body = ClaudeAuthNotifySuccessRequest.model_validate(await request.json())
+    except (ValueError, TypeError) as e:
+        return _error_response(f"Invalid request body: {e}")
+    try:
+        status = await run_in_threadpool(claude_auth.get_auth_status)
+    except claude_auth.ClaudeAuthError as e:
+        return _error_response(str(e), status_code=500)
+    await _on_auth_success(status, body.chat_agent_name)
+    return JSONResponse(content=_status_to_response(status).model_dump())
+
+
 def register_routes(application) -> None:
     """Wire `/api/claude-auth/*` endpoints onto the FastAPI application."""
     application.add_api_route("/api/claude-auth/status", get_status, methods=["GET"])
@@ -131,3 +151,4 @@ def register_routes(application) -> None:
     application.add_api_route("/api/claude-auth/submit-code", submit_oauth_code, methods=["POST"])
     application.add_api_route("/api/claude-auth/submit-api-key", submit_api_key, methods=["POST"])
     application.add_api_route("/api/claude-auth/abort", abort_oauth, methods=["POST"])
+    application.add_api_route("/api/claude-auth/notify-success", notify_success, methods=["POST"])

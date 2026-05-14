@@ -214,6 +214,59 @@ def test_submit_api_key_rejects_empty_key(client: TestClient) -> None:
     assert response.status_code == 400
 
 
+def test_notify_success_endpoint_runs_welcome_resend(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skill_path = tmp_path / "SKILL.md"
+    skill_path.write_text(
+        "---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n"
+    )
+    monkeypatch.setattr(welcome_resend, "_DEFAULT_SKILL_PATH", skill_path)
+
+    welcome_calls: list[str] = []
+
+    monkeypatch.setattr(claude_auth, "command_runner", _logged_in_runner)
+    monkeypatch.setattr(welcome_resend, "capture_pane", lambda _name: "empty pane")
+    monkeypatch.setattr(
+        welcome_resend,
+        "send_message_fn",
+        lambda name, _message: (welcome_calls.append(name), True)[1],
+    )
+
+    response = client.post(
+        "/api/claude-auth/notify-success",
+        json={"chat_agent_name": "chat-1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["logged_in"] is True
+    assert welcome_calls == ["chat-1"]
+
+
+def test_notify_success_endpoint_skips_resend_when_logged_out(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    welcome_calls: list[str] = []
+
+    def _logged_out(_cmd: list[str], _timeout: float) -> _FakeFinishedProcess:
+        return _FakeFinishedProcess(stdout='{"loggedIn": false}')
+
+    monkeypatch.setattr(claude_auth, "command_runner", _logged_out)
+    monkeypatch.setattr(welcome_resend, "capture_pane", lambda _name: "empty pane")
+    monkeypatch.setattr(
+        welcome_resend,
+        "send_message_fn",
+        lambda name, _message: (welcome_calls.append(name), True)[1],
+    )
+
+    response = client.post(
+        "/api/claude-auth/notify-success",
+        json={"chat_agent_name": "chat-1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["logged_in"] is False
+    assert welcome_calls == []
+
+
 def test_abort_endpoint_clears_in_flight_session(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

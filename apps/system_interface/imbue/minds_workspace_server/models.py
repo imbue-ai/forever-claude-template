@@ -139,3 +139,19 @@ class ClaudeAuthApiKeyRequest(FrozenModel):
         default=None,
         description="Name of the chat agent to restart and welcome-resend against",
     )
+
+
+class ClaudeAuthNotifySuccessRequest(FrozenModel):
+    """Request body for POST /api/claude-auth/notify-success.
+
+    Posted by the modal when its background poll detects that auth has
+    succeeded externally (e.g. the user signed in via a terminal). Routes
+    the same `_on_auth_success` chokepoint that the paste and API-key
+    paths use, so the welcome-resend check fires uniformly regardless of
+    which path completed the login.
+    """
+
+    chat_agent_name: str | None = Field(
+        default=None,
+        description="Name of the chat agent to welcome-resend against",
+    )
