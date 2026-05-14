@@ -720,13 +720,16 @@ def main() -> None:
 
     logger.info("Bootstrap service manager started (session: {})", session)
 
-    # Run BEFORE _init_runtime_worktree so the chat agent created here picks
-    # up the host-env CLAUDE_CONFIG_DIR write on first boot. The signal file
-    # lives under runtime/ and ends up inside the worktree once the next
-    # step rotates it via _stage_preexisting_aside / _restore_preexisting_into_worktree.
-    _bootstrap_init_chat_dir()
-
+    # Restore runtime/ FIRST so the initial_chat_created signal file (which
+    # lives inside the worktree and is replicated to mindsbackup/$MNGR_AGENT_ID
+    # by the runtime-backup service) is in place before we decide whether to
+    # create the initial chat agent. Without this ordering, every container
+    # restart sees an empty runtime/, treats the boot as first-ever, and
+    # re-creates the welcome chat agent (and auto-commits any uncommitted
+    # work_dir state).
     _init_runtime_worktree()
+
+    _bootstrap_init_chat_dir()
 
     last_mtime = None
 
