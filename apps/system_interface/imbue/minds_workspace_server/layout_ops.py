@@ -185,8 +185,11 @@ def _resolve_ref(
     if panel_type == "chat":
         # Prefer the live agent name; fall back to the agent id if we
         # can't resolve it (eg. a chat for an agent that no longer exists).
+        # If neither is available (eg. corrupt panelParams missing
+        # chatAgentId), fall back to a panel-id-derived short hash so the
+        # ref remains addressable instead of degrading to a bare ``chat:``.
         agent_name = agent_name_by_id.get(chat_agent_id or "", chat_agent_id or "")
-        ref = f"chat:{agent_name}"
+        ref = f"chat:{agent_name}" if agent_name else f"url:{_short_hash(panel_id)}"
     elif panel_type == "subagent":
         ref = f"subagent:{subagent_session_id or _short_hash(panel_id)}"
     elif panel_type == "iframe" and service_name:
