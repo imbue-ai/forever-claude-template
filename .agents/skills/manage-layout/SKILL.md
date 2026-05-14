@@ -48,23 +48,23 @@ currently-open panels.
 
 | Goal | Command |
 |---|---|
-| List addressable things (services + agents) with open/running flags | `uv run python scripts/layout.py list` |
-| Inspect the live tree (orientation, sizes, active panel) | `uv run python scripts/layout.py inspect` |
-| Surface a service alongside the primary chat | `uv run python scripts/layout.py open web` |
-| Reload one tab after redeploying | `uv run python scripts/layout.py refresh web` |
-| Add a second panel below an existing one | `uv run python scripts/layout.py split api --relative-to=service:web --direction=below --ratio=0.4` |
-| Focus an existing tab | `uv run python scripts/layout.py focus service:web` |
-| Move a tab next to another | `uv run python scripts/layout.py move chat:alice --relative-to=service:web --direction=right` |
-| Rename a tab's label | `uv run python scripts/layout.py rename service:web "Customer dashboard"` |
-| Maximize / restore a group | `uv run python scripts/layout.py maximize service:web` / `uv run python scripts/layout.py restore` |
-| Point an iframe at a new URL | `uv run python scripts/layout.py replace-url service:web service:web/admin` |
-| Close a tab | `uv run python scripts/layout.py close url:9f8e7d6c` |
+| List addressable things (services + agents) with open/running flags | `python3 scripts/layout.py list` |
+| Inspect the live tree (orientation, sizes, active panel) | `python3 scripts/layout.py inspect` |
+| Surface a service alongside the primary chat | `python3 scripts/layout.py open web` |
+| Reload one tab after redeploying | `python3 scripts/layout.py refresh web` |
+| Add a second panel below an existing one | `python3 scripts/layout.py split api --relative-to=service:web --direction=below --ratio=0.4` |
+| Focus an existing tab | `python3 scripts/layout.py focus service:web` |
+| Move a tab next to another | `python3 scripts/layout.py move chat:alice --relative-to=service:web --direction=right` |
+| Rename a tab's label | `python3 scripts/layout.py rename service:web "Customer dashboard"` |
+| Maximize / restore a group | `python3 scripts/layout.py maximize service:web` / `python3 scripts/layout.py restore` |
+| Point an iframe at a new URL | `python3 scripts/layout.py replace-url service:web service:web/admin` |
+| Close a tab | `python3 scripts/layout.py close url:9f8e7d6c` |
 
 Output for `list` and `inspect` is YAML by default; pass `--json` if
 you want to consume it programmatically.
 
 For anything you don't see above, run
-`uv run python scripts/layout.py --help` and the per-subcommand `--help`.
+`python3 scripts/layout.py --help` and the per-subcommand `--help`.
 
 ## Exit codes
 

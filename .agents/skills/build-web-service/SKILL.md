@@ -178,7 +178,7 @@ new tab. Without this step the user would have to discover it via the
 (pure JSON APIs, webhook receivers, etc.).
 
 ```bash
-uv run python scripts/layout.py open <name>
+python3 scripts/layout.py open <name>
 ```
 
 `layout.py` POSTs to a loopback-only workspace_server endpoint that
@@ -193,7 +193,7 @@ To force a reload of an already-open tab (e.g. after redeploying the
 service) without prompting the user to click Refresh:
 
 ```bash
-uv run python scripts/layout.py refresh <name>
+python3 scripts/layout.py refresh <name>
 ```
 
 For anything beyond `open` / `refresh` -- splitting, moving, focusing,
