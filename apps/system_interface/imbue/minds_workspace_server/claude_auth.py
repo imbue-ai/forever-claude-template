@@ -4,18 +4,23 @@ Implements the backend half of the in-UI Claude login modal so that a user
 whose Claude credentials didn't sync into the mind can recover without
 dropping into the ttyd terminal.
 
-Three sign-in paths:
+Two sign-in paths:
 
 1. Subscription OAuth (`claude auth login --claudeai`) and Console OAuth
    (`claude auth login --console`) are driven via pexpect: the CLI prints a
    `claude.ai/oauth/authorize` URL and waits for a `CODE#STATE` paste on
    stdin. The PTY subprocess is held in module state between the
    `start_oauth_login` and `submit_oauth_code` calls so the UI can collect
-   the code from the user in between.
+   the code from the user in between. The completed flow writes the
+   shared `$CLAUDE_CONFIG_DIR/.credentials.json` file, which every running
+   claude in the mind auto-detects on its next API call -- no restart
+   required.
 2. Raw API key: `submit_api_key` writes `ANTHROPIC_API_KEY` into the host
-   env file the bootstrap already manages and then restarts the named
-   chat agent via `mngr stop`/`mngr start` so the new env is in effect
-   the next time claude is launched.
+   env file the bootstrap already manages and then restarts every
+   `type: claude` agent in the mind via `mngr stop`/`mngr start`. The
+   restart is necessary because env vars are inherited at process start
+   and cannot be updated in-place; without it, the new key has no effect
+   on already-running claudes.
 
 Dependencies that touch the outside world (subprocess invocation and
 pexpect-driven PTY spawning) are exposed as named callables on the module
@@ -207,30 +212,75 @@ def write_api_key_to_host_env(api_key: SecretStr, env_path_override: Path | None
     return env_path
 
 
-def restart_agent(agent_name: str) -> None:
-    """Restart a chat agent via `mngr stop` then `mngr start`.
+def list_claude_agent_names() -> list[str]:
+    """Return the names of every `type: claude` agent in the local mind.
 
-    Tmux session contents are lost, but the agent re-launches with a fresh
-    env (so newly-written `ANTHROPIC_API_KEY` is in effect).
+    Uses `mngr list --format json` and filters to `type == "claude"`. This
+    excludes the `main`-type system-services agent, which has no
+    interactive claude process to restart.
     """
-    logger.info("Restarting agent {} via mngr stop+start", agent_name)
-    stop_result = command_runner(["mngr", "stop", agent_name], _MNGR_COMMAND_TIMEOUT_SECONDS)
-    if stop_result.returncode != 0:
+    result = command_runner(
+        ["mngr", "list", "--format", "json"], _MNGR_COMMAND_TIMEOUT_SECONDS
+    )
+    if result.returncode != 0:
         raise ClaudeAuthError(
-            f"mngr stop {agent_name} failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
+            f"mngr list failed (exit {result.returncode}): {result.stderr.strip()}"
         )
-    start_result = command_runner(["mngr", "start", agent_name], _MNGR_COMMAND_TIMEOUT_SECONDS)
-    if start_result.returncode != 0:
-        raise ClaudeAuthError(
-            f"mngr start {agent_name} failed (exit {start_result.returncode}): {start_result.stderr.strip()}"
-        )
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as e:
+        raise ClaudeAuthError(f"mngr list returned non-JSON output: {stdout!r}") from e
+    if not isinstance(payload, dict):
+        raise ClaudeAuthError(f"mngr list returned non-object JSON: {payload!r}")
+    agents = payload.get("agents", [])
+    if not isinstance(agents, list):
+        raise ClaudeAuthError(f"mngr list 'agents' field is not a list: {agents!r}")
+    names: list[str] = []
+    for agent in agents:
+        if not isinstance(agent, dict):
+            continue
+        if agent.get("type") != "claude":
+            continue
+        name = agent.get("name")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
 
 
-def submit_api_key(api_key: SecretStr, chat_agent_name: str | None) -> AuthStatus:
-    """Write `ANTHROPIC_API_KEY` to host env then restart the chat agent."""
+def restart_all_claude_agents() -> list[str]:
+    """Restart every `type: claude` agent via `mngr stop` then `mngr start`.
+
+    Returns the list of agent names that were restarted. Used by the
+    API-key auth path so the freshly-written `ANTHROPIC_API_KEY` is in
+    effect across every running claude in the mind, not just the one the
+    user happened to be chatting with.
+    """
+    names = list_claude_agent_names()
+    for name in names:
+        logger.info("Restarting type:claude agent {} via mngr stop+start", name)
+        stop_result = command_runner(["mngr", "stop", name], _MNGR_COMMAND_TIMEOUT_SECONDS)
+        if stop_result.returncode != 0:
+            raise ClaudeAuthError(
+                f"mngr stop {name} failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
+            )
+        start_result = command_runner(["mngr", "start", name], _MNGR_COMMAND_TIMEOUT_SECONDS)
+        if start_result.returncode != 0:
+            raise ClaudeAuthError(
+                f"mngr start {name} failed (exit {start_result.returncode}): {start_result.stderr.strip()}"
+            )
+    return names
+
+
+def submit_api_key(api_key: SecretStr) -> AuthStatus:
+    """Write `ANTHROPIC_API_KEY` to host env then restart every claude agent.
+
+    All `type: claude` agents must be restarted: env vars are read at
+    process start, so already-running claudes won't pick up the new key
+    until their tmux sessions are torn down and respawned.
+    """
     write_api_key_to_host_env(api_key)
-    if chat_agent_name:
-        restart_agent(chat_agent_name)
+    restart_all_claude_agents()
     return get_auth_status()
 
 

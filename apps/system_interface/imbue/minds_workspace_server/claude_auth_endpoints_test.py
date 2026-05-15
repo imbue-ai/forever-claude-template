@@ -115,22 +115,34 @@ def test_start_oauth_rejects_unknown_provider(client: TestClient) -> None:
     assert response.status_code == 400
 
 
-def test_full_oauth_flow_drives_subprocess_and_runs_welcome_resend(
+def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """OAuth path writes `.credentials.json` via the PTY; no agent restart needed.
+
+    The asserted absence of `mngr stop`/`mngr start` calls is the
+    behavioral contract: claude code auto-picks up freshly-written
+    credentials on its next API call, so restart would be disruptive
+    churn for no auth benefit.
+    """
     fake_url = "https://claude.ai/oauth/authorize?abc=1"
     fake_process = _FakePexpectProcess(url=fake_url)
     welcome_resend_calls: list[str] = []
+    command_log: list[tuple[str, ...]] = []
 
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text(
         "---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n"
     )
 
+    def _recording_runner(cmd: list[str], timeout: float) -> _FakeFinishedProcess:
+        command_log.append(tuple(cmd))
+        return _logged_in_runner(cmd, timeout)
+
     monkeypatch.setattr(
         claude_auth, "pexpect_spawner", lambda *_args, **_kwargs: fake_process
     )
-    monkeypatch.setattr(claude_auth, "command_runner", _logged_in_runner)
+    monkeypatch.setattr(claude_auth, "command_runner", _recording_runner)
     monkeypatch.setattr(welcome_resend, "capture_pane", lambda _name: "empty pane")
     monkeypatch.setattr(
         welcome_resend,
@@ -155,6 +167,8 @@ def test_full_oauth_flow_drives_subprocess_and_runs_welcome_resend(
     assert body["email"] == "u@example.com"
     assert fake_process.sendline_calls == ["FAKE#CODE"]
     assert welcome_resend_calls == ["chat-1"]
+    assert all(cmd[:2] != ("mngr", "stop") for cmd in command_log)
+    assert all(cmd[:2] != ("mngr", "start") for cmd in command_log)
 
 
 def test_submit_code_rejects_unknown_session(client: TestClient) -> None:
@@ -164,11 +178,18 @@ def test_submit_code_rejects_unknown_session(client: TestClient) -> None:
     assert response.status_code == 400
 
 
-def test_submit_api_key_writes_host_env_and_runs_welcome_resend(
+def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
     client: TestClient,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """End-to-end: write env, restart every type:claude agent, welcome-resend.
+
+    The fake `mngr list` returns three agents: two `type: claude` and one
+    `type: main`. We assert the main-type agent is skipped (matches
+    system-services' shape in a real mind) and both claude agents are
+    restarted via the same `mngr stop`/`mngr start` pair.
+    """
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text(
@@ -178,9 +199,18 @@ def test_submit_api_key_writes_host_env_and_runs_welcome_resend(
 
     welcome_calls: list[str] = []
     restart_calls: list[str] = []
+    list_payload = (
+        '{"agents": ['
+        '{"name": "ababa", "type": "claude"}, '
+        '{"name": "system-services", "type": "main"}, '
+        '{"name": "worktree-1", "type": "claude"}'
+        "]}"
+    )
 
     def _runner(cmd: list[str], _timeout: float) -> _FakeFinishedProcess:
-        if len(cmd) >= 2 and cmd[0] == "mngr" and cmd[1] in {"stop", "start"}:
+        if cmd[:3] == ["mngr", "list", "--format"]:
+            return _FakeFinishedProcess(stdout=list_payload)
+        if len(cmd) >= 3 and cmd[0] == "mngr" and cmd[1] in {"stop", "start"}:
             restart_calls.append(f"{cmd[1]} {cmd[2]}")
             return _FakeFinishedProcess(returncode=0)
         return _logged_in_runner(cmd, _timeout)
@@ -195,15 +225,20 @@ def test_submit_api_key_writes_host_env_and_runs_welcome_resend(
 
     response = client.post(
         "/api/claude-auth/submit-api-key",
-        json={"api_key": "sk-ant-test-key", "chat_agent_name": "chat-1"},
+        json={"api_key": "sk-ant-test-key", "chat_agent_name": "ababa"},
     )
 
     assert response.status_code == 200
     assert response.json()["logged_in"] is True
     env_text = (tmp_path / "env").read_text()
     assert "ANTHROPIC_API_KEY=sk-ant-test-key" in env_text
-    assert restart_calls == ["stop chat-1", "start chat-1"]
-    assert welcome_calls == ["chat-1"]
+    assert restart_calls == [
+        "stop ababa",
+        "start ababa",
+        "stop worktree-1",
+        "start worktree-1",
+    ]
+    assert welcome_calls == ["ababa"]
 
 
 def test_submit_api_key_rejects_empty_key(client: TestClient) -> None:
@@ -212,59 +247,6 @@ def test_submit_api_key_rejects_empty_key(client: TestClient) -> None:
         json={"api_key": "   ", "chat_agent_name": "chat-1"},
     )
     assert response.status_code == 400
-
-
-def test_notify_success_endpoint_runs_welcome_resend(
-    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    skill_path = tmp_path / "SKILL.md"
-    skill_path.write_text(
-        "---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n"
-    )
-    monkeypatch.setattr(welcome_resend, "_DEFAULT_SKILL_PATH", skill_path)
-
-    welcome_calls: list[str] = []
-
-    monkeypatch.setattr(claude_auth, "command_runner", _logged_in_runner)
-    monkeypatch.setattr(welcome_resend, "capture_pane", lambda _name: "empty pane")
-    monkeypatch.setattr(
-        welcome_resend,
-        "send_message_fn",
-        lambda name, _message: (welcome_calls.append(name), True)[1],
-    )
-
-    response = client.post(
-        "/api/claude-auth/notify-success",
-        json={"chat_agent_name": "chat-1"},
-    )
-    assert response.status_code == 200
-    assert response.json()["logged_in"] is True
-    assert welcome_calls == ["chat-1"]
-
-
-def test_notify_success_endpoint_skips_resend_when_logged_out(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    welcome_calls: list[str] = []
-
-    def _logged_out(_cmd: list[str], _timeout: float) -> _FakeFinishedProcess:
-        return _FakeFinishedProcess(stdout='{"loggedIn": false}')
-
-    monkeypatch.setattr(claude_auth, "command_runner", _logged_out)
-    monkeypatch.setattr(welcome_resend, "capture_pane", lambda _name: "empty pane")
-    monkeypatch.setattr(
-        welcome_resend,
-        "send_message_fn",
-        lambda name, _message: (welcome_calls.append(name), True)[1],
-    )
-
-    response = client.post(
-        "/api/claude-auth/notify-success",
-        json={"chat_agent_name": "chat-1"},
-    )
-    assert response.status_code == 200
-    assert response.json()["logged_in"] is False
-    assert welcome_calls == []
 
 
 def test_abort_endpoint_clears_in_flight_session(

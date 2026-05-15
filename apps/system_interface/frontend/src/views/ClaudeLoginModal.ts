@@ -7,11 +7,18 @@
  *   user's CODE#STATE.
  * - Anthropic Console: same flow but `--console`.
  * - Raw API key: paste a `sk-ant-...` value; backend writes it to the host
- *   env file and restarts the chat agent.
+ *   env file and restarts every running claude agent.
  *
  * The success state reads `subscription_type` from `claude auth status
  * --json` and renders conditionally, since Console accounts have no
  * subscription tier.
+ *
+ * The modal is purely reactive: it opens when ChatPanel receives an
+ * auth-error event over the SSE stream, and closes only when the user
+ * dismisses it. It does not poll the backend status endpoint, because
+ * `claude auth status` reflects the workspace-server process's view of
+ * auth (env-var-based, fresh subprocess) which can disagree with the
+ * already-running agent's cached in-process auth decision.
  */
 
 import m from "mithril";
@@ -35,18 +42,12 @@ interface OAuthStartResponse {
 type Provider = "claudeai" | "console" | "api_key";
 type Mode = "select_provider" | "awaiting_oauth_code" | "verifying" | "success" | "error";
 
-const POLL_INTERVAL_MS = 3000;
-
 export interface ClaudeLoginModalAttrs {
   chatAgentName: string | null;
-  // Called when the user accepts the success state (clicks "Done", or
-  // clicks the close affordance while the modal is in the success mode).
-  // Parent should drop both the modal and any not-signed-in banner.
+  // Called when the user closes the modal -- either after a successful
+  // sign-in flow ("Done" button) or via the close affordance before
+  // signing in. A subsequent auth-error event will reopen it.
   onDismiss: () => void;
-  // Called when the user closes the modal without reaching success.
-  // Parent should drop the modal and show the not-signed-in banner so
-  // the user can re-open the flow later.
-  onMinimize: () => void;
 }
 
 export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
@@ -58,7 +59,6 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   let apiKey = "";
   let errorMessage: string | null = null;
   let successStatus: ClaudeAuthStatus | null = null;
-  let pollTimer: number | null = null;
   let attrsRef: ClaudeLoginModalAttrs | null = null;
 
   function clearError(): void {
@@ -69,52 +69,6 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     errorMessage = message;
     mode = "error";
     m.redraw();
-  }
-
-  async function pollStatus(): Promise<void> {
-    if (mode === "success" || mode === "verifying") {
-      return;
-    }
-    try {
-      const status = await m.request<ClaudeAuthStatus>({
-        method: "GET",
-        url: apiUrl("/api/claude-auth/status"),
-      });
-      if (status.logged_in) {
-        successStatus = status;
-        mode = "success";
-        m.redraw();
-        // Notify the backend so the welcome-resend chokepoint fires for
-        // the poll-detected path too. The endpoint is idempotent (the
-        // welcome resend skips when the agent's pane already shows the
-        // greeting) so failures here are harmless to swallow.
-        try {
-          await m.request({
-            method: "POST",
-            url: apiUrl("/api/claude-auth/notify-success"),
-            body: { chat_agent_name: attrsRef?.chatAgentName ?? null },
-          });
-        } catch {
-          // Best-effort; the user can still re-run /welcome manually.
-        }
-      }
-    } catch {
-      // Silently ignore poll failures; the user can still drive the flow.
-    }
-  }
-
-  function startPolling(): void {
-    if (pollTimer !== null) return;
-    pollTimer = window.setInterval(() => {
-      void pollStatus();
-    }, POLL_INTERVAL_MS);
-  }
-
-  function stopPolling(): void {
-    if (pollTimer !== null) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
-    }
   }
 
   async function startOAuth(chosen: Provider): Promise<void> {
@@ -388,8 +342,6 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   return {
     oncreate(vnode: m.VnodeDOM<ClaudeLoginModalAttrs>) {
       attrsRef = vnode.attrs;
-      startPolling();
-      void pollStatus();
     },
 
     onupdate(vnode: m.VnodeDOM<ClaudeLoginModalAttrs>) {
@@ -397,21 +349,12 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     },
 
     onremove() {
-      stopPolling();
       void m.request({ method: "POST", url: apiUrl("/api/claude-auth/abort") });
     },
 
     view() {
-      // Close-affordance routing: in `success` mode the user is signed
-      // in, so close is treated as confirmation (drop the banner too).
-      // In every other mode the user is still unauthenticated, so close
-      // collapses to the recovery banner.
       const onClose = (): void => {
-        if (mode === "success") {
-          attrsRef?.onDismiss();
-        } else {
-          attrsRef?.onMinimize();
-        }
+        attrsRef?.onDismiss();
       };
       return m(
         "div.claude-login-overlay",

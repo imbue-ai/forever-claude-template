@@ -25,8 +25,7 @@ import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import { ClaudeLoginModal, type ClaudeAuthStatus } from "./ClaudeLoginModal";
-import { ClaudeLoginBanner } from "./ClaudeLoginBanner";
+import { ClaudeLoginModal } from "./ClaudeLoginModal";
 
 function getAgentTerminalUrl(agentId: string): string {
   const baseUrl = getTerminalUrl();
@@ -72,55 +71,23 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let previousScrollTop = 0;
   let backfillStarted = false;
 
-  // Claude login modal/banner state. The blocking modal pops on every fresh
-  // page load while unauthenticated; if the user dismisses, a non-blocking
-  // banner replaces it. The banner re-opens the modal on click.
+  // Claude login modal state. The modal opens only when the agent's SSE
+  // stream emits an `is_auth_error` event, and closes only when the user
+  // dismisses it (either after a successful sign-in or by clicking the
+  // close affordance). If the user closes it without signing in, the
+  // next auth-error event will reopen it.
   let loginModalOpen = false;
-  let loginBannerVisible = false;
-  let authCheckAgentId: string | null = null;
   let unsubscribeAuthError: (() => void) | null = null;
-
-  async function runInitialAuthCheck(agentId: string): Promise<void> {
-    if (authCheckAgentId === agentId) return;
-    authCheckAgentId = agentId;
-    try {
-      const status = await m.request<ClaudeAuthStatus>({
-        method: "GET",
-        url: apiUrl("/api/claude-auth/status"),
-      });
-      if (!status.logged_in) {
-        loginModalOpen = true;
-        loginBannerVisible = false;
-        m.redraw();
-      }
-    } catch {
-      // Backend not responding to auth check is a soft failure; surface only
-      // the existing chat-panel errors and leave the modal closed.
-    }
-  }
 
   function handleAuthErrorEvent(eventAgentId: string): void {
     if (eventAgentId !== currentAgentId) return;
     if (loginModalOpen) return;
     loginModalOpen = true;
-    loginBannerVisible = false;
     m.redraw();
   }
 
-  function dismissModalToBanner(): void {
+  function closeLoginModal(): void {
     loginModalOpen = false;
-    loginBannerVisible = true;
-    m.redraw();
-  }
-
-  function dismissModalOnSuccess(): void {
-    loginModalOpen = false;
-    loginBannerVisible = false;
-    m.redraw();
-  }
-
-  function reopenModalFromBanner(): void {
-    loginModalOpen = true;
     m.redraw();
   }
 
@@ -467,14 +434,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     view(vnode) {
       const agentId = vnode.attrs.agentId;
 
-      if (!isProtoAgent(agentId)) {
-        void runInitialAuthCheck(agentId);
-      }
-
       const chatAgentName = getAgentById(agentId)?.name ?? null;
 
       return m("div", { class: "chat-panel flex flex-col h-full relative" }, [
-        loginBannerVisible && !loginModalOpen ? m(ClaudeLoginBanner, { onClick: reopenModalFromBanner }) : null,
         m(
           "main",
           {
@@ -509,12 +471,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
         loginModalOpen
           ? m(ClaudeLoginModal, {
               chatAgentName,
-              // Signed-in: drop both modal and not-signed-in banner.
-              onDismiss: dismissModalOnSuccess,
-              // Closed without success: collapse to the recovery banner
-              // so the user can re-open the flow without losing the
-              // visual cue that auth still needs attention.
-              onMinimize: dismissModalToBanner,
+              onDismiss: closeLoginModal,
             })
           : null,
       ]);

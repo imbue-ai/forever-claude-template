@@ -214,6 +214,62 @@ def test_oauth_session_raises_on_timeout_waiting_for_url(monkeypatch: pytest.Mon
         claude_auth.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
 
 
+def test_list_claude_agent_names_filters_to_claude_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only `type: "claude"` agents are returned; `type: "main"` is skipped.
+
+    The `main`-type agent in a real mind is system-services, which has
+    no interactive claude process and would error on `mngr stop`.
+    """
+    payload = (
+        '{"agents": ['
+        '{"name": "ababa", "type": "claude"}, '
+        '{"name": "system-services", "type": "main"}, '
+        '{"name": "feature-x", "type": "claude"}'
+        "]}"
+    )
+
+    def _runner(cmd: list[str], _timeout: float) -> _FakeFinishedProcess:
+        assert cmd[:3] == ["mngr", "list", "--format"]
+        return _FakeFinishedProcess(stdout=payload)
+
+    monkeypatch.setattr(claude_auth, "command_runner", _runner)
+    names = claude_auth.list_claude_agent_names()
+    assert names == ["ababa", "feature-x"]
+
+
+def test_list_claude_agent_names_raises_on_mngr_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _runner(_cmd: list[str], _timeout: float) -> _FakeFinishedProcess:
+        return _FakeFinishedProcess(stderr="boom", returncode=1)
+
+    monkeypatch.setattr(claude_auth, "command_runner", _runner)
+    with pytest.raises(claude_auth.ClaudeAuthError, match="mngr list failed"):
+        claude_auth.list_claude_agent_names()
+
+
+def test_restart_all_claude_agents_stops_then_starts_each(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = '{"agents": [{"name": "a", "type": "claude"}, {"name": "b", "type": "claude"}]}'
+    calls: list[str] = []
+
+    def _runner(cmd: list[str], _timeout: float) -> _FakeFinishedProcess:
+        if cmd[:3] == ["mngr", "list", "--format"]:
+            return _FakeFinishedProcess(stdout=payload)
+        if cmd[0] == "mngr" and cmd[1] in {"stop", "start"}:
+            calls.append(f"{cmd[1]} {cmd[2]}")
+            return _FakeFinishedProcess(returncode=0)
+        raise AssertionError(f"unexpected cmd: {cmd!r}")
+
+    monkeypatch.setattr(claude_auth, "command_runner", _runner)
+    names = claude_auth.restart_all_claude_agents()
+    assert names == ["a", "b"]
+    assert calls == ["stop a", "start a", "stop b", "start b"]
+
+
 def test_submit_oauth_code_drives_subprocess_and_returns_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
