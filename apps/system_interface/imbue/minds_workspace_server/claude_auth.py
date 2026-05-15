@@ -54,7 +54,7 @@ logger = _loguru_logger
 
 _HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
 _ANTHROPIC_API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
-_OAUTH_URL_REGEX = re.compile(r"https://claude\.ai/oauth/authorize\S*")
+_OAUTH_URL_REGEX = re.compile(r"https://\S*oauth/authorize\S*")
 _OAUTH_URL_WAIT_SECONDS: Final = 30.0
 _OAUTH_COMPLETE_WAIT_SECONDS: Final = 30.0
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final = 60.0
