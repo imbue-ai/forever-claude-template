@@ -362,8 +362,11 @@ def start_oauth_login(provider: OAuthProvider) -> OAuthStartResult:
 
 def _drive_oauth_code(process: Any, code: str) -> None:
     process.timeout = _OAUTH_COMPLETE_WAIT_SECONDS
-    process.sendline(code)
-    result = process.expect([pexpect.EOF, pexpect.TIMEOUT])
+    try:
+        process.sendline(code)
+        result = process.expect([pexpect.EOF, pexpect.TIMEOUT])
+    except pexpect.ExceptionPexpect as e:
+        raise ClaudeAuthError(f"claude auth login subprocess failed during code submit: {e}") from e
     if result != 0:
         raise ClaudeAuthError("Timed out waiting for claude auth login to complete after code submit")
 
