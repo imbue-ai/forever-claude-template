@@ -6,7 +6,7 @@
 # .tickets/ directory yet.
 #
 # Step records, not tickets: regular tickets persist cross-agent and the
-# agent is expected to manage them through `tk ls / tk mine / tk ready`.
+# agent is expected to manage them through `tk ls / tk ready / tk show`.
 # Steps are the per-turn progress records that drive the chat progress
 # view, and they are the only thing the carryover reminder is about.
 set -euo pipefail
