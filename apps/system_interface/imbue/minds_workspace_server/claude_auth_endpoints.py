@@ -8,6 +8,7 @@ once per successful login.
 
 from __future__ import annotations
 
+from fastapi import FastAPI
 from loguru import logger as _loguru_logger
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
@@ -122,7 +123,7 @@ async def abort_oauth(request: Request) -> JSONResponse:
     return JSONResponse(content={"status": "ok"})
 
 
-def register_routes(application) -> None:
+def register_routes(application: FastAPI) -> None:
     """Wire `/api/claude-auth/*` endpoints onto the FastAPI application."""
     application.add_api_route("/api/claude-auth/status", get_status, methods=["GET"])
     application.add_api_route("/api/claude-auth/start", start_oauth, methods=["POST"])
