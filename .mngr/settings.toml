@@ -182,6 +182,24 @@ idle_mode = "disabled"
 # Same forwarding as the docker template; see comment there.
 pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 
+# template for OVH VPS provider (the imbue-cloud pool-bake's default)
+[create_templates.ovh]
+provider = "ovh"
+target_path = "/code/"
+# No plan / datacenter baked in: the pool-bake CLI
+# (``mngr imbue_cloud admin pool create``) appends
+# ``-b --vps-datacenter=<region>`` per invocation so a single bake
+# session can spread hosts across regions. Plan defaults come from
+# ``OvhProviderConfig.default_plan`` (``vps-2025-model1`` -- 1 vCPU /
+# 8 GB RAM / 80 GB SSD at ~$7.99/mo as of 2025-05). Operators who want
+# a different plan override per-invocation with ``-b --vps-plan=<code>``.
+build_arg = ["--file=Dockerfile", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown.
+# This also prevents shutdown when all agent tmux sessions exit.
+idle_mode = "disabled"
+# Same forwarding as the docker template; see comment there.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+
 # Template for imbue_cloud-leased pool hosts. minds invokes this as
 # `--template main --template imbue_cloud` (mirroring how the other modes
 # use `--template main --template <provider>`), so the imbue_cloud-specific
