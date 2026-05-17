@@ -154,8 +154,12 @@ COPY . /code/
 # make an extra directory for future worktrees
 RUN mkdir -p /worktree
 
-# extract our code into the project directory
-RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
+# Mark /code/ as a git safe.directory so commands run inside the container
+# don't refuse on ownership mismatch. The previous `chown -R root:root /code/`
+# was dropped: COPY already lands files as root:root by default, so the
+# recursive chown was a redundant ~60s walk over the entire (~250 MB) source
+# tree on every warm-cache rebuild.
+RUN git config --global --add safe.directory /code/
 
 # Build the system_interface frontend (deps already installed pre-COPY).
 RUN cd /code/apps/system_interface/frontend && npm run build
