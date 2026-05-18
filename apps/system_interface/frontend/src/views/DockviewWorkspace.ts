@@ -935,7 +935,7 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
   // attaches to *some* chat instead of degrading to a plain new tab.
   const referencePanelId =
     relativeTo === "self"
-      ? (await resolveRefToPanelId("self", requesterAgentId)) ?? findAnchorChatPanelId(requesterAgentId)
+      ? ((await resolveRefToPanelId("self", requesterAgentId)) ?? findAnchorChatPanelId(requesterAgentId))
       : await resolveRefToPanelId(relativeTo, requesterAgentId);
   if (referencePanelId === null) return;
 
@@ -1042,7 +1042,7 @@ async function handleMove(args: Record<string, unknown>, requesterAgentId: strin
   // ``findAnchorChatPanelId`` when ``self`` doesn't strictly resolve.
   const referencePanelId =
     relativeTo === "self"
-      ? (await resolveRefToPanelId("self", requesterAgentId)) ?? findAnchorChatPanelId(requesterAgentId)
+      ? ((await resolveRefToPanelId("self", requesterAgentId)) ?? findAnchorChatPanelId(requesterAgentId))
       : await resolveRefToPanelId(relativeTo, requesterAgentId);
   if (targetPanelId === null || referencePanelId === null) return;
   const targetPanel = dockview.panels.find((p) => p.id === targetPanelId);
@@ -1090,10 +1090,7 @@ function handleRestore(): void {
   }
 }
 
-async function handleReplaceUrl(
-  args: Record<string, unknown>,
-  requesterAgentId: string,
-): Promise<void> {
+async function handleReplaceUrl(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   const ref = asString(args.ref);
   const url = asString(args.url);
   if (!ref || !url) return;
