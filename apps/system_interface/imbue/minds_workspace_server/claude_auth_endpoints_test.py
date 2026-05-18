@@ -102,16 +102,16 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
         command_log.append(tuple(cmd))
         return _logged_in_runner(cmd, timeout)
 
+    def _record_welcome_send(name: str, _message: str) -> bool:
+        welcome_resend_calls.append(name)
+        return True
+
     monkeypatch.setattr(
         claude_auth, "pexpect_spawner", lambda *_args, **_kwargs: fake_process
     )
     monkeypatch.setattr(claude_auth, "command_runner", _recording_runner)
     monkeypatch.setattr(welcome_resend, "capture_pane", lambda _name: "empty pane")
-    monkeypatch.setattr(
-        welcome_resend,
-        "send_message_fn",
-        lambda name, _message: (welcome_resend_calls.append(name), True)[1],
-    )
+    monkeypatch.setattr(welcome_resend, "send_message_fn", _record_welcome_send)
     monkeypatch.setattr(welcome_resend, "_DEFAULT_SKILL_PATH", skill_path)
 
     start = client.post("/api/claude-auth/start", json={"provider": "claudeai"})
@@ -178,13 +178,13 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
             return FakeFinishedProcess(returncode=0)
         return _logged_in_runner(cmd, _timeout)
 
+    def _record_welcome_send(name: str, _message: str) -> bool:
+        welcome_calls.append(name)
+        return True
+
     monkeypatch.setattr(claude_auth, "command_runner", _runner)
     monkeypatch.setattr(welcome_resend, "capture_pane", lambda _name: "empty")
-    monkeypatch.setattr(
-        welcome_resend,
-        "send_message_fn",
-        lambda name, _message: (welcome_calls.append(name), True)[1],
-    )
+    monkeypatch.setattr(welcome_resend, "send_message_fn", _record_welcome_send)
 
     response = client.post(
         "/api/claude-auth/submit-api-key",

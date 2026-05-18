@@ -72,12 +72,12 @@ def test_check_and_resend_welcome_resends_when_pane_missing(
     skill = _write_welcome_skill(tmp_path / "SKILL.md")
     send_calls: list[tuple[str, str]] = []
 
+    def _record_send(name: str, message: str) -> bool:
+        send_calls.append((name, message))
+        return True
+
     monkeypatch.setattr(welcome_resend, "capture_pane", lambda _name: "empty pane")
-    monkeypatch.setattr(
-        welcome_resend,
-        "send_message_fn",
-        lambda name, message: (send_calls.append((name, message)), True)[1],
-    )
+    monkeypatch.setattr(welcome_resend, "send_message_fn", _record_send)
 
     resent = welcome_resend.check_and_resend_welcome("my-agent", skill_path=skill)
     assert resent is True
@@ -90,14 +90,14 @@ def test_check_and_resend_welcome_skips_when_pane_has_welcome(
     skill = _write_welcome_skill(tmp_path / "SKILL.md")
     send_calls: list[tuple[str, str]] = []
 
+    def _record_send(name: str, message: str) -> bool:
+        send_calls.append((name, message))
+        return True
+
     monkeypatch.setattr(
         welcome_resend, "capture_pane", lambda _name: "### Welcome to Minds appears here"
     )
-    monkeypatch.setattr(
-        welcome_resend,
-        "send_message_fn",
-        lambda name, message: (send_calls.append((name, message)), True)[1],
-    )
+    monkeypatch.setattr(welcome_resend, "send_message_fn", _record_send)
 
     resent = welcome_resend.check_and_resend_welcome("my-agent", skill_path=skill)
     assert resent is False
