@@ -108,6 +108,8 @@ Summary rules: ONE concise line, plain English, describing **the work you did in
 
 After all your steps for the turn are closed, write your final user-facing assistant message — *this* is where the actual results, findings, and recommendations belong. It renders below the progress timeline as the agent's reply to the user.
 
+**Where prose goes while a step is open:** any text-only message you emit between `tk start <id>` and `tk close <id>` becomes that step's *narration* — a single live caption rendered under the step title. Each new text message overwrites the previous one, and on close the summary you pass to `tk close` replaces the narration (or blanks it if you closed without a summary). Implication: do not write substantive prose meant for the user while a step is open and expect it to be visible after you close the step — it will be overwritten by the summary. Put substantive prose either *inside* the close summary, or *after* closing the relevant step (so it lands outside any active window and renders at top level). The narration mechanism is for short live-status captions ("Reading the related files…", "Trying a smaller sample…"), not for findings or recommendations.
+
 ## Working with regular tickets
 
 Regular tickets are for substantive work worth tracking cross-agent. The relevant commands:

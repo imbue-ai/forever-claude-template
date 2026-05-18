@@ -413,7 +413,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       // it brackets the work rather than splitting the timeline.
       const nonBoundaryUserEvents = turn.body_events.filter((e) => e.type === "user_message");
       if (turn.tasks.length > 0) {
-        const finalMessages = selectFinalMessages(turn.body_events);
+        const finalMessages = selectFinalMessages(turn.body_events, turn.tasks);
         for (const ev of nonBoundaryUserEvents) {
           const chipNode = renderUserMessage(ev);
           if (chipNode !== null) {

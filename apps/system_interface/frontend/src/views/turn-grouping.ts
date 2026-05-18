@@ -114,6 +114,14 @@ export interface TaskInTurn {
    *  the model is two levels: ticket -> steps, with steps having no
    *  children of their own. */
   children: TaskInTurn[];
+  /** Live status caption rendered under the task title, always visible.
+   *  Holds the text of the latest text-only assistant_message that fell
+   *  inside this task's active window. While the task is active this
+   *  acts as a "what's happening now" caption; once the task closes the
+   *  ProgressBlock renders `summary` instead (or nothing, if there's no
+   *  summary -- final state stays clean). Null when no text-only
+   *  message has landed in the window yet. */
+  narration: string | null;
 }
 
 export interface Turn {
@@ -304,6 +312,25 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
     turn.tasks = [...carry, ...own];
   }
 
+  // Per-task narration: attribute each text-only assistant_message in the
+  // turn to the most-recently-started task whose active window contains
+  // it, and set that task's `narration` to the message text. Later
+  // matches overwrite earlier ones so the slot reflects the LATEST text
+  // in window. We skip done tasks because their slot will render
+  // `summary` (or nothing) instead -- narration is only meaningful while
+  // a task is still in flight.
+  for (const turn of turns) {
+    for (const e of turn.body_events) {
+      if (e.type !== "assistant_message") continue;
+      if (!e.text) continue;
+      if (e.tool_calls && e.tool_calls.length > 0) continue;
+      const containing = findContainingTask(e.timestamp, turn.tasks);
+      if (containing === null) continue;
+      if (containing.status === "done") continue;
+      containing.narration = e.text;
+    }
+  }
+
   // Nest step children under their parent ticket where both live in the
   // same turn. Steps whose parent is NOT in this turn (orphan steps --
   // typically means the parent already closed in an earlier turn) fall
@@ -387,7 +414,33 @@ function makeTaskInTurn(
     is_step: record.step,
     parent_id: record.parent_id,
     children: [],
+    narration: null,
   };
+}
+
+/** Find the task whose active window contains `ts`, preferring the most
+ *  recently started one when multiple match (the "innermost" / most-
+ *  specific task). Returns null if no task contains the timestamp.
+ *  Tasks with no active window (pending) are skipped. Walks nested
+ *  children so callers can pass either the flat pre-nesting list or
+ *  the post-nesting tree. */
+function findContainingTask(ts: string, tasks: TaskInTurn[]): TaskInTurn | null {
+  let best: TaskInTurn | null = null;
+  let bestStart = "";
+  const visit = (t: TaskInTurn): void => {
+    const start = t.active_window_start;
+    if (start !== null) {
+      const end = t.active_window_end;
+      const inWindow = ts >= start && (end === null || ts <= end);
+      if (inWindow && (best === null || start > bestStart)) {
+        best = t;
+        bestStart = start;
+      }
+    }
+    for (const child of t.children) visit(child);
+  };
+  for (const t of tasks) visit(t);
+  return best;
 }
 
 /** Pick out the body_events that fall inside a task's active window.
@@ -427,25 +480,41 @@ export function eventsInTaskWindow(task: TaskInTurn, body_events: TranscriptEven
 }
 
 /**
- * Pick the assistant_messages from a turn that should render at the top
- * level of the progress block rather than be hidden inside a task's
- * expandable panel. The rule is "text-only": non-empty `text` and no
- * `tool_calls`. This covers two distinct cases that a single
- * "last-non-empty-message" heuristic silently dropped:
+ * Pick the text-only assistant_messages from a turn that should render
+ * at the top level of the progress block (below the timeline), rather
+ * than being absorbed into a task's narration slot.
  *
- *   1. Multiple separate prose messages in one turn (e.g. a summary
- *      followed by a "waiting on your input" note). Both must remain
- *      visible, in chronological order.
- *   2. The agent leaves a task open at turn end and replies with a
- *      final text message. That message's timestamp lands inside the
- *      open task's window and would otherwise be buried in its
- *      dropdown.
- *
- * Tool-bearing assistant_messages are intentionally excluded -- they
- * stay inside their task's expanded panel where the tool calls live.
+ * Rules, in order:
+ *   - Message must be a text-only assistant_message (non-empty `text`
+ *     and no `tool_calls`). Tool-bearing messages always stay inside
+ *     their task's expanded panel.
+ *   - If the message's timestamp is outside every task's active
+ *     window, it renders at top level (standalone prose between or
+ *     around tasks).
+ *   - Otherwise the message is normally consumed as that task's
+ *     narration. The one exception is the LAST text-only message of
+ *     the turn when its containing task is still active (not done) at
+ *     turn end -- the agent left the task open, so we surface its
+ *     trailing message at top level too rather than letting it sit
+ *     only in the narration slot of an unresolved task.
  */
-export function selectFinalMessages(body_events: TranscriptEvent[]): TranscriptEvent[] {
-  return body_events.filter(
+export function selectFinalMessages(body_events: TranscriptEvent[], tasks: TaskInTurn[]): TranscriptEvent[] {
+  const textOnly = body_events.filter(
     (ev) => ev.type === "assistant_message" && !!ev.text && !(ev.tool_calls && ev.tool_calls.length > 0),
   );
+  if (textOnly.length === 0) return [];
+  const lastIdx = textOnly.length - 1;
+  const result: TranscriptEvent[] = [];
+  for (let i = 0; i < textOnly.length; i++) {
+    const ev = textOnly[i];
+    const containing = findContainingTask(ev.timestamp, tasks);
+    if (containing === null) {
+      result.push(ev);
+      continue;
+    }
+    if (i === lastIdx && containing.status !== "done") {
+      result.push(ev);
+    }
+  }
+  return result;
 }

@@ -73,6 +73,19 @@ function statusIcon(status: TaskUiStatus, continues_forward: boolean): m.Vnode {
   );
 }
 
+/** Single sub-caption under the task title:
+ *   - done + summary    -> render the close summary
+ *   - done + no summary -> render nothing (clean final state)
+ *   - active            -> render the latest in-window narration, if any
+ *   - pending           -> render nothing (no window yet)
+ */
+function renderTaskCaption(task: TaskInTurn): m.Vnode | null {
+  if (task.status === "done") {
+    return task.summary ? m("div.pv-tl-summary", task.summary) : null;
+  }
+  return task.narration ? m("div.pv-tl-narration", task.narration) : null;
+}
+
 function renderExpandedTaskBody(
   events: TranscriptEvent[],
   toolResults: Map<string, TranscriptEvent>,
@@ -86,16 +99,15 @@ function renderExpandedTaskBody(
 
   // Reuse renderAssistantMessageChildren so the expanded panel renders
   // assistant text + tool calls identically to the rest of the chat
-  // (interleaved markdown + tool-call-block chrome).
+  // (interleaved markdown + tool-call-block chrome). Text-only messages
+  // also belong here: they're part of the task's history. The most
+  // recent one additionally surfaces as the always-visible narration
+  // slot under the task title -- some small duplication for the latest
+  // entry is fine, and earlier text-only messages would otherwise
+  // disappear entirely from view.
   const children: m.Children[] = [];
   for (const e of events) {
     if (e.type !== "assistant_message") continue;
-    // Text-only assistant_messages are pulled to the top level (rendered
-    // as separate `pv-final` blocks below the timeline) so they remain
-    // visible even when a task is left open at turn end. Skipping them
-    // here avoids rendering the same prose twice.
-    const hasTools = !!(e.tool_calls && e.tool_calls.length > 0);
-    if (!hasTools && e.text) continue;
     children.push(...renderAssistantMessageChildren(e, toolResults, agentId));
   }
 
@@ -127,14 +139,14 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
   ): m.Vnode {
     const { is_last, is_child, body_events, toolResults, agentId } = options;
     const taskEvents = eventsInTaskWindow(task, body_events);
-    // A task is "expandable" only if it has assistant_messages with
-    // tool_calls to show. Text-only assistant_messages get pulled to
-    // the top level (see ProgressBlockAttrs.final_messages), so a
-    // task whose window contains only text-only messages would have
-    // an empty expanded panel -- avoid offering expansion in that
-    // case.
+    // A task is "expandable" when its window contains any assistant
+    // content -- tool calls or plain text. Text-only messages also
+    // render in the expanded panel (the latest one additionally
+    // surfaces as the always-visible narration slot), so an
+    // assistant_message of either flavour is enough to warrant
+    // expand.
     const canExpand = taskEvents.some(
-      (e) => e.type === "assistant_message" && !!(e.tool_calls && e.tool_calls.length > 0),
+      (e) => e.type === "assistant_message" && (!!(e.tool_calls && e.tool_calls.length > 0) || !!e.text),
     );
     const isExpanded = expanded.has(task.ticket_id);
     // The kind class drives the chrome difference between a regular
@@ -189,7 +201,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
                 : null,
             ],
           ),
-          task.status === "done" && task.summary ? m("div.pv-tl-summary", task.summary) : null,
+          renderTaskCaption(task),
           isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, toolResults, agentId)) : null,
           // Nested step children (only for parent tickets in practice).
           task.children.length > 0

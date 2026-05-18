@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEvent } from "../models/Response";
+import type { TaskInTurn } from "./turn-grouping";
 import { buildTaskRecords, buildTurns, eventsInTaskWindow, selectFinalMessages } from "./turn-grouping";
 
 function userMsg(ts: string, content: string, eventId: string = `u-${ts}`): TranscriptEvent {
@@ -371,6 +372,7 @@ describe("eventsInTaskWindow", () => {
       is_step: false,
       parent_id: "",
       children: [],
+      narration: null,
     };
     const body = [
       assistantMsg("2026-04-28T01:00:15Z", "before start"),
@@ -397,6 +399,7 @@ describe("eventsInTaskWindow", () => {
       is_step: false,
       parent_id: "",
       children: [],
+      narration: null,
     };
     const body = [toolUse("2026-04-28T01:00:25Z", "Read", "tc1"), toolUse("2026-04-28T01:00:45Z", "Edit", "tc2")];
     expect(eventsInTaskWindow(task, body)).toHaveLength(2);
@@ -420,6 +423,7 @@ describe("eventsInTaskWindow", () => {
       is_step: false,
       parent_id: "",
       children: [],
+      narration: null,
     };
     function toolResult(ts: string, callId: string): TranscriptEvent {
       return {
@@ -452,7 +456,7 @@ describe("selectFinalMessages", () => {
     const a1 = assistantMsg("2026-04-28T01:00:10Z", "Here is the summary table...", "msg-summary");
     const a2 = assistantMsg("2026-04-28T01:00:20Z", "Waiting on your input.", "msg-waiting");
     const events = [a1, toolUse("2026-04-28T01:00:15Z", "Bash", "tc-1"), a2];
-    expect(selectFinalMessages(events).map((e) => e.event_id)).toEqual(["msg-summary", "msg-waiting"]);
+    expect(selectFinalMessages(events, []).map((e) => e.event_id)).toEqual(["msg-summary", "msg-waiting"]);
   });
 
   it("excludes tool-bearing assistant_messages even when they have text", () => {
@@ -467,7 +471,7 @@ describe("selectFinalMessages", () => {
       text: "Calling out to a tool.",
       tool_calls: [{ tool_call_id: "tc-x", tool_name: "Bash", input_preview: "{}" }],
     };
-    expect(selectFinalMessages([withTextAndTools])).toEqual([]);
+    expect(selectFinalMessages([withTextAndTools], [])).toEqual([]);
   });
 
   it("excludes empty-text assistant_messages", () => {
@@ -475,7 +479,7 @@ describe("selectFinalMessages", () => {
     // with text="". They aren't substantive prose and should not surface
     // as top-level final blocks.
     const empty = assistantMsg("2026-04-28T01:00:00Z", "", "a-empty");
-    expect(selectFinalMessages([empty])).toEqual([]);
+    expect(selectFinalMessages([empty], [])).toEqual([]);
   });
 
   it("ignores non-assistant events", () => {
@@ -484,7 +488,133 @@ describe("selectFinalMessages", () => {
       taskEvent("t1", "open", "2026-04-28T01:00:01Z"),
       assistantMsg("2026-04-28T01:00:02Z", "hi back", "a-hi"),
     ];
-    expect(selectFinalMessages(events).map((e) => e.event_id)).toEqual(["a-hi"]);
+    expect(selectFinalMessages(events, []).map((e) => e.event_id)).toEqual(["a-hi"]);
+  });
+
+  it("drops a text-only message that falls inside a closed task's window", () => {
+    // Mid-task prose belongs to the closed task's narration slot (which
+    // the close summary then overrides). Surfacing it at top level
+    // duplicates the agent's output and clutters the final view.
+    const doneTask: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Pull headlines",
+      status: "done",
+      summary: "Pulled headline + summary + link from each newsletter.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:01:00Z",
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const mid = assistantMsg("2026-04-28T01:00:30Z", "Half done with the JSON.", "msg-mid");
+    expect(selectFinalMessages([mid], [doneTask])).toEqual([]);
+  });
+
+  it("keeps a text-only message that falls outside every task window", () => {
+    // Prose between tasks (after one task closed, before the next
+    // started) has no task to attach to -- it must render at top level
+    // or the user would never see it.
+    const earlier: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Setup",
+      status: "done",
+      summary: "Set things up.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:30Z",
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const between = assistantMsg("2026-04-28T01:00:40Z", "Quick check-in before next step.", "msg-between");
+    expect(selectFinalMessages([between], [earlier]).map((e) => e.event_id)).toEqual(["msg-between"]);
+  });
+
+  it("surfaces the trailing message of an unclosed task at top level (safety valve)", () => {
+    // If the agent leaves the task open at turn end and emits a final
+    // text message, that message would otherwise sit only in the
+    // narration slot of an unresolved task. Promote it to top level so
+    // the user reliably sees the wrap-up.
+    const openTask: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Investigate",
+      status: "active",
+      summary: null,
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: null,
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Stuck -- need your call.", "msg-trailing");
+    expect(selectFinalMessages([trailing], [openTask]).map((e) => e.event_id)).toEqual(["msg-trailing"]);
+  });
+
+  it("drops earlier in-window messages even when the last one is the trailing safety-valve case", () => {
+    // The safety valve only rescues the LAST text-only message of the
+    // turn. Earlier in-window prose still belongs to the narration slot.
+    const openTask: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Investigate",
+      status: "active",
+      summary: null,
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: null,
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const mid = assistantMsg("2026-04-28T01:00:20Z", "Looking into thing A.", "msg-mid");
+    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Hit a wall, need your call.", "msg-trailing");
+    expect(selectFinalMessages([mid, trailing], [openTask]).map((e) => e.event_id)).toEqual(["msg-trailing"]);
+  });
+});
+
+describe("narration attribution", () => {
+  it("populates narration with the latest text-only message inside an active task's window", () => {
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
+      assistantMsg("2026-04-28T01:00:10Z", "Trying approach A.", "a1"),
+      assistantMsg("2026-04-28T01:00:20Z", "Approach A failed, trying B.", "a2"),
+    ];
+    const [turn] = buildTurns(events);
+    expect(turn.tasks).toHaveLength(1);
+    expect(turn.tasks[0].narration).toBe("Approach A failed, trying B.");
+  });
+
+  it("leaves narration null on a closed task -- the summary owns the slot", () => {
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
+      assistantMsg("2026-04-28T01:00:10Z", "Mid-task narration.", "a1"),
+      taskEvent("t1", "closed", "2026-04-28T01:00:30Z", { summary: "Did the thing.", step: true }),
+    ];
+    const [turn] = buildTurns(events);
+    expect(turn.tasks[0].status).toBe("done");
+    expect(turn.tasks[0].summary).toBe("Did the thing.");
+    expect(turn.tasks[0].narration).toBeNull();
   });
 });
 
