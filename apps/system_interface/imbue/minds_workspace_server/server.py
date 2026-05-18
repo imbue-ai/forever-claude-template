@@ -817,12 +817,12 @@ async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
             return JSONResponse(content=error_body, status_code=409)
         try:
             broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
-            broadcaster.broadcast_layout_op(op, args_raw)
+            broadcaster.broadcast_layout_op(op, args_raw, requester_agent_id=agent_id)
         finally:
             layout_mutex.release(agent_id, op)
     else:
         broadcaster = request.app.state.broadcaster
-        broadcaster.broadcast_layout_op(op, args_raw)
+        broadcaster.broadcast_layout_op(op, args_raw, requester_agent_id=agent_id)
 
     logger.info("layout op={} agent_id={} args={}", op, agent_id, args_raw)
     return JSONResponse(content={"ok": True})

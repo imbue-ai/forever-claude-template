@@ -170,7 +170,7 @@ class WebSocketBroadcaster(MutableModel):
             }
         )
 
-    def broadcast_layout_op(self, op: str, args: dict[str, Any]) -> None:
+    def broadcast_layout_op(self, op: str, args: dict[str, Any], requester_agent_id: str = "") -> None:
         """Broadcast a layout_op event telling the frontend to mutate the dockview layout.
 
         The frontend dispatches on ``op`` (e.g. ``open``, ``focus``, ``split``,
@@ -178,8 +178,14 @@ class WebSocketBroadcaster(MutableModel):
         ``refresh``) and applies the corresponding dockview primitive. ``args`` is
         an op-specific payload keyed by ref (e.g. ``{"ref": "service:web"}`` for
         ``open``).
+
+        ``requester_agent_id`` is the ``MNGR_AGENT_ID`` of the agent that invoked
+        ``scripts/layout.py``. The frontend uses it to anchor splits against the
+        requester's own chat panel and to resolve the ``self`` ref.
         """
-        self.broadcast({"type": "layout_op", "op": op, "args": args})
+        self.broadcast(
+            {"type": "layout_op", "op": op, "args": args, "requester_agent_id": requester_agent_id}
+        )
 
     def shutdown(self) -> None:
         """Signal all clients to disconnect by sending None sentinel."""

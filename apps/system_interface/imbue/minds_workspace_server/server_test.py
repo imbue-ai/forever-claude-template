@@ -306,7 +306,12 @@ def test_layout_broadcast_open_emits_ws_message(app: FastAPI) -> None:
             assert response.status_code == 200
 
             msg = json.loads(ws.receive_text())
-            assert msg == {"type": "layout_op", "op": "open", "args": {"ref": "service:web"}}
+            assert msg == {
+                "type": "layout_op",
+                "op": "open",
+                "args": {"ref": "service:web"},
+                "requester_agent_id": "agent-42",
+            }
 
 
 @pytest.mark.timeout(10)
@@ -323,7 +328,12 @@ def test_layout_broadcast_refresh_bypasses_mutex(app: FastAPI) -> None:
             )
             assert response.status_code == 200
             msg = json.loads(ws.receive_text())
-            assert msg == {"type": "layout_op", "op": "refresh", "args": {"ref": "service:web"}}
+            assert msg == {
+                "type": "layout_op",
+                "op": "refresh",
+                "args": {"ref": "service:web"},
+                "requester_agent_id": "agent-42",
+            }
 
 
 def test_layout_broadcast_rejects_non_loopback(app: FastAPI) -> None:

@@ -46,6 +46,11 @@ export interface LayoutOpEvent {
   // rather than at the listener boundary -- the WS broadcast is the source of
   // truth and ``scripts/layout.py`` enforces shape before broadcasting.
   args: Record<string, unknown>;
+  // ``MNGR_AGENT_ID`` of the agent that invoked ``scripts/layout.py``. Empty
+  // string when the caller did not set ``MNGR_AGENT_ID``. Used to anchor
+  // splits against the requester's own chat panel and to resolve the ``self``
+  // ref.
+  requesterAgentId: string;
 }
 
 type WsEvent =
@@ -59,7 +64,12 @@ type WsEvent =
       parent_agent_id: string | null;
     }
   | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null }
-  | { type: "layout_op"; op: LayoutOpName; args: Record<string, unknown> };
+  | {
+      type: "layout_op";
+      op: LayoutOpName;
+      args: Record<string, unknown>;
+      requester_agent_id?: string;
+    };
 
 export type LayoutOpListener = (event: LayoutOpEvent) => void;
 export type AgentsUpdatedListener = (agents: AgentState[]) => void;
@@ -155,7 +165,11 @@ function handleEvent(event: WsEvent): void {
 
     case "layout_op":
       for (const listener of layoutOpListeners) {
-        listener({ op: event.op, args: event.args });
+        listener({
+          op: event.op,
+          args: event.args,
+          requesterAgentId: event.requester_agent_id ?? "",
+        });
       }
       break;
   }

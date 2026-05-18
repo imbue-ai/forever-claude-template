@@ -506,12 +506,35 @@ function openIframeTab(url: string, title: string, panelType: PanelType = "ifram
   });
 }
 
-/** Find the panel id of the primary agent's chat tab, or null if absent. */
-function findPrimaryChatPanelId(): string | null {
+/** Find the chat panel id to anchor an agent-initiated split against.
+ *
+ *  Preference order:
+ *    1. ``chat-<requesterAgentId>`` -- the chat tab of the agent that
+ *       invoked ``scripts/layout.py``. This is what we want in the common
+ *       case where an agent is splitting a service next to its own chat.
+ *    2. ``chat-<getPrimaryAgentId()>`` -- the workspace's primary chat
+ *       tab, used as a fallback when the requester id is empty (no
+ *       ``MNGR_AGENT_ID`` in the caller's env) or when the requester
+ *       doesn't have an open chat panel.
+ *    3. Any open chat panel -- final fallback so the split still anchors
+ *       against *some* chat instead of degrading to a plain new tab when
+ *       a chat is on screen.
+ *  Returns null when no chat panel is open at all. */
+function findAnchorChatPanelId(requesterAgentId: string): string | null {
+  if (!dockview) return null;
+  const candidates: string[] = [];
+  if (requesterAgentId) candidates.push(`chat-${requesterAgentId}`);
   const primaryId = getPrimaryAgentId();
-  if (!primaryId || !dockview) return null;
-  const id = `chat-${primaryId}`;
-  return dockview.panels.find((p) => p.id === id) ? id : null;
+  if (primaryId) candidates.push(`chat-${primaryId}`);
+  for (const candidate of candidates) {
+    if (dockview.panels.find((p) => p.id === candidate)) return candidate;
+  }
+  for (const [panelId, params] of panelParams) {
+    if (params.panelType === "chat" && dockview.panels.find((p) => p.id === panelId)) {
+      return panelId;
+    }
+  }
+  return null;
 }
 
 /** Find an existing iframe panel for ``serviceName``, or null. */
@@ -528,13 +551,15 @@ function findIframePanelIdForService(serviceName: string): string | null {
  *
  *  Resolution order:
  *    1. If a panel for ``serviceName`` is already open, focus it.
- *    2. If the primary agent's chat panel is open, add a right-split iframe
- *       sized to ``OPEN_TAB_SPLIT_FRACTION`` of the dockview container width.
+ *    2. If a chat panel is available to anchor against (preferring the
+ *       requesting agent's own chat, then the primary's, then any open
+ *       chat), add a right-split iframe sized to
+ *       ``OPEN_TAB_SPLIT_FRACTION`` of the dockview container width.
  *    3. Otherwise, add a plain iframe tab with dockview's default placement.
  *  Drop silently if the service isn't registered in ``applications`` yet --
  *  the script polls registration, but the WS broadcast itself is fire-and-
  *  forget. */
-function handleOpenTabRequest(serviceName: string): void {
+function handleOpenTabRequest(serviceName: string, requesterAgentId: string): void {
   if (!dockview) return;
 
   const existingPanelId = findIframePanelIdForService(serviceName);
@@ -549,18 +574,18 @@ function handleOpenTabRequest(serviceName: string): void {
   const app = getApplications().find((a) => a.name === serviceName);
   if (!app) return;
 
-  const primaryId = getPrimaryAgentId();
-  const panelId = `iframe-${primaryId}-${Date.now()}`;
+  const ownerId = requesterAgentId || getPrimaryAgentId();
+  const panelId = `iframe-${ownerId}-${Date.now()}`;
   const params: PanelParams = {
     panelType: "iframe",
-    agentId: primaryId,
+    agentId: ownerId,
     url: getServiceUrl(serviceName),
     title: serviceName,
     serviceName,
   };
   panelParams.set(panelId, params);
 
-  const chatPanelId = findPrimaryChatPanelId();
+  const chatPanelId = findAnchorChatPanelId(requesterAgentId);
   if (chatPanelId !== null) {
     const containerWidth = dockviewContainer?.getBoundingClientRect().width ?? 0;
     const initialWidth = containerWidth > 0 ? Math.round(containerWidth * OPEN_TAB_SPLIT_FRACTION) : undefined;
@@ -755,16 +780,15 @@ function directionToPosition(direction: string): "top" | "bottom" | "left" | "ri
  *  panel id. Returns null when no matching panel is currently open --
  *  callers decide whether that's fatal (close/focus) or a no-op cue to
  *  fall back to a creation path (open/split). */
-async function resolveRefToPanelId(ref: string): Promise<string | null> {
+async function resolveRefToPanelId(ref: string, requesterAgentId: string): Promise<string | null> {
   if (!dockview) return null;
   if (ref === "self") {
-    // ``self`` is the caller's chat panel. Each workspace_server serves
-    // exactly one primary mngr agent, and the layout helper script
-    // always POSTs to its local server, so ``self`` resolves to that
-    // primary chat tab.
-    const primaryId = getPrimaryAgentId();
-    const candidate = `chat-${primaryId}`;
-    return dockview.panels.find((p) => p.id === candidate) ? candidate : null;
+    // ``self`` is the caller's chat panel: the chat tab of the agent that
+    // invoked ``scripts/layout.py``. Falls back to a generic anchor when
+    // the requester has no open chat panel (or the caller didn't set
+    // ``MNGR_AGENT_ID``) so ops like ``split --relative-to self`` still
+    // find something to attach to.
+    return findAnchorChatPanelId(requesterAgentId);
   }
   if (ref.startsWith("service:")) {
     const serviceName = ref.substring("service:".length);
@@ -823,51 +847,52 @@ function asNumber(value: unknown): number | null {
 
 async function handleLayoutOp(event: LayoutOpEvent): Promise<void> {
   if (!dockview) return;
+  const requesterAgentId = event.requesterAgentId;
   switch (event.op) {
     case "open":
-      await handleOpen(event.args);
+      await handleOpen(event.args, requesterAgentId);
       return;
     case "focus":
-      await handleFocus(event.args);
+      await handleFocus(event.args, requesterAgentId);
       return;
     case "split":
-      await handleSplit(event.args);
+      await handleSplit(event.args, requesterAgentId);
       return;
     case "close":
-      await handleClose(event.args);
+      await handleClose(event.args, requesterAgentId);
       return;
     case "move":
-      await handleMove(event.args);
+      await handleMove(event.args, requesterAgentId);
       return;
     case "rename":
-      await handleRename(event.args);
+      await handleRename(event.args, requesterAgentId);
       return;
     case "maximize":
-      await handleMaximize(event.args);
+      await handleMaximize(event.args, requesterAgentId);
       return;
     case "restore":
       handleRestore();
       return;
     case "replace-url":
-      await handleReplaceUrl(event.args);
+      await handleReplaceUrl(event.args, requesterAgentId);
       return;
     case "refresh":
-      await handleRefresh(event.args);
+      await handleRefresh(event.args, requesterAgentId);
       return;
   }
 }
 
-async function handleOpen(args: Record<string, unknown>): Promise<void> {
+async function handleOpen(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   const ref = asString(args.ref);
   if (!ref || !dockview) return;
-  const existing = await resolveRefToPanelId(ref);
+  const existing = await resolveRefToPanelId(ref, requesterAgentId);
   if (existing !== null) {
     const panel = dockview.panels.find((p) => p.id === existing);
     if (panel) dockview.setActivePanel(panel);
     return;
   }
   if (ref.startsWith("service:")) {
-    handleOpenTabRequest(ref.substring("service:".length));
+    handleOpenTabRequest(ref.substring("service:".length), requesterAgentId);
     return;
   }
   if (ref.startsWith("chat:")) {
@@ -881,17 +906,17 @@ async function handleOpen(args: Record<string, unknown>): Promise<void> {
   // the surrounding code paths (e.g. SubagentView, "New URL" dialog).
 }
 
-async function handleFocus(args: Record<string, unknown>): Promise<void> {
+async function handleFocus(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   if (!dockview) return;
   const ref = asString(args.ref);
   if (!ref) return;
-  const panelId = await resolveRefToPanelId(ref);
+  const panelId = await resolveRefToPanelId(ref, requesterAgentId);
   if (panelId === null) return;
   const panel = dockview.panels.find((p) => p.id === panelId);
   if (panel) dockview.setActivePanel(panel);
 }
 
-async function handleSplit(args: Record<string, unknown>): Promise<void> {
+async function handleSplit(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   if (!dockview) return;
   const ref = asString(args.ref);
   const relativeTo = asString(args.relative_to);
@@ -899,7 +924,7 @@ async function handleSplit(args: Record<string, unknown>): Promise<void> {
   const ratio = asNumber(args.ratio);
   if (!ref || !relativeTo) return;
 
-  const referencePanelId = await resolveRefToPanelId(relativeTo);
+  const referencePanelId = await resolveRefToPanelId(relativeTo, requesterAgentId);
   if (referencePanelId === null) return;
 
   if (!ref.startsWith("service:") && !ref.startsWith("chat:")) {
@@ -924,11 +949,11 @@ async function handleSplit(args: Record<string, unknown>): Promise<void> {
       if (existing) dockview.setActivePanel(existing);
       return;
     }
-    const primaryId = getPrimaryAgentId();
-    const panelId = `iframe-${primaryId}-${Date.now()}`;
+    const ownerId = requesterAgentId || getPrimaryAgentId();
+    const panelId = `iframe-${ownerId}-${Date.now()}`;
     const params: PanelParams = {
       panelType: "iframe",
-      agentId: primaryId,
+      agentId: ownerId,
       url: getServiceUrl(serviceName),
       title: serviceName,
       serviceName,
@@ -984,24 +1009,24 @@ function computeInitialSize(
   return w ? { initialWidth: w } : {};
 }
 
-async function handleClose(args: Record<string, unknown>): Promise<void> {
+async function handleClose(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   if (!dockview) return;
   const ref = asString(args.ref);
   if (!ref) return;
-  const panelId = await resolveRefToPanelId(ref);
+  const panelId = await resolveRefToPanelId(ref, requesterAgentId);
   if (panelId === null) return;
   const panel = dockview.panels.find((p) => p.id === panelId);
   if (panel) dockview.removePanel(panel);
 }
 
-async function handleMove(args: Record<string, unknown>): Promise<void> {
+async function handleMove(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   if (!dockview) return;
   const ref = asString(args.ref);
   const relativeTo = asString(args.relative_to);
   const direction = asString(args.direction);
   if (!ref || !relativeTo || !direction) return;
-  const targetPanelId = await resolveRefToPanelId(ref);
-  const referencePanelId = await resolveRefToPanelId(relativeTo);
+  const targetPanelId = await resolveRefToPanelId(ref, requesterAgentId);
+  const referencePanelId = await resolveRefToPanelId(relativeTo, requesterAgentId);
   if (targetPanelId === null || referencePanelId === null) return;
   const targetPanel = dockview.panels.find((p) => p.id === targetPanelId);
   const referencePanel = dockview.panels.find((p) => p.id === referencePanelId);
@@ -1012,12 +1037,12 @@ async function handleMove(args: Record<string, unknown>): Promise<void> {
   });
 }
 
-async function handleRename(args: Record<string, unknown>): Promise<void> {
+async function handleRename(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   if (!dockview) return;
   const ref = asString(args.ref);
   const title = asString(args.title);
   if (!ref || !title) return;
-  const panelId = await resolveRefToPanelId(ref);
+  const panelId = await resolveRefToPanelId(ref, requesterAgentId);
   if (panelId === null) return;
   const panel = dockview.panels.find((p) => p.id === panelId);
   if (!panel) return;
@@ -1028,11 +1053,11 @@ async function handleRename(args: Record<string, unknown>): Promise<void> {
   }
 }
 
-async function handleMaximize(args: Record<string, unknown>): Promise<void> {
+async function handleMaximize(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   if (!dockview) return;
   const ref = asString(args.ref);
   if (!ref) return;
-  const panelId = await resolveRefToPanelId(ref);
+  const panelId = await resolveRefToPanelId(ref, requesterAgentId);
   if (panelId === null) return;
   const panel = dockview.panels.find((p) => p.id === panelId);
   if (panel) panel.api.maximize();
@@ -1048,11 +1073,14 @@ function handleRestore(): void {
   }
 }
 
-async function handleReplaceUrl(args: Record<string, unknown>): Promise<void> {
+async function handleReplaceUrl(
+  args: Record<string, unknown>,
+  requesterAgentId: string,
+): Promise<void> {
   const ref = asString(args.ref);
   const url = asString(args.url);
   if (!ref || !url) return;
-  const panelId = await resolveRefToPanelId(ref);
+  const panelId = await resolveRefToPanelId(ref, requesterAgentId);
   if (panelId === null) return;
   const params = panelParams.get(panelId);
   if (!params || params.panelType !== "iframe") return;
@@ -1061,14 +1089,14 @@ async function handleReplaceUrl(args: Record<string, unknown>): Promise<void> {
   scheduleSave();
 }
 
-async function handleRefresh(args: Record<string, unknown>): Promise<void> {
+async function handleRefresh(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   const ref = asString(args.ref);
   if (!ref) return;
   if (ref.startsWith("service:")) {
     reloadIframesForService(ref.substring("service:".length));
     return;
   }
-  const panelId = await resolveRefToPanelId(ref);
+  const panelId = await resolveRefToPanelId(ref, requesterAgentId);
   if (panelId === null) return;
   const params = panelParams.get(panelId);
   if (!params || params.panelType !== "iframe") return;
