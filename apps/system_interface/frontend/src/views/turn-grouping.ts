@@ -418,23 +418,34 @@ function makeTaskInTurn(
   };
 }
 
-/** Find the task whose active window contains `ts`, preferring the most
- *  recently started one when multiple match (the "innermost" / most-
- *  specific task). Returns null if no task contains the timestamp.
- *  Tasks with no active window (pending) are skipped. Walks nested
- *  children so callers can pass either the flat pre-nesting list or
- *  the post-nesting tree. */
+/** Find the step record whose active window contains `ts`, preferring
+ *  the most recently started one when multiple match (the "innermost" /
+ *  most-specific step). Returns null if no step contains the timestamp.
+ *  Pending steps (no active window) are skipped.
+ *
+ *  Regular tickets are intentionally NOT eligible containers. A regular
+ *  ticket can stay open across many turns and contain many step records
+ *  beneath it; once the latest step closes, any subsequent text-only
+ *  message is a wrap-up bounded by the latest step, not by the
+ *  outer ticket -- treating the ticket as a container would swallow the
+ *  wrap-up into a slot the user can't easily see. Step records are
+ *  shorter-lived and are the natural unit for "live status" captions.
+ *
+ *  Walks nested children so callers can pass either the flat
+ *  pre-nesting list or the post-nesting tree. */
 function findContainingTask(ts: string, tasks: TaskInTurn[]): TaskInTurn | null {
   let best: TaskInTurn | null = null;
   let bestStart = "";
   const visit = (t: TaskInTurn): void => {
-    const start = t.active_window_start;
-    if (start !== null) {
-      const end = t.active_window_end;
-      const inWindow = ts >= start && (end === null || ts <= end);
-      if (inWindow && (best === null || start > bestStart)) {
-        best = t;
-        bestStart = start;
+    if (t.is_step) {
+      const start = t.active_window_start;
+      if (start !== null) {
+        const end = t.active_window_end;
+        const inWindow = ts >= start && (end === null || ts <= end);
+        if (inWindow && (best === null || start > bestStart)) {
+          best = t;
+          bestStart = start;
+        }
       }
     }
     for (const child of t.children) visit(child);

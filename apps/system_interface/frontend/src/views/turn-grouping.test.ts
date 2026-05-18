@@ -617,6 +617,53 @@ describe("selectFinalMessages", () => {
     const afterClose = assistantMsg("2026-04-28T01:00:40Z", "Wrap-up notes after closing.", "msg-after");
     expect(selectFinalMessages([inWindow, afterClose], [doneTask]).map((e) => e.event_id)).toEqual(["msg-after"]);
   });
+
+  it("surfaces a wrap-up at top level when the only enclosing task is a still-open regular ticket", () => {
+    // An agent often picks up a regular ticket as the umbrella for the
+    // turn's work and files step records beneath it. The ticket can stay
+    // in_progress across many turns. Text-only prose between or after
+    // the steps should NOT be swallowed by the ticket's window -- it's
+    // a wrap-up bounded by the steps, not by the umbrella ticket.
+    const parentTicket: TaskInTurn = {
+      ticket_id: "ticket-1",
+      title: "Crystallize email-inbox",
+      status: "active",
+      summary: null,
+      is_carryover: true,
+      continues_forward: true,
+      created_at: "2026-04-28T00:50:00Z",
+      started_at: "2026-04-28T00:50:00Z",
+      active_window_start: "2026-04-28T00:50:00Z",
+      active_window_end: null,
+      is_step: false,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const closedStep: TaskInTurn = {
+      ticket_id: "step-1",
+      title: "Ask you whether the digest should auto-refresh",
+      status: "done",
+      summary: "Asked the schedule question.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:30Z",
+      is_step: true,
+      parent_id: "ticket-1",
+      children: [],
+      narration: null,
+    };
+    parentTicket.children.push(closedStep);
+    const wrapup = assistantMsg(
+      "2026-04-28T01:00:40Z",
+      "No selection registered -- happy to wait, or go with the default.",
+      "msg-wrapup",
+    );
+    expect(selectFinalMessages([wrapup], [parentTicket]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+  });
 });
 
 describe("narration attribution", () => {
