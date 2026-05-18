@@ -4,7 +4,7 @@
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
   },
   "permissions": {
-    "deny": ["TodoWrite"]
+    "deny": ["TodoWrite", "TaskCreate", "TaskList", "TaskUpdate"]
   },
   "hooks": {
     "SessionStart": [
@@ -40,6 +40,15 @@
           {
             "type": "command",
             "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_block_todowrite.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Task(Create|List|Update)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_block_task_tools.sh"
           }
         ]
       }
