@@ -27,15 +27,11 @@ logger = _loguru_logger
 
 
 def _status_to_response(status: claude_auth.AuthStatus) -> ClaudeAuthStatusResponse:
-    return ClaudeAuthStatusResponse(
-        logged_in=status.logged_in,
-        auth_method=status.auth_method,
-        api_provider=status.api_provider,
-        email=status.email,
-        org_id=status.org_id,
-        org_name=status.org_name,
-        subscription_type=status.subscription_type,
-    )
+    # Both models share the same field names and types; validating directly
+    # off the AuthStatus dump keeps the conversion automatic so adding a
+    # field to one side only needs the matching field added to the other,
+    # not a third edit here.
+    return ClaudeAuthStatusResponse.model_validate(status.model_dump())
 
 
 def _error_response(detail: str, status_code: int = 400) -> JSONResponse:
