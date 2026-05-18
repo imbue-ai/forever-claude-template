@@ -9,16 +9,12 @@
  * - Raw API key: paste a `sk-ant-...` value; backend writes it to the host
  *   env file and restarts every running claude agent.
  *
- * The success state reads `subscription_type` from `claude auth status
- * --json` and renders conditionally, since Console accounts have no
- * subscription tier.
- *
  * The modal is purely reactive: it opens when ChatPanel receives an
  * auth-error event over the SSE stream, and closes only when the user
  * dismisses it. It does not poll the backend status endpoint, because
  * `claude auth status` reflects the workspace-server process's view of
- * auth (env-var-based, fresh subprocess) which can disagree with the
- * already-running agent's cached in-process auth decision.
+ * auth which can disagree with the already-running agent's cached
+ * in-process auth decision.
  */
 
 import m from "mithril";
@@ -40,7 +36,13 @@ interface OAuthStartResponse {
 }
 
 type Provider = "claudeai" | "console" | "api_key";
-type Mode = "select_provider" | "awaiting_oauth_code" | "verifying" | "success" | "error";
+type Mode =
+  | "select_provider"
+  | "api_key_form"
+  | "awaiting_oauth_code"
+  | "verifying"
+  | "success"
+  | "error";
 
 export interface ClaudeLoginModalAttrs {
   chatAgentName: string | null;
@@ -50,14 +52,128 @@ export interface ClaudeLoginModalAttrs {
   onDismiss: () => void;
 }
 
+function spinnerIcon(): m.Vnode {
+  return m(
+    "svg.claude-login-spinner",
+    { viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" },
+    [
+      m("circle", {
+        cx: 12,
+        cy: 12,
+        r: 10,
+        stroke: "currentColor",
+        "stroke-opacity": 0.18,
+        "stroke-width": 3,
+      }),
+      m("path", {
+        d: "M22 12a10 10 0 0 1-10 10",
+        stroke: "currentColor",
+        "stroke-width": 3,
+        "stroke-linecap": "round",
+      }),
+    ],
+  );
+}
+
+function checkIcon(): m.Vnode {
+  return m(
+    "svg",
+    {
+      width: 26,
+      height: 26,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      "aria-hidden": "true",
+    },
+    m("path", {
+      d: "M5 12.5l4.5 4.5L19 7.5",
+      stroke: "currentColor",
+      "stroke-width": 2.5,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+    }),
+  );
+}
+
+function warningIcon(small = false): m.Vnode {
+  const s = small ? 16 : 26;
+  return m(
+    "svg",
+    {
+      width: s,
+      height: s,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      "aria-hidden": "true",
+    },
+    [
+      m("circle", {
+        cx: 12,
+        cy: 12,
+        r: 10,
+        stroke: "currentColor",
+        "stroke-width": small ? 1.8 : 2,
+      }),
+      m("path", {
+        d: "M12 8v4.5",
+        stroke: "currentColor",
+        "stroke-width": small ? 1.8 : 2.2,
+        "stroke-linecap": "round",
+      }),
+      m("circle", { cx: 12, cy: 16, r: 0.9, fill: "currentColor" }),
+    ],
+  );
+}
+
+function closeIcon(): m.Vnode {
+  return m(
+    "svg",
+    {
+      width: 16,
+      height: 16,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      "aria-hidden": "true",
+    },
+    m("path", {
+      d: "M6 6l12 12M18 6L6 18",
+      stroke: "currentColor",
+      "stroke-width": 2,
+      "stroke-linecap": "round",
+    }),
+  );
+}
+
+function externalLinkIcon(): m.Vnode {
+  return m(
+    "svg",
+    {
+      width: 13,
+      height: 13,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      "aria-hidden": "true",
+    },
+    m("path", {
+      d: "M14 4h6v6M20 4l-9 9M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4",
+      stroke: "currentColor",
+      "stroke-width": 2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+    }),
+  );
+}
+
 export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   let mode: Mode = "select_provider";
-  let provider: Provider = "claudeai";
   let sessionId: string | null = null;
   let oauthUrl: string | null = null;
   let code = "";
   let apiKey = "";
+  let apiKeyRevealed = false;
   let errorMessage: string | null = null;
+  let verifyingTitle = "Working...";
+  let verifyingDetail: string | null = null;
   let successStatus: ClaudeAuthStatus | null = null;
   let attrsRef: ClaudeLoginModalAttrs | null = null;
 
@@ -71,11 +187,21 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     m.redraw();
   }
 
-  async function startOAuth(chosen: Provider): Promise<void> {
-    provider = chosen;
-    clearError();
+  function startVerifying(title: string, detail: string | null): void {
+    verifyingTitle = title;
+    verifyingDetail = detail;
     mode = "verifying";
     m.redraw();
+  }
+
+  async function startOAuth(chosen: Provider): Promise<void> {
+    clearError();
+    startVerifying(
+      "Starting sign-in...",
+      chosen === "claudeai"
+        ? "Spawning the Claude subscription OAuth flow."
+        : "Spawning the Anthropic Console OAuth flow.",
+    );
     try {
       const response = await m.request<OAuthStartResponse>({
         method: "POST",
@@ -95,8 +221,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   async function submitOAuthCode(): Promise<void> {
     if (!sessionId || !code.trim()) return;
     clearError();
-    mode = "verifying";
-    m.redraw();
+    startVerifying("Verifying code...", "Completing the OAuth handshake.");
     try {
       const status = await m.request<ClaudeAuthStatus>({
         method: "POST",
@@ -123,8 +248,10 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   async function submitApiKey(): Promise<void> {
     if (!apiKey.trim()) return;
     clearError();
-    mode = "verifying";
-    m.redraw();
+    startVerifying(
+      "Restarting Claude agents...",
+      "Saving your API key and respawning every running claude in this mind so the new key takes effect.",
+    );
     try {
       const status = await m.request<ClaudeAuthStatus>({
         method: "POST",
@@ -147,141 +274,190 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     }
   }
 
+  function abortOAuthIfActive(): void {
+    if (sessionId !== null) {
+      void m.request({ method: "POST", url: apiUrl("/api/claude-auth/abort") });
+    }
+    sessionId = null;
+    oauthUrl = null;
+    code = "";
+  }
+
+  function goBackToProviderSelection(): void {
+    abortOAuthIfActive();
+    apiKey = "";
+    apiKeyRevealed = false;
+    clearError();
+    mode = "select_provider";
+    m.redraw();
+  }
+
+  // ----- Renderers -----
+
   function renderProviderSelection(): m.Vnode {
-    return m("div.claude-login-providers", [
-      m("p.text-text-secondary", "How would you like to sign in?"),
-      m("div.flex.flex-col.gap-2.mt-3", [
-        renderProviderButton("claudeai", "Claude subscription", "Sign in with your Claude.ai account (recommended)."),
-        renderProviderButton(
-          "console",
-          "Anthropic Console",
-          "Sign in with API-usage billing via console.anthropic.com.",
-        ),
-        renderProviderButton("api_key", "Use an API key", "Paste a raw sk-ant-... key."),
-      ]),
-    ]);
-  }
-
-  function renderProviderButton(p: Provider, label: string, description: string): m.Vnode {
-    return m(
-      "button",
+    const providers: Array<{
+      id: Provider;
+      label: string;
+      description: string;
+      recommended?: boolean;
+    }> = [
       {
-        type: "button",
-        class:
-          "claude-login-provider-button text-left p-3 border border-border rounded hover:bg-surface-hover focus:ring",
-        onclick: () => {
-          if (p === "api_key") {
-            provider = p;
-            mode = "select_provider";
-            apiKey = "";
-            m.redraw();
-          } else {
-            void startOAuth(p);
-          }
-        },
+        id: "claudeai",
+        label: "Claude subscription",
+        description: "Sign in with your Claude.ai account. Uses your Pro / Max plan quota.",
+        recommended: true,
       },
-      [m("div.font-semibold", label), m("div.text-sm.text-text-secondary", description)],
-    );
-  }
-
-  function renderApiKeyForm(): m.Vnode {
-    return m("div.claude-login-api-key", [
-      m("label.block.font-semibold.mb-1", { for: "claude-login-api-key-input" }, "Anthropic API key"),
-      m("input", {
-        id: "claude-login-api-key-input",
-        type: "password",
-        class: "w-full p-2 border rounded",
-        placeholder: "sk-ant-...",
-        value: apiKey,
-        oninput: (event: InputEvent) => {
-          apiKey = (event.target as HTMLInputElement).value;
-        },
-      }),
-      m("div.flex.gap-2.mt-3", [
+      {
+        id: "console",
+        label: "Anthropic Console",
+        description: "Sign in with an API-billing account from console.anthropic.com.",
+      },
+      {
+        id: "api_key",
+        label: "Use an API key",
+        description: "Paste a raw sk-ant-... key. Requires restarting every running claude.",
+      },
+    ];
+    return m("div.claude-login-providers", [
+      m(
+        "p.claude-login-intro",
+        "Pick how you'd like to authenticate. The browser flow is fastest if you have a subscription.",
+      ),
+      ...providers.map((p) =>
         m(
-          "button",
+          "button.claude-login-provider",
           {
+            key: p.id,
             type: "button",
-            class: "px-4 py-2 border rounded",
             onclick: () => {
-              provider = "claudeai";
-              apiKey = "";
-              m.redraw();
+              if (p.id === "api_key") {
+                mode = "api_key_form";
+                m.redraw();
+              } else {
+                void startOAuth(p.id);
+              }
             },
           },
-          "Back",
+          [
+            m("div.claude-login-provider-label", [
+              p.label,
+              p.recommended ? m("span.claude-login-provider-badge", "Recommended") : null,
+            ]),
+            m("div.claude-login-provider-description", p.description),
+          ],
         ),
-        m(
-          "button",
-          {
-            type: "button",
-            class: "claude-login-primary-button px-4 py-2 rounded",
-            disabled: !apiKey.trim(),
-            onclick: () => {
-              void submitApiKey();
-            },
-          },
-          "Save",
-        ),
-      ]),
+      ),
     ]);
   }
 
-  function renderOAuthCodeEntry(): m.Vnode {
-    return m("div.claude-login-oauth", [
-      m("p", "Open this URL in your browser, complete the sign-in, then paste the code back here."),
-      m(
-        "a.block.mt-2",
-        {
-          href: oauthUrl ?? "#",
-          target: "_blank",
-          rel: "noopener noreferrer",
-          style:
-            "color: var(--color-accent); word-break: break-all; overflow-wrap: anywhere;",
-        },
-        oauthUrl,
-      ),
-      m("label.block.font-semibold.mt-3.mb-1", { for: "claude-login-code-input" }, "Code"),
-      m("input", {
-        id: "claude-login-code-input",
-        type: "text",
-        class: "w-full p-2 border rounded font-mono",
-        placeholder: "CODE#STATE",
-        value: code,
-        oninput: (event: InputEvent) => {
-          code = (event.target as HTMLInputElement).value;
-        },
-      }),
-      m("div.flex.gap-2.mt-3", [
-        m(
-          "button",
-          {
-            type: "button",
-            class: "px-4 py-2 border rounded",
-            onclick: () => {
-              sessionId = null;
-              oauthUrl = null;
-              code = "";
-              mode = "select_provider";
-              m.redraw();
-              void m.request({ method: "POST", url: apiUrl("/api/claude-auth/abort") });
+  function renderApiKeyForm(): m.Vnode[] {
+    return [
+      m("div.claude-login-field", { key: "api-key-field" }, [
+        m("label.claude-login-step-label", { for: "claude-login-api-key-input" }, [
+          m("span.claude-login-step-num", "1"),
+          "Paste your Anthropic API key",
+        ]),
+        m("div.claude-login-input-wrap", [
+          m("input.claude-login-input.claude-login-input--mono.claude-login-input--with-action", {
+            id: "claude-login-api-key-input",
+            type: apiKeyRevealed ? "text" : "password",
+            placeholder: "sk-ant-...",
+            value: apiKey,
+            spellcheck: false,
+            autocomplete: "off",
+            oninput: (event: InputEvent) => {
+              apiKey = (event.target as HTMLInputElement).value;
             },
-          },
-          "Back",
-        ),
-        m(
-          "button",
-          {
-            type: "button",
-            class: "claude-login-primary-button px-4 py-2 rounded",
-            disabled: !code.trim(),
-            onclick: () => {
-              void submitOAuthCode();
+            onkeydown: (event: KeyboardEvent) => {
+              if (event.key === "Enter" && apiKey.trim()) {
+                event.preventDefault();
+                void submitApiKey();
+              }
             },
-          },
-          "Verify",
+          }),
+          m(
+            "button.claude-login-input-action",
+            {
+              type: "button",
+              onclick: () => {
+                apiKeyRevealed = !apiKeyRevealed;
+                m.redraw();
+              },
+              "aria-label": apiKeyRevealed ? "Hide API key" : "Show API key",
+            },
+            apiKeyRevealed ? "Hide" : "Show",
+          ),
+        ]),
+        m(
+          "p.claude-login-helper",
+          "Saved to the mind's host env file. Every running claude process is restarted so the new key takes effect.",
         ),
       ]),
+    ];
+  }
+
+  function renderOAuthCodeEntry(): m.Vnode[] {
+    return [
+      m("div.claude-login-step", { key: "step1" }, [
+        m("div.claude-login-step-label", [
+          m("span.claude-login-step-num", "1"),
+          "Open this URL in your browser and sign in",
+        ]),
+        m("div.claude-login-url-box", [
+          m("div.claude-login-url", oauthUrl),
+          m(
+            "button.claude-login-url-action",
+            {
+              type: "button",
+              onclick: () => {
+                if (oauthUrl) {
+                  window.open(oauthUrl, "_blank", "noopener,noreferrer");
+                }
+              },
+              "aria-label": "Open in new tab",
+            },
+            [externalLinkIcon(), "Open"],
+          ),
+        ]),
+      ]),
+      m("div.claude-login-step", { key: "step2" }, [
+        m(
+          "label.claude-login-step-label",
+          { for: "claude-login-code-input" },
+          [m("span.claude-login-step-num", "2"), "Paste the code shown after sign-in"],
+        ),
+        m("input.claude-login-input.claude-login-input--mono", {
+          id: "claude-login-code-input",
+          type: "text",
+          placeholder: "CODE#STATE",
+          value: code,
+          spellcheck: false,
+          autocomplete: "off",
+          oninput: (event: InputEvent) => {
+            code = (event.target as HTMLInputElement).value;
+          },
+          onkeydown: (event: KeyboardEvent) => {
+            if (event.key === "Enter" && code.trim()) {
+              event.preventDefault();
+              void submitOAuthCode();
+            }
+          },
+        }),
+      ]),
+    ];
+  }
+
+  function renderStatus(
+    kind: "loading" | "success" | "error",
+    title: string,
+    detail: string | null,
+  ): m.Vnode {
+    const icon =
+      kind === "loading" ? spinnerIcon() : kind === "success" ? checkIcon() : warningIcon();
+    return m("div.claude-login-status", [
+      m(`div.claude-login-status-icon.claude-login-status-icon--${kind}`, icon),
+      m("p.claude-login-status-title", title),
+      detail !== null ? m("p.claude-login-status-detail", detail) : null,
     ]);
   }
 
@@ -289,60 +465,118 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     const status = successStatus;
     const email = status?.email ?? null;
     const tier = status?.subscription_type ?? null;
-    let line: string;
+    let detail: string;
     if (email && tier) {
-      line = `Signed in as ${email} — subscription: ${tier}`;
+      detail = `Signed in as ${email}. Plan: ${tier}.`;
     } else if (email) {
-      line = `Signed in as ${email} via Anthropic Console`;
+      detail = `Signed in as ${email} via Anthropic Console.`;
     } else {
-      line = "Signed in.";
+      detail = "You're signed in.";
     }
-    return m("div.claude-login-success", [
-      m("p.text-lg.font-semibold", line),
-      m(
-        "div.mt-3",
-        m(
-          "button",
-          {
-            type: "button",
-            class: "claude-login-primary-button px-4 py-2 rounded",
-            onclick: () => attrsRef?.onDismiss(),
-          },
-          "Done",
-        ),
-      ),
-    ]);
+    return renderStatus("success", "All set", detail);
   }
 
-  function renderError(): m.Vnode {
-    return m("div.claude-login-error", [
-      m("p.text-red-500", errorMessage ?? "An error occurred."),
-      m(
-        "div.mt-3",
+  function renderInlineError(): m.Vnode {
+    return m("div.claude-login-error-callout", [warningIcon(true), m("span", errorMessage ?? "")]);
+  }
+
+  // ----- Layout (header / body / footer) -----
+
+  function titleForMode(): string {
+    if (mode === "success") return "Signed in";
+    if (mode === "error") return "Something went wrong";
+    if (mode === "verifying") return "Just a moment";
+    if (mode === "api_key_form") return "Sign in with API key";
+    if (mode === "awaiting_oauth_code") return "Finish signing in";
+    return "Sign in to Claude";
+  }
+
+  function renderBody(): m.Vnode | m.Vnode[] {
+    if (mode === "success") return renderSuccess();
+    if (mode === "error") {
+      return renderStatus(
+        "error",
+        "Couldn't complete sign-in",
+        errorMessage ?? "An unexpected error occurred.",
+      );
+    }
+    if (mode === "verifying") return renderStatus("loading", verifyingTitle, verifyingDetail);
+    if (mode === "awaiting_oauth_code") return renderOAuthCodeEntry();
+    if (mode === "api_key_form") return renderApiKeyForm();
+    return renderProviderSelection();
+  }
+
+  function renderFooter(): m.Vnode | null {
+    if (mode === "select_provider" || mode === "verifying") return null;
+    if (mode === "success") {
+      return m("div.claude-login-footer", [
         m(
-          "button",
+          "button.claude-login-button.claude-login-button--primary",
+          { type: "button", onclick: () => attrsRef?.onDismiss() },
+          "Done",
+        ),
+      ]);
+    }
+    if (mode === "error") {
+      return m("div.claude-login-footer.claude-login-footer--spread", [
+        m(
+          "button.claude-login-button.claude-login-button--ghost",
+          { type: "button", onclick: () => attrsRef?.onDismiss() },
+          "Close",
+        ),
+        m(
+          "button.claude-login-button.claude-login-button--primary",
           {
             type: "button",
-            class: "px-4 py-2 border rounded",
             onclick: () => {
-              mode = "select_provider";
               clearError();
+              mode = "select_provider";
               m.redraw();
             },
           },
           "Try again",
         ),
+      ]);
+    }
+    if (mode === "api_key_form") {
+      return m("div.claude-login-footer.claude-login-footer--spread", [
+        m(
+          "button.claude-login-button.claude-login-button--ghost",
+          { type: "button", onclick: () => goBackToProviderSelection() },
+          "Back",
+        ),
+        m(
+          "button.claude-login-button.claude-login-button--primary",
+          {
+            type: "button",
+            disabled: !apiKey.trim(),
+            onclick: () => {
+              void submitApiKey();
+            },
+          },
+          "Save and restart",
+        ),
+      ]);
+    }
+    // awaiting_oauth_code
+    return m("div.claude-login-footer.claude-login-footer--spread", [
+      m(
+        "button.claude-login-button.claude-login-button--ghost",
+        { type: "button", onclick: () => goBackToProviderSelection() },
+        "Back",
+      ),
+      m(
+        "button.claude-login-button.claude-login-button--primary",
+        {
+          type: "button",
+          disabled: !code.trim(),
+          onclick: () => {
+            void submitOAuthCode();
+          },
+        },
+        "Verify",
       ),
     ]);
-  }
-
-  function renderBody(): m.Vnode {
-    if (mode === "success") return renderSuccess();
-    if (mode === "error") return renderError();
-    if (mode === "verifying") return m("p", "Working...");
-    if (mode === "awaiting_oauth_code") return renderOAuthCodeEntry();
-    if (provider === "api_key" && mode === "select_provider") return renderApiKeyForm();
-    return renderProviderSelection();
   }
 
   return {
@@ -355,40 +589,41 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     },
 
     onremove() {
-      void m.request({ method: "POST", url: apiUrl("/api/claude-auth/abort") });
+      abortOAuthIfActive();
     },
 
     view() {
-      const onClose = (): void => {
-        attrsRef?.onDismiss();
-      };
+      const onClose = (): void => attrsRef?.onDismiss();
       return m(
         "div.claude-login-overlay",
         {
-          style:
-            "position: absolute; inset: 0; background: rgba(0,0,0,0.4); z-index: 50; display: flex; align-items: center; justify-content: center;",
+          onclick: (event: MouseEvent) => {
+            if (event.target === event.currentTarget) onClose();
+          },
         },
         m(
           "div.claude-login-modal",
           {
-            style:
-              "position: relative; background: var(--color-surface, white); padding: 24px; border-radius: 8px; max-width: 480px; width: 90%; box-shadow: 0 8px 24px rgba(0,0,0,0.2);",
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-label": "Sign in to Claude",
           },
           [
+            m("div.claude-login-header", [
+              m("h2.claude-login-title", titleForMode()),
+              m(
+                "button.claude-login-close",
+                { type: "button", onclick: onClose, "aria-label": "Close" },
+                closeIcon(),
+              ),
+            ]),
             m(
-              "button",
-              {
-                type: "button",
-                class: "claude-login-dismiss",
-                onclick: onClose,
-                style:
-                  "position: absolute; top: 8px; right: 12px; background: transparent; border: none; cursor: pointer; font-size: 1.2em; color: inherit;",
-                "aria-label": "Close",
-              },
-              "\u00d7",
+              "div.claude-login-body",
+              mode === "awaiting_oauth_code" || mode === "api_key_form"
+                ? [errorMessage !== null ? renderInlineError() : null, renderBody()]
+                : renderBody(),
             ),
-            m("h2.text-xl.font-bold.mb-3", "Sign in to Claude"),
-            renderBody(),
+            renderFooter(),
           ],
         ),
       );
