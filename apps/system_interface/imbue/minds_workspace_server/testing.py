@@ -10,7 +10,6 @@ rather than being copy-pasted into each test module.
 from __future__ import annotations
 
 import re
-from typing import Any
 
 
 class FakeFinishedProcess:
@@ -59,7 +58,7 @@ class FakePexpectProcess:
         self.terminate_calls = 0
         self.close_calls = 0
         self.timeout: float | None = None
-        self.match: Any = None
+        self.match: re.Match[str] | None = None
         if url_match is not None:
             self.match = re.compile(r".*").match(url_match)
             assert self.match is not None
