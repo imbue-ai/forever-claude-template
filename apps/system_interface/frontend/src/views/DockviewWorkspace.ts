@@ -783,12 +783,17 @@ function directionToPosition(direction: string): "top" | "bottom" | "left" | "ri
 async function resolveRefToPanelId(ref: string, requesterAgentId: string): Promise<string | null> {
   if (!dockview) return null;
   if (ref === "self") {
-    // ``self`` is the caller's chat panel: the chat tab of the agent that
-    // invoked ``scripts/layout.py``. Falls back to a generic anchor when
-    // the requester has no open chat panel (or the caller didn't set
-    // ``MNGR_AGENT_ID``) so ops like ``split --relative-to self`` still
-    // find something to attach to.
-    return findAnchorChatPanelId(requesterAgentId);
+    // ``self`` is the *identity* ref for the caller's own chat panel
+    // (``chat-<requesterAgentId>``). Returns null when the requester
+    // didn't set ``MNGR_AGENT_ID`` or when their chat tab isn't open --
+    // identity ops like ``close self`` / ``rename self`` / ``maximize
+    // self`` must not silently retarget another agent's chat panel, so
+    // the broader anchor fallback in ``findAnchorChatPanelId`` is only
+    // applied by ``handleSplit`` / ``handleMove`` for their
+    // ``relative_to`` argument.
+    if (!requesterAgentId) return null;
+    const candidate = `chat-${requesterAgentId}`;
+    return dockview.panels.find((p) => p.id === candidate) ? candidate : null;
   }
   if (ref.startsWith("service:")) {
     const serviceName = ref.substring("service:".length);
@@ -924,7 +929,14 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
   const ratio = asNumber(args.ratio);
   if (!ref || !relativeTo) return;
 
-  const referencePanelId = await resolveRefToPanelId(relativeTo, requesterAgentId);
+  // ``relative_to`` is an anchor: when the caller passes ``self`` but
+  // their own chat isn't open (or they didn't set ``MNGR_AGENT_ID``),
+  // fall back through ``findAnchorChatPanelId`` so the split still
+  // attaches to *some* chat instead of degrading to a plain new tab.
+  const referencePanelId =
+    relativeTo === "self"
+      ? (await resolveRefToPanelId("self", requesterAgentId)) ?? findAnchorChatPanelId(requesterAgentId)
+      : await resolveRefToPanelId(relativeTo, requesterAgentId);
   if (referencePanelId === null) return;
 
   if (!ref.startsWith("service:") && !ref.startsWith("chat:")) {
@@ -1026,7 +1038,12 @@ async function handleMove(args: Record<string, unknown>, requesterAgentId: strin
   const direction = asString(args.direction);
   if (!ref || !relativeTo || !direction) return;
   const targetPanelId = await resolveRefToPanelId(ref, requesterAgentId);
-  const referencePanelId = await resolveRefToPanelId(relativeTo, requesterAgentId);
+  // ``relative_to`` is an anchor (see ``handleSplit``): fall back to
+  // ``findAnchorChatPanelId`` when ``self`` doesn't strictly resolve.
+  const referencePanelId =
+    relativeTo === "self"
+      ? (await resolveRefToPanelId("self", requesterAgentId)) ?? findAnchorChatPanelId(requesterAgentId)
+      : await resolveRefToPanelId(relativeTo, requesterAgentId);
   if (targetPanelId === null || referencePanelId === null) return;
   const targetPanel = dockview.panels.find((p) => p.id === targetPanelId);
   const referencePanel = dockview.panels.find((p) => p.id === referencePanelId);
