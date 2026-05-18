@@ -1435,12 +1435,8 @@ body {
 /* === Claude login modal === */
 
 @keyframes claude-login-overlay-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes claude-login-modal-in {
@@ -1455,9 +1451,7 @@ body {
 }
 
 @keyframes claude-login-spin {
-  to {
-    transform: rotate(360deg);
-  }
+  to { transform: rotate(360deg); }
 }
 
 .claude-login-overlay {
@@ -1518,9 +1512,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  transition:
-    background 100ms ease,
-    color 100ms ease;
+  transition: background 100ms ease, color 100ms ease;
 }
 
 .claude-login-close:hover {
@@ -1577,10 +1569,7 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 8px;
   cursor: pointer;
-  transition:
-    border-color 100ms ease,
-    background 100ms ease,
-    transform 80ms ease;
+  transition: border-color 100ms ease, background 100ms ease, transform 80ms ease;
   position: relative;
   font: inherit;
   color: inherit;
@@ -1730,9 +1719,7 @@ body {
   font-size: 0.875rem;
   color: var(--color-text-primary);
   background: var(--color-surface);
-  transition:
-    border-color 80ms ease,
-    box-shadow 80ms ease;
+  transition: border-color 80ms ease, box-shadow 80ms ease;
   font-family: inherit;
 }
 
@@ -1785,9 +1772,7 @@ body {
   font-size: 0.875rem;
   font-weight: 500;
   cursor: pointer;
-  transition:
-    background 80ms ease,
-    border-color 80ms ease;
+  transition: background 80ms ease, border-color 80ms ease;
   border: 1px solid transparent;
   background: transparent;
   color: var(--color-text-primary);

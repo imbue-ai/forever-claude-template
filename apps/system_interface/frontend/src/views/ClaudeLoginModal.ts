@@ -36,7 +36,13 @@ interface OAuthStartResponse {
 }
 
 type Provider = "claudeai" | "console" | "api_key";
-type Mode = "select_provider" | "api_key_form" | "awaiting_oauth_code" | "verifying" | "success" | "error";
+type Mode =
+  | "select_provider"
+  | "api_key_form"
+  | "awaiting_oauth_code"
+  | "verifying"
+  | "success"
+  | "error";
 
 export interface ClaudeLoginModalAttrs {
   chatAgentName: string | null;
@@ -47,22 +53,26 @@ export interface ClaudeLoginModalAttrs {
 }
 
 function spinnerIcon(): m.Vnode {
-  return m("svg.claude-login-spinner", { viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" }, [
-    m("circle", {
-      cx: 12,
-      cy: 12,
-      r: 10,
-      stroke: "currentColor",
-      "stroke-opacity": 0.18,
-      "stroke-width": 3,
-    }),
-    m("path", {
-      d: "M22 12a10 10 0 0 1-10 10",
-      stroke: "currentColor",
-      "stroke-width": 3,
-      "stroke-linecap": "round",
-    }),
-  ]);
+  return m(
+    "svg.claude-login-spinner",
+    { viewBox: "0 0 24 24", fill: "none", "aria-hidden": "true" },
+    [
+      m("circle", {
+        cx: 12,
+        cy: 12,
+        r: 10,
+        stroke: "currentColor",
+        "stroke-opacity": 0.18,
+        "stroke-width": 3,
+      }),
+      m("path", {
+        d: "M22 12a10 10 0 0 1-10 10",
+        stroke: "currentColor",
+        "stroke-width": 3,
+        "stroke-linecap": "round",
+      }),
+    ],
+  );
 }
 
 function checkIcon(): m.Vnode {
@@ -411,10 +421,11 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
         ]),
       ]),
       m("div.claude-login-step", { key: "step2" }, [
-        m("label.claude-login-step-label", { for: "claude-login-code-input" }, [
-          m("span.claude-login-step-num", "2"),
-          "Paste the code shown after sign-in",
-        ]),
+        m(
+          "label.claude-login-step-label",
+          { for: "claude-login-code-input" },
+          [m("span.claude-login-step-num", "2"), "Paste the code shown after sign-in"],
+        ),
         m("input.claude-login-input.claude-login-input--mono", {
           id: "claude-login-code-input",
           type: "text",
@@ -436,8 +447,13 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     ];
   }
 
-  function renderStatus(kind: "loading" | "success" | "error", title: string, detail: string | null): m.Vnode {
-    const icon = kind === "loading" ? spinnerIcon() : kind === "success" ? checkIcon() : warningIcon();
+  function renderStatus(
+    kind: "loading" | "success" | "error",
+    title: string,
+    detail: string | null,
+  ): m.Vnode {
+    const icon =
+      kind === "loading" ? spinnerIcon() : kind === "success" ? checkIcon() : warningIcon();
     return m("div.claude-login-status", [
       m(`div.claude-login-status-icon.claude-login-status-icon--${kind}`, icon),
       m("p.claude-login-status-title", title),
@@ -478,7 +494,11 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   function renderBody(): m.Vnode | m.Vnode[] {
     if (mode === "success") return renderSuccess();
     if (mode === "error") {
-      return renderStatus("error", "Couldn't complete sign-in", errorMessage ?? "An unexpected error occurred.");
+      return renderStatus(
+        "error",
+        "Couldn't complete sign-in",
+        errorMessage ?? "An unexpected error occurred.",
+      );
     }
     if (mode === "verifying") return renderStatus("loading", verifyingTitle, verifyingDetail);
     if (mode === "awaiting_oauth_code") return renderOAuthCodeEntry();
@@ -591,7 +611,11 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
           [
             m("div.claude-login-header", [
               m("h2.claude-login-title", titleForMode()),
-              m("button.claude-login-close", { type: "button", onclick: onClose, "aria-label": "Close" }, closeIcon()),
+              m(
+                "button.claude-login-close",
+                { type: "button", onclick: onClose, "aria-label": "Close" },
+                closeIcon(),
+              ),
             ]),
             m(
               "div.claude-login-body",
