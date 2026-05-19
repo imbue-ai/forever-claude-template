@@ -35,11 +35,11 @@ Every panel has a stable, type-prefixed ref:
 | `terminal:<short-hash>` | An ad-hoc terminal tab. | `terminal:1a2b3c4d` |
 | `url:<short-hash>` | An ad-hoc external URL tab. | `url:9f8e7d6c` |
 
-Subcommands that take a "service or ref" argument (`open`, `split`,
-`refresh`) also accept a bare service name (`web`) -- it expands to
-`service:web`. The literal `self` resolves to your own chat
-panel; it is accepted as a ref anywhere (most usefully as
-`--relative-to=self` for `split` / `move`).
+Every ref-accepting argument (the positional ref on each subcommand,
+plus `--relative-to` on `split` / `move`) also accepts a bare service
+name (`web`) -- it expands to `service:web`. The literal `self`
+resolves to your own chat panel; it is accepted as a ref anywhere
+(most usefully as `--relative-to=self` for `split` / `move`).
 
 Run `python3 scripts/layout.py inspect` to see refs for the
 currently-open panels.
