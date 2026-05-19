@@ -119,9 +119,10 @@ COPY apps/system_interface/pyproject.toml /code/apps/system_interface/pyproject.
 # vendor/mngr path-dependency manifests. The root pyproject.toml's
 # [tool.uv.sources] points imbue-common, imbue-mngr, imbue-mngr-claude,
 # resource-guards, and concurrency-group at vendor/mngr/libs/<pkg>; uv
-# needs each pyproject.toml present to resolve the workspace. The two
-# additional tool installs below (mngr_modal, mngr_wait) ride here too
-# so their transitive deps land in the warmed cache.
+# needs each pyproject.toml present to resolve the workspace. mngr_modal
+# and mngr_wait are also workspace members whose transitive deps benefit
+# from pre-warming even though only mngr_wait is registered post-COPY
+# (as a mngr plugin, not a tool install).
 COPY vendor/mngr/libs/imbue_common/pyproject.toml /code/vendor/mngr/libs/imbue_common/pyproject.toml
 COPY vendor/mngr/libs/mngr/pyproject.toml /code/vendor/mngr/libs/mngr/pyproject.toml
 COPY vendor/mngr/libs/mngr_claude/pyproject.toml /code/vendor/mngr/libs/mngr_claude/pyproject.toml
