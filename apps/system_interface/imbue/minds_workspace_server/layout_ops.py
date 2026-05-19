@@ -253,15 +253,17 @@ def _serialize_grid_node(
     }
 
 
-def layout_inspect(layout_json_path: Path, agent_name_by_id: dict[str, str]) -> dict[str, Any]:
+def layout_inspect(layout_json_path: Path | None, agent_name_by_id: dict[str, str]) -> dict[str, Any]:
     """Read the persisted ``layout.json`` and produce a ref-resolved summary.
 
     The frontend autosaves layout state with a 1.5 s debounce, so this is
-    correct modulo that staleness window. If the file is missing or
-    unreadable, returns an empty layout (``{"panels": []}``) -- which the
-    agent can interpret as "no UI initialized yet" without erroring.
+    correct modulo that staleness window. ``layout_json_path`` is None when
+    the workspace_server has no primary agent configured (dev/test setups);
+    if the file is missing or unreadable for any reason, returns an empty
+    layout (``{"panels": []}``) -- which the agent can interpret as "no UI
+    initialized yet" without erroring.
     """
-    if not layout_json_path.exists():
+    if layout_json_path is None or not layout_json_path.exists():
         return {"panels": [], "tree": None}
     try:
         raw = json.loads(layout_json_path.read_text())
@@ -293,7 +295,7 @@ def layout_inspect(layout_json_path: Path, agent_name_by_id: dict[str, str]) -> 
 def layout_list(
     service_names: tuple[str, ...],
     agents: list[dict[str, Any]],
-    layout_json_path: Path,
+    layout_json_path: Path | None,
     agent_name_by_id: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Enumerate everything addressable in the workspace.
@@ -334,9 +336,9 @@ def layout_list(
     return entries
 
 
-def _collect_open_refs(layout_json_path: Path, agent_name_by_id: dict[str, str]) -> set[str]:
+def _collect_open_refs(layout_json_path: Path | None, agent_name_by_id: dict[str, str]) -> set[str]:
     """Return the set of refs currently mounted in the saved layout."""
-    if not layout_json_path.exists():
+    if layout_json_path is None or not layout_json_path.exists():
         return set()
     try:
         raw = json.loads(layout_json_path.read_text())

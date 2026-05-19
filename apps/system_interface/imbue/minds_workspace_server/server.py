@@ -778,7 +778,7 @@ async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
 
     if op == "list":
         layout_dir = _primary_agent_layout_dir()
-        layout_path = (layout_dir / _LAYOUT_FILENAME) if layout_dir is not None else Path("/nonexistent")
+        layout_path = (layout_dir / _LAYOUT_FILENAME) if layout_dir is not None else None
         entries = layout_list(
             agent_manager.list_service_names(),
             agent_manager.get_agents_serialized(),
@@ -791,7 +791,7 @@ async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
 
     if op == "inspect":
         layout_dir = _primary_agent_layout_dir()
-        layout_path = (layout_dir / _LAYOUT_FILENAME) if layout_dir is not None else Path("/nonexistent")
+        layout_path = (layout_dir / _LAYOUT_FILENAME) if layout_dir is not None else None
         summary = layout_inspect(layout_path, agent_name_by_id)
         logger.info("layout op={} agent_id={} panels={}", op, agent_id, len(summary.get("panels", [])))
         return JSONResponse(content={"ok": True, "layout": summary})
