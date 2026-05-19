@@ -84,15 +84,17 @@ python3 scripts/layout.py split api --relative-to=service:web --direction=below 
 `layout.py` uses distinct exit codes so wrapper scripts can branch:
 
 - `0` ok
-- `2` requested service not registered yet (and registration polling
+- `2` argparse CLI usage error (unknown subcommand, invalid `--direction`
+  choice, missing required argument). Not emitted by `layout.py` itself.
+- `10` requested service not registered yet (and registration polling
   timed out -- did `forward_port.py` run?)
-- `3` couldn't reach the workspace server
-- `4` HTTP error other than the codes below
-- `5` mutex conflict -- another agent's layout op is in flight. The
+- `11` couldn't reach the workspace server
+- `12` HTTP error other than the codes below
+- `13` mutex conflict -- another agent's layout op is in flight. The
   stderr message includes the in-flight op's `agent_id`, `op`, `args`,
   `started_at`, and `retry_after_ms`. Decide whether to retry.
-- `6` not-found (e.g. the ref you named doesn't match an open panel)
-- `7` bad request (malformed ref, unknown direction, unsupported URL)
+- `14` not-found (e.g. the ref you named doesn't match an open panel)
+- `15` bad request (malformed ref, unknown direction, unsupported URL)
 
 ## When NOT to use this skill
 

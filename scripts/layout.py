@@ -59,14 +59,17 @@ _REF_PREFIXES = ("service:", "chat:", "terminal:", "url:", "subagent:")
 _DIRECTIONS = ("left", "right", "above", "below")
 
 
-# Exit codes -- distinct so wrapper scripts can branch on them.
+# Exit codes -- distinct so wrapper scripts can branch on them. Argparse uses
+# exit code 2 for any CLI usage error (unknown subcommand, invalid choice,
+# missing required argument), so the layout-specific codes start at 10 to
+# avoid that collision.
 EXIT_OK = 0
-EXIT_NOT_REGISTERED = 2
-EXIT_NETWORK = 3
-EXIT_HTTP_ERROR = 4
-EXIT_CONFLICT = 5
-EXIT_NOT_FOUND = 6
-EXIT_BAD_REQUEST = 7
+EXIT_NOT_REGISTERED = 10
+EXIT_NETWORK = 11
+EXIT_HTTP_ERROR = 12
+EXIT_CONFLICT = 13
+EXIT_NOT_FOUND = 14
+EXIT_BAD_REQUEST = 15
 
 
 def _workspace_base_url() -> str:
