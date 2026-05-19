@@ -215,7 +215,9 @@ def test_open_close_chat_ref_broadcasts_layout_ops(
         assert open_result.returncode == 0, f"stderr={open_result.stderr!r}"
         open_msg = _await_layout_op(client_queue, timeout=2.0)
         assert open_msg["op"] == "open"
-        assert open_msg["args"] == {"ref": f"chat:{_AGENT_NAME}"}
+        # ``_cmd_open`` always sends ``new_group``; the broadcaster passes
+        # the args dict through unchanged.
+        assert open_msg["args"] == {"ref": f"chat:{_AGENT_NAME}", "new_group": False}
 
         close_result = _run_layout_script(
             ["close", f"chat:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox
