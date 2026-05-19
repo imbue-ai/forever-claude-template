@@ -47,17 +47,28 @@ latchkey curl 'https://discord.com/api/v10/users/@me'
 
 When either there are no credentials for the given service yet or our
 requests come back with the "request not permitted by the user"
-message, ask the user for permission first. The request is sent to
+message, ask the user for permission first. The requests are sent to
 Latchkey via the reserved `latchkey-self.invalid` host:
 
 ```bash
+# 1. Retrieve the list of available permissions if necessary.
+latchkey curl http://latchkey-self.invalid/permissions/available/discord
+
+# 2. Retrieve the list of your existing permissions if necessary.
+latchkey curl http://latchkey-self.invalid/permissions/self | jq .rules
+
+# 3. Ask for the necessary missing permissions.
 latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
   -H 'Content-Type: application/json' \
-  -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "service_name": "discord", "rationale": "I'"'"'d like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
+  -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "scope": "discord_api", "permissions": ["discord-read-all"], "rationale": "I'"'"'d like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
 ```
 
-The body must be a JSON object with exactly three string fields:
-`agent_id` (use `$MNGR_AGENT_ID`), `service_name`, and `rationale`.
+Try to strike a balance: do not require needlessly broad
+permissions while also minimizing the need for multiple
+iterations with additional permission requests.
+
+The body must be a JSON object with exactly four string fields:
+`agent_id` (use `$MNGR_AGENT_ID`), `scope`, `permissions`, and `rationale`.
 
 After posting, wait for a system message indicating whether the user
 approved or denied the permission request.

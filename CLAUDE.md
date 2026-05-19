@@ -37,7 +37,7 @@ Only after doing all of the above should you begin writing code.
 # Important commands and conventions:
 
 - Never run `uv sync`, always run `uv sync --all-packages` instead
-- For browser automation, Playwright's Python API is available in the root venv with Chromium preinstalled -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`.
+- For browser automation, Playwright's Python API is available in the root venv -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`. The Chromium browser itself (and its apt system libraries) installs asynchronously on first container boot via the `deferred-install` service rather than being baked into the image; if the install hasn't finished yet, any `playwright.chromium.launch()` call will fail with a clear error. Check `/var/lib/minds/deferred-install/done.playwright` (or watch `tmux capture-pane -t svc-deferred-install -p`) to confirm the install completed before using browser automation in a fresh workspace. See `libs/bootstrap/README.md` for the full deferral contract.
 
 # Always remember these guidelines:
 

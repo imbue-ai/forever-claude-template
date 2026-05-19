@@ -30,7 +30,7 @@ Inside each agent's Docker container:
 
 Agents can be created in two ways:
 
-1. **Via the web UI**: Visit the desktop client. If no agents exist, you'll see a creation form. Enter a git repository URL (or local path), agent name, and launch mode (DEV or LOCAL). The desktop client clones the repo (if URL), runs `mngr create` with the appropriate templates, creates a Cloudflare tunnel, and injects the tunnel token.
+1. **Via the web UI**: Visit the desktop client. If no agents exist, you'll see a creation form. Enter a git repository URL (or local path), agent name, and launch mode (LOCAL, LIMA, CLOUD, or IMBUE_CLOUD). The desktop client clones the repo (if URL), runs `mngr create` with the appropriate templates, creates a Cloudflare tunnel, and injects the tunnel token.
 
 2. **Via the API**: POST to `/api/create-agent` with a JSON body containing `git_url`, `agent_name`, and `launch_mode`. Poll `/api/create-agent/{agent_id}/status` for progress.
 
@@ -53,7 +53,7 @@ The `global` flag indicates whether the agent wants Cloudflare forwarding enable
 
 ## Cloudflare tunnel integration
 
-The remote service connector URL comes from `MindsConfig.remote_service_connector_url`, loaded from `~/.<MINDS_ROOT_NAME>/config.toml` or the `REMOTE_SERVICE_CONNECTOR_URL` environment variable (env overrides file), with a dev-deployed default baked in. Every tunnel request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. Once signed in:
+The remote service connector URL comes from the per-tier `client.toml` loaded via `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). When `--config-file` is not passed, the default resolves to `apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by the Electron production build), then falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml` shipped with the wheel. Every tunnel request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. Once signed in:
 
 1. A tunnel is created automatically after each agent is created
 2. The tunnel token is injected into the agent's `runtime/secrets`

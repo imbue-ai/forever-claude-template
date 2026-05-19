@@ -75,6 +75,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -347,6 +348,7 @@ class ModalProviderApp(FrozenModel):
 
 @pure
 def check_host_name_is_unique(
+    provider_name: ProviderInstanceName,
     name: HostName,
     host_records: Sequence[HostRecord],
     running_host_ids: set[HostId],
@@ -370,7 +372,7 @@ def check_host_name_is_unique(
         if not is_running and not has_snapshots and not is_failed:
             continue
 
-        raise HostNameConflictError(name)
+        raise HostNameConflictError(provider_name, name)
 
 
 class ModalProviderInstance(BaseProviderInstance):
@@ -1119,6 +1121,7 @@ class ModalProviderInstance(BaseProviderInstance):
                 # Create the Host object with callback for future certified data updates
                 host = Host(
                     id=host_id,
+                    host_name=host_name,
                     connector=connector,
                     provider_instance=self,
                     mngr_ctx=self.mngr_ctx,
@@ -1602,6 +1605,7 @@ log "=== Shutdown script completed ==="
 
             return Host(
                 id=host_id,
+                host_name=HostName(host_record.certified_host_data.host_name),
                 connector=connector,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
@@ -1646,7 +1650,7 @@ log "=== Shutdown script completed ==="
             )
             running_host_ids = self._list_running_host_ids(cg=self.mngr_ctx.concurrency_group)
 
-        check_host_name_is_unique(name, host_records, running_host_ids)
+        check_host_name_is_unique(self.name, name, host_records, running_host_ids)
 
     # =========================================================================
     # Core Lifecycle Methods
@@ -1937,7 +1941,7 @@ log "=== Shutdown script completed ==="
         if snapshot_id is None:
             # Load host record to get available snapshots
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
 
             if not host_record.certified_host_data.snapshots:
                 raise NoSnapshotsModalMngrError(
@@ -1954,7 +1958,7 @@ log "=== Shutdown script completed ==="
 
         # Load host record from volume
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         # Find the snapshot in the host record
         snapshot_data: SnapshotRecord | None = None
@@ -1964,7 +1968,7 @@ log "=== Shutdown script completed ==="
                 break
 
         if snapshot_data is None:
-            raise SnapshotNotFoundError(snapshot_id)
+            raise SnapshotNotFoundError(self.name, snapshot_id)
 
         # The snapshot id is the Modal image ID
         modal_image_id = snapshot_data.id
@@ -2088,7 +2092,7 @@ log "=== Shutdown script completed ==="
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         host_record = self._read_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         return self._create_host_from_host_record(host_record)
 
@@ -2146,7 +2150,7 @@ log "=== Shutdown script completed ==="
             return host_obj
         # or raise:
         else:
-            raise HostNotFoundError(host)
+            raise HostNotFoundError(self.name, host)
 
     @handle_modal_auth_error
     def discover_hosts(
@@ -2169,6 +2173,9 @@ log "=== Shutdown script completed ==="
         # Track the host state determined during discovery so we don't need to
         # call h.get_state() (which would SSH into the host) at the end.
         discovery_state: dict[HostId, HostState] = {}
+        # Track host names from records / sandbox tags so we don't need to call
+        # h.get_name() (which would SSH into the host to read certified data) at the end.
+        host_name_by_id: dict[HostId, HostName] = {}
         processed_host_ids: set[HostId] = set()
 
         # Fetch sandboxes and host records in parallel since they are independent.
@@ -2192,6 +2199,8 @@ log "=== Shutdown script completed ==="
                 tags = sandbox.get_tags()
                 host_id = HostId(tags[TAG_HOST_ID])
                 running_sandbox_by_host_id[host_id] = sandbox
+                if TAG_HOST_NAME in tags:
+                    host_name_by_id[host_id] = HostName(tags[TAG_HOST_NAME])
             except (KeyError, ValueError) as e:
                 logger.warning("Skipped sandbox with invalid tags: {}", e)
                 continue
@@ -2204,6 +2213,9 @@ log "=== Shutdown script completed ==="
             for host_record in all_host_records:
                 host_id = HostId(host_record.certified_host_data.host_id)
                 processed_host_ids.add(host_id)
+                # Records always carry the canonical mngr-assigned name; prefer
+                # this over sandbox tags (which can be stale) when both exist.
+                host_name_by_id[host_id] = HostName(host_record.certified_host_data.host_name)
                 host_futures_with_records.append(
                     executor.submit(
                         self._construct_host_from_record_for_discovery,
@@ -2248,10 +2260,12 @@ log "=== Shutdown script completed ==="
         for host in hosts:
             self._evict_cached_host(host.id, replacement=host)
 
+        # Use names collected from host records / sandbox tags so building the
+        # DiscoveredHost list does not trigger an SSH read of data.json per host.
         return [
             DiscoveredHost(
                 host_id=h.id,
-                host_name=h.get_name(),
+                host_name=host_name_by_id.get(h.id) or h.get_name(),
                 provider_name=self.name,
                 host_state=discovery_state.get(h.id),
             )
@@ -2765,7 +2779,7 @@ log "=== Shutdown script completed ==="
         # Read existing host record from volume
         host_record = self._read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         # Create the filesystem snapshot
         with log_span("Creating filesystem snapshot", name=str(name)):
@@ -2835,7 +2849,7 @@ log "=== Shutdown script completed ==="
 
         sandbox = self._find_sandbox_by_host_id(host_id)
         if sandbox is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         # Generate snapshot name if not provided
         if name is None:
@@ -2899,14 +2913,14 @@ log "=== Shutdown script completed ==="
             # Read host record from volume
             host_record = self._read_host_record(host_id, use_cache=False)
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
 
             # Find and remove the snapshot
             snapshot_id_str = str(snapshot_id)
             updated_snapshots = [s for s in host_record.certified_host_data.snapshots if s.id != snapshot_id_str]
 
             if len(updated_snapshots) == len(host_record.certified_host_data.snapshots):
-                raise SnapshotNotFoundError(snapshot_id)
+                raise SnapshotNotFoundError(self.name, snapshot_id)
 
             # Update host record on volume
             updated_certified_data = host_record.certified_host_data.model_copy_update(
@@ -3002,7 +3016,7 @@ log "=== Shutdown script completed ==="
         if host_record is not None:
             return dict(host_record.certified_host_data.user_tags)
 
-        raise HostNotFoundError(host_id)
+        raise HostNotFoundError(self.name, host_id)
 
     def set_host_tags(
         self,
@@ -3138,7 +3152,7 @@ log "=== Shutdown script completed ==="
         # Read host record from volume
         host_record = self._read_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         # Failed hosts don't have SSH info and can't be connected to
         if host_record.ssh_host is None or host_record.ssh_port is None or host_record.ssh_host_public_key is None:

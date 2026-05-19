@@ -73,14 +73,14 @@ def test_render_create_form_has_default_values() -> None:
     html = render_create_form()
     assert "assistant" in html
     assert "forever-claude-template" in html
-    assert "agent_name" in html
+    assert "host_name" in html
     assert "launch_mode" in html
 
 
 def test_render_create_form_prefills_values() -> None:
-    html = render_create_form(git_url="https://custom/repo", agent_name="my-bot", branch="feature/test")
+    html = render_create_form(git_url="https://custom/repo", host_name="my-workspace", branch="feature/test")
     assert "https://custom/repo" in html
-    assert "my-bot" in html
+    assert "my-workspace" in html
     assert "feature/test" in html
 
 
@@ -96,8 +96,10 @@ def test_render_create_form_selects_local_by_default() -> None:
 
 
 def test_render_create_form_selects_specified_launch_mode() -> None:
-    html = render_create_form(launch_mode=LaunchMode.DEV)
-    assert 'value="DEV" selected' in html
+    # CLOUD instead of the default LOCAL so the "selection honored over the
+    # default" assertion is meaningful.
+    html = render_create_form(launch_mode=LaunchMode.CLOUD)
+    assert 'value="CLOUD" selected' in html
     assert 'value="LOCAL" selected' not in html
 
 
