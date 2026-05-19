@@ -356,6 +356,57 @@ def test_parse_agent_types_uses_parent_type_config_class() -> None:
         reset_agent_config_registry()
 
 
+def test_parse_agent_types_unknown_field_hints_at_missing_plugin() -> None:
+    """When the agent type has no registered config class and no plugins are
+    disabled, the unknown-field error should suggest the providing plugin
+    package may not be installed."""
+    reset_agent_config_registry()
+    try:
+        # claude is intentionally not registered here -- simulates the plugin
+        # not being installed while the user has [agent_types.claude] config.
+        raw = {"claude": {"is_fast": True}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset())
+        msg = str(exc_info.value)
+        assert "is_fast" in msg
+        assert "plugin package that provides agent type 'claude' may not be installed" in msg
+    finally:
+        reset_agent_config_registry()
+
+
+def test_parse_agent_types_unknown_field_hints_when_other_plugins_disabled() -> None:
+    """When some plugins are disabled but not the unknown type itself, the
+    error should list the disabled plugins so the user can spot a match."""
+    reset_agent_config_registry()
+    try:
+        raw = {"claude": {"is_fast": True}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset({"codex"}))
+        msg = str(exc_info.value)
+        assert "is_fast" in msg
+        assert "Currently disabled plugins" in msg
+        assert "codex" in msg
+    finally:
+        reset_agent_config_registry()
+
+
+def test_parse_agent_types_no_plugin_hint_when_type_is_registered() -> None:
+    """When the agent type IS registered, the hint about missing plugins
+    should NOT be added -- the user really did make a typo."""
+    reset_agent_config_registry()
+    try:
+        register_agent_config("claude", _TestParentConfig)
+
+        raw = {"claude": {"bogus_option": True}}
+        with pytest.raises(ConfigParseError) as exc_info:
+            _parse_agent_types(raw, disabled_plugins=frozenset())
+        msg = str(exc_info.value)
+        assert "bogus_option" in msg
+        assert "not installed" not in msg
+    finally:
+        reset_agent_config_registry()
+
+
 def test_parse_agent_types_rejects_unknown_fields_even_with_parent_type() -> None:
     """Custom types with parent_type should still reject truly unknown fields."""
     reset_agent_config_registry()
@@ -1644,3 +1695,56 @@ def test_parse_plugins_normalizes_hyphens() -> None:
         assert parsed.custom_field == "value"
     finally:
         _plugin_config_registry.pop(PluginName("hyphen-test-plugin"), None)
+
+
+# =============================================================================
+# Tests for silent=True warning suppression (used by `mngr plugin add`)
+# =============================================================================
+
+
+def test_parse_providers_silent_does_not_warn_on_unknown_backend(log_warnings: list[str]) -> None:
+    """_parse_providers with strict=False, silent=True must not warn about an unknown backend.
+
+    Regression guard for the issue where `mngr plugin add` was emitting
+    `Provider X references unknown backend Y` warnings during installation,
+    since the user is *about to install* the missing backend.
+    """
+    raw = {"modal": {"backend": "modal"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    # Provider with unknown backend was skipped (same as non-silent strict=False path).
+    assert ProviderInstanceName("modal") not in result
+    # No warning was emitted.
+    assert not any("references unknown backend" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_providers_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_providers with silent=True must not warn about unknown fields on a known backend."""
+    raw = {"my-local": {"backend": "local", "typo_field": "value"}}
+    result = _parse_providers(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert ProviderInstanceName("my-local") in result
+    # Unknown field still stripped from the parsed model -- silent affects only the warning.
+    assert "typo_field" not in result[ProviderInstanceName("my-local")].model_dump()
+    assert not any("typo_field" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_agent_types_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_agent_types with silent=True must not warn about unknown fields."""
+    raw = {"claude": {"bogus_option": "value"}}
+    result = _parse_agent_types(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    # Unknown field still stripped -- silent affects only the warning.
+    assert AgentTypeName("claude") in result
+    assert not any("bogus_option" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_plugins_silent_does_not_warn_on_unknown_field(log_warnings: list[str]) -> None:
+    """_parse_plugins with silent=True must not warn about unknown fields."""
+    raw = {"some-plugin": {"unknown_setting": "x"}}
+    _parse_plugins(raw, strict=False, silent=True)
+    assert not any("unknown_setting" in msg for msg in log_warnings), log_warnings
+
+
+def test_parse_config_silent_does_not_warn_on_unknown_top_level_field(log_warnings: list[str]) -> None:
+    """parse_config with silent=True must not warn about unknown top-level fields."""
+    raw = {"future_top_level_field": "x"}
+    parse_config(raw, disabled_plugins=frozenset(), strict=False, silent=True)
+    assert not any("future_top_level_field" in msg for msg in log_warnings), log_warnings

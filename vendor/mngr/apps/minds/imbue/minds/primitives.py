@@ -37,7 +37,6 @@ class LaunchMode(UpperCaseStrEnum):
 
     LOCAL = auto()
     CLOUD = auto()
-    DEV = auto()
     LIMA = auto()
     IMBUE_CLOUD = auto()
 
@@ -62,12 +61,6 @@ class AIProvider(UpperCaseStrEnum):
     IMBUE_CLOUD = auto()
     API_KEY = auto()
     SUBSCRIPTION = auto()
-
-
-class AgentName(NonEmptyStr):
-    """User-chosen name for an agent."""
-
-    ...
 
 
 class OneTimeCode(NonEmptyStr):

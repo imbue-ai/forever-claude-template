@@ -4,12 +4,9 @@ FROM python:3.12.13-slim
 ARG TTYD_VERSION=1.7.7
 ARG CLOUDFLARED_VERSION=2026.3.0
 ARG UV_VERSION=0.11.7
-ARG CLAUDE_CODE_VERSION=2.1.116
+ARG CLAUDE_CODE_VERSION=2.1.141
 ARG MODAL_VERSION=1.4.2
 ARG NODE_MAJOR=20
-# Keep in sync with the `playwright==X.Y.Z` pin in the root pyproject.toml so
-# the Chromium build cached here is the one the workspace venv resolves to.
-ARG PLAYWRIGHT_VERSION=1.58.0
 
 # Install system dependencies including tini for proper signal handling
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -95,45 +92,92 @@ RUN npm install -g "latchkey@${LATCHKEY_VERSION}"
 # install python dependencies
 RUN uv tool install "modal==${MODAL_VERSION}"
 
-# Install Playwright's Chromium browser + Debian system libs before the COPY
-# so this layer survives code changes. The workspace venv gets its own
-# `playwright` install later via `uv sync --all-packages`; as long as the
-# version matches PLAYWRIGHT_VERSION, it reuses the Chromium build cached in
-# ~/.cache/ms-playwright. `--with-deps` invokes apt-get internally.
-RUN uv tool install "playwright==${PLAYWRIGHT_VERSION}" \
-    && playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
+# Playwright + Chromium is deliberately NOT installed here. The container
+# starts and the bootstrap services come up without it; the
+# `deferred-install` service (services.toml) installs it idempotently on
+# first boot and writes a marker file so subsequent restarts no-op.
+
+# ============================================================================
+# Pre-COPY manifest layer.
+# Copies only the dependency manifests (no application source) so the
+# expensive `uv sync` and `npm ci` steps below cache against
+# dependency-manifest changes only. Application code edits land on the
+# `COPY . /code/` further down -- they do not invalidate the cache here.
+# ============================================================================
+WORKDIR /code/
+
+# Root + per-workspace-member pyproject.toml + uv.lock.
+COPY pyproject.toml uv.lock /code/
+COPY libs/app_watcher/pyproject.toml /code/libs/app_watcher/pyproject.toml
+COPY libs/bootstrap/pyproject.toml /code/libs/bootstrap/pyproject.toml
+COPY libs/cloudflare_tunnel/pyproject.toml /code/libs/cloudflare_tunnel/pyproject.toml
+COPY libs/runtime_backup/pyproject.toml /code/libs/runtime_backup/pyproject.toml
+COPY libs/telegram_bot/pyproject.toml /code/libs/telegram_bot/pyproject.toml
+COPY libs/web_server/pyproject.toml /code/libs/web_server/pyproject.toml
+COPY apps/system_interface/pyproject.toml /code/apps/system_interface/pyproject.toml
+
+# vendor/mngr path-dependency manifests. The root pyproject.toml's
+# [tool.uv.sources] points imbue-common, imbue-mngr, imbue-mngr-claude,
+# resource-guards, and concurrency-group at vendor/mngr/libs/<pkg>; uv
+# needs each pyproject.toml present to resolve the workspace. The two
+# additional tool installs below (mngr_modal, mngr_wait) ride here too
+# so their transitive deps land in the warmed cache.
+COPY vendor/mngr/libs/imbue_common/pyproject.toml /code/vendor/mngr/libs/imbue_common/pyproject.toml
+COPY vendor/mngr/libs/mngr/pyproject.toml /code/vendor/mngr/libs/mngr/pyproject.toml
+COPY vendor/mngr/libs/mngr_claude/pyproject.toml /code/vendor/mngr/libs/mngr_claude/pyproject.toml
+COPY vendor/mngr/libs/mngr_modal/pyproject.toml /code/vendor/mngr/libs/mngr_modal/pyproject.toml
+COPY vendor/mngr/libs/mngr_wait/pyproject.toml /code/vendor/mngr/libs/mngr_wait/pyproject.toml
+COPY vendor/mngr/libs/resource_guards/pyproject.toml /code/vendor/mngr/libs/resource_guards/pyproject.toml
+COPY vendor/mngr/libs/concurrency_group/pyproject.toml /code/vendor/mngr/libs/concurrency_group/pyproject.toml
+
+# Pre-warm the uv wheel cache. --no-install-workspace skips every libs/*
+# and apps/system_interface (their source isn't here yet); --no-install-local
+# skips the vendor/mngr path deps (same reason). What lands in the cache is
+# every third-party PyPI dep in the lockfile, so the post-COPY
+# `uv sync --all-packages --frozen` only has to register the editable
+# workspace + path-dep packages -- no wheel downloads -- when application
+# or vendor/mngr source changes invalidate the layers below.
+RUN uv sync --all-packages --frozen --no-install-workspace --no-install-local
+
+# Frontend npm dependencies. Same shape: copy only the lockfile + manifest,
+# install, then `npm run build` post-COPY when the actual source is present.
+COPY apps/system_interface/frontend/package.json apps/system_interface/frontend/package-lock.json /code/apps/system_interface/frontend/
+RUN cd /code/apps/system_interface/frontend && npm ci
+
+# ============================================================================
+# End pre-COPY manifest layer. Source-changing layers begin below.
+# ============================================================================
 
 # copy in all of our code:
 COPY . /code/
 
-# set working directory to the project root
-WORKDIR /code/
-
 # make an extra directory for future worktrees
 RUN mkdir -p /worktree
 
-# extract our code into the project directory
-RUN git config --global --add safe.directory /code/ && chown -R root:root /code/
+# Mark /code/ as a git safe.directory so commands run inside the container
+# don't refuse on ownership mismatch. No chown is needed: COPY already
+# lands files as root:root by default.
+RUN git config --global --add safe.directory /code/
 
-# Build the system_interface frontend
-RUN cd /code/apps/system_interface/frontend && \
-    npm ci && \
-    npm run build
+# Build the system_interface frontend (deps already installed pre-COPY).
+RUN cd /code/apps/system_interface/frontend && npm run build
 
 # add mngr and system-interface as tools (both need the plugin packages
-# so they can parse plugin-specific config fields like auto_dismiss_dialogs)
+# so they can parse plugin-specific config fields like auto_dismiss_dialogs).
+# mngr_modal is intentionally NOT installed/registered here because the FCT
+# .mngr/settings.toml sets providers.modal.is_enabled = false; without it,
+# `mngr plugin add` no longer has to inject a third plugin into the mngr
+# tool venv, which is the dominant cost of this RUN.
 RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
     uv tool install -e /code/apps/system_interface \
-        --with-editable /code/vendor/mngr/libs/mngr_claude \
-        --with-editable /code/vendor/mngr/libs/mngr_modal && \
+        --with-editable /code/vendor/mngr/libs/mngr_claude && \
     mngr plugin add \
-    --path vendor/mngr/libs/mngr_modal/ \
     --path vendor/mngr/libs/mngr_claude \
     --path vendor/mngr/libs/mngr_wait
 
-# Sync the workspace venv
-RUN uv sync --all-packages
+# Sync the workspace venv. --frozen asserts the lockfile is canonical so
+# the pre-warm cache layer is never bypassed by a silent re-resolve.
+RUN uv sync --all-packages --frozen
 
 # Expose the vendored tk ticket tracker on PATH. `tk` is a portable bash
 # script at vendor/tk/ticket; a symlink into /root/.local/bin/ (already on
