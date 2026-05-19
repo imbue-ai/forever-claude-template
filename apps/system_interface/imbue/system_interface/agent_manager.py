@@ -664,11 +664,18 @@ class AgentManager:
             # which in turn prevents periodic DISCOVERY_FULL snapshots from
             # being written, so the system_interface's agent list drifts out
             # of sync with reality whenever an individual event is missed.
+            # `is_checked_by_group=False` because we terminate this long-running
+            # subprocess explicitly via `.terminate()` in `stop()`; that SIGTERM
+            # produces a non-zero exit code that should not surface as a
+            # ProcessError when the concurrency group exits. The watchdog thread
+            # below is responsible for distinguishing graceful shutdown from
+            # unexpected early exit.
             process = self._observe_cg.run_process_in_background(
                 command=cmd,
                 cwd=self._resolve_observe_cwd(),
                 on_output=self._handle_observe_output_line,
                 shutdown_event=self._shutdown_event,
+                is_checked_by_group=False,
             )
         except (OSError, InvalidConcurrencyGroupStateError):
             _loguru_logger.warning(
