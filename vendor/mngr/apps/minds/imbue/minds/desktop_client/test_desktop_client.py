@@ -507,30 +507,30 @@ def test_create_form_submit_rejects_empty_git_url(tmp_path: Path) -> None:
     """POST /create with empty git_url returns 400."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.post("/create", data={"git_url": "", "agent_name": "test"})
+    response = client.post("/create", data={"git_url": "", "host_name": "test"})
     assert response.status_code == 400
 
 
-def test_create_form_submit_passes_agent_name(tmp_path: Path) -> None:
-    """POST /create passes agent_name to the creator."""
+def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
+    """POST /create passes host_name to the creator."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={"git_url": "file:///nonexistent-repo", "agent_name": "my-agent"},
+        data={"git_url": "file:///nonexistent-repo", "host_name": "my-workspace"},
         follow_redirects=False,
     )
     assert response.status_code == 303
     agent_creator.wait_for_all()
 
 
-def test_create_agent_api_passes_agent_name(tmp_path: Path) -> None:
-    """POST /api/create-agent passes agent_name to the creator."""
+def test_create_agent_api_passes_host_name(tmp_path: Path) -> None:
+    """POST /api/create-agent passes host_name to the creator."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "agent_name": "my-agent"},
+        json={"git_url": "file:///nonexistent-repo", "host_name": "my-agent"},
     )
     assert response.status_code == 200
     data = response.json()
@@ -556,6 +556,33 @@ def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
 
     response = client.post("/api/create-agent", json={"git_url": ""})
     assert response.status_code == 400
+
+
+def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
+    """POST /create with a host_name that fails HostName validation re-renders the form with an error."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "alphanumeric" in response.text
+    assert "bad.name" in response.text
+
+
+def test_create_agent_api_rejects_invalid_host_name(tmp_path: Path) -> None:
+    """POST /api/create-agent with a host_name that fails HostName validation returns 400."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert "alphanumeric" in body["error"]
 
 
 def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
@@ -760,8 +787,8 @@ def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
-            "launch_mode": "DEV",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
         },
         follow_redirects=False,
     )
@@ -777,8 +804,8 @@ def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
         "/api/create-agent",
         json={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
-            "launch_mode": "DEV",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
         },
     )
     assert response.status_code == 200
@@ -795,7 +822,7 @@ def test_create_agent_api_rejects_invalid_launch_mode(tmp_path: Path) -> None:
         "/api/create-agent",
         json={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
+            "host_name": "my-agent",
             "launch_mode": "INVALID_MODE",
         },
     )
@@ -812,7 +839,8 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     assert "launch_mode" in response.text
     assert "local" in response.text
     assert "cloud" in response.text
-    assert "dev" in response.text
+    assert "lima" in response.text
+    assert "imbue_cloud" in response.text
 
 
 def test_create_form_shows_ai_provider_dropdown(tmp_path: Path) -> None:
@@ -853,7 +881,7 @@ def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
+            "host_name": "my-agent",
             "launch_mode": "IMBUE_CLOUD",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
@@ -872,7 +900,7 @@ def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Pat
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
+            "host_name": "my-agent",
             "launch_mode": "LOCAL",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
@@ -891,7 +919,7 @@ def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path)
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
+            "host_name": "my-agent",
             "launch_mode": "LOCAL",
             "ai_provider": "API_KEY",
             "anthropic_api_key": "",
@@ -910,7 +938,7 @@ def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path)
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
+            "host_name": "my-agent",
             "launch_mode": "LOCAL",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
@@ -996,7 +1024,7 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
+            "host_name": "my-agent",
             "launch_mode": "LOCAL",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
@@ -1192,7 +1220,7 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
     # TestClient and still have a concretely-typed handle to app.state.
     agent_id = str(AgentId())
     event = create_latchkey_permission_request_event(
-        agent_id=agent_id, service_name="slack", rationale="Need to post status updates"
+        agent_id=agent_id, scope="slack-api", rationale="Need to post status updates"
     )
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     session_store = make_session_store_for_test(tmp_path)
