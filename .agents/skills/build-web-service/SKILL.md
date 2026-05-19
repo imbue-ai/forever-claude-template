@@ -196,7 +196,7 @@ service) without prompting the user to click Refresh:
 python3 scripts/layout.py refresh <name>
 ```
 
-You should always `refresh` services after make changes, to make sure the user can see the updates.
+You should always `refresh` services after making changes, to make sure the user can see the updates.
 
 For anything beyond `open` / `refresh` -- splitting, moving, focusing,
 renaming, maximizing, replacing an iframe's URL, inspecting the live
