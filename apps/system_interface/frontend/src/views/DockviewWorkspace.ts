@@ -652,7 +652,8 @@ function handleOpenTabRequest(serviceName: string, requesterAgentId: string, for
     // adjacency rule.
     const anchorPanel = dockview.panels.find((p) => p.id === chatPanelId);
     const anchorGroupId = anchorPanel?.api.group.id ?? null;
-    const sibling = !forceNewGroup && anchorGroupId !== null ? findSiblingGroupInDirection(anchorGroupId, "right") : null;
+    const sibling =
+      !forceNewGroup && anchorGroupId !== null ? findSiblingGroupInDirection(anchorGroupId, "right") : null;
     if (sibling !== null) {
       dockview.addPanel({
         id: panelId,
@@ -1037,9 +1038,7 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
   const sibling =
     !forceNewGroup && anchorGroupId !== null ? findSiblingGroupInDirection(anchorGroupId, directionArg) : null;
   const positionOptions =
-    sibling !== null
-      ? { referenceGroup: sibling.id }
-      : { referencePanel: referencePanelId, direction: directionArg };
+    sibling !== null ? { referenceGroup: sibling.id } : { referencePanel: referencePanelId, direction: directionArg };
   // Size hints only apply when we're carving a new group; tabbing into
   // an existing group ignores them anyway, so omit to keep intent clear.
   const sizeOptions = sibling !== null ? {} : sizes;
