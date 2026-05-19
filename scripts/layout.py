@@ -5,15 +5,18 @@ Subcommands:
     list                                List addressable services + agents (open/running flags).
     inspect                             Describe the live dockview state as a ref-resolved tree.
     open <ref-or-service>               Surface a service (focus-if-open, else tab into / split next to caller's chat).
-    focus <ref>                         Activate the named panel within its group.
+    focus <ref-or-service>              Activate the named panel within its group.
     split <ref-or-service> [...]        Add a panel relative to another panel; tabs into an existing adjacent group by default.
-    close <ref>                         Remove the named panel.
-    move <ref> --relative-to <other> [...]  Relocate a panel; iframe DOM is preserved.
-    rename <ref> <title>                Update the panel's tab title.
-    maximize <ref>                      Maximize the panel's group within the dockview.
+    close <ref-or-service>              Remove the named panel.
+    move <ref-or-service> --relative-to <ref-or-service> [...]  Relocate a panel; iframe DOM is preserved.
+    rename <ref-or-service> <title>     Update the panel's tab title.
+    maximize <ref-or-service>           Maximize the panel's group within the dockview.
     restore                             Exit a maximized group.
-    replace-url <ref> <url>             Swap an iframe's src (service:<name>[/<path>] or https://...).
+    replace-url <ref-or-service> <url>  Swap an iframe's src (service:<name>[/<path>] or https://...).
     refresh <ref-or-service>            Reload one iframe; ``service:<name>`` reloads all iframes for that service.
+
+Every ref-accepting argument (positional ref, ``--relative-to``) accepts a bare
+service name as shorthand for ``service:<name>``.
 
 ``open`` / ``split`` / ``move`` default to *tabbing into an existing group*
 that already lives in the requested direction relative to the anchor; pass
