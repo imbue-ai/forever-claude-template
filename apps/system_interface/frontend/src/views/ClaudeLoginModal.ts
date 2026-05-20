@@ -317,7 +317,6 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
         m(
           "button.claude-login-provider",
           {
-            key: p.id,
             type: "button",
             onclick: () => {
               if (p.id === "api_key") {
@@ -342,7 +341,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
 
   function renderApiKeyForm(): m.Vnode[] {
     return [
-      m("div.claude-login-field", { key: "api-key-field" }, [
+      m("div.claude-login-field", [
         m("label.claude-login-step-label", { for: "claude-login-api-key-input" }, [
           m("span.claude-login-step-num", "1"),
           "Paste your Anthropic API key",
@@ -388,7 +387,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
 
   function renderOAuthCodeEntry(): m.Vnode[] {
     return [
-      m("div.claude-login-step", { key: "step1" }, [
+      m("div.claude-login-step", [
         m("div.claude-login-step-label", [
           m("span.claude-login-step-num", "1"),
           "Open this URL in your browser and sign in",
@@ -410,7 +409,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
           ),
         ]),
       ]),
-      m("div.claude-login-step", { key: "step2" }, [
+      m("div.claude-login-step", [
         m("label.claude-login-step-label", { for: "claude-login-code-input" }, [
           m("span.claude-login-step-num", "2"),
           "Paste the code shown after sign-in",
