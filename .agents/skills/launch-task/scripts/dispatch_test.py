@@ -256,3 +256,111 @@ def test_main_workspace_defaults_when_env_unset(
     assert rc == 0
     create_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "create"]]
     assert "workspace=default" in create_calls[0]
+
+
+def _make_state_dir_with_converter(tmp_path: Path) -> Path:
+    """Create a state_dir containing a stub common_transcript.sh."""
+    state_dir = tmp_path / "state"
+    (state_dir / "commands").mkdir(parents=True)
+    script = state_dir / "commands" / "common_transcript.sh"
+    script.write_text("#!/usr/bin/env bash\n:\n")
+    return state_dir
+
+
+def test_common_transcript_flushed_before_message_send(tmp_path: Path) -> None:
+    """When state_dir has the converter, dispatch flushes it right before the message."""
+    runtime, task, _ = _make_layout(tmp_path)
+    state_dir = _make_state_dir_with_converter(tmp_path)
+    runner = _RecordingRunner()
+
+    rc = dispatch_mod.dispatch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        extra_pushes=(),
+        workspace="ws-1",
+        state_dir=state_dir,
+        runner=runner,
+    )
+
+    assert rc == 0
+    argvs = [c.argv for c in runner.calls]
+    expected_script = str(state_dir / "commands" / "common_transcript.sh")
+    assert argvs == [
+        ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
+        [
+            "mngr",
+            "push",
+            f"demo-worker:{runtime}/",
+            "--source",
+            f"{runtime}/",
+            "--uncommitted-changes=merge",
+        ],
+        [expected_script, "--single-pass"],
+        ["mngr", "message", "demo-worker", "--message-file", str(task)],
+    ]
+
+
+def test_common_transcript_skipped_when_state_dir_is_none(tmp_path: Path) -> None:
+    """No converter call when state_dir is None (tests / non-mngr envs)."""
+    runtime, task, _ = _make_layout(tmp_path)
+    runner = _RecordingRunner()
+
+    rc = dispatch_mod.dispatch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        extra_pushes=(),
+        workspace="ws-1",
+        state_dir=None,
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert not any(
+        "common_transcript.sh" in arg for call in runner.calls for arg in call.argv
+    )
+
+
+def test_common_transcript_skipped_when_script_missing(tmp_path: Path) -> None:
+    """No converter call when the script isn't installed (non-claude agents)."""
+    runtime, task, _ = _make_layout(tmp_path)
+    state_dir = tmp_path / "state-without-converter"
+    state_dir.mkdir()
+    runner = _RecordingRunner()
+
+    rc = dispatch_mod.dispatch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        extra_pushes=(),
+        workspace="ws-1",
+        state_dir=state_dir,
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert not any(
+        "common_transcript.sh" in arg for call in runner.calls for arg in call.argv
+    )
+
+
+def test_main_picks_up_state_dir_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() reads MNGR_AGENT_STATE_DIR and threads it into dispatch."""
+    runtime, task, _ = _make_layout(tmp_path)
+    state_dir = _make_state_dir_with_converter(tmp_path)
+    runner = _RecordingRunner()
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+
+    rc = dispatch_mod.main(_main_argv(runtime, task), runner=runner)
+
+    assert rc == 0
+    expected_script = str(state_dir / "commands" / "common_transcript.sh")
+    flush_calls = [c.argv for c in runner.calls if c.argv == [expected_script, "--single-pass"]]
+    assert len(flush_calls) == 1
