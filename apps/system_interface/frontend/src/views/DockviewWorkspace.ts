@@ -533,6 +533,86 @@ function findIframePanelIdForService(serviceName: string): string | null {
   return null;
 }
 
+/** Position + size options passed through to ``dockview.addPanel``. */
+type AddPanelPlacementOptions = {
+  position?:
+    | { referenceGroup: string }
+    | { referencePanel: string; direction: "left" | "right" | "above" | "below" };
+  initialWidth?: number;
+  initialHeight?: number;
+};
+
+/** Dedup-then-add for a ``service:`` or ``chat:`` ref.
+ *
+ *  Shared by ``handleSplit`` and ``handleOpenTabRequest`` so that the
+ *  panelParams bookkeeping + addPanel invocation only exist in one place.
+ *  When a panel already exists for the ref (service: dedup by serviceName,
+ *  chat: dedup by deterministic ``chat-<agent-id>``), focuses it and
+ *  returns its id. Otherwise creates the panel with the supplied
+ *  positioning and returns the new id. Returns null when dockview isn't
+ *  ready, the ref carries a prefix that doesn't create panels in v1
+ *  (terminal:/subagent:/url:), or the named chat agent is unknown. */
+function addPanelForRef(
+  ref: string,
+  requesterAgentId: string,
+  addOptions: AddPanelPlacementOptions,
+): string | null {
+  if (!dockview) return null;
+
+  if (ref.startsWith("service:")) {
+    const serviceName = ref.substring("service:".length);
+    const existingPanelId = findIframePanelIdForService(serviceName);
+    if (existingPanelId !== null) {
+      const existing = dockview.panels.find((p) => p.id === existingPanelId);
+      if (existing) dockview.setActivePanel(existing);
+      return existingPanelId;
+    }
+    const ownerId = requesterAgentId || getPrimaryAgentId();
+    const panelId = `iframe-${ownerId}-${Date.now()}`;
+    const params: PanelParams = {
+      panelType: "iframe",
+      agentId: ownerId,
+      url: getServiceUrl(serviceName),
+      title: serviceName,
+      serviceName,
+    };
+    panelParams.set(panelId, params);
+    dockview.addPanel({
+      id: panelId,
+      component: "iframe",
+      title: serviceName,
+      params,
+      ...addOptions,
+    });
+    return panelId;
+  }
+
+  if (ref.startsWith("chat:")) {
+    const agentName = ref.substring("chat:".length);
+    const agent = getAgents().find((a) => a.name === agentName);
+    if (!agent) return null;
+    const panelId = `chat-${agent.id}`;
+    const existing = dockview.panels.find((p) => p.id === panelId);
+    if (existing) {
+      dockview.setActivePanel(existing);
+      return panelId;
+    }
+    const params: PanelParams = { panelType: "chat", agentId: agent.id, chatAgentId: agent.id };
+    panelParams.set(panelId, params);
+    dockview.addPanel({
+      id: panelId,
+      component: "chat",
+      title: agent.name,
+      params,
+      renderer: "always",
+      ...addOptions,
+    });
+    return panelId;
+  }
+
+  return null;
+}
+
 /** Find a group adjacent to ``anchorGroupId`` in the requested direction.
  *
  *  Used by the "share existing splits" default for ``open`` / ``split`` /
@@ -608,68 +688,31 @@ function findSiblingGroupInDirection(
  *  forget. */
 function handleOpenTabRequest(serviceName: string, requesterAgentId: string, forceNewGroup: boolean): void {
   if (!dockview) return;
+  if (!getApplications().find((a) => a.name === serviceName)) return;
 
-  const existingPanelId = findIframePanelIdForService(serviceName);
-  if (existingPanelId !== null) {
-    const existing = dockview.panels.find((p) => p.id === existingPanelId);
-    if (existing) {
-      dockview.setActivePanel(existing);
-    }
-    return;
-  }
-
-  const app = getApplications().find((a) => a.name === serviceName);
-  if (!app) return;
-
-  const ownerId = requesterAgentId || getPrimaryAgentId();
-  const panelId = `iframe-${ownerId}-${Date.now()}`;
-  const params: PanelParams = {
-    panelType: "iframe",
-    agentId: ownerId,
-    url: getServiceUrl(serviceName),
-    title: serviceName,
-    serviceName,
-  };
-  panelParams.set(panelId, params);
-
+  const ref = `service:${serviceName}`;
   const chatPanelId = findAnchorChatPanelId(requesterAgentId);
-  if (chatPanelId !== null) {
-    // Default: tab into an existing group to the right of the anchor
-    // chat if one is open. Callers pass ``forceNewGroup`` to demand a
-    // fresh column instead. See ``findSiblingGroupInDirection`` for the
-    // adjacency rule.
-    const anchorPanel = dockview.panels.find((p) => p.id === chatPanelId);
-    const anchorGroupId = anchorPanel?.api.group.id ?? null;
-    const sibling =
-      !forceNewGroup && anchorGroupId !== null ? findSiblingGroupInDirection(anchorGroupId, "right") : null;
-    if (sibling !== null) {
-      dockview.addPanel({
-        id: panelId,
-        component: "iframe",
-        title: serviceName,
-        params,
-        position: { referenceGroup: sibling.id },
-      });
-      return;
-    }
-    const containerWidth = dockviewContainer?.getBoundingClientRect().width ?? 0;
-    const initialWidth = containerWidth > 0 ? Math.round(containerWidth * OPEN_TAB_SPLIT_FRACTION) : undefined;
-    dockview.addPanel({
-      id: panelId,
-      component: "iframe",
-      title: serviceName,
-      params,
-      position: { referencePanel: chatPanelId, direction: "right" },
-      initialWidth,
-    });
+  if (chatPanelId === null) {
+    addPanelForRef(ref, requesterAgentId, {});
     return;
   }
-
-  dockview.addPanel({
-    id: panelId,
-    component: "iframe",
-    title: serviceName,
-    params,
+  // Default: tab into an existing group to the right of the anchor chat
+  // if one is open. Callers pass ``forceNewGroup`` to demand a fresh
+  // column instead. See ``findSiblingGroupInDirection`` for the
+  // adjacency rule.
+  const anchorPanel = dockview.panels.find((p) => p.id === chatPanelId);
+  const anchorGroupId = anchorPanel?.api.group.id ?? null;
+  const sibling =
+    !forceNewGroup && anchorGroupId !== null ? findSiblingGroupInDirection(anchorGroupId, "right") : null;
+  if (sibling !== null) {
+    addPanelForRef(ref, requesterAgentId, { position: { referenceGroup: sibling.id } });
+    return;
+  }
+  const containerWidth = dockviewContainer?.getBoundingClientRect().width ?? 0;
+  const initialWidth = containerWidth > 0 ? Math.round(containerWidth * OPEN_TAB_SPLIT_FRACTION) : undefined;
+  addPanelForRef(ref, requesterAgentId, {
+    position: { referencePanel: chatPanelId, direction: "right" },
+    initialWidth,
   });
 }
 
@@ -1021,55 +1064,10 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
   // an existing group ignores them anyway, so omit to keep intent clear.
   const sizeOptions = sibling !== null ? {} : sizes;
 
-  if (ref.startsWith("service:")) {
-    const serviceName = ref.substring("service:".length);
-    // ``service:<name>`` uniquely identifies a panel via panelParams, so
-    // splitting a service that's already open would leave a duplicate
-    // addressable only by short-hash. Focus the existing panel instead,
-    // matching the chat-ref branch below and the dedup ``open`` does.
-    const existingServicePanelId = findIframePanelIdForService(serviceName);
-    if (existingServicePanelId !== null) {
-      const existing = dockview.panels.find((p) => p.id === existingServicePanelId);
-      if (existing) dockview.setActivePanel(existing);
-      return;
-    }
-    const ownerId = requesterAgentId || getPrimaryAgentId();
-    const panelId = `iframe-${ownerId}-${Date.now()}`;
-    const params: PanelParams = {
-      panelType: "iframe",
-      agentId: ownerId,
-      url: getServiceUrl(serviceName),
-      title: serviceName,
-      serviceName,
-    };
-    panelParams.set(panelId, params);
-    dockview.addPanel({
-      id: panelId,
-      component: "iframe",
-      title: serviceName,
-      params,
-      position: positionOptions,
-      ...sizeOptions,
-    });
-    return;
-  }
-  // ref starts with "chat:"
-  const agentName = ref.substring("chat:".length);
-  const agent = getAgents().find((a) => a.name === agentName);
-  if (!agent) return;
-  const panelId = `chat-${agent.id}`;
-  if (dockview.panels.some((p) => p.id === panelId)) return;
-  const params: PanelParams = { panelType: "chat", agentId: agent.id, chatAgentId: agent.id };
-  panelParams.set(panelId, params);
-  dockview.addPanel({
-    id: panelId,
-    component: "chat",
-    title: agent.name,
-    params,
-    renderer: "always",
-    position: positionOptions,
-    ...sizeOptions,
-  });
+  // Both service: and chat: route through ``addPanelForRef`` which
+  // handles dedup (focus existing instead of duplicating) + panelParams
+  // bookkeeping + the actual addPanel invocation.
+  addPanelForRef(ref, requesterAgentId, { position: positionOptions, ...sizeOptions });
 }
 
 function directionFromArg(direction: string): "left" | "right" | "above" | "below" {
