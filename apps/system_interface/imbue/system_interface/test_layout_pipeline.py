@@ -31,12 +31,12 @@ from typing import Generator
 import pytest
 import uvicorn
 
+from imbue.mngr.utils.polling import wait_for
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
-from imbue.mngr.utils.polling import wait_for
 
 pytestmark = pytest.mark.acceptance
 

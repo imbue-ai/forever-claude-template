@@ -4,13 +4,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from imbue.mngr.utils.polling import wait_for
 from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.layout_ops import is_broadcasting_op
 from imbue.system_interface.layout_ops import is_known_op
 from imbue.system_interface.layout_ops import is_mutating_op
 from imbue.system_interface.layout_ops import layout_inspect
 from imbue.system_interface.layout_ops import layout_list
-from imbue.mngr.utils.polling import wait_for
 
 
 def test_known_ops_cover_the_full_surface() -> None:
