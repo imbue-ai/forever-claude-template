@@ -18,7 +18,7 @@ Usage:
 2. **Pass through all regular curl arguments** - latchkey is a transparent wrapper.
 3. **Check for `latchkey services list`** to get a list of supported services. Use `--viable` to only show the currently configured ones.
 4. **Use `latchkey services info <service_name>`** to get information about a specific service (auth options, credentials status, API docs links, special requirements, etc.).
-5. **Submit a permission request to the user if necessary** by calling `latchkey curl -XPOST http://latchkey-self.invalid/extensions/permission-requests` (see the "Ask for user permission" example below) when either there are no credentials for the given service or the curl requests come back with the "request not permitted by the user" message.
+5. **Submit a permission request to the user if necessary** by calling `latchkey curl -XPOST http://latchkey-self.invalid/permission-requests` (see the "Ask for user permission" example below) when either there are no credentials for the given service or the curl requests come back with the "request not permitted by the user" message. (Note: the path is `/permission-requests`, NOT `/extensions/permission-requests`; the `/extensions/*` namespace is admin-only and returns 403 to agents.)
 6. **Look for the newest documentation of the desired public API online.** Avoid bot-only endpoints.
 
 
@@ -60,7 +60,12 @@ latchkey curl http://latchkey-self.invalid/permissions/self | jq .rules
 # 3. Ask for the necessary missing permissions.
 latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
   -H 'Content-Type: application/json' \
-  -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "scope": "discord_api", "permissions": ["discord-read-all"], "rationale": "I'"'"'d like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
+  -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "scope": "discord-api", "permissions": ["discord-read-all"], "rationale": "I'"'"'d like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
+
+The `scope` field must be a registered bundle name from the gateway's
+catalog — these use kebab-case (e.g. `slack-api`, `discord-api`,
+`github-api`), never snake_case. To discover the correct scope for a
+service, call `GET /permissions/available/<service>` first.
 ```
 
 Try to strike a balance: do not require needlessly broad
