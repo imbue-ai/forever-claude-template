@@ -1598,6 +1598,13 @@ body {
   line-height: 1.55;
 }
 
+.pv-tl-narration {
+  margin-top: 4px;
+  font-size: 13.5px;
+  color: var(--pv-fg-muted);
+  line-height: 1.55;
+}
+
 /* Id badge in front of regular-ticket titles. Visually subtle -- the
    title is the primary thing the user reads; the badge is the secondary
    "which tk ticket is this" handle for users / agents who care. */
