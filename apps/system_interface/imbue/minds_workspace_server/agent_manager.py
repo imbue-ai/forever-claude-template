@@ -669,6 +669,13 @@ class AgentManager:
                 cwd=self._resolve_observe_cwd(),
                 on_output=self._handle_observe_output_line,
                 shutdown_event=self._shutdown_event,
+                # The observe subprocess is long-lived and stopped via SIGTERM,
+                # which produces a non-zero returncode (-15). With the default
+                # is_checked_by_group=True, the concurrency group's __exit__
+                # would treat that as a process failure and raise ProcessError
+                # during stop(). The watchdog below is the sole intended channel
+                # for surfacing unexpected exits.
+                is_checked_by_group=False,
             )
         except (OSError, InvalidConcurrencyGroupStateError):
             _loguru_logger.warning(
