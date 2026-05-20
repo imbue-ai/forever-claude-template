@@ -6,38 +6,19 @@ enum of allowed `name:` values.
 
 ## Task-file inputs
 
-Your task file has been synced to your worktree alongside the replay artifact
-(`turn.jsonl` for `absorb`, `crystallize`, and `heal` flows; `commit.diff` for
-the `verify` flow) at `<RUNTIME_DIR>/task.md`. At the start of your run,
-validate its frontmatter and extract the three required fields with:
+Your task file has been synced to your worktree at `<RUNTIME_DIR>/task.md`.
+Your worker SKILL.md lists any additional inputs the calling flow stages
+alongside it. At the start of your run, extract the lead's address with:
 
 ```bash
-uv run .agents/shared/scripts/parse_task_frontmatter.py '<TASK_FILE_GLOB>'
+eval "$(uv run .agents/shared/scripts/parse_task_frontmatter.py '<TASK_FILE_GLOB>')"
 ```
 
-Quote the glob pattern so the shell passes the literal to the helper; the
-helper expands it internally and fails loudly if zero or more than one task
-file matches (each worker handles a single task -- either condition means the
-runtime layout drifted). On success it prints three shell-evalable `KEY=value`
-lines on stdout: `LEAD_AGENT=`, `LEAD_REPORT_DIR=`, `TRANSCRIPT_PATH=`. It
-exits non-zero with a stderr message on any failure, including a missing or
-misspelled field or a non-string / empty value.
-
-The first two address reports back to the lead; `transcript_path` is where the
-replay artifact lives.
-
-## Task-file frontmatter schema
-
-```yaml
----
-lead_agent: <main agent name>
-lead_report_dir: runtime/<flow>/<name>/reports/
-transcript_path: runtime/<flow>/<name>/turn.jsonl
----
-```
-
-All three fields are required non-empty strings. `parse_task_frontmatter.py`
-enforces this.
+Quote the pattern. `LEAD_AGENT` is the `mngr` agent you push reports to
+(and whose transcript you read); `LEAD_REPORT_DIR` is the destination
+directory on the lead's worktree. Any additional string fields the lead
+set in the frontmatter also become shell variables -- see your worker
+SKILL.md for which extras (if any) the calling flow stages.
 
 ## Reporting procedure
 

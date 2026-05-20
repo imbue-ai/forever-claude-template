@@ -136,21 +136,3 @@ mngr push <WORKER>:<DEST_DIR> \
   the push.
 - There is no `mngr file put` subcommand -- `mngr push` is the correct
   mechanism.
-
-## `extract_turn.py`
-
-Capture a turn from the current session transcript:
-
-```bash
-uv run .agents/shared/scripts/extract_turn.py \
-    --nth 1 \
-    --output <RUNTIME_DIR>/turn.jsonl
-```
-
-`--nth 1` selects the *previous* human turn -- the one you typically want to
-capture. `--nth 0` (the default) would capture the current invocation turn,
-which is rarely what you want.
-
-For marker-based slicing when turn counts do not line up cleanly (e.g.
-sub-agent interleaving) and the transcript path resolution chain, run
-`uv run .agents/shared/scripts/extract_turn.py --help`.

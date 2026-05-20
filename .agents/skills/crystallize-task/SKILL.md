@@ -54,9 +54,8 @@ Pick a short kebab-case slug `$NAME` for this crystallization (e.g.
 - Worker agent name: `crystallize-$NAME`
 - Worker branch: `mngr/crystallize-$NAME` (created by `mngr create`)
 - Local artifact paths under `runtime/crystallize/$NAME/`
-- Task file path: `runtime/crystallize/$NAME/task.md` (sits alongside
-  `turn.jsonl` so the existing Step 4 `mngr push` syncs it to the
-  worker for free)
+- Task file path: `runtime/crystallize/$NAME/task.md` (the Step 4 push
+  syncs it to the worker)
 - `tk` ticket title
 
 Use that same slug everywhere below.
@@ -64,7 +63,7 @@ Use that same slug everywhere below.
 If you were invoked from `do-something-new`, reuse its slug (`$SLUG`) as
 `$NAME` -- the `source_artifacts_dir` frontmatter assumes matched paths.
 
-## Step 1: Confirm and open a tracking ticket
+## Step 1: Confirm
 
 **Skip the pre-gate question if the user explicitly invoked this skill.**
 Triggers that count as explicit invocation:
@@ -74,7 +73,7 @@ Triggers that count as explicit invocation:
   turn, or otherwise named the skill by hand.
 - The calling skill is `do-something-new` (sample-approval at its Step 5 is the go-ahead).
 
-In any of those cases go straight to the ticket -- asking again is
+In any of those cases go straight to Step 2 -- asking again is
 redundant and annoying.
 
 Otherwise send a one-line pre-gate question via the `send-user-message` skill:
@@ -83,55 +82,69 @@ Otherwise send a one-line pre-gate question via the `send-user-message` skill:
 
 Wait for the user's reply. If no, stop here.
 
-If the user said yes (or the skip rule above applied), open a `tk`
-ticket so the lifecycle is visible after the turn ends:
+## Step 2: Open a tracking ticket
+
+The ticket survives until the post-merge migration in Step 6, so the ID
+goes to disk under the runtime dir for that step to read back.
 
 ```bash
+mkdir -p runtime/crystallize/$NAME
 TICKET_ID=$(tk create "crystallize $NAME" -t task \
-    --acceptance "transcript extracted; task file written; worker launched; worker DONE; branch merged")
+    --acceptance "task file written; worker launched; worker DONE; branch merged")
 tk start "$TICKET_ID"
-```
-
-## Step 2: Extract the just-finished turn
-
-See `.agents/shared/references/lead-proxy.md` for the `extract_turn.py`
-invocation contract.
-
-```bash
-uv run .agents/shared/scripts/extract_turn.py \
-    --nth 1 \
-    --output runtime/crystallize/$NAME/turn.jsonl
+echo "$TICKET_ID" > runtime/crystallize/$NAME/ticket_id.txt
 ```
 
 ## Step 3: Write the task file
 
-Describe invariants and state constraints — what must be true about the
-skill's inputs and outputs. Do not enumerate subcommands, flow steps, or
-argparse surfaces; surface decisions belong to the worker.
+The worker will explore your transcript via `mngr transcript` to find
+the work being crystallized. Your job here is to write a task body that
+*describes* the work and anchors the worker's search with verbatim
+quotes from the conversation (the user's original ask, key decisions,
+tool calls or outputs that defined the recipe). Without anchors the
+worker will scan the wrong region of your transcript.
+
+Also describe invariants and state constraints — what must be true
+about the skill's inputs and outputs. Do not enumerate subcommands,
+flow steps, or argparse surfaces; surface decisions belong to the
+worker.
 
 The task file's YAML frontmatter follows the schema in
-`.agents/shared/references/worker-reporting.md` -- `lead_agent`,
-`lead_report_dir`, and `transcript_path`.
+`.agents/shared/references/worker-reporting.md` -- `lead_agent` and
+`lead_report_dir`.
 
 ```bash
-mkdir -p runtime/crystallize/$NAME
 {
 cat << FRONTMATTER_EOF
 ---
 lead_agent: $MNGR_AGENT_NAME
 lead_report_dir: runtime/crystallize/$NAME/reports/
-transcript_path: runtime/crystallize/$NAME/turn.jsonl
 ---
 FRONTMATTER_EOF
 cat << 'BODY_EOF'
 
 # Task: crystallize the just-finished work into a reusable skill
 
-## Transcript
-The turn you need to crystallize is at the path given by the
-`transcript_path` frontmatter field (JSONL of tool calls and results).
-Replay it mentally to understand what was done; you do not need to
-re-execute destructive operations.
+## What was done
+<2-5 sentences describing the work to crystallize: what the user asked
+for, what you did, the recipe that emerged. This is the worker's
+primary guide -- it should make sense even to someone who has not seen
+the transcript.>
+
+## Anchors (verbatim quotes)
+The worker will use these to locate the relevant turns in your
+transcript via `mngr transcript`. Include:
+- The user's original request (verbatim).
+- 1-3 short quotes that mark distinctive moments (a key decision, a
+  tool output that drove a step, a clarification the user gave).
+<paste quotes here, one per bullet, in original wording.>
+
+## How to read the transcript
+Use `mngr transcript <lead_agent>` (with `--role user --role assistant`
+to strip tool noise, or `--tail N` to scope in) to find the turns above.
+The crystallize-task invocation is the *most recent* turn in your
+lead's transcript; the work to crystallize is *prior* to that
+invocation. Do not crystallize the lead's task-handoff turn itself.
 
 ## Source artifacts (optional)
 If your frontmatter has a `source_artifacts_dir` field, the calling
@@ -178,10 +191,13 @@ BODY_EOF
 } > runtime/crystallize/$NAME/task.md
 ```
 
+Fill in the `## What was done` and `## Anchors` sections with real
+content drawn from your conversation -- do not leave the placeholders.
+
 **Optional: source artifacts handoff.** If a calling skill (e.g.
 `/do-something-new`) handed you a directory of pre-existing artifacts
-(scripts, sample data) that the worker should have access to, include
-an extra line in the frontmatter heredoc:
+(scripts, sample data) that the worker should have access to, add an
+extra line to the frontmatter heredoc above:
 
 ```
 source_artifacts_dir: runtime/<calling-skill>/<slug>/
@@ -190,59 +206,48 @@ source_artifacts_dir: runtime/<calling-skill>/<slug>/
 Step 4 then pushes that directory to the worker alongside the standard
 crystallize runtime dir.
 
-## Step 4: Launch the worker
+## Step 4: Dispatch the worker
 
-Follow the `launch-task` skill's conventions for worker lifecycle management
-(background waiting, checking results, handling outcomes), with these
-crystallize-specific overrides:
-
-- Template: `-t crystallize-worker` (not `-t worker`)
-- Task file: the one written in step 3
+The shared `launch-task` dispatcher runs the lifecycle commands
+(`mngr create` + `mngr push` of the runtime dir + optional extra pushes
++ `mngr message` of the task file).
 
 ```bash
-mngr create crystallize-$NAME -t crystallize-worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file runtime/crystallize/$NAME/task.md
+uv run .agents/skills/launch-task/scripts/dispatch.py \
+    --name crystallize-$NAME \
+    --template crystallize-worker \
+    --runtime-dir runtime/crystallize/$NAME/ \
+    --task-file runtime/crystallize/$NAME/task.md
 ```
 
-Push the runtime dir (task file + transcript) into the worker's worktree --
-see `.agents/shared/references/lead-proxy.md` § "mngr push rationale" for
-why the directory form and `--uncommitted-changes=merge` are required:
-
-```bash
-mngr push crystallize-$NAME:runtime/crystallize/$NAME/ \
-    --source runtime/crystallize/$NAME/ \
-    --uncommitted-changes=merge
-```
-
-If you set `source_artifacts_dir: <dir>` in the task frontmatter (Step 3),
-also push that directory so the worker has the calling skill's scripts and
-sample data:
-
-```bash
-mngr push crystallize-$NAME:<dir>/ \
-    --source <dir>/ \
-    --uncommitted-changes=merge
-```
+If the task frontmatter sets `source_artifacts_dir: <dir>`, add
+`--extra-push <dir>/` so the worker also gets the calling skill's scripts
+and sample data.
 
 ## Step 5: Background-poll for worker reports (concurrent with other work)
 
-Launch the poll as a background task (`run_in_background: true`) and
-continue with whatever else you were doing -- subsequent skill steps,
-interface design, or other user requests. Reports surface as task
-notifications when they arrive; handle them at that point, not by
+Run this poll command as a Bash tool call with `run_in_background: true`,
+then continue with whatever else you were doing -- subsequent skill
+steps, interface design, or other user requests. Reports surface as
+task notifications when they arrive; handle them at that point, not by
 blocking on the poll.
+
+```bash
+# Run with Bash run_in_background: true. Substitute $NAME with the slug.
+timeout 90m bash -c '
+  while [ ! -f runtime/crystallize/'"$NAME"'/reports/report.md ]; do sleep 10; done
+  cat runtime/crystallize/'"$NAME"'/reports/report.md
+'
+```
 
 You still own this poll even if you reached this step from another skill
 (e.g. `do-something-new`) and now move on to unrelated work. Do not
 assume "fire and forget" -- without the poll, Gate 1 / Gate 2 reports
 never reach the user and the worker deadlocks waiting for approval.
 
-Follow `.agents/shared/references/lead-proxy.md` for polling, gate
-decisions, the "do not interrupt more recent user work" rule, `mngr push`
-rationale, and terminal-status handling.
-
-Flow-specific substitutions:
+Follow `.agents/shared/references/lead-proxy.md` for gate decisions, the
+"do not interrupt more recent user work" rule, `mngr push` rationale, and
+terminal-status handling. Flow-specific substitutions:
 
 - Worker name: `crystallize-$NAME`
 - Branch: `mngr/crystallize-$NAME`
@@ -250,8 +255,26 @@ Flow-specific substitutions:
 - Consumed path: `runtime/crystallize/$NAME/reports/consumed/`
 - User-approval gates: `type: gate, name: outline-approval` (Gate 1) and
   `type: gate, name: final-artifact` (Gate 2).
-- Terminal statuses: `type: status, name: done` (merge);
+- Terminal statuses: `type: status, name: done` (merge, then run Step 6);
   `type: status, name: stuck` (failure-handling flow).
+
+## Step 6: Post-merge migration
+
+Once `type: status, name: done` arrives and you have merged the
+worker's `mngr/crystallize-$NAME` branch into the calling agent's
+branch, **read and follow `references/post-crystallize-migration.md`
+before declaring crystallize done**.
+
+The migration covers: pointing consumers at the installed skill path
+(replacing references to the runtime fallback), deleting the now-stale
+runtime artifact dir, picking up any breaking renames the worker
+introduced during autofix, restarting any service that was caching the
+old path, and closing the tracking ticket recorded in
+`runtime/crystallize/$NAME/ticket_id.txt`. The doc is short -- skip
+items that don't apply.
+
+If the migration produces consumer changes, commit them as a separate
+commit so the migration is reviewable on its own.
 
 ## Guidelines
 

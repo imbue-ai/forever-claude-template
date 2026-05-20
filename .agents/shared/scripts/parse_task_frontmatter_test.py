@@ -21,7 +21,6 @@ _spec.loader.exec_module(parse_task_frontmatter)
 _VALID_FRONTMATTER = """---
 lead_agent: crystallize-test
 lead_report_dir: runtime/update/foo/reports/
-transcript_path: runtime/update/foo/turn.jsonl
 ---
 
 # Task body
@@ -41,7 +40,6 @@ def test_happy_path(tmp_path: Path) -> None:
     assert result == {
         "lead_agent": "crystallize-test",
         "lead_report_dir": "runtime/update/foo/reports/",
-        "transcript_path": "runtime/update/foo/turn.jsonl",
     }
 
 
@@ -51,7 +49,6 @@ def test_render_shell_evalable(tmp_path: Path) -> None:
     rendered = parse_task_frontmatter._render(fields)
     assert "LEAD_AGENT=crystallize-test\n" in rendered
     assert "LEAD_REPORT_DIR=runtime/update/foo/reports/\n" in rendered
-    assert "TRANSCRIPT_PATH=runtime/update/foo/turn.jsonl\n" in rendered
 
 
 def test_render_quotes_unsafe_values(tmp_path: Path) -> None:
@@ -60,7 +57,6 @@ def test_render_quotes_unsafe_values(tmp_path: Path) -> None:
         """---
 lead_agent: agent with spaces
 lead_report_dir: path/with$dollar/
-transcript_path: normal/path.jsonl
 ---
 body
 """,
@@ -101,13 +97,12 @@ def test_invalid_yaml(tmp_path: Path) -> None:
         parse_task_frontmatter.parse(task)
 
 
-@pytest.mark.parametrize("missing", ["lead_agent", "lead_report_dir", "transcript_path"])
+@pytest.mark.parametrize("missing", ["lead_agent", "lead_report_dir"])
 def test_missing_required_field(tmp_path: Path, missing: str) -> None:
     lines = [
         "---",
         "lead_agent: a",
         "lead_report_dir: b",
-        "transcript_path: c",
         "---",
         "body",
     ]
@@ -123,7 +118,6 @@ def test_wrong_type_int(tmp_path: Path) -> None:
         """---
 lead_agent: 42
 lead_report_dir: b
-transcript_path: c
 ---
 body
 """,
@@ -138,7 +132,6 @@ def test_wrong_type_list(tmp_path: Path) -> None:
         """---
 lead_agent: a
 lead_report_dir: [b, c]
-transcript_path: c
 ---
 body
 """,
@@ -153,7 +146,6 @@ def test_empty_string(tmp_path: Path) -> None:
         """---
 lead_agent: a
 lead_report_dir: ""
-transcript_path: c
 ---
 body
 """,
@@ -197,19 +189,97 @@ def test_resolve_multiple_matches_fails_loud(tmp_path: Path) -> None:
         parse_task_frontmatter.resolve(pattern)
 
 
-def test_extra_keys_are_ignored(tmp_path: Path) -> None:
+def test_extra_string_keys_pass_through(tmp_path: Path) -> None:
     task = _write_task(
         tmp_path,
         """---
 lead_agent: a
 lead_report_dir: b
-transcript_path: c
-future_extension: whatever
-nested:
-  x: 1
+ticket_id: task-42
+flow: verify
 ---
 body
 """,
     )
     result = parse_task_frontmatter.parse(task)
-    assert set(result.keys()) == {"lead_agent", "lead_report_dir", "transcript_path"}
+    assert result == {
+        "lead_agent": "a",
+        "lead_report_dir": "b",
+        "ticket_id": "task-42",
+        "flow": "verify",
+    }
+
+
+def test_non_string_extra_keys_are_dropped(tmp_path: Path) -> None:
+    """Only string values survive -- lists / mappings / numbers don't eval cleanly."""
+    task = _write_task(
+        tmp_path,
+        """---
+lead_agent: a
+lead_report_dir: b
+nested:
+  x: 1
+inputs:
+  - commit.diff
+  - commit.log
+count: 3
+---
+body
+""",
+    )
+    result = parse_task_frontmatter.parse(task)
+    assert set(result.keys()) == {"lead_agent", "lead_report_dir"}
+
+
+def test_extra_key_with_invalid_shell_identifier_fails_loud(tmp_path: Path) -> None:
+    """Keys with dashes (or other shell-illegal chars) must fail loud, not silently drop."""
+    task = _write_task(
+        tmp_path,
+        """---
+lead_agent: a
+lead_report_dir: b
+staged-inputs: commit.diff
+---
+body
+""",
+    )
+    with pytest.raises(ValueError, match=r"staged-inputs.*shell identifier"):
+        parse_task_frontmatter.parse(task)
+
+
+def test_extra_key_starting_with_digit_fails_loud(tmp_path: Path) -> None:
+    """POSIX shell identifiers cannot begin with a digit."""
+    task = _write_task(
+        tmp_path,
+        """---
+lead_agent: a
+lead_report_dir: b
+1st_input: commit.diff
+---
+body
+""",
+    )
+    with pytest.raises(ValueError, match=r"1st_input.*shell identifier"):
+        parse_task_frontmatter.parse(task)
+
+
+def test_render_orders_required_first_then_extras_alphabetized(tmp_path: Path) -> None:
+    task = _write_task(
+        tmp_path,
+        """---
+lead_agent: a
+lead_report_dir: b
+ticket_id: task-42
+flow: verify
+---
+body
+""",
+    )
+    fields = parse_task_frontmatter.parse(task)
+    rendered = parse_task_frontmatter._render(fields)
+    assert rendered == (
+        "LEAD_AGENT=a\n"
+        "LEAD_REPORT_DIR=b\n"
+        "FLOW=verify\n"
+        "TICKET_ID=task-42\n"
+    )
