@@ -1,7 +1,7 @@
 /**
  * Activity strip that sits just above the message input.
  *
- * The backend (workspace server) is the source of truth for *which* state
+ * The backend (system interface) is the source of truth for *which* state
  * the agent is in -- IDLE / THINKING / TOOL_RUNNING / WAITING_ON_PERMISSION
  * -- because the WAITING_ON_PERMISSION case relies on a marker file that
  * the transcript alone cannot detect. The state is delivered on each

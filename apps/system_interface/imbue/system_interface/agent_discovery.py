@@ -118,7 +118,7 @@ def read_tickets_dir_from_env_file(agent_state_dir: Path, work_dir: Path) -> Pat
 
     Priority:
       1. ``TICKETS_DIR`` in the agent's env file at ``<agent_state_dir>/env``.
-      2. ``TICKETS_DIR`` in the workspace server's own process environment.
+      2. ``TICKETS_DIR`` in the system interface's own process environment.
       3. ``<work_dir>/.tickets`` (tk's default).
 
     Minds sets ``TICKETS_DIR=/code/runtime/tickets`` via ``host_env`` in
@@ -126,7 +126,7 @@ def read_tickets_dir_from_env_file(agent_state_dir: Path, work_dir: Path) -> Pat
     ``host_env`` entries are forwarded to the container's process
     environment but are *not* written into the per-agent env file, so the
     env-file lookup alone misses them; the os.environ fallback catches
-    that case for the co-located workspace server.
+    that case for the co-located system interface.
     """
     env_file = agent_state_dir / "env"
     if env_file.exists():
