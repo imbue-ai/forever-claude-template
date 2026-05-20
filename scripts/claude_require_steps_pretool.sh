@@ -30,7 +30,7 @@ case "$tool_name" in
 esac
 
 # For Bash calls, skip if the command is invoking tk (creating/managing
-# steps) or is a trivial read-only command (git log, cat, ls, etc.).
+# steps).
 if [[ "$tool_name" == "Bash" ]]; then
     command=$(echo "$input" | jq -r '.tool_input.command // empty')
     case "$command" in
