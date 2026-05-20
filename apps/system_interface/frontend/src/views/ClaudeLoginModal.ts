@@ -318,10 +318,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
       },
     ];
     return m("div.claude-login-providers", [
-      m(
-        "p.claude-login-intro",
-        "Pick how you'd like to authenticate. The browser flow is fastest if you have a subscription.",
-      ),
+      m("p.claude-login-intro", "Pick how you'd like to authenticate."),
       ...providers.map((p) =>
         m(
           "button.claude-login-provider",
