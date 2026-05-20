@@ -505,14 +505,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
         ),
         m(
           "button.claude-login-button.claude-login-button--primary",
-          {
-            type: "button",
-            onclick: () => {
-              clearError();
-              mode = "select_provider";
-              m.redraw();
-            },
-          },
+          { type: "button", onclick: () => goBackToProviderSelection() },
           "Try again",
         ),
       ]);
