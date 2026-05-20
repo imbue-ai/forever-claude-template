@@ -16,6 +16,147 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - All relative paths in this repo assume cwd = repo root (`/code`). The bootstrap service manager runs from there; any process started elsewhere (manual launch, subprocess from a different cwd) must either set cwd to the repo root or use absolute paths. State directories live under `runtime/<feature>/`.
 - When adding a new web app, do NOT edit `libs/web_server/` -- it's an example placeholder. Use the `build-web-service` skill, which sets up a new lib + service entry + `forward_port.py` registration on its own port.
 
+# Task management (CRITICAL — read this before doing real work)
+
+You manage your work using `tk`, the vendored ticket tracker at `vendor/tk/`. This is the **only** task tracking tool available to you. Claude Code's built-in `TodoWrite` is disabled — attempts to call it will be denied. **`tk create --step` is the replacement for `TodoWrite`**: use it everywhere you would have used `TodoWrite` to declare plan steps and track completion. The difference is that `tk` step records render directly in the user-facing chat progress view rather than being hidden in a side panel.
+
+## Two kinds of records: steps and tickets
+
+`tk` stores two distinct kinds of records, distinguished by the `step:` frontmatter field:
+
+- **Step records** (`tk create --step "..."`) are *turn-bound progress markers* — the direct replacement for Claude Code's `TodoWrite`. They populate the chat progress view: each step becomes a node on the timeline with a status icon and (on close) a one-line summary. Steps are **creator-private** — only the agent that created them sees them. They are sequential within a turn, ephemeral by intent, and exist purely to communicate progress to the user.
+- **Regular tickets** (`tk create "..."`, no `--step`) are *substantive work units worth tracking cross-agent*. Other agents can see them, pick them up, and own them. A ticket is "current" to whichever agent has it `in_progress` and assigned to themselves; that agent's progress view shows the ticket as a top-level node, with any step records they file *during* the work nested under it.
+
+Most turns use only step records. Tickets enter the picture when a piece of work is large enough to span turns or to be handed between agents.
+
+## Why this exists
+
+Your conversation is rendered to the user as a "progress view": each turn shows a clean, vertical timeline of plain-English task steps with one-line summaries on completion. The user does **not** see your raw tool calls unless they explicitly expand a step.
+
+This means every step title and every closing summary is **user-facing copy**. Write it for a non-technical reader who doesn't know your codebase, your tools, or your jargon.
+
+## How every turn must start: declare the plan as steps
+
+**The first thing you do on any user prompt that warrants real work is decompose it into a sequence of step records and create them all up front, BEFORE doing any of the work.** This is not optional. The sequence of steps is the user-visible plan; making the user wait while tool calls scroll by before they see the plan defeats the entire purpose of the progress view.
+
+Concretely, the start of every substantive turn looks like:
+
+1. (Optional) One short prose acknowledgement to the user — e.g. "Sure, looking into that now." This renders as plain text above the timeline. Keep it to one line; do not narrate the plan here.
+2. `tk create --step "..."` for every step you currently expect the work to require, in order. Capture each id. Do NOT call `tk start` on any of them yet.
+3. `tk start` the first step and begin the work for that step.
+
+You may add steps later (`tk create --step` more as new sub-problems surface) or remove ones that turn out to be unneeded (`tk close <id> "No longer needed — the previous step covered this."`).
+
+**Steps must be serial.** Only one step is `in_progress` at a time. Do not call `tk start` on the next step until the current one is `tk close`d.
+
+A step represents a logical step in the user's mental model of the work, not a unit of parallel computation. If you'd describe the work to the user as "first I'll do X, then Y, then Z," that's three steps. If you'd describe it as a single coherent step — even if it involves several parallel lookups internally — it's one step.
+
+Granularity: typically 2-5 sequential steps per substantive turn. Not one per tool call (way too granular). Not one step for the whole turn (defeats the purpose of progress).
+
+## Auto-nest under an in_progress ticket
+
+If you have a regular ticket that is currently `in_progress` AND assigned to you, `tk create --step` automatically nests the new step under that ticket as its parent. The chat view renders this as: the ticket appears as the top-level node, the steps appear indented underneath. You don't need to pass `--parent` in the common case — auto-nest handles it.
+
+If you have *more than one* ticket in_progress for yourself simultaneously, auto-nest is ambiguous and `tk create --step` will error with a list of candidate tickets. You must then disambiguate with either:
+
+- `tk create --step "..." --parent=<ticket-id>` to pick a specific parent, or
+- `tk create --step "..." --no-parent` to file a standalone step.
+
+In practice having two tickets in_progress at once is allowed but discouraged. Prefer to finish or hand off the current ticket before picking up another.
+
+## When you don't need any records
+
+Records are required for any turn that involves real work. The exceptions:
+
+- Chitchat, single-line acknowledgements, trivial answers ("yes, I can do that", "the file is at src/foo.ts").
+- Pure clarifying-question turns where you have nothing concrete to do until the user answers.
+- A reply that's a single quick read of one file to answer the user's question.
+
+If your turn is truly one of these, just write your reply directly — no records, no timeline. If you're not sure, default to creating steps; an extra small step is better than the user watching a turn unfold with no visible plan.
+
+## Step lifecycle (must follow exactly)
+
+At the **start of the turn**, create every step you currently expect the work to require:
+
+```bash
+S1=$(tk create --step "Look through your recent changes to find the new theme")
+S2=$(tk create --step "Trace how the dark-mode toggle picks a theme")
+S3=$(tk create --step "Register the new theme and update the toggle")
+S4=$(tk create --step "Verify the toggle now reaches your new theme")
+```
+
+Title rules: plain English, describes the goal as the user understands it, no file names, no tool names, no internal jargon. The title is what the user sees as the step name.
+
+Then for **each step in order**, one at a time:
+
+1. **Start** it:
+   ```bash
+   tk start "$S1"
+   ```
+2. **Do the work.** Run whatever tools you need.
+3. **Close with a summary** (required, positional):
+   ```bash
+   tk close "$S1" "Read through your recent commits and the theme files to find what's new."
+   ```
+4. Move on to the next step. Only one is `in_progress` at a time.
+
+If during the work you discover a sub-problem that warrants its own step, `tk create --step` a new one (it'll appear at the bottom of the timeline). If you discover a previously-planned step is no longer needed, `tk close <id> "No longer needed — covered by the previous step."`.
+
+Summary rules: ONE concise line, plain English, describing **the work you did in this step** — what the user would see if they expanded the block. Think of it as a high-level non-technical caption for the raw tool calls inside.
+
+- It is NOT the *result* / *finding* / *answer* — those go in your final assistant message below the timeline. Don't put conclusions, fixes, or recommendations in summaries.
+- It is NOT a list of tool calls or file names. "Ran git log, then read midnight.ts, then grep'd for registerTheme" is wrong — too technical, and the user can already see those tool calls if they expand the block.
+- It IS one short caption-style sentence describing the work, in the same plain-English tone as the title.
+
+After all your steps for the turn are closed, write your final user-facing assistant message — *this* is where the actual results, findings, and recommendations belong. It renders below the progress timeline as the agent's reply to the user.
+
+**Steps and prose:**
+- Text emitted while a step is `in_progress` shows as a live caption under the step, replaced by each new message.
+- On `tk close`, the close summary becomes the caption and your last pre-close text becomes a prominent top-level reply. So write the wrap-up naturally, then close.
+- Steps may stay open across turns. Close when work is done; leave open if work continues.
+
+## Working with regular tickets
+
+Regular tickets are for substantive work worth tracking cross-agent. The relevant commands:
+
+- `tk ls` / `tk ready` / `tk blocked` — list regular tickets (step records are hidden by default; pass `--include-steps` or `--only-steps` to override).
+- `tk show <id>` — show a single ticket with its child sub-tickets and `## Steps` sub-records.
+- `tk create "..."` — file a new ticket. Inside an mngr context the ticket is stamped with `agent: $MNGR_AGENT_NAME` (creator) but left **unassigned** until someone picks it up.
+- `tk start <id>` — pick up a ticket. Auto-self-assigns you (`assignee: $MNGR_AGENT_NAME`). If the ticket was already assigned to a different agent, you get a stderr warning and the reassign proceeds. From this point on the ticket shows in *your* progress view, not the originator's.
+- `tk close <id> [summary]` — close. Summary is optional for tickets (required for steps).
+- `tk assign <id> [agent]` / `tk unassign <id>` — explicit assignment.
+
+Tickets can be left `in_progress` across turns; the chat view will keep rendering them at the top of every subsequent turn (with a "continued in next turn" marker on the prior turn) until you close them.
+
+## Persistent task state across turns
+
+Step records persist across user turns until you close them. At the start of every new user message, you'll receive a system reminder listing every **step record** still `open` or `in_progress` for you. For each one, decide before doing anything else:
+
+- **Keep working on it** — appropriate if the new user message asks you to continue. Run `tk start <id>` if it isn't already in_progress, then proceed.
+- **Replace it** — appropriate if the new user message redirects you. Close the old step with a summary of what state you left things in, then create new steps for the new direction.
+- **Close it** — appropriate if you didn't get to it but you're moving on. Close it with a summary that honestly reports the situation, e.g. `tk close <id> "Did not get to this — got pulled into the dark-mode bug instead."`. Do not silently abandon it.
+
+The reminder hook intentionally only shows **steps**, not tickets. Tickets are managed cross-agent through `tk ls / tk ready / tk show` — you invoke those yourself when you want to check your queue.
+
+## No "failed" status
+
+Every record terminates as `closed`, regardless of outcome. There is no "failed" or "abandoned" state in this system. If a step didn't pan out:
+
+- Still close it. The summary describes the *work you did* (e.g. "Tried to reproduce the bug by running the export endpoint with several sample inputs."), and your final assistant message reports the *result* honestly.
+- Don't leave a step open hoping to come back. Close it; if the user wants to continue, the next turn can open a fresh step.
+
+## Subagent delegation
+
+When you delegate to a sub-agent via the `launch-task` skill, the entire delegation is **one step** in your progress, not many. The sub-agent runs in its own container with its own `.tickets/` and uses tk independently for its own internal progress — that work does not surface in your chat. You represent the delegation in your progress with a single step like "Delegate the auth refactor to a sub-agent and review the result", then close it with a summary of the outcome when the sub-agent finishes.
+
+## Read tk's help if you forget the commands
+
+```bash
+tk help
+```
+
+The everyday lifecycle you need is `tk create --step`, `tk start`, `tk close <id> "summary"`. For ticket pickup it's `tk start <id>` (auto-assigns) and `tk close <id>` (summary optional). Avoid `deps`, `links`, `types`, `priorities` — they exist for backlog management but are not used by the chat progress view.
+
 # How to get started on any task:
 
 Always begin your session by reading the relevant READMEs and any other related documentation in the docs/ directory of the project(s) you are working on.

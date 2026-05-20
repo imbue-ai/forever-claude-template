@@ -17,6 +17,10 @@ Key functions:
 
 Dependencies: bash, sed, awk, find. Optional: ripgrep (faster grep).
 
+**Step records vs. regular tickets:** A ticket may carry `step: true` in its frontmatter to mark it as a turn-bound progress record (created via `tk create --step`). Step records are creator-private (filtered by `agent:`) and turn-scoped; regular tickets are cross-agent and routed by `assignee:`. The `tk steps` built-in lists this-agent step records; `tk ready / ls / blocked / closed` hide steps by default and accept `--include-steps` / `--only-steps`. See the `step_records.feature` file for the contract.
+
+**Auto-self-assignment:** When `$MNGR_AGENT_NAME` is set, `tk create` skips the `git config user.name` default for `assignee:` (regular tickets stay unassigned until picked up) and `tk start <id>` auto-self-assigns the current agent (warning when reassigning across agents).
+
 **Plugin system:** Commands can be extended via external executables in PATH.
 - `tk foo` checks for `tk-foo` then `ticket-foo` in PATH
 - `tk super foo` bypasses plugins, runs built-in directly
