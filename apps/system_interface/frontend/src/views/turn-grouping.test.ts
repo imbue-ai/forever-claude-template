@@ -706,11 +706,7 @@ describe("selectFinalMessages", () => {
       children: [],
       narration: null,
     };
-    const wrapup = assistantMsg(
-      "2026-04-28T01:00:40Z",
-      "Both done -- here is the wrap-up.",
-      "msg-wrapup",
-    );
+    const wrapup = assistantMsg("2026-04-28T01:00:40Z", "Both done -- here is the wrap-up.", "msg-wrapup");
     // 01:00:40 is after step-b closed; step-a's stored window has no
     // end, but its effective end is capped at step-b's start
     // (01:00:10), so step-a doesn't contain 01:00:40 either. Outside
