@@ -12,8 +12,8 @@ members = [
     "bootstrap",
     "cloudflare-tunnel",
     "forever-claude-template",
-    "minds-workspace-server",
     "runtime-backup",
+    "system-interface",
     "telegram-bot",
     "web-server",
 ]
@@ -1146,67 +1146,6 @@ wheels = [
 ]
 
 [[package]]
-name = "minds-workspace-server"
-version = "0.1.0"
-source = { editable = "apps/system_interface" }
-dependencies = [
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "imbue-common" },
-    { name = "imbue-mngr" },
-    { name = "pluggy" },
-    { name = "pydantic-settings" },
-    { name = "starlette" },
-    { name = "uvicorn" },
-    { name = "watchdog" },
-    { name = "websockets" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "coverage" },
-    { name = "import-linter" },
-    { name = "inline-snapshot" },
-    { name = "playwright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-playwright" },
-    { name = "pytest-timeout" },
-    { name = "resource-guards" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
-    { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
-    { name = "pluggy", specifier = ">=1.5" },
-    { name = "pydantic-settings", specifier = ">=2.13.1" },
-    { name = "starlette", specifier = ">=0.45" },
-    { name = "uvicorn", specifier = ">=0.34" },
-    { name = "watchdog", specifier = ">=4.0" },
-    { name = "websockets", specifier = ">=13.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "coverage" },
-    { name = "import-linter", specifier = ">=2.0" },
-    { name = "inline-snapshot", specifier = ">=0.13" },
-    { name = "playwright", specifier = ">=1.40" },
-    { name = "pytest", specifier = ">=9.0" },
-    { name = "pytest-cov", specifier = ">=7.0.0" },
-    { name = "pytest-playwright", specifier = ">=0.4" },
-    { name = "pytest-timeout", specifier = ">=2.3.0" },
-    { name = "resource-guards", editable = "vendor/mngr/libs/resource_guards" },
-    { name = "ruff", specifier = "~=0.12.8" },
-    { name = "ty", specifier = "==0.0.24" },
-]
-
-[[package]]
 name = "nodeenv"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1871,6 +1810,67 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/81/69/17425771797c36cded50b7fe44e850315d039f28b15901ab44839e70b593/starlette-1.0.0.tar.gz", hash = "sha256:6a4beaf1f81bb472fd19ea9b918b50dc3a77a6f2e190a12954b25e6ed5eea149", size = 2655289, upload-time = "2026-03-22T18:29:46.779Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/c9/584bc9651441b4ba60cc4d557d8a547b5aff901af35bda3a4ee30c819b82/starlette-1.0.0-py3-none-any.whl", hash = "sha256:d3ec55e0bb321692d275455ddfd3df75fff145d009685eb40dc91fc66b03d38b", size = 72651, upload-time = "2026-03-22T18:29:45.111Z" },
+]
+
+[[package]]
+name = "system-interface"
+version = "0.1.0"
+source = { editable = "apps/system_interface" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "imbue-common" },
+    { name = "imbue-mngr" },
+    { name = "pluggy" },
+    { name = "pydantic-settings" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+    { name = "watchdog" },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "coverage" },
+    { name = "import-linter" },
+    { name = "inline-snapshot" },
+    { name = "playwright" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-playwright" },
+    { name = "pytest-timeout" },
+    { name = "resource-guards" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
+    { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
+    { name = "pluggy", specifier = ">=1.5" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "starlette", specifier = ">=0.45" },
+    { name = "uvicorn", specifier = ">=0.34" },
+    { name = "watchdog", specifier = ">=4.0" },
+    { name = "websockets", specifier = ">=13.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "coverage" },
+    { name = "import-linter", specifier = ">=2.0" },
+    { name = "inline-snapshot", specifier = ">=0.13" },
+    { name = "playwright", specifier = ">=1.40" },
+    { name = "pytest", specifier = ">=9.0" },
+    { name = "pytest-cov", specifier = ">=7.0.0" },
+    { name = "pytest-playwright", specifier = ">=0.4" },
+    { name = "pytest-timeout", specifier = ">=2.3.0" },
+    { name = "resource-guards", editable = "vendor/mngr/libs/resource_guards" },
+    { name = "ruff", specifier = "~=0.12.8" },
+    { name = "ty", specifier = "==0.0.24" },
 ]
 
 [[package]]
