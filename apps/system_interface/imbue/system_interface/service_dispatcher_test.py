@@ -1,7 +1,7 @@
-"""Integration tests for /service/<name>/ forwarding inside the workspace server.
+"""Integration tests for /service/<name>/ forwarding inside the system_interface.
 
 Spins up a small stub FastAPI app on an ephemeral port as the "backend"
-service, registers it with the workspace server's AgentManager via a
+service, registers it with the system_interface's AgentManager via a
 controlled applications.toml, and exercises the proxy end-to-end.
 """
 
@@ -23,11 +23,11 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
-from imbue.minds_workspace_server.agent_manager import AgentManager
-from imbue.minds_workspace_server.config import Config
-from imbue.minds_workspace_server.models import ApplicationEntry
-from imbue.minds_workspace_server.server import create_application
-from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.config import Config
+from imbue.system_interface.models import ApplicationEntry
+from imbue.system_interface.server import create_application
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 
 def _find_free_port() -> int:
@@ -134,7 +134,7 @@ def stub_backend() -> Generator[tuple[str, int], None, None]:
 
 @pytest.fixture
 def workspace_app_with_stub(stub_backend: tuple[str, int], monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    """Build a workspace_server FastAPI app wired to a stub backend under service 'web'.
+    """Build a system_interface FastAPI app wired to a stub backend under service 'web'.
 
     Injects a pre-built ``AgentManager`` seeded with the stub's URL as the
     'web' service. The real ``mngr observe`` pipeline is not started, so the
@@ -157,7 +157,7 @@ def workspace_client(workspace_app_with_stub: FastAPI) -> Generator[TestClient, 
 
 
 def test_service_sw_js_is_served_without_stub(workspace_client: TestClient) -> None:
-    """The scoped service worker is served statically from the workspace_server."""
+    """The scoped service worker is served statically from the system_interface."""
     response = workspace_client.get("/service/web/__sw.js")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/javascript")

@@ -1,6 +1,6 @@
 """Writes event files to ``$MNGR_AGENT_STATE_DIR/events/<source>/events.jsonl``.
 
-This module is used by the workspace server to create agent-originated events
+This module is used by the system_interface to create agent-originated events
 (refresh signals, etc.) that the minds desktop client picks up via
 ``mngr event --follow``.
 """

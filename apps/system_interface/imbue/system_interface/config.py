@@ -12,12 +12,12 @@ class DuplicateStaticBasenameError(ValueError):
 class Config(BaseSettings):
     model_config = {"frozen": False}
 
-    minds_workspace_server_javascript_plugins: list[str] | None = None
-    minds_workspace_server_static_paths: list[str] | None = None
-    minds_workspace_server_host: str = "127.0.0.1"
-    minds_workspace_server_port: int = 8000
+    system_interface_javascript_plugins: list[str] | None = None
+    system_interface_static_paths: list[str] | None = None
+    system_interface_host: str = "127.0.0.1"
+    system_interface_port: int = 8000
 
-    @field_validator("minds_workspace_server_javascript_plugins", "minds_workspace_server_static_paths", mode="before")
+    @field_validator("system_interface_javascript_plugins", "system_interface_static_paths", mode="before")
     @classmethod
     def split_comma_separated(cls, value: object) -> list[str] | None:
         if isinstance(value, str):
@@ -28,15 +28,15 @@ class Config(BaseSettings):
 
     @cached_property
     def javascript_plugin_basenames(self) -> list[str]:
-        if not self.minds_workspace_server_javascript_plugins:
+        if not self.system_interface_javascript_plugins:
             return []
-        return [Path(plugin_path).name for plugin_path in self.minds_workspace_server_javascript_plugins]
+        return [Path(plugin_path).name for plugin_path in self.system_interface_javascript_plugins]
 
     @cached_property
     def static_file_basename_to_path(self) -> dict[str, str]:
         all_paths = [
-            *(self.minds_workspace_server_javascript_plugins or []),
-            *(self.minds_workspace_server_static_paths or []),
+            *(self.system_interface_javascript_plugins or []),
+            *(self.system_interface_static_paths or []),
         ]
         if not all_paths:
             return {}

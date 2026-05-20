@@ -42,7 +42,7 @@ const SVG_REFRESH =
   '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>';
 
 // Every non-system_interface service is reached at /service/<name>/ on the
-// same origin as the dockview UI itself. The workspace_server's service
+// same origin as the dockview UI itself. The system_interface's service
 // dispatcher handles the proxying, SW bootstrap, and header rewriting.
 function getServiceUrl(serviceName: string): string {
   return `/service/${serviceName}/`;
@@ -868,7 +868,7 @@ function initializeDockview(parentElement: HTMLElement): void {
 
   // Agent-triggered refresh: reload every open iframe tab whose
   // data-service-name attribute matches the service_name the agent named.
-  // This arrives over the existing workspace server WebSocket as
+  // This arrives over the existing system_interface WebSocket as
   // {type: "refresh_service", service_name}.
   _refreshServiceListener = (serviceName: string) => {
     reloadIframesForService(serviceName);

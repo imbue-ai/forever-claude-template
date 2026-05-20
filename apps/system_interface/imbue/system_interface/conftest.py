@@ -15,12 +15,12 @@ from playwright.sync_api import BrowserType
 from playwright.sync_api import Playwright
 from playwright.sync_api import sync_playwright
 
-from imbue.minds_workspace_server.agent_manager import AgentManager
-from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 
 @pytest.fixture(autouse=True)
-def _isolate_workspace_server_tests(
+def _isolate_system_interface_tests(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path_factory: pytest.TempPathFactory,
@@ -32,7 +32,7 @@ def _isolate_workspace_server_tests(
 
     1. Override MNGR_HOST_DIR / MNGR_AGENT_ID / MNGR_AGENT_WORK_DIR /
        MNGR_AGENT_STATE_DIR to point at a fresh tmp dir. Anything that
-       reads these (e.g. workspace_server endpoints) gets an empty world.
+       reads these (e.g. system_interface endpoints) gets an empty world.
 
     2. Replace ``AgentManager.start`` with a no-op. The FastAPI lifespan
        in ``server._lifespan`` calls ``AgentManager.build(...).start()``,
@@ -91,7 +91,7 @@ def _isolate_workspace_server_tests(
 # Session-scope means teardown runs at pytest session end -- AFTER mngr's
 # autouse `session_cleanup` fixture (libs/mngr/imbue/mngr/conftest.py) has
 # already checked for leaked child processes. In offload release batches
-# that mix workspace-server e2e tests with other mngr tests, both the
+# that mix system_interface e2e tests with other mngr tests, both the
 # playwright node driver and chrome-headless-shell are still alive when
 # session_cleanup runs, so it asserts "leftover child processes" and
 # cascades a teardown error into every sibling test in the batch
@@ -189,7 +189,7 @@ def browser_context_args(
     # to function scope because it transitively depends on `playwright`,
     # which we've pinned to function scope above. Without this override
     # pytest raises ScopeMismatch at setup time for every test that uses
-    # `page` / `context` (i.e. the entire minds_workspace_server e2e suite).
+    # `page` / `context` (i.e. the entire system_interface e2e suite).
     context_args: dict[str, Any] = {}
     if device:
         context_args.update(playwright.devices[device])

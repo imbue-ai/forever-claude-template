@@ -219,7 +219,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 def test_prevent_monkeypatch_setattr() -> None:
     # The single monkeypatch.setattr in conftest.py's
-    # `_isolate_workspace_server_tests` autouse fixture patches
+    # `_isolate_system_interface_tests` autouse fixture patches
     # `AgentManager.start` to skip the observe subprocess for tests
     # (rationale documented at the call site). DI alternative would
     # require plumbing a flag through every call site of

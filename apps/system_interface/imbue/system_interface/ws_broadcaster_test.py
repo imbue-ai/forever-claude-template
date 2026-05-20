@@ -6,9 +6,9 @@ import queue
 
 import pytest
 
-from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
-from imbue.minds_workspace_server.ws_broadcaster import _CLIENT_QUEUE_MAX_SIZE
-from imbue.minds_workspace_server.ws_broadcaster import _MAX_CONSECUTIVE_QUEUE_FULL
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
+from imbue.system_interface.ws_broadcaster import _CLIENT_QUEUE_MAX_SIZE
+from imbue.system_interface.ws_broadcaster import _MAX_CONSECUTIVE_QUEUE_FULL
 
 pytestmark = pytest.mark.flaky
 

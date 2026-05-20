@@ -2,8 +2,8 @@
 
 import threading
 
-from imbue.minds_workspace_server.event_queues import AgentEventQueues
-from imbue.minds_workspace_server.events import BufferBehavior
+from imbue.system_interface.event_queues import AgentEventQueues
+from imbue.system_interface.events import BufferBehavior
 
 
 def test_broadcast_delivers_to_registered_queue() -> None:

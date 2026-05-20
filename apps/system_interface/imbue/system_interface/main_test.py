@@ -2,17 +2,17 @@
 
 from unittest.mock import patch
 
-from imbue.minds_workspace_server.config import Config
-from imbue.minds_workspace_server.main import main
+from imbue.system_interface.config import Config
+from imbue.system_interface.main import main
 
 
 def test_main_starts_server() -> None:
     """main() creates an app and starts uvicorn."""
     with (
-        patch("imbue.minds_workspace_server.main.load_config") as mock_load_config,
-        patch("imbue.minds_workspace_server.main.create_application") as mock_create_app,
-        patch("imbue.minds_workspace_server.main.uvicorn") as mock_uvicorn,
-        patch("sys.argv", ["minds-workspace-server"]),
+        patch("imbue.system_interface.main.load_config") as mock_load_config,
+        patch("imbue.system_interface.main.create_application") as mock_create_app,
+        patch("imbue.system_interface.main.uvicorn") as mock_uvicorn,
+        patch("sys.argv", ["system-interface"]),
     ):
         mock_config = Config()
         mock_load_config.return_value = mock_config
@@ -37,13 +37,13 @@ def test_main_starts_server() -> None:
 def test_main_passes_filters() -> None:
     """main() passes CLI filter args to create_application."""
     with (
-        patch("imbue.minds_workspace_server.main.load_config") as mock_load_config,
-        patch("imbue.minds_workspace_server.main.create_application") as mock_create_app,
-        patch("imbue.minds_workspace_server.main.uvicorn"),
+        patch("imbue.system_interface.main.load_config") as mock_load_config,
+        patch("imbue.system_interface.main.create_application") as mock_create_app,
+        patch("imbue.system_interface.main.uvicorn"),
         patch(
             "sys.argv",
             [
-                "minds-workspace-server",
+                "system-interface",
                 "--provider",
                 "local",
                 "--include",

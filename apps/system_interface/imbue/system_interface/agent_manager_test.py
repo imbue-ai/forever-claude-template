@@ -12,13 +12,6 @@ from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
 from watchdog.events import FileOpenedEvent
 
-from imbue.minds_workspace_server.agent_manager import AgentManager
-from imbue.minds_workspace_server.agent_manager import _LogQueueCallback
-from imbue.minds_workspace_server.agent_manager import _make_applications_file_handler
-from imbue.minds_workspace_server.models import AgentCreationError
-from imbue.minds_workspace_server.models import AgentStateItem
-from imbue.minds_workspace_server.models import ApplicationEntry
-from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
@@ -30,6 +23,13 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
+from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.agent_manager import _LogQueueCallback
+from imbue.system_interface.agent_manager import _make_applications_file_handler
+from imbue.system_interface.models import AgentCreationError
+from imbue.system_interface.models import AgentStateItem
+from imbue.system_interface.models import ApplicationEntry
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 
 def test_generate_random_name(agent_manager: AgentManager) -> None:

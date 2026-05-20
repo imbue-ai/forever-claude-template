@@ -162,7 +162,7 @@ RUN git config --global --add safe.directory /code/
 # Build the system_interface frontend (deps already installed pre-COPY).
 RUN cd /code/apps/system_interface/frontend && npm run build
 
-# add mngr and minds-workspace-server as tools (both need the plugin packages
+# add mngr and system-interface as tools (both need the plugin packages
 # so they can parse plugin-specific config fields like auto_dismiss_dialogs).
 # mngr_modal is intentionally NOT installed/registered here because the FCT
 # .mngr/settings.toml sets providers.modal.is_enabled = false; without it,
