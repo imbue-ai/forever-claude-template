@@ -70,10 +70,11 @@ LIFECYCLE_SKILL_NAMES: frozenset[str] = frozenset(
 # so we only nudge once per commit window.
 NUDGE_STATE_REL_PATH: str = "runtime/.crystallize_nudge_state.json"
 
-# Matches the Bash command of a successful ``git commit`` invocation. We
-# only require the literal ``git commit`` token; subcommands like
-# ``git commit-tree`` are excluded by the word boundary.
-_GIT_COMMIT_PATTERN = re.compile(r"\bgit commit\b")
+# Matches the Bash command of a successful ``git commit`` invocation. The
+# trailing negative lookahead excludes subcommands like ``git commit-tree``
+# and plurals like ``git commits`` -- a plain word boundary is insufficient
+# because ``\b`` also matches between ``commit`` and ``-``.
+_GIT_COMMIT_PATTERN = re.compile(r"\bgit commit(?![-\w])")
 
 # Matches a slash-style command marker in a user-message string, e.g.
 # ``<command-name>/do-something-new</command-name>``. The leading slash is

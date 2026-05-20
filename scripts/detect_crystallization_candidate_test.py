@@ -526,6 +526,27 @@ def test_bash_commit_detected_when_input_preview_truncated(tmp_path: Path) -> No
     assert detect._successful_commit_indices(events) == [1]
 
 
+def test_bash_git_commit_tree_does_not_count_as_commit(tmp_path: Path) -> None:
+    """``git commit-tree`` is a plumbing subcommand, not a commit. The
+    regex must not match it -- a bare ``\\b`` would, which is why the
+    pattern uses a negative lookahead."""
+    bash_call = {
+        "tool_call_id": "plumbing",
+        "tool_name": "Bash",
+        "input_preview": json.dumps(
+            {"command": "git commit-tree abc123 -m 'msg'"},
+            separators=(",", ":"),
+        ),
+    }
+    assistant_event = {
+        "type": "assistant_message",
+        "text": "",
+        "tool_calls": [bash_call],
+    }
+    events = [_user("hi"), assistant_event, _tool_result("plumbing")]
+    assert detect._successful_commit_indices(events) == []
+
+
 def test_bash_description_mentioning_commit_does_not_false_positive(tmp_path: Path) -> None:
     """When input_preview parses cleanly, the description field must NOT
     trigger a commit match -- only the command field counts."""
