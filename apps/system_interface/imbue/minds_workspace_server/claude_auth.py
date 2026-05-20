@@ -372,9 +372,14 @@ def _drive_oauth_code(process: Any, code: str) -> None:
     process.timeout = _OAUTH_COMPLETE_WAIT_SECONDS
     try:
         process.sendline(code)
+    except pexpect.ExceptionPexpect as e:
+        raise ClaudeAuthError(f"claude auth login subprocess failed sending code: {e}") from e
+    try:
         result = process.expect([pexpect.EOF, pexpect.TIMEOUT])
     except pexpect.ExceptionPexpect as e:
-        raise ClaudeAuthError(f"claude auth login subprocess failed during code submit: {e}") from e
+        raise ClaudeAuthError(
+            f"claude auth login subprocess failed waiting for completion: {e}"
+        ) from e
     if result != 0:
         raise ClaudeAuthError("Timed out waiting for claude auth login to complete after code submit")
 
