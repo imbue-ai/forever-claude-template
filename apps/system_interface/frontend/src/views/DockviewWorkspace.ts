@@ -535,9 +535,7 @@ function findIframePanelIdForService(serviceName: string): string | null {
 
 /** Position + size options passed through to ``dockview.addPanel``. */
 type AddPanelPlacementOptions = {
-  position?:
-    | { referenceGroup: string }
-    | { referencePanel: string; direction: "left" | "right" | "above" | "below" };
+  position?: { referenceGroup: string } | { referencePanel: string; direction: "left" | "right" | "above" | "below" };
   initialWidth?: number;
   initialHeight?: number;
 };
@@ -552,11 +550,7 @@ type AddPanelPlacementOptions = {
  *  positioning and returns the new id. Returns null when dockview isn't
  *  ready, the ref carries a prefix that doesn't create panels in v1
  *  (terminal:/subagent:/url:), or the named chat agent is unknown. */
-function addPanelForRef(
-  ref: string,
-  requesterAgentId: string,
-  addOptions: AddPanelPlacementOptions,
-): string | null {
+function addPanelForRef(ref: string, requesterAgentId: string, addOptions: AddPanelPlacementOptions): string | null {
   if (!dockview) return null;
 
   if (ref.startsWith("service:")) {
