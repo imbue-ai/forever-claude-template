@@ -244,7 +244,7 @@ def test_move_preserves_self_in_relative_to(monkeypatch: pytest.MonkeyPatch) -> 
     assert args["relative_to"] == "self"
 
 
-def test_move_requires_known_direction(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_move_requires_known_direction(monkeypatch: pytest.MonkeyPatch) -> None:
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
