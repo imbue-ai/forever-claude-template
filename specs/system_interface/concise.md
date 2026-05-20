@@ -1,4 +1,4 @@
-# Minds Workspace Server
+# System Interface
 
 > Note: this spec was authored when the workspace server lived in mngr at `apps/minds_workspace_server/`. It has since been migrated into this template at `apps/system_interface/`. Path references to `apps/minds_workspace_server/` describe state at the time this spec was written.
 

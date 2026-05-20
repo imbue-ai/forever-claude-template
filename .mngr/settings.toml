@@ -24,7 +24,17 @@ host_env = [
     "TICKETS_DIR=/code/runtime/tickets",
 ]
 worktree_base_folder = "/worktree/"
-disable_plugin = ["recursive", "ttyd"]
+# claude_subagent_proxy is upstream mngr's experimental Claude-Code-Task ->
+# mngr-managed-subagent proxy. It is not used here. Without this disable, when
+# the proxy plugin is present in the system-tool mngr install it gets the
+# on_after_provisioning hook fired, which installs a PreToolUse:Agent hook
+# (spawn.py) into each new agent's .claude/settings.local.json -- and that
+# hook then wedges parent agents in a Haiku retry loop whenever it hits a
+# permanent error (e.g. the proxy package isn't in /code/.venv, or
+# `mngr-proxy-child` isn't a registered agent type in the resolved mngr).
+# The disable is non-strict (commands.create.disable_plugin path), so this is
+# safe even on installs that don't include the proxy plugin at all.
+disable_plugin = ["recursive", "ttyd", "claude_subagent_proxy"]
 yes = true
 
 # for the list command -- ensures that we don't see other agents when we're listing, even if we happen to list remote agents
@@ -37,7 +47,7 @@ include = ["""has(labels.workspace)"""]
 [agent_types.claude]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
-cli_args = """--dangerously-skip-permissions"""
+cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode"""
 settings_overrides = {model = "opus[1m]", fastMode = false}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
@@ -176,6 +186,24 @@ target_path = "/code/"
 # a different region can still override per-invocation with
 # ``-b --vps-region=<other>``.
 build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region=sjc", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown.
+# This also prevents shutdown when all agent tmux sessions exit.
+idle_mode = "disabled"
+# Same forwarding as the docker template; see comment there.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+
+# template for OVH VPS provider (the imbue-cloud pool-bake's default)
+[create_templates.ovh]
+provider = "ovh"
+target_path = "/code/"
+# No plan / datacenter baked in: the pool-bake CLI
+# (``mngr imbue_cloud admin pool create``) appends
+# ``-b --vps-datacenter=<region>`` per invocation so a single bake
+# session can spread hosts across regions. Plan defaults come from
+# ``OvhProviderConfig.default_plan`` (``vps-2025-model1`` -- 1 vCPU /
+# 8 GB RAM / 80 GB SSD at ~$7.99/mo as of 2025-05). Operators who want
+# a different plan override per-invocation with ``-b --vps-plan=<code>``.
+build_arg = ["--file=Dockerfile", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"

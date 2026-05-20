@@ -2,7 +2,7 @@
  * Informational modal for the per-service Share button.
  *
  * Sharing (Cloudflare tunnels + Access policies) is configured from the
- * Minds desktop app's workspace settings page. The workspace server no
+ * Minds desktop app's workspace settings page. The system_interface no
  * longer routes share-button clicks back to minds via request events --
  * this modal just tells the user where to go.
  */

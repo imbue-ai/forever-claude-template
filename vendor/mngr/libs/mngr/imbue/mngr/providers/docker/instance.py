@@ -25,9 +25,11 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -496,6 +498,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         host = Host(
             id=host_id,
+            host_name=host_name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -553,7 +556,7 @@ kill -TERM 1
         with log_span("Updating certified host data", host_id=str(host_id)):
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
             updated_host_record = host_record.model_copy_update(
                 to_update(host_record.field_ref().certified_host_data, certified_data),
             )
@@ -629,12 +632,17 @@ kill -TERM 1
         `executable` defaults to DOCKER; pass DEPOT to use the depot.dev remote
         builder (only valid for build subcommands).
         """
-        return self.mngr_ctx.concurrency_group.run_process_to_completion(
+        # Defer the success/timeout/non-zero distinction to FinishedProcess.check(), which
+        # raises ProcessTimeoutError on timeout instead of a generic ProcessError.
+        result = self.mngr_ctx.concurrency_group.run_process_to_completion(
             [executable.value.lower()] + args,
             timeout=timeout,
             env=self._docker_env(),
             on_output=self._log_docker_creation_command_output,
+            is_checked_after=False,
         )
+        result.check()
+        return result
 
     def _log_docker_creation_command_output(self, line: str, is_stdout: bool) -> None:
         """Log output from docker subprocess calls, prefixing with [DOCKER]."""
@@ -648,8 +656,12 @@ kill -TERM 1
         # depot requires --load to import the resulting image into the local daemon.
         extra_args = ["--load"] if builder is DockerBuilder.DEPOT else []
         args = ["build", *extra_args, "-t", tag, *build_args]
+        timeout_seconds = self.config.build_timeout_seconds
         with log_span("Running {} build with {} args", builder.value.lower(), len(build_args)):
-            self._run_docker_creation_command(args, executable=builder)
+            try:
+                self._run_docker_creation_command(args, timeout=timeout_seconds, executable=builder)
+            except ProcessTimeoutError as e:
+                raise DockerBuildTimeoutError(provider_name=self.name, timeout_seconds=timeout_seconds) from e
         return tag
 
     def _build_default_image(self, tag: str) -> str:
@@ -846,6 +858,7 @@ kill -TERM 1
 
         return Host(
             id=host_id,
+            host_name=name,
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -1118,7 +1131,7 @@ kill -TERM 1
             self._evict_cached_host(host_id)
 
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
 
             config = host_record.config
             if config is None:
@@ -1141,7 +1154,7 @@ kill -TERM 1
 
         # No container found, try snapshot restore
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if not host_record.certified_host_data.snapshots:
             raise MngrError(
@@ -1163,7 +1176,7 @@ kill -TERM 1
         if host_record is None:
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         snapshot_data: SnapshotRecord | None = None
         for snap in host_record.certified_host_data.snapshots:
@@ -1172,7 +1185,7 @@ kill -TERM 1
                 break
 
         if snapshot_data is None:
-            raise SnapshotNotFoundError(snapshot_id)
+            raise SnapshotNotFoundError(self.name, snapshot_id)
 
         config = host_record.config
         if config is None:
@@ -1294,7 +1307,7 @@ kill -TERM 1
         """Return an offline representation of the given host for use when it is unreachable."""
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         return self._create_host_from_host_record(host_record)
 
@@ -1340,7 +1353,7 @@ kill -TERM 1
             self._evict_cached_host(host_obj.id, replacement=host_obj)
             return host_obj
 
-        raise HostNotFoundError(host)
+        raise HostNotFoundError(self.name, host)
 
     def discover_hosts(
         self,
@@ -1357,14 +1370,19 @@ kill -TERM 1
             logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
             return []
 
-        # Map running containers by host_id
+        # Map running containers by host_id, and harvest host names from labels.
+        # We use this map below instead of h.get_name() so building DiscoveredHosts
+        # does not trigger a per-host SSH read of data.json.
         container_by_host_id: dict[HostId, docker.models.containers.Container] = {}
+        host_name_by_id: dict[HostId, HostName] = {}
         for container in containers:
             labels = container.labels or {}
             if LABEL_HOST_ID in labels:
                 try:
                     host_id = HostId(labels[LABEL_HOST_ID])
                     container_by_host_id[host_id] = container
+                    if LABEL_HOST_NAME in labels:
+                        host_name_by_id[host_id] = HostName(labels[LABEL_HOST_NAME])
                 except (KeyError, ValueError) as e:
                     logger.warning("Skipped container with invalid labels: {}", e)
 
@@ -1376,6 +1394,9 @@ kill -TERM 1
         for host_record in all_host_records:
             host_id = HostId(host_record.certified_host_data.host_id)
             processed_host_ids.add(host_id)
+            # Records always carry the canonical mngr-assigned name; prefer
+            # this over container labels (which can be stale) when both exist.
+            host_name_by_id[host_id] = HostName(host_record.certified_host_data.host_name)
 
             if host_id in container_by_host_id:
                 container = container_by_host_id[host_id]
@@ -1421,8 +1442,15 @@ kill -TERM 1
         for h, _ in hosts_with_state:
             self._evict_cached_host(h.id, replacement=h)
 
+        # Use names collected from records / labels so building the DiscoveredHost
+        # list does not trigger an SSH read of data.json per running host.
         return [
-            DiscoveredHost(host_id=h.id, host_name=h.get_name(), provider_name=self.name, host_state=state)
+            DiscoveredHost(
+                host_id=h.id,
+                host_name=host_name_by_id.get(h.id) or h.get_name(),
+                provider_name=self.name,
+                host_state=state,
+            )
             for h, state in hosts_with_state
         ]
 
@@ -1454,7 +1482,7 @@ kill -TERM 1
 
         container = self._find_container_by_host_id(host_id)
         if container is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if not self._is_container_running(container):
             raise MngrError(f"Cannot snapshot stopped container {host_id}")
@@ -1490,7 +1518,7 @@ kill -TERM 1
         # Update host record with new snapshot
         host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         updated_certified_data = host_record.certified_host_data.model_copy_update(
             to_update(
@@ -1542,13 +1570,13 @@ kill -TERM 1
         with log_span("Deleting snapshot", snapshot_id=str(snapshot_id), host_id=str(host_id)):
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
             if host_record is None:
-                raise HostNotFoundError(host_id)
+                raise HostNotFoundError(self.name, host_id)
 
             snapshot_id_str = str(snapshot_id)
             updated_snapshots = [s for s in host_record.certified_host_data.snapshots if s.id != snapshot_id_str]
 
             if len(updated_snapshots) == len(host_record.certified_host_data.snapshots):
-                raise SnapshotNotFoundError(snapshot_id)
+                raise SnapshotNotFoundError(self.name, snapshot_id)
 
             # Remove Docker image
             try:
@@ -1647,7 +1675,7 @@ kill -TERM 1
         if host_record is not None:
             return dict(host_record.certified_host_data.user_tags)
 
-        raise HostNotFoundError(host_id)
+        raise HostNotFoundError(self.name, host_id)
 
     def set_host_tags(
         self,
@@ -1700,7 +1728,7 @@ kill -TERM 1
 
         host_record = self._host_store.read_host_record(host_id)
         if host_record is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         if host_record.ssh_host is None or host_record.ssh_port is None or host_record.ssh_host_public_key is None:
             raise MngrError(f"Cannot get connector for host {host_id}: host has no SSH info (likely a failed host)")
@@ -1761,7 +1789,7 @@ kill -TERM 1
     def outer_host_id_for(self, host_id: HostId) -> str | None:
         """Stable id for the outer of `host_id` -- shared across all containers on this daemon."""
         if self._host_store.read_host_record(host_id, use_cache=False) is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
         machine = self._outer_machine_id()
         if machine is None:
             return None
@@ -1779,7 +1807,7 @@ kill -TERM 1
         Raises HostNotFoundError if host_id is unknown to this provider.
         """
         if self._host_store.read_host_record(host_id, use_cache=False) is None:
-            raise HostNotFoundError(host_id)
+            raise HostNotFoundError(self.name, host_id)
 
         outer = self._build_outer_host(host_id)
         try:
