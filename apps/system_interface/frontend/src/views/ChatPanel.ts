@@ -419,8 +419,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     // results are still built from the full event list above so nothing
     // dangles; only the rendered turns are filtered.
     const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
-    const visibleEvents =
-      hiddenEventIds.size > 0 ? events.filter((e) => !hiddenEventIds.has(e.event_id)) : events;
+    const visibleEvents = hiddenEventIds.size > 0 ? events.filter((e) => !hiddenEventIds.has(e.event_id)) : events;
 
     // Group events into turns and decide per turn whether to render the
     // tk-driven progress view or the plain (legacy) chat view. A turn is
