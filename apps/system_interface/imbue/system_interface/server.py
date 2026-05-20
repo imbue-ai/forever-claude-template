@@ -487,6 +487,13 @@ async def _interrupt_agent_endpoint(agent_id: str, request: Request) -> JSONResp
         error = ErrorResponse(detail=f"Failed to interrupt agent '{agent_name}': {output}")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
+    # The restart abandons the session transcript mid-turn, so the
+    # transcript-derived activity state would stay pinned at THINKING /
+    # TOOL_RUNNING until the user sends another message. Reset it to IDLE
+    # now so the activity indicator clears immediately after the stop.
+    agent_manager: AgentManager = request.app.state.agent_manager
+    agent_manager.reset_activity_state(agent_id)
+
     return JSONResponse(content=InterruptAgentResponse(status="ok").model_dump())
 
 

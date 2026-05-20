@@ -127,3 +127,20 @@ class AgentMarkerWatcher:
     def read_permissions_waiting(self) -> bool:
         """Return True iff the ``permissions_waiting`` marker file exists."""
         return (self._agent_state_dir / PERMISSIONS_WAITING_MARKER_FILENAME).exists()
+
+    def clear_permissions_waiting(self) -> None:
+        """Delete the ``permissions_waiting`` marker file if it exists.
+
+        Used when the agent is interrupted and restarted: the restart abandons
+        whatever permission prompt Claude was blocked on, but the readiness
+        hooks that normally remove this marker (PostToolUse, UserPromptSubmit,
+        ...) do not run when the process is killed, so a stale marker would
+        otherwise pin the indicator at WAITING_ON_PERMISSION.
+        """
+        marker = self._agent_state_dir / PERMISSIONS_WAITING_MARKER_FILENAME
+        try:
+            marker.unlink(missing_ok=True)
+        except OSError as exc:
+            _loguru_logger.opt(exception=exc).warning(
+                "Failed to clear permissions_waiting marker for agent {}", self._agent_id
+            )

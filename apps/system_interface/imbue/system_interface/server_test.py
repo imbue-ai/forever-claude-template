@@ -215,6 +215,7 @@ def test_interrupt_agent_success(client: TestClient) -> None:
             "imbue.system_interface.server.run_local_command_modern_version",
             return_value=fake_result,
         ) as mock_run,
+        patch.object(AgentManager, "reset_activity_state") as mock_reset,
     ):
         response = client.post("/api/agents/agent-123/interrupt")
 
@@ -227,6 +228,9 @@ def test_interrupt_agent_success(client: TestClient) -> None:
         "--restart",
         "--no-resume",
     ]
+    # After a successful restart the endpoint resets the agent's activity
+    # state so the indicator clears instead of staying pinned at THINKING.
+    mock_reset.assert_called_once_with("agent-123")
 
 
 def test_interrupt_agent_rejects_is_primary_agent(client: TestClient) -> None:

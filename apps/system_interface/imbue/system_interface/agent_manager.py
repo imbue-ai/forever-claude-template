@@ -1053,6 +1053,30 @@ class AgentManager:
 
         self._recompute_activity_state(agent_id, broadcast_on_change=True)
 
+    def reset_activity_state(self, agent_id: str) -> None:
+        """Force ``agent_id`` back to IDLE after an interrupt/restart.
+
+        Interrupting an agent restarts its Claude process. The restart abandons
+        the session transcript mid-turn -- the last recorded event is still an
+        unmatched ``tool_use`` or a ``tool_result`` -- so the transcript-derived
+        activity state stays pinned at TOOL_RUNNING / THINKING until the user
+        sends another message. A lingering ``permissions_waiting`` marker would
+        likewise pin it at WAITING_ON_PERMISSION. The restart is a backend
+        action that the transcript never records, so the backend must reset the
+        derived signals explicitly.
+
+        No-op for agents with no marker watcher registered (remote agents, or a
+        callback racing with destruction).
+        """
+        with self._lock:
+            watcher = self._marker_watchers.get(agent_id)
+            if watcher is None:
+                return
+            self._has_unmatched_tool_use_by_agent[agent_id] = False
+            self._last_event_type_by_agent[agent_id] = None
+        watcher.clear_permissions_waiting()
+        self._recompute_activity_state(agent_id, broadcast_on_change=True)
+
     def _read_applications(self, toml_path: Path) -> None:
         """Read and parse runtime/applications.toml for the primary agent."""
         apps: list[ApplicationEntry] = []
