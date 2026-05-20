@@ -201,17 +201,7 @@ def _make_agent_tool_result_line(
     output: str,
     structured_agent_id: str | None = None,
 ) -> str:
-    raw: dict[str, Any] = {
-        "type": "user",
-        "uuid": uuid,
-        "timestamp": timestamp,
-        "message": {
-            "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": tool_use_id, "content": output, "is_error": False},
-            ],
-        },
-    }
+    raw: dict[str, Any] = json.loads(_make_tool_result_line(uuid, timestamp, tool_use_id, output))
     if structured_agent_id is not None:
         raw["toolUseResult"] = {"status": "completed", "agentId": structured_agent_id}
     return json.dumps(raw)
