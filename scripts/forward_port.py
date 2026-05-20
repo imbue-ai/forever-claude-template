@@ -17,7 +17,19 @@ from pathlib import Path
 
 import tomlkit
 
-APPLICATIONS_FILE = Path("runtime/applications.toml")
+DEFAULT_APPLICATIONS_FILE = "runtime/applications.toml"
+ENV_APPLICATIONS_FILE = "MINDS_APPLICATIONS_FILE"
+
+
+def _applications_file() -> Path:
+    """Path to the agent's applications.toml registry.
+
+    Defaults to ``runtime/applications.toml`` relative to cwd. Override
+    via ``MINDS_APPLICATIONS_FILE`` -- used by tests and by callers that
+    need to point at a non-default registry (e.g. when running outside
+    the agent's repo root). Mirrors ``scripts/layout.py``.
+    """
+    return Path(os.environ.get(ENV_APPLICATIONS_FILE, DEFAULT_APPLICATIONS_FILE))
 
 
 def _load_applications(path: Path) -> tomlkit.TOMLDocument:
@@ -103,16 +115,17 @@ def main() -> None:
     if not args.remove and not args.url:
         parser.error("--url is required when not using --remove")
 
-    lock_path = APPLICATIONS_FILE.parent / ".applications.lock"
+    applications_file = _applications_file()
+    lock_path = applications_file.parent / ".applications.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(lock_path, "w") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         try:
             if args.remove:
-                _remove(APPLICATIONS_FILE, args.name)
+                _remove(applications_file, args.name)
             else:
-                _upsert(APPLICATIONS_FILE, args.name, args.url)
+                _upsert(applications_file, args.name, args.url)
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
