@@ -23,11 +23,6 @@ from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.system_interface.activity_state import ActivityState
-from imbue.system_interface.activity_state import derive_activity_state
-from imbue.system_interface.activity_state import has_unmatched_tool_use
-from imbue.system_interface.activity_state import last_event_type
-from imbue.system_interface.activity_watcher import AgentMarkerWatcher
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
@@ -37,6 +32,11 @@ from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
+from imbue.system_interface.activity_state import ActivityState
+from imbue.system_interface.activity_state import derive_activity_state
+from imbue.system_interface.activity_state import has_unmatched_tool_use
+from imbue.system_interface.activity_state import last_event_type
+from imbue.system_interface.activity_watcher import AgentMarkerWatcher
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.models import AgentCreationError
