@@ -3,11 +3,14 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyyaml>=6"]
 # ///
-"""Parse a worker task file's YAML frontmatter and emit the required fields.
+"""Parse a worker task file's YAML frontmatter and emit its string fields.
 
-Pins the schema so workers can't silently consume a task file whose
-`lead_agent` / `lead_report_dir` was missing, misspelled, or the wrong
-type.
+Pins the required schema so workers can't silently consume a task file
+whose `lead_agent` / `lead_report_dir` was missing, misspelled, or the
+wrong type. Beyond those two, any additional top-level string fields
+the lead sets are passed through to the worker -- so leads can attach
+flow-specific context (a ticket id, a feature flag, a list of staged
+inputs) without each new key requiring a parser change.
 
 The positional argument is a path that may contain a shell-style glob
 (e.g. ``runtime/crystallize/*/task.md``). The helper resolves the
@@ -17,18 +20,21 @@ landing in the same tree) cannot silently parse the wrong thing.
 Quote the pattern in the shell (``'runtime/crystallize/*/task.md'``)
 so the literal glob reaches this script.
 
-On success (exit 0) prints two shell-evalable `KEY=value` lines to
+On success (exit 0) prints shell-evalable ``KEY=value`` lines to
 stdout (values quoted via ``shlex.quote`` so whitespace and shell
-metacharacters survive):
+metacharacters survive). The required fields come first in fixed
+order; any extra string fields follow alphabetically:
 
     LEAD_AGENT=crystallize-test
     LEAD_REPORT_DIR=runtime/update/foo/reports/
+    TICKET_ID=task-42
+
+Non-string frontmatter values (lists, mappings, numbers, bools) are
+silently dropped -- only strings round-trip cleanly through ``eval``.
 
 On any failure -- no glob match, multiple glob matches, file missing,
 no/broken frontmatter, any required field missing, wrong type, or
 empty string -- prints a human-readable error to stderr and exits 1.
-Unknown extra keys in the frontmatter are ignored (room for future
-additions without a breaking change).
 """
 
 from __future__ import annotations
@@ -89,14 +95,16 @@ def _split_frontmatter(text: str) -> dict[str, Any]:
 
 
 def parse(task_file: Path) -> dict[str, str]:
-    """Return the two required fields as a typed dict.
+    """Return all top-level string fields after validating the required ones.
 
-    Raises ``ValueError`` with a precise message on any schema violation.
+    Required fields (``lead_agent``, ``lead_report_dir``) must be present,
+    string-typed, and non-empty -- any violation raises ``ValueError``.
+    Beyond those, all other top-level string-valued keys are passed
+    through. Non-string values are silently dropped.
     """
     if not task_file.is_file():
         raise ValueError(f"task file not found: {task_file}")
     frontmatter = _split_frontmatter(task_file.read_text(encoding="utf-8"))
-    result: dict[str, str] = {}
     for field in _REQUIRED_FIELDS:
         if field not in frontmatter:
             raise ValueError(f"frontmatter is missing required field `{field}`")
@@ -107,12 +115,17 @@ def parse(task_file: Path) -> dict[str, str]:
             )
         if not value:
             raise ValueError(f"frontmatter.{field} must not be empty")
-        result[field] = value
-    return result
+    return {
+        key: value
+        for key, value in frontmatter.items()
+        if isinstance(value, str) and value
+    }
 
 
 def _render(fields: dict[str, str]) -> str:
-    lines = [f"{field.upper()}={shlex.quote(fields[field])}" for field in _REQUIRED_FIELDS]
+    extras = sorted(key for key in fields if key not in _REQUIRED_FIELDS)
+    ordered = [*_REQUIRED_FIELDS, *extras]
+    lines = [f"{key.upper()}={shlex.quote(fields[key])}" for key in ordered if key in fields]
     return "\n".join(lines) + "\n"
 
 
