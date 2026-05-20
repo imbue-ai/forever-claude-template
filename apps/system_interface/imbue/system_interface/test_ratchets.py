@@ -34,11 +34,16 @@ def test_prevent_while_true() -> None:
 
 def test_prevent_time_sleep() -> None:
     # +1 for service_dispatcher_test._wait_for_port's TCP-ready poll loop.
-    rc.check_time_sleep(_DIR, snapshot(7))
+    # +3 for session_watcher_test.test_watcher_does_not_lose_events_on_partial_writes:
+    # the test must let the watchdog observer thread initialize, sleep between two
+    # halves of a partial-flushed JSONL line, and poll for delivery. There is no
+    # observable signal to await -- the bug being verified is that the poll silently
+    # drops bytes -- so real wall-clock waits are the only way to drive the scenario.
+    rc.check_time_sleep(_DIR, snapshot(10))
 
 
 def test_prevent_global_keyword() -> None:
-    rc.check_global_keyword(_DIR, snapshot(1))
+    rc.check_global_keyword(_DIR, snapshot(0))
 
 
 def test_prevent_bare_print() -> None:
@@ -94,7 +99,11 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(1))
+    # Two getattrs on FastAPI app.state for the per-agent watchers dicts:
+    # one for session watchers, one for tickets watchers. Both guard
+    # against test paths where _lifespan() doesn't run; direct attribute
+    # access would raise AttributeError on app.state in those cases.
+    rc.check_getattr(_DIR, snapshot(2))
 
 
 def test_prevent_setattr() -> None:
@@ -225,7 +234,21 @@ def test_prevent_monkeypatch_setattr() -> None:
     # require plumbing a flag through every call site of
     # create_application, which is a much larger blast radius for a
     # test-only workaround.
-    rc.check_monkeypatch_setattr(_DIR, snapshot(1))
+    #
+    # The rest are the in-UI Claude login modal tests (claude_auth_test.py,
+    # welcome_resend_test.py, claude_auth_endpoints_test.py). The
+    # `claude_auth` and `welcome_resend` modules expose
+    # `command_runner`, `pexpect_spawner`, `read_assistant_transcript`,
+    # `send_message_fn`, and `_default_skill_path` as module-level
+    # callables so dependencies on the outside world
+    # (subprocesses, pexpect spawns, session-transcript reads, agent
+    # message dispatch, the welcome-skill file path) can be swapped
+    # for deterministic test fakes without `unittest.mock`. Tests
+    # use `monkeypatch.setattr` rather than hand-rolled try/finally
+    # so the swap is counted by this ratchet (in the spirit of the
+    # rule) rather than dodging the regex. (Count includes references
+    # inside docstrings/comments that the regex catches as well.)
+    rc.check_monkeypatch_setattr(_DIR, snapshot(41))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -257,7 +280,11 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(3))
+    # +1 for the on_events callback nested inside _get_or_create_tickets_watcher.
+    # The closure captures event_queues from the outer scope; this matches the
+    # existing pattern used by _get_or_create_watcher (which is one of the
+    # original 3).
+    rc.check_inline_functions(_DIR, snapshot(4))
 
 
 def test_prevent_underscore_imports() -> None:
@@ -265,7 +292,19 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(4))
+    # +1 for layout_ops.LayoutMutex.__init__. The mutex holds runtime state
+    # (a ``threading.Lock`` and a holder dict mutated under that lock) that
+    # is not a natural fit for a Pydantic model, matching the precedent
+    # already set by session_watcher / event_queues entries here.
+    # +1 since the introduction of the tickets pipeline:
+    # AgentTicketsWatcher.__init__ (stateful background watcher, mirroring
+    # AgentSessionWatcher's __init__ pattern -- a classmethod factory
+    # wouldn't help). The watchdog file-change handler's __init__ is
+    # already counted toward the project's existing total (it lived in
+    # session_watcher.py before the tickets pipeline arrived; it now
+    # lives in watcher_common.py as the shared WakeOnChangeHandler
+    # consumed by both watchers).
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
 
 
 def test_prevent_cast_usage() -> None:

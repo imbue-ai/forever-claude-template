@@ -5,31 +5,25 @@ by hand. The user was not part of a design conversation about the change. The
 worker replicates the incident, proposes an outline (Gate 1), implements, runs
 scenarios, and presents Gate 2.
 
-This file covers lead-side Steps 2a-2c. Return to `SKILL.md` Step 3 (proxy
-gates, merge) afterwards.
+This file covers lead-side Step 2 (write the task file). Return to `SKILL.md`
+Step 3 (proxy gates, merge) afterwards.
 
-## 2a: Capture the incident transcript
+## 2a: Write the absorb-flow task file
 
-Call `extract_turn.py` with the runtime path below; see
-`.agents/shared/references/lead-proxy.md` for the full invocation contract
-(what `--nth 1` does and how to use marker-based slicing if counting turns
-does not line up).
-
-```bash
-uv run .agents/shared/scripts/extract_turn.py \
-    --nth 1 \
-    --output runtime/update/$TARGET/turn.jsonl
-```
-
-## 2b: Write the absorb-flow task file
+The worker will explore your transcript via `mngr transcript` to find the
+incident. Your job here is to write a task body that *describes* the
+incident and the additional repeatable work, then anchors the worker's
+search with verbatim quotes (the user's request, the failing or
+insufficient output of `$TARGET`, the manual follow-up steps you took).
+Without anchors the worker will scan the wrong region of your transcript.
 
 Describe invariants and state constraints -- what the updated skill must
 guarantee about its inputs and outputs. Do not enumerate subcommands, flow
 steps, or argparse surfaces; surface decisions belong to the worker.
 
 The task file's YAML frontmatter follows the schema documented in
-`.agents/shared/references/worker-reporting.md` -- `lead_agent`,
-`lead_report_dir`, and `transcript_path`, all required.
+`.agents/shared/references/worker-reporting.md` -- `lead_agent` and
+`lead_report_dir`, both required.
 
 ```bash
 mkdir -p runtime/update/$TARGET
@@ -37,7 +31,6 @@ cat > runtime/update/$TARGET/task.md << TASK_EOF
 ---
 lead_agent: $MNGR_AGENT_NAME
 lead_report_dir: runtime/update/$TARGET/reports/
-transcript_path: runtime/update/$TARGET/turn.jsonl
 ---
 
 # Task: update the \`$TARGET\` skill (or split a new one)
@@ -45,15 +38,29 @@ transcript_path: runtime/update/$TARGET/turn.jsonl
 ## Flow
 FLOW: absorb
 
-## Incident
-The turn where \`$TARGET\` was invoked is at the path given by the
-\`transcript_path\` frontmatter field.
+## Incident summary
+<2-5 sentences: what the user asked for, how \`$TARGET\` was invoked,
+where it fell short, and the additional repeatable work you did to
+fully satisfy the request.>
+
+## Anchors (verbatim quotes)
+The worker will use these to locate the incident in your transcript via
+\`mngr transcript\`. Include:
+- The user's original request (verbatim).
+- The \`$TARGET\` output that was insufficient (verbatim).
+- 1-2 quotes showing the manual follow-up you did or the final result.
+<paste quotes here, one per bullet.>
+
+## How to read the transcript
+Use \`mngr transcript <lead_agent>\` (with \`--role user --role assistant\`
+to strip tool noise, or \`--tail N\` to scope in) to find the turns above.
+The update-skill invocation is the *most recent* turn; the incident and
+manual follow-up are *prior* to that invocation.
 
 ## What the updated skill must do
 <state the contract the updated skill must honor after this change --
 what inputs it should now accept, what outputs it should now produce.
-Read the incident transcript for what was done by hand; here,
-describe only the new contract.>
+Describe only the new contract; the incident itself is captured above.>
 
 ## What to do
 Use the \`update-skill-worker\` sub-skill in the absorb flow: replicate
@@ -75,26 +82,24 @@ frontmatter.
 TASK_EOF
 ```
 
+Fill in the `## Incident summary` and `## Anchors` sections with real
+content drawn from your conversation -- do not leave the placeholders.
 `FLOW: absorb` is required; the worker fails loudly if the marker is missing.
 
-## 2c: Launch the worker and push the transcript
+## 2b: Launch the worker
 
-```bash
-mngr create update-$TARGET -t crystallize-worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file runtime/update/$TARGET/task.md
-```
-
-Then push the runtime dir (task file + transcript) into the worker's worktree
--- the worker cannot read files that live only in your worktree, and its
+The shared `launch-task` dispatcher runs `mngr create`, pushes the runtime
+dir (task file) into the worker's worktree, and sends the task as a
+follow-up message so the worker sees the runtime dir first. The worker's
 `parse_task_frontmatter.py` helper needs `task.md` on disk to validate the
-schema. See `.agents/shared/references/lead-proxy.md` § "mngr push rationale"
-for the directory-form and `--uncommitted-changes=merge` requirements.
+schema, which is why the push is part of the lifecycle.
 
 ```bash
-mngr push update-$TARGET:runtime/update/$TARGET/ \
-    --source runtime/update/$TARGET/ \
-    --uncommitted-changes=merge
+uv run .agents/skills/launch-task/scripts/dispatch.py \
+    --name update-$TARGET \
+    --template crystallize-worker \
+    --runtime-dir runtime/update/$TARGET/ \
+    --task-file runtime/update/$TARGET/task.md
 ```
 
 Return to `SKILL.md` Step 3 to proxy gates through to the user.

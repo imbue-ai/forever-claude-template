@@ -10,6 +10,23 @@ Pick a short kebab-case slug `$NAME` for this dispatch (e.g.
 its branch (`mngr/$NAME`), and the local runtime path
 (`runtime/launch-task/$NAME/`). Names must be unique.
 
+## 0. Open a single tk step for the whole delegation
+
+The progress view treats each delegation as **one** step in your timeline, regardless of how much work the sub-agent does internally. Before doing anything else, create one step record that describes the delegation in user-facing terms and start it:
+
+```bash
+ID=$(tk create --step "Delegate <plain-english description of what the sub-agent will do> to a sub-agent")
+tk start "$ID"
+```
+
+The sub-agent will use its own `.tickets/` for its own internal progress — that work renders in the sub-agent's chat, not yours. Don't try to surface the sub-agent's individual steps in your timeline; the user can open the sub-agent's chat if they want that level of detail.
+
+When the sub-agent finishes (Step 5 below), close your step. The closing summary describes the *work you did* — e.g. "Briefed a sub-agent on the dark-mode toggle fix and reviewed its result." — not the outcome. Save the actual outcome / result for your final assistant message to the user.
+
+```bash
+tk close "$ID" "Briefed a sub-agent on the <task> and reviewed its result."
+```
+
 ## 1. Write the task file
 
 Write a clear task file with YAML frontmatter (so the worker can address
@@ -70,45 +87,27 @@ BODY_EOF
 } > runtime/launch-task/$NAME/task.md
 ```
 
-## 2. Create the sub-agent
+## 2. Dispatch the worker
+
+`scripts/dispatch.py` runs the lifecycle commands -- `mngr create` (no
+`--message-file` to avoid racing with the push), `mngr push` of the
+runtime dir, optional extra pushes for gitignored auxiliary state, and
+`mngr message` of the task file. Sending the message *after* the push
+guarantees the worker sees the runtime dir before reading the task.
 
 ```bash
-mngr create $NAME -t worker \
-    --label workspace=$MINDS_WORKSPACE_NAME
-```
-
-Omit `--message-file` here. Sending the task message at create time
-races with the runtime-dir push in Step 3 -- the worker could read the
-message and try to find `runtime/launch-task/$NAME/` before it has been
-pushed into its worktree. Send the task as a follow-up in Step 4
-instead.
-
-## 3. Push the runtime dir to the worker
-
-The worker's worktree is a fresh checkout that does not see your
-gitignored `runtime/`. Push the runtime dir so the worker has the task
-file (and a writable home for its `report.md`) at the path the
-frontmatter names.
-
-```bash
-mngr push $NAME:runtime/launch-task/$NAME/ \
-    --source runtime/launch-task/$NAME/ \
-    --uncommitted-changes=merge
+uv run .agents/skills/launch-task/scripts/dispatch.py \
+    --name $NAME \
+    --template worker \
+    --runtime-dir runtime/launch-task/$NAME/ \
+    --task-file runtime/launch-task/$NAME/task.md
 ```
 
 If the task references other gitignored files (datasets, credentials,
-extra transcripts), push them now too with the same pattern.
+extra transcripts), pass them as `--extra-push <dir>/` (repeatable) so
+they land in the worker's worktree alongside the runtime dir.
 
-## 4. Send the task message
-
-Now that the runtime dir is in place, send the task file as the
-worker's first message:
-
-```bash
-mngr message $NAME --message-file runtime/launch-task/$NAME/task.md
-```
-
-## 5. Background-poll for the worker's report
+## 3. Background-poll for the worker's report
 
 Launch the poll as a background task (`run_in_background: true`) and
 continue with whatever else you were doing. The report file appears at
@@ -128,7 +127,7 @@ reports never reach the user and the worker deadlocks waiting for a
 reply. Reports surface as task notifications when the background job
 completes; handle them at that point, not by blocking on the poll.
 
-## 6. Handle the report
+## 4. Handle the report
 
 Follow `.agents/shared/references/lead-proxy.md` for parsing the
 report's frontmatter (`type` + `name`), deciding whether to answer a
@@ -163,5 +162,6 @@ Flow-specific substitutions when reading `lead-proxy.md`:
   <worker>` and message it to continue -- the worktree is preserved
   across restart. See `references/dead-worker-recovery.md` for the
   manual salvage fallback when restart isn't viable.
-- If the task references gitignored files beyond the runtime dir, push
-  them with `mngr push` before sending the task message (see Step 3).
+- If the task references gitignored files beyond the runtime dir, pass
+  them as `--extra-push <dir>/` (repeatable) to `dispatch.py` so they
+  land in the worker's worktree before it reads the task message.

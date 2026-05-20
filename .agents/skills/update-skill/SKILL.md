@@ -11,9 +11,11 @@ needs a change. Two flows cover the two ways this happens.
 
 - **absorb flow.** A skill ran successfully but you had to do additional
   *repeatable* work to fully satisfy the user's request. The user was not
-  part of a design conversation about the change. You hand the worker the
-  incident transcript and the new contract; the worker replicates, proposes
-  a design at Gate 1, implements, runs scenarios, presents Gate 2.
+  part of a design conversation about the change. You hand the worker an
+  incident description with verbatim quote anchors plus the new contract;
+  the worker locates the incident in your transcript via `mngr transcript`,
+  replicates, proposes a design at Gate 1, implements, runs scenarios,
+  presents Gate 2.
 - **verify flow.** You and the user discussed a change to a skill during
   the turn, agreed on a design, and you committed the change live. You
   hand the worker the committed diff and the design rationale. The worker
@@ -48,9 +50,9 @@ Then:
 - Worker agent name: `update-$TARGET`
 - Worker branch: `mngr/update-$TARGET`
 - Runtime path: `runtime/update/$TARGET/`
-- Task file: `runtime/update/$TARGET/task.md` (sits alongside `turn.jsonl`
-  / `commit.diff` so the absorb / verify `mngr push` syncs it to the
-  worker for free)
+- Task file: `runtime/update/$TARGET/task.md` (the verify flow stages
+  `commit.diff` / `commit.log` alongside; the absorb flow ships only the
+  task file)
 
 ## Step 1: Open a tracking ticket
 
@@ -58,7 +60,7 @@ Shared across flows.
 
 ```bash
 TICKET_ID=$(tk create "update $TARGET" -t task \
-    --acceptance "incident captured; task file written; worker launched; worker DONE; branch merged")
+    --acceptance "task file written; worker launched; worker DONE; branch merged")
 tk start "$TICKET_ID"
 ```
 
@@ -98,10 +100,10 @@ Flow-specific substitutions:
   `type: status, name: no-update-needed` (no change -- just close the
   ticket; no merge); `type: status, name: stuck` (failure-handling flow).
 
-On successful merge, close the tracking ticket:
+On successful merge, close the tracking ticket with a summary:
 
 ```bash
-tk close "$TICKET_ID"
+tk close "$TICKET_ID" "Updated $TARGET -- worker branch merged."
 ```
 
 ## Gotchas

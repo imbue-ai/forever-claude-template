@@ -47,7 +47,7 @@ include = ["""has(labels.workspace)"""]
 [agent_types.claude]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
-cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode"""
+cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode,TodoWrite,TaskCreate,TaskList,TaskUpdate"""
 settings_overrides = {model = "opus[1m]", fastMode = false}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
@@ -167,8 +167,8 @@ extra_provision_command = [
     "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
     "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
     # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
-    # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
-    # because the uv installer prepends it.
+    # symlinks at /usr/local/bin/tk and /usr/local/bin/ticket).
+    # $HOME/.local/bin is already on PATH because the uv installer prepends it.
     "mkdir -p $HOME/.local/bin && ln -sf /code/vendor/tk/ticket $HOME/.local/bin/tk",
 ]
 

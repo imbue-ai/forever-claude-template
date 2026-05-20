@@ -256,6 +256,37 @@ def step_run_command_no_stdin(context, command):
     context.returncode = result.returncode
 
 
+@when(r'I run "(?P<command>(?:[^"\\]|\\.)+)" as agent "(?P<agent_name>[^"]+)"')
+def step_run_command_as_agent(context, command, agent_name):
+    """Run a command with MNGR_AGENT_NAME set so create/start exercise
+    the agent-aware code paths (stamping `agent:`, auto-self-assign on
+    start, etc)."""
+    command = command.replace('\\"', '"')
+    ticket_script = get_ticket_script(context)
+    cmd = command.replace('ticket ', f'{ticket_script} ', 1)
+    env = os.environ.copy()
+    env['MNGR_AGENT_NAME'] = agent_name
+    cwd = getattr(context, 'working_dir', context.test_dir)
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env=env,
+    )
+    context.result = result
+    context.stdout = result.stdout.strip()
+    context.stderr = result.stderr.strip()
+    context.returncode = result.returncode
+    context.last_command = command
+    # Mirror step_run_command: track the created ticket id so subsequent
+    # "the created ticket should ..." assertions can find the file.
+    if 'ticket create' in command and result.returncode == 0:
+        context.last_created_id = result.stdout.strip()
+
+
 @when(r'I run "(?P<command>(?:[^"\\]|\\.)+)" with TICKETS_DIR set to "(?P<tickets_dir>[^"]+)"')
 def step_run_command_with_env(context, command, tickets_dir):
     """Run a ticket CLI command with custom TICKETS_DIR."""
@@ -428,6 +459,25 @@ def step_created_ticket_contains(context, text):
     ticket_path = Path(context.test_dir) / '.tickets' / f'{ticket_id}.md'
     content = ticket_path.read_text()
     assert text in content, f"Ticket does not contain '{text}'\nContent: {content}"
+
+
+@then(r'the created ticket should not contain "(?P<text>[^"]+)"')
+def step_created_ticket_not_contains(context, text):
+    """Assert the most recently created ticket does NOT contain text. Used
+    to confirm absence of frontmatter fields (e.g. no `assignee:` line on
+    a freshly-filed ticket in an mngr agent context)."""
+    ticket_id = context.last_created_id
+    ticket_path = Path(context.test_dir) / '.tickets' / f'{ticket_id}.md'
+    content = ticket_path.read_text()
+    assert text not in content, f"Ticket unexpectedly contains '{text}'\nContent: {content}"
+
+
+@then(r'ticket "(?P<ticket_id>[^"]+)" should not contain "(?P<text>[^"]+)"')
+def step_ticket_not_contains(context, ticket_id, text):
+    """Assert a named ticket file does NOT contain text."""
+    ticket_path = Path(context.test_dir) / '.tickets' / f'{ticket_id}.md'
+    content = ticket_path.read_text()
+    assert text not in content, f"Ticket {ticket_id} unexpectedly contains '{text}'\nContent: {content}"
 
 
 @then(r'the created ticket should have field "(?P<field>[^"]+)" with value "(?P<value>[^"]+)"')

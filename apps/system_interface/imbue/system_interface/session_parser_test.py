@@ -3,6 +3,8 @@
 import json
 from typing import Any
 
+import pytest
+
 from imbue.system_interface.session_parser import parse_session_lines
 
 
@@ -159,6 +161,38 @@ def test_tool_result_only_user_message_not_emitted_as_user_message() -> None:
     assert events[0]["type"] == "tool_result"
 
 
+def test_interrupt_sentinel_user_message_not_emitted() -> None:
+    """The ``[Request interrupted by user]`` sentinel must not surface as a user_message.
+
+    Claude writes this control text to the user channel when the user interrupts
+    a turn. Treating it as a real prompt would leave the activity indicator
+    pinned on "Thinking..." after every interrupt, since the indicator's tail-
+    event heuristic equates "tail = user_message" with "Claude is about to
+    reply." Verify both string content and array content forms.
+    """
+    string_form = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "[Request interrupted by user]"},
+        }
+    )
+    array_form = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-2",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "[Request interrupted by user]"}],
+            },
+        }
+    )
+    events = parse_session_lines([string_form, array_form])
+    assert events == []
+
+
 def test_events_sorted_by_timestamp() -> None:
     lines = [
         _make_assistant_line("uuid-2", "2026-01-01T00:00:02Z", "Second"),
@@ -192,6 +226,132 @@ def test_tool_output_truncation() -> None:
     events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
     assert events[0]["output"].endswith("...")
     assert len(events[0]["output"]) <= 2003
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("Here is the file contents.", False, id="plain-assistant-text"),
+        pytest.param("", False, id="empty-text"),
+        pytest.param(
+            "Not logged in \u00b7 Please run /login to authenticate.",
+            True,
+            id="not-logged-in",
+        ),
+        pytest.param(
+            "I received an error: Invalid API key. Please update your credentials.",
+            True,
+            id="invalid-api-key",
+        ),
+        pytest.param(
+            "OAuth token has been revoked; re-authentication required.",
+            True,
+            id="oauth-revoked",
+        ),
+        pytest.param("Error: OAuth token has expired.", True, id="oauth-expired"),
+        pytest.param(
+            "OAuth token does not meet scope requirements for this operation.",
+            True,
+            id="oauth-scope",
+        ),
+        pytest.param(
+            'API returned: {"type": "authentication_error", "message": "..."}',
+            True,
+            id="authentication-error-type",
+        ),
+        pytest.param("API Error: 401 Unauthorized", True, id="api-401"),
+        pytest.param(
+            "Invalid authentication credentials provided.", True, id="invalid-credentials"
+        ),
+        pytest.param(
+            "Your credit balance is too low to make this request.",
+            True,
+            id="credit-balance-too-low",
+        ),
+        pytest.param("This organization has been disabled.", True, id="org-disabled"),
+    ],
+)
+def test_assistant_message_auth_error_flag(text: str, expected: bool) -> None:
+    lines = [_make_assistant_line("uuid-1", "2026-01-01T00:00:00Z", text)]
+    events = parse_session_lines(lines)
+    assert events[0]["is_auth_error"] is expected
+
+
+def _make_agent_tool_result_line(
+    uuid: str,
+    timestamp: str,
+    tool_use_id: str,
+    output: str,
+    structured_agent_id: str | None = None,
+) -> str:
+    raw: dict[str, Any] = json.loads(_make_tool_result_line(uuid, timestamp, tool_use_id, output))
+    if structured_agent_id is not None:
+        raw["toolUseResult"] = {"status": "completed", "agentId": structured_agent_id}
+    return json.dumps(raw)
+
+
+def test_agent_tool_result_uses_structured_agent_id() -> None:
+    tool_name_by_call_id: dict[str, str] = {"toolu_agent": "Agent"}
+    lines = [
+        _make_agent_tool_result_line(
+            "uuid-a",
+            "2026-01-01T00:00:00Z",
+            "toolu_agent",
+            "Exploration complete.",
+            structured_agent_id="abc123",
+        ),
+    ]
+    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_result"
+    assert events[0]["subagent_id"] == "abc123"
+
+
+def test_agent_tool_result_falls_back_to_text_trailer() -> None:
+    tool_name_by_call_id: dict[str, str] = {"toolu_agent": "Agent"}
+    lines = [
+        _make_agent_tool_result_line(
+            "uuid-a",
+            "2026-01-01T00:00:00Z",
+            "toolu_agent",
+            "Exploration complete.\nagentId: legacy999",
+            structured_agent_id=None,
+        ),
+    ]
+    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    assert len(events) == 1
+    assert events[0]["subagent_id"] == "legacy999"
+
+
+def test_agent_tool_result_without_any_agent_id_omits_field() -> None:
+    tool_name_by_call_id: dict[str, str] = {"toolu_agent": "Agent"}
+    lines = [
+        _make_agent_tool_result_line(
+            "uuid-a",
+            "2026-01-01T00:00:00Z",
+            "toolu_agent",
+            "Exploration complete with no link info.",
+            structured_agent_id=None,
+        ),
+    ]
+    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    assert len(events) == 1
+    assert "subagent_id" not in events[0]
+
+
+def test_agent_tool_result_prefers_structured_over_trailer() -> None:
+    tool_name_by_call_id: dict[str, str] = {"toolu_agent": "Agent"}
+    lines = [
+        _make_agent_tool_result_line(
+            "uuid-a",
+            "2026-01-01T00:00:00Z",
+            "toolu_agent",
+            "Done.\nagentId: trailerWins",
+            structured_agent_id="structuredWins",
+        ),
+    ]
+    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    assert events[0]["subagent_id"] == "structuredWins"
 
 
 def test_user_message_with_array_content() -> None:

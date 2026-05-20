@@ -170,6 +170,42 @@ dockview tab bar", redirect loop, broken WebSockets), see
 [references/cross-flow-gotchas.md](references/cross-flow-gotchas.md)
 -- it's symptom-indexed.
 
+## Step 4: Surface the view to the user
+
+Once verification passes, tell the workspace UI to actually open the
+new tab. Without this step the user would have to discover it via the
+"+" dropdown -- skip the surfacing step only for services with no UI
+(pure JSON APIs, webhook receivers, etc.).
+
+```bash
+python3 scripts/layout.py open <name>
+```
+
+`layout.py` POSTs to a loopback-only workspace_server endpoint that
+broadcasts a `layout_op` message over its WebSocket. The frontend
+focuses the panel if a tab for `<name>` is already open, otherwise
+splits a new iframe alongside the primary chat (60% web / 40% chat).
+The script briefly waits for the service to appear in
+`runtime/applications.toml` so it's safe to run immediately after the
+`forward_port.py` call.
+
+To force a reload of an already-open tab (e.g. after redeploying the
+service) without prompting the user to click Refresh:
+
+```bash
+python3 scripts/layout.py refresh <name>
+```
+
+You should always `refresh` services after making changes, to make sure the user can see the updates.
+
+For anything beyond `open` / `refresh` -- splitting, moving, focusing,
+renaming, maximizing, replacing an iframe's URL, inspecting the live
+tree -- see the `manage-layout` skill. `layout.py list` is also useful
+when the user is asking about what tabs are available (it prints every
+user-facing registered service plus every mngr-level agent, with
+open/running flags; the workspace chrome's own `system_interface` entry
+is hidden).
+
 ## Escape hatch: wrap an existing server
 
 For pre-existing third-party tools, do not scaffold a lib. Add a

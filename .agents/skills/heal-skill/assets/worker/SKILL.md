@@ -1,6 +1,6 @@
 ---
 name: heal-skill-worker
-description: Repair a failing skill. Invoke when your task file asks you to heal a specific skill by pointing at its incident transcript.
+description: Repair a failing skill. Invoke when your task file asks you to heal a specific skill, providing an incident description plus verbatim quote anchors that locate the failure in the lead's transcript.
 metadata:
   role: worker-sub-skill
 ---
@@ -26,16 +26,29 @@ Valid `name:` values for this worker:
 
 ## Stage 1: Replicate
 
-1. Read the task file to learn which skill failed and how.
-2. Read the incident transcript the task file points at.
-3. Read the skill's current `SKILL.md` and any scripts under `<skill_directory>/scripts/`.
-   A skill may be pure prose (no scripts), in which case "replicate" means
-   tracing the SKILL.md instructions against the incident inputs to see
-   where the recipe led astray.
+1. Read the task file. Pay close attention to the `## Incident summary`
+   description and the `## Anchors` verbatim quotes -- these are your
+   primary guide.
+2. Explore the lead's transcript with `mngr transcript $LEAD_AGENT`
+   (substitute the value parsed from frontmatter). Start with
+   `--role user --role assistant` to strip tool-call noise, and search
+   for the anchor quotes to locate the incident turns. Then re-read
+   those turns with full tool detail (default format, scoped with
+   `--tail` once you know where to look) to see exactly how the skill
+   was invoked, what it returned, and what the lead did to work around
+   it. The heal-skill invocation is the most recent turn in the lead's
+   transcript; the incident is *prior* to it.
+3. Read the skill's current `SKILL.md` and any scripts under
+   `<skill_directory>/scripts/`. A skill may be pure prose (no scripts),
+   in which case "replicate" means tracing the SKILL.md instructions
+   against the incident inputs to see where the recipe led astray.
 4. Reproduce the failure. If the failure depends on external state you
    cannot recreate, construct a minimal synthetic input that exercises the
    same code path (or, for a prose-only skill, the same branch of the
    recipe).
+
+Do NOT re-execute destructive operations from the transcript. Reading the
+transcript is enough.
 
 ## Stage 2: Diagnose the root cause
 

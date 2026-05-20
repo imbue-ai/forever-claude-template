@@ -63,25 +63,30 @@ Commands:
     --acceptance           Acceptance criteria
     -t, --type             Type (bug|feature|task|epic|chore) [default: task]
     -p, --priority         Priority 0-4, 0=highest [default: 2]
-    -a, --assignee         Assignee [default: git user.name]
+    -a, --assignee         Assignee [default: git user.name, suppressed when MNGR_AGENT_NAME is set]
     --external-ref         External reference (e.g., gh-123, JIRA-456)
     --parent               Parent ticket ID
+    --no-parent            Disable auto-nest under in_progress ticket (steps only)
+    --step                 Create as a turn-bound progress record (step)
     --tags                 Comma-separated tags (e.g., --tags ui,backend,urgent)
-  start <id>               Set status to in_progress
-  close <id>               Set status to closed
+  start <id>               Set status to in_progress (auto-self-assigns when MNGR_AGENT_NAME is set)
+  close <id> [summary]     Set status to closed (positional summary required for steps)
   reopen <id>              Set status to open
   status <id> <status>     Update status (open|in_progress|closed)
+  assign <id> [agent]      Set assignee (defaults to MNGR_AGENT_NAME / git user.name)
+  unassign <id>            Clear assignee
   dep <id> <dep-id>        Add dependency (id depends on dep-id)
   dep tree [--full] <id>   Show dependency tree (--full disables dedup)
   dep cycle                Find dependency cycles in open tickets
   undep <id> <dep-id>      Remove dependency
   link <id> <id> [id...]   Link tickets together (symmetric)
   unlink <id> <target-id>  Remove link between tickets
-  ls|list [--status=X] [-a X] [-T X]   List tickets
-  ready [-a X] [-T X]      List open/in-progress tickets with deps resolved
-  blocked [-a X] [-T X]    List open/in-progress tickets with unresolved deps
-  closed [--limit=N] [-a X] [-T X] List recently closed tickets (default 20, by mtime)
-  show <id>                Display ticket
+  ls|list [--status=X] [-a X] [-T X] [--include-steps|--only-steps]   List tickets
+  ready [-a X] [-T X] [--include-steps|--only-steps]   List open/in-progress tickets with deps resolved
+  blocked [-a X] [-T X] [--include-steps|--only-steps]   List open/in-progress tickets with unresolved deps
+  closed [--limit=N] [-a X] [-T X] [--include-steps|--only-steps]   List recently closed tickets
+  steps [--agent=X] [--status=X] [--all-agents]   List this agent's open step records
+  show <id>                Display ticket (renders ## Children for regular sub-tickets and ## Steps for step children)
   add-note <id> [text]     Append timestamped note (or pipe via stdin)
   super <cmd> [args]       Bypass plugins, run built-in command directly
 

@@ -10,14 +10,18 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
+from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
-# Placeholder client-side port used by the refresh-service broadcast tests.
-# Only the host portion of the TestClient ``client`` tuple is inspected by the
+# Placeholder client-side port used by the layout broadcast tests. Only the
+# host portion of the TestClient ``client`` tuple is inspected by the
 # endpoint (it enforces loopback), so any fixed value works here.
 _TEST_CLIENT_PORT = 12345
 
@@ -182,6 +186,108 @@ def test_send_message_success(client: TestClient) -> None:
     mock_send.assert_called_once_with("test-agent", "hello")
 
 
+def test_interrupt_agent_returns_404_for_unknown_agent(client: TestClient) -> None:
+    """Interrupting a nonexistent agent returns 404."""
+    with patch("imbue.system_interface.server._find_agent", return_value=None):
+        response = client.post("/api/agents/nonexistent/interrupt")
+    assert response.status_code == 404
+
+
+def test_interrupt_agent_success(client: TestClient) -> None:
+    """Interrupting an agent restarts it via mngr and returns 200."""
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="claude-agent",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    fake_result = FinishedProcess(
+        returncode=0,
+        stdout="Restarted agent: claude-agent",
+        stderr="",
+        command=("mngr", "start", "claude-agent", "--restart", "--no-resume"),
+        is_output_already_logged=False,
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=agent_info),
+        patch(
+            "imbue.system_interface.server.run_local_command_modern_version",
+            return_value=fake_result,
+        ) as mock_run,
+        patch.object(AgentManager, "reset_activity_state") as mock_reset,
+    ):
+        response = client.post("/api/agents/agent-123/interrupt")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert mock_run.call_args.kwargs["command"] == [
+        "mngr",
+        "start",
+        "claude-agent",
+        "--restart",
+        "--no-resume",
+    ]
+    # After a successful restart the endpoint resets the agent's activity
+    # state so the indicator clears instead of staying pinned at THINKING.
+    mock_reset.assert_called_once_with("agent-123")
+
+
+def test_interrupt_agent_rejects_is_primary_agent(client: TestClient) -> None:
+    """POST /api/agents/<id>/interrupt returns 400 for the services agent.
+
+    Restarting the is_primary agent would stop the workspace services. The
+    frontend hides such agents; this server-side guard protects direct callers.
+    """
+    services_agent = AgentInfo(
+        id="services-1",
+        name="system-services",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+        labels={"is_primary": "true", "workspace": "my-ws"},
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=services_agent),
+        patch("imbue.system_interface.server.run_local_command_modern_version") as mock_run,
+    ):
+        response = client.post("/api/agents/services-1/interrupt")
+
+    assert response.status_code == 400
+    assert "is_primary" in response.json()["detail"]
+    # The guard runs before the restart subprocess, so mngr is never invoked.
+    mock_run.assert_not_called()
+
+
+def test_interrupt_agent_returns_500_on_failure(client: TestClient) -> None:
+    """If the mngr restart command exits non-zero, return 500 with its stderr."""
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="claude-agent",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    fake_result = FinishedProcess(
+        returncode=1,
+        stdout="",
+        stderr="mngr start failed",
+        command=("mngr", "start", "claude-agent", "--restart", "--no-resume"),
+        is_output_already_logged=False,
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=agent_info),
+        patch(
+            "imbue.system_interface.server.run_local_command_modern_version",
+            return_value=fake_result,
+        ),
+    ):
+        response = client.post("/api/agents/agent-123/interrupt")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to interrupt agent 'claude-agent': mngr start failed"
+
+
 def test_get_layout_returns_404_when_no_layout_saved(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -289,51 +395,268 @@ def test_websocket_endpoint_sends_initial_snapshot(client: TestClient) -> None:
         assert "applications_updated" in types
 
 
-def test_refresh_service_request_writes_event(
-    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """POST /api/refresh-service/{service_name} appends a refresh event to the agent state dir."""
-    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
-
-    response = client.post("/api/refresh-service/web")
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-
-    events_file = tmp_path / "events" / "refresh" / "events.jsonl"
-    assert events_file.exists()
-    event = json.loads(events_file.read_text().splitlines()[0])
-    assert event["type"] == "refresh_service"
-    assert event["service_name"] == "web"
-
-
-def test_refresh_service_request_without_agent_state_dir(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The request endpoint surfaces the config error when MNGR_AGENT_STATE_DIR is unset."""
-    monkeypatch.delenv("MNGR_AGENT_STATE_DIR", raising=False)
-    response = client.post("/api/refresh-service/web")
-    assert response.status_code == 500
-
-
 @pytest.mark.timeout(10)
-def test_refresh_service_broadcast_emits_ws_message(app: FastAPI) -> None:
-    """POST /api/refresh-service/{service_name}/broadcast sends a refresh_service WS message."""
+def test_layout_broadcast_open_emits_ws_message(app: FastAPI) -> None:
+    """POST /api/layout/broadcast with op=open emits a layout_op WS message."""
     with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
         with loopback_client.websocket_connect("/api/ws") as ws:
             # Drain the initial snapshot messages.
             json.loads(ws.receive_text())
             json.loads(ws.receive_text())
 
-            response = loopback_client.post("/api/refresh-service/web/broadcast")
+            response = loopback_client.post(
+                "/api/layout/broadcast",
+                json={"op": "open", "args": {"ref": "service:web"}, "agent_id": "agent-42"},
+            )
             assert response.status_code == 200
 
             msg = json.loads(ws.receive_text())
-            assert msg == {"type": "refresh_service", "service_name": "web"}
+            assert msg == {
+                "type": "layout_op",
+                "op": "open",
+                "args": {"ref": "service:web"},
+                "requester_agent_id": "agent-42",
+            }
 
 
-def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
-    """The broadcast endpoint refuses requests whose client host isn't loopback."""
+@pytest.mark.timeout(10)
+def test_layout_broadcast_refresh_bypasses_mutex(app: FastAPI) -> None:
+    """``refresh`` is read-only and never acquires the mutex."""
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        with loopback_client.websocket_connect("/api/ws") as ws:
+            json.loads(ws.receive_text())
+            json.loads(ws.receive_text())
+
+            response = loopback_client.post(
+                "/api/layout/broadcast",
+                json={"op": "refresh", "args": {"ref": "service:web"}, "agent_id": "agent-42"},
+            )
+            assert response.status_code == 200
+            msg = json.loads(ws.receive_text())
+            assert msg == {
+                "type": "layout_op",
+                "op": "refresh",
+                "args": {"ref": "service:web"},
+                "requester_agent_id": "agent-42",
+            }
+
+
+def test_layout_broadcast_rejects_non_loopback(app: FastAPI) -> None:
+    """The layout broadcast endpoint refuses non-loopback callers."""
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
-        response = remote_client.post("/api/refresh-service/web/broadcast")
+        response = remote_client.post(
+            "/api/layout/broadcast",
+            json={"op": "open", "args": {"ref": "service:web"}, "agent_id": "agent-42"},
+        )
     assert response.status_code == 403
+
+
+def test_layout_broadcast_rejects_unknown_op(app: FastAPI) -> None:
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "explode", "args": {}, "agent_id": "agent-42"},
+        )
+    assert response.status_code == 400
+    assert "Unknown layout op" in response.json()["detail"]
+
+
+def test_layout_broadcast_rejects_non_dict_args(app: FastAPI) -> None:
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "open", "args": ["not", "a", "dict"], "agent_id": "agent-42"},
+        )
+    assert response.status_code == 400
+
+
+def test_layout_broadcast_rejects_null_args(app: FastAPI) -> None:
+    """``args: null`` must be a 400, not silently coerced into ``{}``.
+
+    A previous implementation collapsed every falsy non-dict via ``or {}``,
+    which let mutating ops broadcast empty payloads that the frontend
+    handlers silently dropped.
+    """
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "close", "args": None, "agent_id": "agent-42"},
+        )
+    assert response.status_code == 400
+
+
+def test_layout_broadcast_mutex_returns_409_with_holder_metadata(app: FastAPI) -> None:
+    """While agent A holds the mutex, agent B's mutating op is rejected with 409."""
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        # Pre-acquire the mutex on behalf of agent-a so the test's request
+        # races against an active holder deterministically (no thread timing).
+        mutex: LayoutMutex = app.state.layout_mutex
+        held = mutex.try_acquire("agent-a", "move", {"ref": "service:web"})
+        assert held is None
+
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "split", "args": {"ref": "service:api"}, "agent_id": "agent-b"},
+        )
+    assert response.status_code == 409
+    body = response.json()
+    assert body["retry_after_ms"] > 0
+    in_flight = body["in_flight"]
+    assert in_flight["agent_id"] == "agent-a"
+    assert in_flight["operation"] == "move"
+    assert in_flight["args"] == {"ref": "service:web"}
+
+
+def test_layout_broadcast_inspect_reads_layout_json(
+    app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``inspect`` returns a ref-resolved summary of the saved layout."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-42")
+    layout_dir = tmp_path / "agents" / "agent-42" / "workspace_layout"
+    layout_dir.mkdir(parents=True)
+    (layout_dir / "layout.json").write_text(
+        json.dumps(
+            {
+                "dockview": {
+                    "panels": {
+                        "panel-1": {"id": "panel-1", "title": "web"},
+                        "panel-2": {"id": "panel-2", "title": "chat"},
+                    },
+                    "grid": {
+                        "root": {
+                            "type": "leaf",
+                            "data": {"views": ["panel-1", "panel-2"], "activeView": "panel-1", "size": 1.0},
+                        },
+                    },
+                },
+                "panelParams": {
+                    "panel-1": {"panelType": "iframe", "serviceName": "web"},
+                    "panel-2": {"panelType": "chat", "chatAgentId": "agent-42"},
+                },
+            }
+        )
+    )
+
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "inspect", "args": {}, "agent_id": "agent-42"},
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    layout_summary = payload["layout"]
+    refs = [p["ref"] for p in layout_summary["panels"]]
+    assert "service:web" in refs
+
+
+def test_layout_broadcast_list_includes_open_flag(
+    app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``list`` reads the saved layout to compute ``is_open`` per service."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-42")
+    layout_dir = tmp_path / "agents" / "agent-42" / "workspace_layout"
+    layout_dir.mkdir(parents=True)
+    (layout_dir / "layout.json").write_text(
+        json.dumps(
+            {
+                "dockview": {"panels": {"panel-1": {"id": "panel-1", "title": "web"}}},
+                "panelParams": {"panel-1": {"panelType": "iframe", "serviceName": "web"}},
+            }
+        )
+    )
+
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        response = loopback_client.post(
+            "/api/layout/broadcast",
+            json={"op": "list", "args": {}, "agent_id": "agent-42"},
+        )
+    assert response.status_code == 200
+    entries = response.json()["entries"]
+    # We don't know what services the agent_manager seeded; assert the
+    # endpoint shape and that ``is_open`` is bool-typed if any entry exists.
+    for entry in entries:
+        assert set(entry.keys()) == {"ref", "kind", "display_name", "is_open", "is_running"}
+        assert isinstance(entry["is_open"], bool)
+
+
+def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hitting /api/agents/{id}/events for a Claude session with an unmatched tool_use
+    seeds the AgentManager's transcript-derived signals so the activity indicator
+    reads ``TOOL_RUNNING`` immediately.
+    """
+    agent_id = "agent-pending-tool"
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", agent_id)
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path / "work"))
+
+    state_dir = tmp_path / "agents" / agent_id
+    state_dir.mkdir(parents=True)
+
+    claude_config_dir = tmp_path / "claude_config"
+    projects_dir = claude_config_dir / "projects" / "hash123"
+    projects_dir.mkdir(parents=True)
+    session_id = "test-session-id"
+    session_file = projects_dir / f"{session_id}.jsonl"
+    # An assistant message that includes a tool_use, with no matching tool_result.
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "uuid-1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [
+                        {"type": "text", "text": "running a command"},
+                        {"type": "tool_use", "id": "call_a", "name": "Bash", "input": {"command": "ls"}},
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            }
+        )
+        + "\n"
+    )
+    (state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
+
+    broadcaster = WebSocketBroadcaster()
+    manager = AgentManager.build(broadcaster)
+    with manager._lock:
+        manager._agents[agent_id] = AgentStateItem(
+            id=agent_id,
+            name="seed-agent",
+            state="RUNNING",
+            labels={},
+            work_dir=str(tmp_path / "work"),
+        )
+    manager._ensure_marker_watcher(agent_id)
+
+    app = create_application(agent_manager=manager)
+    agent_info = AgentInfo(
+        id=agent_id,
+        name="seed-agent",
+        state="RUNNING",
+        agent_state_dir=state_dir,
+        claude_config_dir=claude_config_dir,
+    )
+
+    try:
+        with TestClient(app) as test_client:
+            with patch("imbue.system_interface.server._find_agent", return_value=agent_info):
+                response = test_client.get(f"/api/agents/{agent_id}/events")
+            assert response.status_code == 200
+
+        # The watcher creation path seeds transcript-derived state
+        # synchronously. Assert before ``stop()``, which clears these
+        # caches alongside the marker watchers.
+        with manager._lock:
+            assert manager._has_unmatched_tool_use_by_agent[agent_id] is True
+            assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
+    finally:
+        manager.stop()
 
 
 @pytest.mark.timeout(5)

@@ -35,8 +35,10 @@ index, not a dependency.
 ## 2b: Write the verify-flow task file
 
 The task file carries the design rationale (why this change, what conversation
-led here) in your own words. The worker uses the diff as ground truth and the
-rationale to judge whether the implementation matches the agreed design.
+led here) in your own words. The worker uses the diff as ground truth, the
+rationale to judge whether the implementation matches the agreed design, and
+your lead transcript (via `mngr transcript`) to recover any conversational
+context the rationale alludes to.
 
 The task file's YAML frontmatter follows the schema documented in
 `.agents/shared/references/worker-reporting.md`.
@@ -46,7 +48,6 @@ cat > runtime/update/$TARGET/task.md << TASK_EOF
 ---
 lead_agent: $MNGR_AGENT_NAME
 lead_report_dir: runtime/update/$TARGET/reports/
-transcript_path: runtime/update/$TARGET/commit.diff
 ---
 
 # Task: verify the live update to \`$TARGET\`
@@ -67,6 +68,13 @@ If multiple commits, list them.>
 Design rationale:
 <why this design -- the conversation / constraint / invariant that
 drove it. This is what the worker checks the diff against.>
+
+## Anchors (verbatim quotes)
+The worker can use these with \`mngr transcript <lead_agent>\` to
+recover conversational context referenced by the rationale (e.g. why a
+particular alternative was rejected). Include 1-3 short quotes from
+the user that pinned down the design.
+<paste quotes here, one per bullet.>
 
 ## What to do
 Use the \`update-skill-worker\` sub-skill in the verify flow: skip
@@ -92,21 +100,17 @@ TASK_EOF
 
 ## 2c: Launch the worker and push the commit artifacts
 
-```bash
-mngr create update-$TARGET -t crystallize-worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file runtime/update/$TARGET/task.md
-```
-
-Push the `runtime/update/$TARGET/` dir so the worker has `task.md`,
-`commit.log`, and `commit.diff` under its worktree. See
-`.agents/shared/references/lead-proxy.md` § "mngr push rationale" for the
-directory-form and `--uncommitted-changes=merge` requirements.
+The shared `launch-task` dispatcher runs `mngr create`, pushes the
+`runtime/update/$TARGET/` dir (so the worker has `task.md`, `commit.log`,
+and `commit.diff` under its worktree), and sends the task as a follow-up
+message so the worker sees the runtime dir first.
 
 ```bash
-mngr push update-$TARGET:runtime/update/$TARGET/ \
-    --source runtime/update/$TARGET/ \
-    --uncommitted-changes=merge
+uv run .agents/skills/launch-task/scripts/dispatch.py \
+    --name update-$TARGET \
+    --template crystallize-worker \
+    --runtime-dir runtime/update/$TARGET/ \
+    --task-file runtime/update/$TARGET/task.md
 ```
 
 Return to `SKILL.md` Step 3 to proxy the Gate 2 (final-artifact) report
