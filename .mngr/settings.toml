@@ -24,7 +24,17 @@ host_env = [
     "TICKETS_DIR=/code/runtime/tickets",
 ]
 worktree_base_folder = "/worktree/"
-disable_plugin = ["recursive", "ttyd"]
+# claude_subagent_proxy is upstream mngr's experimental Claude-Code-Task ->
+# mngr-managed-subagent proxy. It is not used here. Without this disable, when
+# the proxy plugin is present in the system-tool mngr install it gets the
+# on_after_provisioning hook fired, which installs a PreToolUse:Agent hook
+# (spawn.py) into each new agent's .claude/settings.local.json -- and that
+# hook then wedges parent agents in a Haiku retry loop whenever it hits a
+# permanent error (e.g. the proxy package isn't in /code/.venv, or
+# `mngr-proxy-child` isn't a registered agent type in the resolved mngr).
+# The disable is non-strict (commands.create.disable_plugin path), so this is
+# safe even on installs that don't include the proxy plugin at all.
+disable_plugin = ["recursive", "ttyd", "claude_subagent_proxy"]
 yes = true
 
 # for the list command -- ensures that we don't see other agents when we're listing, even if we happen to list remote agents
@@ -37,7 +47,7 @@ include = ["""has(labels.workspace)"""]
 [agent_types.claude]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
-cli_args = """--dangerously-skip-permissions"""
+cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode"""
 settings_overrides = {model = "opus[1m]", fastMode = false}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
