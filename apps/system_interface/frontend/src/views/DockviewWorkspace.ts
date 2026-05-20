@@ -508,33 +508,19 @@ function openIframeTab(url: string, title: string, panelType: PanelType = "ifram
 
 /** Find the chat panel id to anchor an agent-initiated split against.
  *
- *  Preference order:
- *    1. ``chat-<requesterAgentId>`` -- the chat tab of the agent that
- *       invoked ``scripts/layout.py``. This is what we want in the common
- *       case where an agent is splitting a service next to its own chat.
- *    2. ``chat-<getPrimaryAgentId()>`` -- the workspace's primary chat
- *       tab, used as a fallback when the requester id is empty (no
- *       ``MNGR_AGENT_ID`` in the caller's env) or when the requester
- *       doesn't have an open chat panel.
- *    3. Any open chat panel -- final fallback so the split still anchors
- *       against *some* chat instead of degrading to a plain new tab when
- *       a chat is on screen.
- *  Returns null when no chat panel is open at all. */
+ *  Strict identity: the only acceptable anchor is the requester's own chat
+ *  tab (``chat-<requesterAgentId>``). Returns null when the requester id is
+ *  empty or their chat panel isn't open -- callers then either fall through
+ *  to a non-chat-anchored placement (``handleOpenTabRequest``) or no-op
+ *  (``handleSplit`` / ``handleMove`` skip the relative_to=self branch). We
+ *  intentionally do not auto-select another agent's chat: that would let
+ *  ``layout.py split web`` from agent A land next to agent B's chat
+ *  whenever A's chat happens not to be on screen, which is surprising. */
 function findAnchorChatPanelId(requesterAgentId: string): string | null {
   if (!dockview) return null;
-  const candidates: string[] = [];
-  if (requesterAgentId) candidates.push(`chat-${requesterAgentId}`);
-  const primaryId = getPrimaryAgentId();
-  if (primaryId) candidates.push(`chat-${primaryId}`);
-  for (const candidate of candidates) {
-    if (dockview.panels.find((p) => p.id === candidate)) return candidate;
-  }
-  for (const [panelId, params] of panelParams) {
-    if (params.panelType === "chat" && dockview.panels.find((p) => p.id === panelId)) {
-      return panelId;
-    }
-  }
-  return null;
+  if (!requesterAgentId) return null;
+  const candidate = `chat-${requesterAgentId}`;
+  return dockview.panels.find((p) => p.id === candidate) ? candidate : null;
 }
 
 /** Find an existing iframe panel for ``serviceName``, or null. */
@@ -610,10 +596,12 @@ function findSiblingGroupInDirection(
  *
  *  Resolution order:
  *    1. If a panel for ``serviceName`` is already open, focus it.
- *    2. If a chat panel is available to anchor against (preferring the
- *       requesting agent's own chat, then the primary's, then any open
- *       chat), add a right-split iframe sized to
- *       ``OPEN_TAB_SPLIT_FRACTION`` of the dockview container width.
+ *    2. If the *requester's own* chat panel is open, add a right-split
+ *       iframe sized to ``OPEN_TAB_SPLIT_FRACTION`` of the dockview
+ *       container width, anchored on that chat. The previous broader
+ *       fallback (primary's chat, then any open chat) was dropped to
+ *       avoid landing one agent's service next to a different agent's
+ *       chat just because the requester's chat happened to be closed.
  *    3. Otherwise, add a plain iframe tab with dockview's default placement.
  *  Drop silently if the service isn't registered in ``applications`` yet --
  *  the script polls registration, but the WS broadcast itself is fire-and-
@@ -862,12 +850,10 @@ async function resolveRefToPanelId(ref: string, requesterAgentId: string): Promi
   if (ref === "self") {
     // ``self`` is the *identity* ref for the caller's own chat panel
     // (``chat-<requesterAgentId>``). Returns null when the requester
-    // didn't set ``MNGR_AGENT_ID`` or when their chat tab isn't open --
-    // identity ops like ``close self`` / ``rename self`` / ``maximize
-    // self`` must not silently retarget another agent's chat panel, so
-    // the broader anchor fallback in ``findAnchorChatPanelId`` is only
-    // applied by ``handleSplit`` / ``handleMove`` for their
-    // ``relative_to`` argument.
+    // didn't set ``MNGR_AGENT_ID`` or when their chat tab isn't open.
+    // All layout ops (including ``relative_to=self`` on split/move)
+    // honor this strict identity to avoid silently retargeting another
+    // agent's chat.
     if (!requesterAgentId) return null;
     const candidate = `chat-${requesterAgentId}`;
     return dockview.panels.find((p) => p.id === candidate) ? candidate : null;
@@ -1004,14 +990,10 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
   const forceNewGroup = args.new_group === true;
   if (!ref || !relativeTo) return;
 
-  // ``relative_to`` is an anchor: when the caller passes ``self`` but
-  // their own chat isn't open (or they didn't set ``MNGR_AGENT_ID``),
-  // fall back through ``findAnchorChatPanelId`` so the split still
-  // attaches to *some* chat instead of degrading to a plain new tab.
-  const referencePanelId =
-    relativeTo === "self"
-      ? ((await resolveRefToPanelId("self", requesterAgentId)) ?? findAnchorChatPanelId(requesterAgentId))
-      : await resolveRefToPanelId(relativeTo, requesterAgentId);
+  // ``relative_to=self`` strictly anchors against the requester's own chat
+  // panel. If their chat isn't open (or they didn't set ``MNGR_AGENT_ID``),
+  // the op is a no-op rather than landing next to some other agent's chat.
+  const referencePanelId = await resolveRefToPanelId(relativeTo, requesterAgentId);
   if (referencePanelId === null) return;
 
   if (!ref.startsWith("service:") && !ref.startsWith("chat:")) {
@@ -1129,12 +1111,9 @@ async function handleMove(args: Record<string, unknown>, requesterAgentId: strin
   const forceNewGroup = args.new_group === true;
   if (!ref || !relativeTo || !direction) return;
   const targetPanelId = await resolveRefToPanelId(ref, requesterAgentId);
-  // ``relative_to`` is an anchor (see ``handleSplit``): fall back to
-  // ``findAnchorChatPanelId`` when ``self`` doesn't strictly resolve.
-  const referencePanelId =
-    relativeTo === "self"
-      ? ((await resolveRefToPanelId("self", requesterAgentId)) ?? findAnchorChatPanelId(requesterAgentId))
-      : await resolveRefToPanelId(relativeTo, requesterAgentId);
+  // ``relative_to`` follows the same strict-identity rule as ``handleSplit``:
+  // ``self`` resolves to the requester's chat or nothing.
+  const referencePanelId = await resolveRefToPanelId(relativeTo, requesterAgentId);
   if (targetPanelId === null || referencePanelId === null) return;
   const targetPanel = dockview.panels.find((p) => p.id === targetPanelId);
   const referencePanel = dockview.panels.find((p) => p.id === referencePanelId);
