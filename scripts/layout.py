@@ -43,7 +43,8 @@ from typing import Any
 import tomlkit
 import yaml
 
-APPLICATIONS_FILE = Path("runtime/applications.toml")
+DEFAULT_APPLICATIONS_FILE = "runtime/applications.toml"
+ENV_APPLICATIONS_FILE = "MINDS_APPLICATIONS_FILE"
 DEFAULT_WORKSPACE_URL = "http://127.0.0.1:8000"
 ENV_WORKSPACE_URL = "MINDS_WORKSPACE_SERVER_URL"
 ENV_MNGR_AGENT_ID = "MNGR_AGENT_ID"
@@ -83,6 +84,17 @@ def _mngr_agent_id() -> str:
     return os.environ.get(ENV_MNGR_AGENT_ID, "")
 
 
+def _applications_file() -> Path:
+    """Path to the agent's applications.toml registry.
+
+    Defaults to ``runtime/applications.toml`` relative to cwd (the script
+    is invoked from the agent's repo root). Override via
+    ``MINDS_APPLICATIONS_FILE`` -- used by tests to point at a sandboxed
+    fixture without depending on cwd.
+    """
+    return Path(os.environ.get(ENV_APPLICATIONS_FILE, DEFAULT_APPLICATIONS_FILE))
+
+
 def _read_application_names(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -98,7 +110,7 @@ def _read_application_names(path: Path) -> list[str]:
 
 
 def _is_service_registered(name: str) -> bool:
-    return name in _read_application_names(APPLICATIONS_FILE)
+    return name in _read_application_names(_applications_file())
 
 
 def _wait_for_registration(name: str, timeout: float) -> bool:
@@ -246,7 +258,7 @@ def _cmd_open(args: argparse.Namespace) -> int:
         service_name = ref.removeprefix("service:")
         if not _wait_for_registration(service_name, _REGISTRATION_TIMEOUT_SECONDS):
             sys.stderr.write(
-                f"error: service {service_name!r} is not registered in {APPLICATIONS_FILE} "
+                f"error: service {service_name!r} is not registered in {_applications_file()} "
                 f"after waiting {_REGISTRATION_TIMEOUT_SECONDS:.0f}s. "
                 f"Did you forward_port.py / start the service?\n"
             )
@@ -274,7 +286,7 @@ def _cmd_split(args: argparse.Namespace) -> int:
         service_name = ref.removeprefix("service:")
         if not _wait_for_registration(service_name, _REGISTRATION_TIMEOUT_SECONDS):
             sys.stderr.write(
-                f"error: service {service_name!r} is not registered in {APPLICATIONS_FILE} "
+                f"error: service {service_name!r} is not registered in {_applications_file()} "
                 f"after waiting {_REGISTRATION_TIMEOUT_SECONDS:.0f}s.\n"
             )
             return EXIT_NOT_REGISTERED

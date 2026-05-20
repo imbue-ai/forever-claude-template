@@ -106,7 +106,7 @@ def test_inspect_emits_layout_payload(monkeypatch: pytest.MonkeyPatch, capsys: p
 def test_open_waits_for_registration_then_posts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     apps_file = tmp_path / "applications.toml"
     _write_apps_toml(apps_file, ["web"])
-    monkeypatch.setattr(layout, "APPLICATIONS_FILE", apps_file)
+    monkeypatch.setenv(layout.ENV_APPLICATIONS_FILE, str(apps_file))
 
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
@@ -121,7 +121,7 @@ def test_open_fails_when_service_not_registered(
 ) -> None:
     apps_file = tmp_path / "applications.toml"
     _write_apps_toml(apps_file, ["other"])
-    monkeypatch.setattr(layout, "APPLICATIONS_FILE", apps_file)
+    monkeypatch.setenv(layout.ENV_APPLICATIONS_FILE, str(apps_file))
     monkeypatch.setattr(layout, "_REGISTRATION_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(layout, "_REGISTRATION_POLL_INTERVAL_SECONDS", 0.01)
 
@@ -138,7 +138,7 @@ def test_open_fails_when_service_not_registered(
 def test_open_full_ref_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     apps_file = tmp_path / "applications.toml"
     _write_apps_toml(apps_file, ["web"])
-    monkeypatch.setattr(layout, "APPLICATIONS_FILE", apps_file)
+    monkeypatch.setenv(layout.ENV_APPLICATIONS_FILE, str(apps_file))
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
@@ -151,7 +151,7 @@ def test_open_new_group_flag_sets_payload(tmp_path: Path, monkeypatch: pytest.Mo
     """``--new-group`` opts out of the share-existing-group default."""
     apps_file = tmp_path / "applications.toml"
     _write_apps_toml(apps_file, ["web"])
-    monkeypatch.setattr(layout, "APPLICATIONS_FILE", apps_file)
+    monkeypatch.setenv(layout.ENV_APPLICATIONS_FILE, str(apps_file))
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
