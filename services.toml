@@ -3,8 +3,7 @@
 # See the edit-services skill for details.
 
 [services.system_interface]
-command = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && minds-workspace-server"
-restart = "on-failure"
+command = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
 
 [services.web]
 command = "python3 scripts/forward_port.py --url http://localhost:8080 --name web && uv run web-server"
@@ -25,3 +24,11 @@ restart = "on-failure"
 [services.runtime-backup]
 command = "uv run runtime-backup"
 restart = "on-failure"
+
+# Idempotently installs deferred packages on first container boot
+# (currently just Playwright + Chromium + its apt system libs). Skips
+# work when /var/lib/minds/deferred-install/done.<package> is present,
+# so this is fast on every restart after the first. See
+# scripts/deferred_install.sh and libs/bootstrap/README.md.
+[services.deferred-install]
+command = "bash scripts/deferred_install.sh"

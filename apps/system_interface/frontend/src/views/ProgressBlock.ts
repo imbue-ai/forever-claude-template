@@ -73,6 +73,19 @@ function statusIcon(status: TaskUiStatus, continues_forward: boolean): m.Vnode {
   );
 }
 
+/** Single sub-caption under the task title:
+ *   - done + summary    -> render the close summary
+ *   - done + no summary -> render nothing (clean final state)
+ *   - active            -> render the latest in-window narration, if any
+ *   - pending           -> render nothing (no window yet)
+ */
+function renderTaskCaption(task: TaskInTurn): m.Vnode | null {
+  if (task.status === "done") {
+    return task.summary ? m("div.pv-tl-summary", task.summary) : null;
+  }
+  return task.narration ? m("div.pv-tl-narration", task.narration) : null;
+}
+
 function renderExpandedTaskBody(
   events: TranscriptEvent[],
   toolResults: Map<string, TranscriptEvent>,
@@ -86,16 +99,15 @@ function renderExpandedTaskBody(
 
   // Reuse renderAssistantMessageChildren so the expanded panel renders
   // assistant text + tool calls identically to the rest of the chat
-  // (interleaved markdown + tool-call-block chrome).
+  // (interleaved markdown + tool-call-block chrome). Text-only messages
+  // also belong here: they're part of the task's history. The most
+  // recent one additionally surfaces as the always-visible narration
+  // slot under the task title -- some small duplication for the latest
+  // entry is fine, and earlier text-only messages would otherwise
+  // disappear entirely from view.
   const children: m.Children[] = [];
   for (const e of events) {
     if (e.type !== "assistant_message") continue;
-    // Text-only assistant_messages are pulled to the top level (rendered
-    // as separate `pv-final` blocks below the timeline) so they remain
-    // visible even when a task is left open at turn end. Skipping them
-    // here avoids rendering the same prose twice.
-    const hasTools = !!(e.tool_calls && e.tool_calls.length > 0);
-    if (!hasTools && e.text) continue;
     children.push(...renderAssistantMessageChildren(e, toolResults, agentId));
   }
 
@@ -115,6 +127,102 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
     }
   }
 
+  function renderTaskNode(
+    task: TaskInTurn,
+    options: {
+      is_last: boolean;
+      is_child: boolean;
+      body_events: TranscriptEvent[];
+      toolResults: Map<string, TranscriptEvent>;
+      agentId: string;
+    },
+  ): m.Vnode {
+    const { is_last, is_child, body_events, toolResults, agentId } = options;
+    const taskEvents = eventsInTaskWindow(task, body_events);
+    // A task is "expandable" when its window contains any assistant
+    // content -- tool calls or plain text. Text-only messages also
+    // render in the expanded panel (the latest one additionally
+    // surfaces as the always-visible narration slot), so an
+    // assistant_message of either flavour is enough to warrant
+    // expand.
+    const canExpand = taskEvents.some(
+      (e) => e.type === "assistant_message" && (!!(e.tool_calls && e.tool_calls.length > 0) || !!e.text),
+    );
+    const isExpanded = expanded.has(task.ticket_id);
+    // The kind class drives the chrome difference between a regular
+    // ticket and a step record: tickets get a heavier title + an id
+    // badge; steps render slimmer / de-emphasized. The child class
+    // adds the indent rail for nested step children. is_last applies
+    // to standalone nodes (and to the last sibling among children
+    // separately, controlled by the children renderer).
+    const kindClass = task.is_step ? "pv-tl-node--step" : "pv-tl-node--ticket";
+    const nodeClasses = [
+      "pv-tl-node",
+      `pv-tl-node--${task.status}`,
+      kindClass,
+      is_child ? "pv-tl-node--child" : "",
+      is_last ? "pv-tl-node--last" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return m(
+      "div",
+      { class: nodeClasses, key: task.ticket_id + (task.is_carryover ? "-carry" : "") + (is_child ? "-c" : "") },
+      [
+        m("div.pv-tl-bullet", statusIcon(task.status, task.continues_forward)),
+        m("div.pv-tl-body", [
+          m(
+            "button",
+            {
+              type: "button",
+              class: "pv-tl-title",
+              disabled: !canExpand,
+              onclick: canExpand ? () => toggle(task.ticket_id) : undefined,
+            },
+            [
+              // Id badge for regular tickets only -- gives the user a
+              // visible handle on which tk ticket this row corresponds
+              // to (matches the `tk show <id>` partial-id lookup). Steps
+              // are agent-private and don't need it.
+              !task.is_step
+                ? m("span.pv-tl-id-badge", { title: `Ticket ${task.ticket_id}` }, `[${task.ticket_id}]`)
+                : null,
+              task.title,
+              task.continues_forward
+                ? m(
+                    "span.pv-carryover-tag",
+                    { title: "This task continues in the next turn" },
+                    "continued in next turn",
+                  )
+                : null,
+              canExpand
+                ? m("span", { class: `pv-chev ${isExpanded ? "pv-chev--open" : ""}` }, m.trust("&rsaquo;"))
+                : null,
+            ],
+          ),
+          renderTaskCaption(task),
+          isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, toolResults, agentId)) : null,
+          // Nested step children (only for parent tickets in practice).
+          task.children.length > 0
+            ? m(
+                "div.pv-tl-children",
+                task.children.map((child, ci) =>
+                  renderTaskNode(child, {
+                    is_last: ci === task.children.length - 1,
+                    is_child: true,
+                    body_events,
+                    toolResults,
+                    agentId,
+                  }),
+                ),
+              )
+            : null,
+        ]),
+      ],
+    );
+  }
+
   return {
     view(vnode) {
       const { tasks, body_events, toolResults, final_messages, agentId } = vnode.attrs;
@@ -130,53 +238,15 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
       // Putting the keyed task vnodes inside their own container keeps
       // them a homogeneous (all-keyed) fragment and lets the unkeyed
       // thread sit next to them without violating the rule.
-      const taskNodes = tasks.map((task, idx) => {
-        const isLast = idx === tasks.length - 1;
-        const taskEvents = eventsInTaskWindow(task, body_events);
-        // A task is "expandable" only if it has assistant_messages with
-        // tool_calls to show. Text-only assistant_messages get pulled to
-        // the top level (see ProgressBlockAttrs.final_messages), so a
-        // task whose window contains only text-only messages would have
-        // an empty expanded panel -- avoid offering expansion in that
-        // case.
-        const canExpand = taskEvents.some(
-          (e) => e.type === "assistant_message" && !!(e.tool_calls && e.tool_calls.length > 0),
-        );
-        const isExpanded = expanded.has(task.ticket_id);
-        const nodeClasses = ["pv-tl-node", `pv-tl-node--${task.status}`, isLast ? "pv-tl-node--last" : ""]
-          .filter(Boolean)
-          .join(" ");
-
-        return m("div", { class: nodeClasses, key: task.ticket_id + (task.is_carryover ? "-carry" : "") }, [
-          m("div.pv-tl-bullet", statusIcon(task.status, task.continues_forward)),
-          m("div.pv-tl-body", [
-            m(
-              "button",
-              {
-                type: "button",
-                class: "pv-tl-title",
-                disabled: !canExpand,
-                onclick: canExpand ? () => toggle(task.ticket_id) : undefined,
-              },
-              [
-                task.title,
-                task.continues_forward
-                  ? m(
-                      "span.pv-carryover-tag",
-                      { title: "This task continues in the next turn" },
-                      "continued in next turn",
-                    )
-                  : null,
-                canExpand
-                  ? m("span", { class: `pv-chev ${isExpanded ? "pv-chev--open" : ""}` }, m.trust("&rsaquo;"))
-                  : null,
-              ],
-            ),
-            task.status === "done" && task.summary ? m("div.pv-tl-summary", task.summary) : null,
-            isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, toolResults, agentId)) : null,
-          ]),
-        ]);
-      });
+      const taskNodes = tasks.map((task, idx) =>
+        renderTaskNode(task, {
+          is_last: idx === tasks.length - 1,
+          is_child: false,
+          body_events,
+          toolResults,
+          agentId,
+        }),
+      );
 
       return m("div.progress-block", [
         m("div.pv.pv--timeline", [

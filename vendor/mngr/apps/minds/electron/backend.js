@@ -4,6 +4,21 @@ const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
 
+// Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
+// launches go through a pipe (e.g. `just minds-start | head -30`), the
+// reader can exit while the backend is still alive, leaving subsequent
+// writes from the dev-mode forwarder (below) to raise EPIPE asynchronously
+// as an 'error' event. Without this handler the unhandled error surfaces
+// as a JS alert in the Electron window. We log nothing because the
+// downstream consumer is gone -- the log file is the durable record.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err) => {
+    if (!err || err.code !== 'EPIPE') {
+      throw err;
+    }
+  });
+}
+
 let backendProcess = null;
 
 /**
@@ -53,6 +68,59 @@ function waitForPort(host, port, maxAttempts = 50, intervalMs = 200) {
 }
 
 /**
+ * Check whether a port is free (nothing listening on it).
+ *
+ * Attempts a TCP connection to 127.0.0.1:port. If the connection succeeds
+ * (something is listening), the port is occupied. If it fails with ECONNREFUSED,
+ * the port is free.
+ *
+ * Returns a Promise<boolean> -- true if free, false if occupied.
+ */
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(500);
+    socket.once('connect', () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once('error', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('timeout', () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.connect(port, '127.0.0.1');
+  });
+}
+
+/**
+ * Wait for a port to become free, polling at intervalMs up to timeoutMs.
+ *
+ * Returns a Promise<boolean> -- true if the port became free within the
+ * timeout, false if it is still occupied.
+ */
+function waitForPortFree(port, timeoutMs = 6000, intervalMs = 200) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    function poll() {
+      isPortFree(port).then((free) => {
+        if (free) {
+          resolve(true);
+        } else if (Date.now() >= deadline) {
+          resolve(false);
+        } else {
+          setTimeout(poll, intervalMs);
+        }
+      });
+    }
+    poll();
+  });
+}
+
+/**
  * Spawn the Python backend and wait for the login URL.
  *
  * The backend emits structured JSONL events to stdout (via --format jsonl)
@@ -65,11 +133,18 @@ function waitForPort(host, port, maxAttempts = 50, intervalMs = 200) {
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
  */
-function startBackend(onProgress, onNotification, onAuthEvent) {
+function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStarted) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
-    findAvailablePort().then((port) => {
+    findAvailablePort().then(async (port) => {
+      // A stale backend from a previous app instance may still be shutting
+      // down on this port. Wait up to 6 seconds for it to release the port.
+      const isFree = await waitForPortFree(port);
+      if (!isFree) {
+        // Port is still occupied -- pick a different one.
+        port = await findAvailablePort();
+      }
       const logDir = paths.getLogDir();
 
       // Ensure log directory exists
@@ -85,6 +160,14 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
       const mindsRootName = paths.getMindsRootName();
       const mngrHostDir = paths.getMngrHostDir();
       const mngrPrefix = paths.getMngrPrefix();
+      // When build.js embedded a client.toml + root_name pair (production
+      // / staging / beta packaged builds), pass --config-file explicitly
+      // so the backend doesn't have to fall back to MINDS_CLIENT_CONFIG_PATH.
+      // Dev-mode builds (no bundle) inherit MINDS_CLIENT_CONFIG_PATH from
+      // the user's activated shell instead; the backend refuses to start
+      // if neither path is set.
+      const bundledClientConfig = paths.getBundledClientConfigPath();
+      const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 
       if (paths.isDev()) {
         // Dev mode: use system uv with the monorepo workspace venv
@@ -93,10 +176,11 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           'run', '--package', 'minds',
           'minds', '-vv', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
-          'forward',
+          'run',
           '--host', '127.0.0.1',
           '--port', String(port),
           '--no-browser',
+          ...configFileArgs,
         ];
         cwd = paths.getMonorepoRoot();
         env = {
@@ -122,10 +206,11 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
           'run', '--project', pyprojectDir,
           'minds', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
-          'forward',
+          'run',
           '--host', '127.0.0.1',
           '--port', String(port),
           '--no-browser',
+          ...configFileArgs,
         ];
         cwd = pyprojectDir;
         env = {
@@ -184,6 +269,8 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
               onNotification(event);
             } else if ((event.event === 'auth_success' || event.event === 'auth_required') && onAuthEvent) {
               onAuthEvent(event);
+            } else if (event.event === 'mngr_forward_started' && onMngrForwardStarted) {
+              onMngrForwardStarted(event);
             }
           } catch {
             // Not valid JSON -- just log it
@@ -191,12 +278,23 @@ function startBackend(onProgress, onNotification, onAuthEvent) {
         }
       });
 
-      // Stderr is human-readable logging -- capture to log file and console
+      // Stderr is human-readable logging -- capture to log file and console.
+      // The dev-mode forward to process.stderr can throw EPIPE if the parent
+      // (e.g. a `just` recipe whose stdout was piped through `head`) goes
+      // away while the backend is still emitting log lines. We swallow the
+      // error: the log file is the durable record, and a broken parent pipe
+      // should never bring down the Electron main process.
       child.stderr.on('data', (data) => {
         const text = data.toString();
         logStream.write(text);
         if (paths.isDev()) {
-          process.stderr.write(text);
+          try {
+            process.stderr.write(text);
+          } catch (err) {
+            if (err && err.code !== 'EPIPE') {
+              throw err;
+            }
+          }
         }
       });
 

@@ -36,6 +36,15 @@ Why ``mngr message`` *after* the pushes (instead of using ``mngr create
 dir push lands in its worktree, the task file's ``lead_report_dir`` will
 resolve to nothing. Sending the task as a follow-up message guarantees the
 worker sees the runtime dir first.
+
+Common-transcript flush: right before sending the task message we invoke the
+lead's own ``common_transcript.sh --single-pass`` converter (when present).
+This guarantees the worker's first ``mngr transcript <lead>`` read includes
+every turn up through the handoff -- the converter normally polls on a 5s
+interval, which races with worker startup. It only freshens through the
+handoff moment; later lead turns won't appear until the poller catches up,
+which is fine for the anchored-lookup pattern (workers locate quotes the
+lead already pasted into the task body).
 """
 
 from __future__ import annotations
@@ -46,6 +55,9 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Sequence
+
+
+_COMMON_TRANSCRIPT_REL = Path("commands/common_transcript.sh")
 
 
 def _normalize_dir(value: str) -> str:
@@ -62,6 +74,37 @@ class Runner:
 
     def run(self, argv: Sequence[str], **kwargs):
         return subprocess.run(list(argv), **kwargs)
+
+
+def _flush_common_transcript(state_dir: Path | None, runner: Runner) -> None:
+    """Run the lead's common-transcript converter once, synchronously.
+
+    No-op when ``state_dir`` is unset (tests, non-mngr environments) or the
+    converter script isn't installed at the standard path (non-claude agents
+    don't have it). See module docstring for why this runs before the message
+    send.
+
+    Best-effort by design: this is a freshness optimization that merely
+    races the converter's 5s poller, so a converter failure must not
+    abort dispatch (which would orphan a half-launched worker between
+    the runtime push and the message send). On non-zero exit we log a
+    warning to stderr and let dispatch continue; the worker will see
+    whatever the periodic poller has already produced.
+    """
+    if state_dir is None:
+        return
+    script = state_dir / _COMMON_TRANSCRIPT_REL
+    if not script.is_file():
+        return
+    result = runner.run([str(script), "--single-pass"], check=False)
+    returncode = getattr(result, "returncode", 0)
+    if returncode != 0:
+        print(
+            f"dispatch: warning: common_transcript.sh --single-pass exited "
+            f"{returncode}; worker will read whatever the periodic poller "
+            f"has already produced",
+            file=sys.stderr,
+        )
 
 
 def push(name: str, source_dir: Path, runner: Runner) -> None:
@@ -92,12 +135,18 @@ def dispatch(
     task_file: Path,
     extra_pushes: Sequence[Path],
     workspace: str,
+    state_dir: Path | None = None,
     runner: Runner | None = None,
 ) -> int:
     """Run the dispatch lifecycle. Returns the process exit code.
 
     Pre-flight checks (existence of ``runtime_dir``, ``task_file``, every
     ``extra_pushes`` entry) run first so a typo doesn't half-create a worker.
+
+    ``state_dir`` is the lead's ``MNGR_AGENT_STATE_DIR``; when set, the
+    converter at ``<state_dir>/commands/common_transcript.sh`` is flushed
+    before the task message lands so the worker's first transcript read
+    sees fresh events.
     """
     runner = runner or Runner()
 
@@ -133,6 +182,8 @@ def dispatch(
     push(name, runtime_dir, runner)
     for extra in extra_pushes:
         push(name, extra, runner)
+
+    _flush_common_transcript(state_dir, runner)
 
     runner.run(
         [
@@ -183,6 +234,8 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
     args = parser.parse_args(argv)
 
     workspace = os.environ.get("MINDS_WORKSPACE_NAME", "default")
+    state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR")
+    state_dir = Path(state_dir_env) if state_dir_env else None
 
     return dispatch(
         name=args.name,
@@ -191,6 +244,7 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
         task_file=args.task_file,
         extra_pushes=tuple(args.extra_push),
         workspace=workspace,
+        state_dir=state_dir,
         runner=runner,
     )
 

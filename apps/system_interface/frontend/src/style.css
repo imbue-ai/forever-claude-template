@@ -1455,6 +1455,471 @@ body {
 
 /* share-modal-btn-create uses the base .share-modal-btn styling (dark button) */
 
+/* === Claude login modal === */
+
+@keyframes claude-login-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes claude-login-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes claude-login-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.claude-login-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 20, 20, 0.45);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  animation: claude-login-overlay-in 150ms ease-out;
+}
+
+.claude-login-modal {
+  position: relative;
+  background: var(--color-surface);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 460px;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.06),
+    0 16px 40px rgba(0, 0, 0, 0.18);
+  animation: claude-login-modal-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.claude-login-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--color-border-faint);
+}
+
+.claude-login-title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+  letter-spacing: -0.005em;
+}
+
+.claude-login-close {
+  background: transparent;
+  border: none;
+  width: 28px;
+  height: 28px;
+  margin: -4px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background 100ms ease,
+    color 100ms ease;
+}
+
+.claude-login-close:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.claude-login-close:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.claude-login-body {
+  padding: 18px 22px 4px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.claude-login-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 22px 18px;
+  border-top: 1px solid var(--color-border-faint);
+}
+
+.claude-login-footer--spread {
+  justify-content: space-between;
+}
+
+.claude-login-intro {
+  color: var(--color-text-secondary);
+  margin: 0 0 14px;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+/* Provider cards */
+.claude-login-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.claude-login-provider {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+  padding: 12px 14px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    border-color 100ms ease,
+    background 100ms ease,
+    transform 80ms ease;
+  position: relative;
+  font: inherit;
+  color: inherit;
+}
+
+.claude-login-provider:hover {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+}
+
+.claude-login-provider:active {
+  transform: scale(0.995);
+}
+
+.claude-login-provider:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.claude-login-provider-label {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.claude-login-provider-description {
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+/* Numbered steps (OAuth flow) */
+.claude-login-step {
+  margin-bottom: 16px;
+}
+
+.claude-login-step:last-child {
+  margin-bottom: 0;
+}
+
+.claude-login-step-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 8px;
+}
+
+.claude-login-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+/* URL display */
+.claude-login-url-box {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--color-bg);
+}
+
+.claude-login-url {
+  flex: 1 1 auto;
+  padding: 10px 12px;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--color-accent);
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  max-height: 88px;
+  overflow-y: auto;
+  background: transparent;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  min-width: 0;
+}
+
+.claude-login-url:hover {
+  text-decoration: underline;
+  filter: brightness(1.1);
+}
+
+.claude-login-url:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.claude-login-url-action {
+  flex: none;
+  padding: 0 14px;
+  font-size: 0.8125rem;
+  background: var(--color-surface);
+  border: none;
+  border-left: 1px solid var(--color-border);
+  cursor: pointer;
+  color: var(--color-accent);
+  font-weight: 500;
+  transition: background 80ms ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.claude-login-url-action:hover {
+  background: var(--color-accent-light);
+}
+
+.claude-login-url-action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+/* Inputs */
+.claude-login-field {
+  display: flex;
+  flex-direction: column;
+}
+
+.claude-login-input-wrap {
+  position: relative;
+  display: flex;
+}
+
+.claude-login-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 0.875rem;
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+  transition:
+    border-color 80ms ease,
+    box-shadow 80ms ease;
+  font-family: inherit;
+}
+
+.claude-login-input--mono {
+  font-family: var(--font-family-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.01em;
+}
+
+.claude-login-input--with-action {
+  padding-right: 64px;
+}
+
+.claude-login-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(47, 107, 79, 0.15);
+}
+
+.claude-login-input-action {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.claude-login-input-action:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+
+.claude-login-helper {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* Buttons */
+.claude-login-button {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 80ms ease,
+    border-color 80ms ease;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: inherit;
+}
+
+.claude-login-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.claude-login-button--ghost {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+}
+
+.claude-login-button--ghost:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.claude-login-button--primary {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+
+.claude-login-button--primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.claude-login-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Inline error callout */
+.claude-login-error-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #fdecea;
+  border: 1px solid #f4c7c3;
+  border-radius: 8px;
+  color: #80261f;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  margin-bottom: 14px;
+}
+
+.claude-login-error-callout svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+/* Full-bleed status state (verifying / success / error) */
+.claude-login-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 16px 8px 8px;
+}
+
+.claude-login-status-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+
+.claude-login-status-icon--success {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+}
+
+.claude-login-status-icon--error {
+  background: #fdecea;
+  color: #c5221f;
+}
+
+.claude-login-status-icon--loading {
+  background: transparent;
+  color: var(--color-accent);
+}
+
+.claude-login-status-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 4px;
+}
+
+.claude-login-status-detail {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+  max-width: 320px;
+}
+
+.claude-login-spinner {
+  width: 32px;
+  height: 32px;
+  animation: claude-login-spin 800ms linear infinite;
+}
+
 /* ─────────────────────────────────────────────────────────────────────
    PROGRESS VIEW (per-turn task timeline rendered from tk tickets)
    ─────────────────────────────────────────────────────────────────── */
@@ -1619,6 +2084,56 @@ body {
   font-size: 13.5px;
   color: var(--pv-summary-fg);
   line-height: 1.55;
+}
+
+/* Id badge in front of regular-ticket titles. Visually subtle -- the
+   title is the primary thing the user reads; the badge is the secondary
+   "which tk ticket is this" handle for users / agents who care. */
+.pv-tl-id-badge {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 0 6px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--pv-fg-muted);
+  background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+/* Distinct chrome for step records vs. regular tickets. Steps are
+   creator-private progress markers -- they read like sub-items, so we
+   keep the title weight lighter and the typography slightly de-emphasized.
+   Regular tickets carry a heavier title weight (the existing default). */
+.pv-tl-node--step .pv-tl-title {
+  font-weight: 400;
+  font-size: 13.5px;
+  color: var(--pv-fg-soft);
+}
+.pv-tl-node--ticket .pv-tl-title {
+  font-weight: 600;
+}
+.pv-tl-node--ticket.pv-tl-node--done .pv-tl-title {
+  font-weight: 500;
+}
+
+/* Nested step children under their parent ticket. Indent + a thin
+   continuation rail so the hierarchy reads at a glance. Last child
+   drops the rail tail to match the surrounding timeline-thread. */
+.pv-tl-children {
+  margin-top: 8px;
+  margin-left: 4px;
+  padding-left: 18px;
+  border-left: 1px solid var(--pv-line-faint, rgba(127, 127, 127, 0.18));
+  position: relative;
+}
+.pv-tl-node--child {
+  padding-bottom: 10px;
+}
+.pv-tl-node--child.pv-tl-node--last {
+  padding-bottom: 0;
 }
 
 .pv-tl-expanded {

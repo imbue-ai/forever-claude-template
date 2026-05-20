@@ -10,18 +10,22 @@ Pick a short kebab-case slug `$NAME` for this dispatch (e.g.
 its branch (`mngr/$NAME`), and the local runtime path
 (`runtime/launch-task/$NAME/`). Names must be unique.
 
-## 0. Open a single tk ticket for the whole delegation
+## 0. Open a single tk step for the whole delegation
 
-The progress view treats each delegation as **one** step in your timeline, regardless of how much work the sub-agent does internally. Before doing anything else, create one ticket that describes the delegation in user-facing terms (e.g. "Delegate the dark-mode toggle fix to a sub-agent and review the result") and start it:
+The progress view treats each delegation as **one** step in your timeline, regardless of how much work the sub-agent does internally. Before doing anything else, create one step record that describes the delegation in user-facing terms and start it:
 
 ```bash
-ID=$(tk create "Delegate <plain-english description of what the sub-agent will do> to a sub-agent")
+ID=$(tk create --step "Delegate <plain-english description of what the sub-agent will do> to a sub-agent")
 tk start "$ID"
 ```
 
 The sub-agent will use its own `.tickets/` for its own internal progress — that work renders in the sub-agent's chat, not yours. Don't try to surface the sub-agent's individual steps in your timeline; the user can open the sub-agent's chat if they want that level of detail.
 
-When the sub-agent finishes (Step 5 below), close your ticket. The closing summary describes the *work you did* — e.g. "Briefed a sub-agent on the dark-mode toggle fix and reviewed its result." — not the outcome. Save the actual outcome / result for your final assistant message to the user.
+When the sub-agent finishes (Step 5 below), close your step. The closing summary describes the *work you did* — e.g. "Briefed a sub-agent on the dark-mode toggle fix and reviewed its result." — not the outcome. Save the actual outcome / result for your final assistant message to the user.
+
+```bash
+tk close "$ID" "Briefed a sub-agent on the <task> and reviewed its result."
+```
 
 ## 1. Write the task file
 

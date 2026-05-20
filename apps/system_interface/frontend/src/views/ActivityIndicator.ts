@@ -1,7 +1,7 @@
 /**
  * Activity strip that sits just above the message input.
  *
- * The backend (workspace server) is the source of truth for *which* state
+ * The backend (system interface) is the source of truth for *which* state
  * the agent is in -- IDLE / THINKING / TOOL_RUNNING / WAITING_ON_PERMISSION
  * -- because the WAITING_ON_PERMISSION case relies on a marker file that
  * the transcript alone cannot detect. The state is delivered on each
@@ -123,6 +123,22 @@ function pendingToolCall(events: TranscriptEvent[]): ToolCall | null {
     }
   }
   return null;
+}
+
+// Activity states in which the agent has a turn in progress that the user
+// can interrupt. WAITING_ON_PERMISSION is included: the agent is paused on a
+// permission prompt rather than computing, but the turn is still live and
+// aborting it is a meaningful action. IDLE and null mean there is nothing to
+// interrupt.
+const WORKING_ACTIVITY_STATES: ReadonlySet<string> = new Set(["THINKING", "TOOL_RUNNING", "WAITING_ON_PERMISSION"]);
+
+/**
+ * Whether the given server-derived activity state means the agent is in the
+ * middle of an interruptible turn. Drives the visibility of the stop button
+ * in the message input.
+ */
+export function isWorkingActivityState(state: string | null | undefined): boolean {
+  return state !== null && state !== undefined && WORKING_ACTIVITY_STATES.has(state);
 }
 
 /**

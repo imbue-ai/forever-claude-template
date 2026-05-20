@@ -1,5 +1,7 @@
 import m from "mithril";
 import { interruptAgent, sendMessage } from "../models/Response";
+import { getAgentById } from "../models/AgentManager";
+import { isWorkingActivityState } from "./ActivityIndicator";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
 
@@ -22,6 +24,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
   let messageText = "";
   let currentAgentId: string | null = null;
   let messageTextareaElement: HTMLTextAreaElement | null = null;
+  let isInterruptInFlight = false;
 
   function focusMessageTextarea(): void {
     messageTextareaElement?.focus();
@@ -38,6 +41,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
       if (currentAgentId !== agentId) {
         currentAgentId = agentId;
         messageText = localStorage.getItem(messageTextKey(agentId)) ?? "";
+        isInterruptInFlight = false;
       }
 
       async function handleSend(): Promise<void> {
@@ -62,15 +66,22 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
       }
 
       async function handleInterrupt(): Promise<void> {
-        if (!agentId) {
+        if (!agentId || isInterruptInFlight) {
           return;
         }
+        // Hide the stop button until the restart request settles so the user
+        // cannot fire off multiple restarts in quick succession.
+        isInterruptInFlight = true;
+        m.redraw();
         try {
           await interruptAgent(agentId);
         } catch (err) {
           const reqErr = err as { response?: { detail?: string }; message?: string };
           const detail = reqErr.response?.detail ?? reqErr.message ?? String(err);
           console.error(`Failed to interrupt agent ${agentId}: ${detail}`);
+        } finally {
+          isInterruptInFlight = false;
+          m.redraw();
         }
       }
 
@@ -82,6 +93,13 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
       }
 
       const hasMessageText = messageText.trim().length > 0;
+
+      // The stop button is only meaningful while the agent has an interruptible
+      // turn in progress -- the same condition that drives the activity
+      // indicator above the input. Hide it whenever the agent is idle.
+      const agent = getAgentById(agentId);
+      const isAgentWorking = isWorkingActivityState(agent?.activity_state);
+      const isStopButtonVisible = isAgentWorking && !isInterruptInFlight;
 
       return m("div", { class: "message-input mx-auto w-full" }, [
         m("div", { class: "message-input-box flex flex-row items-center" }, [
@@ -111,17 +129,19 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
             onkeydown: handleKeydown,
           }),
           m("div", { class: "message-input-toolbar" }, [
-            m(
-              "button",
-              {
-                class: "message-input-stop-button",
-                title: "Interrupt current turn",
-                onclick: handleInterrupt,
-              },
-              m.trust(
-                '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
-              ),
-            ),
+            isStopButtonVisible
+              ? m(
+                  "button",
+                  {
+                    class: "message-input-stop-button",
+                    title: "Interrupt current turn",
+                    onclick: handleInterrupt,
+                  },
+                  m.trust(
+                    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+                  ),
+                )
+              : null,
             hasMessageText
               ? m(
                   "button",

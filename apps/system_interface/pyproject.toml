@@ -1,5 +1,5 @@
 [project]
-name = "minds-workspace-server"
+name = "system-interface"
 version = "0.1.0"
 description = "Web chat interface for mngr-managed Claude agents"
 readme = "README.md"
@@ -9,6 +9,8 @@ dependencies = [
     "httpx>=0.27",
     "imbue-common",
     "imbue-mngr",
+    "imbue-mngr-claude",
+    "pexpect>=4.9",
     "pluggy>=1.5",
     "pydantic-settings>=2.13.1",
     "starlette>=0.45",
@@ -43,7 +45,7 @@ dev = [
 ]
 
 [project.scripts]
-minds-workspace-server = "imbue.minds_workspace_server.main:main"
+system-interface = "imbue.system_interface.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -51,7 +53,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build]
 artifacts = [
-    "imbue/minds_workspace_server/static/**",
+    "imbue/system_interface/static/**",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -67,7 +69,7 @@ timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
 addopts = [
-  "--cov=imbue.minds_workspace_server",
+  "--cov=imbue.system_interface",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",

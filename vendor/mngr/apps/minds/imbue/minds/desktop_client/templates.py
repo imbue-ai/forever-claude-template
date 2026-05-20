@@ -9,6 +9,7 @@ that we moved from inline strings to file-based templates.
 
 import hashlib
 import os
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -18,7 +19,11 @@ from jinja2 import FileSystemLoader
 from jinja2 import select_autoescape
 
 from imbue.imbue_common.pure import pure
+from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
+from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.mngr.primitives import AgentId
@@ -62,85 +67,222 @@ def workspace_accent(agent_id: str) -> str:
 @pure
 def render_landing_page(
     accessible_agent_ids: Sequence[AgentId],
+    mngr_forward_origin: str = "",
     telegram_status_by_agent_id: dict[str, bool] | None = None,
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
+    destroying_status_by_agent_id: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
+
+    ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin
+    (e.g. ``"http://localhost:8421"``). Workspace links target
+    ``{mngr_forward_origin}/goto/<agent>/`` because Phase 2 deletes minds'
+    in-process subdomain forwarder; the plugin owns ``/goto/`` now.
 
     telegram_status_by_agent_id maps agent ID strings to whether they have
     active Telegram bot credentials. When None, no telegram buttons are shown.
 
     agent_names maps agent ID strings to human-readable workspace names.
 
+    destroying_status_by_agent_id maps agent ID strings to one of
+    ``"running"``/``"failed"`` for agents whose detached destroy subprocess
+    is currently in flight (running) or exited without removing the agent
+    (failed). Agents whose destroy is ``done`` are not included -- the
+    landing handler deletes those records so the row vanishes naturally
+    once discovery propagates ``AgentDestroyed``. When None, no marker is
+    shown.
+
     When is_discovering is True, the page shows a "Discovering agents..." message
-    with auto-refresh instead of the empty state. This is used when the stream
-    manager hasn't completed initial agent discovery yet.
+    with auto-refresh instead of the empty state. This is used when the
+    envelope-stream consumer hasn't completed initial agent discovery yet.
     """
     agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
     template = JINJA_ENV.get_template("landing.html")
     return template.render(
         agent_ids=accessible_agent_ids,
         agent_accents=agent_accents,
+        mngr_forward_origin=mngr_forward_origin,
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
         is_discovering=is_discovering,
         agent_names=agent_names or {},
+        destroying_status_by_agent_id=destroying_status_by_agent_id or {},
     )
 
 
-_DEFAULT_GIT_URL: Final[str] = os.getenv(
-    "MINDS_WORKSPACE_GIT_URL", "https://github.com/imbue-ai/forever-claude-template.git"
-)
+# Hardcoded fallbacks for the workspace-creation form. Overridable via
+# the MINDS_WORKSPACE_* env vars in dev tiers ONLY -- see
+# ``_dev_only_workspace_default`` for the gating rationale.
+_FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
+_FALLBACK_HOST_NAME: Final[str] = "assistant"
+_FALLBACK_BRANCH: Final[str] = ""
+
+# Root names that map to operator-managed shared tiers (production /
+# staging). For these tiers the MINDS_WORKSPACE_* env-var defaults are
+# intentionally ignored: ``just minds-start`` (and any other dev-iteration
+# tool) exports those vars from the operator's local FCT worktree state,
+# which only makes sense when iterating against a per-developer dev env.
+# In staging / production the workspaces are end-user-driven and a leaked
+# ``MINDS_WORKSPACE_BRANCH`` from the operator's shell would silently
+# pin the lease to a ref that no pool host carries.
+_SHARED_TIER_ROOT_NAMES: Final[frozenset[str]] = frozenset({DEFAULT_MINDS_ROOT_NAME, "minds-staging"})
 
 
-_DEFAULT_AGENT_NAME: Final[str] = os.getenv("MINDS_WORKSPACE_NAME", "selene")
+def _dev_only_workspace_default(env_var: str, fallback: str) -> str:
+    """Read ``env_var`` for dev tiers; otherwise return ``fallback``.
 
+    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars are a dev
+    convenience that wire the create-form's defaults to the operator's
+    local FCT worktree (``just minds-start`` exports them). They have
+    no business pre-filling the form in staging or production, where
+    workspaces are end-user-driven and the operator's local git state
+    is irrelevant.
 
-_DEFAULT_BRANCH: Final[str] = os.getenv("MINDS_WORKSPACE_BRANCH", "main")
+    Activation is detected via ``MINDS_ROOT_NAME``. The env var is
+    honored only when the root name names a dev tier (i.e. anything
+    other than ``minds`` / ``minds-staging``). An unactivated shell --
+    ``MINDS_ROOT_NAME`` unset entirely -- is treated as non-dev (defensive
+    default: ``minds run`` always activates first today, so this branch
+    is essentially unreachable; we still want to ignore the env var if
+    we somehow get there).
+    """
+    root_name = os.environ.get(MINDS_ROOT_NAME_ENV_VAR, "")
+    if not root_name or root_name in _SHARED_TIER_ROOT_NAMES:
+        return fallback
+    return os.environ.get(env_var, fallback)
 
 
 @pure
 def render_create_form(
     git_url: str = "",
-    agent_name: str = "",
+    host_name: str = "",
     branch: str = "",
-    launch_mode: LaunchMode = LaunchMode.LOCAL,
+    launch_mode: LaunchMode | None = None,
+    ai_provider: AIProvider | None = None,
+    accounts: Sequence[object] | None = None,
+    default_account_id: str = "",
+    gh_token: str = "",
+    anthropic_api_key: str = "",
+    error_message: str = "",
 ) -> str:
-    """Render the agent creation form page."""
-    effective_url = git_url if git_url else _DEFAULT_GIT_URL
-    effective_name = agent_name if agent_name else _DEFAULT_AGENT_NAME
-    effective_branch = branch if branch else _DEFAULT_BRANCH
+    """Render the agent creation form page.
+
+    The compute provider (``launch_mode``) and AI provider are independent.
+    Both default to ``IMBUE_CLOUD`` when an account is selected; without
+    an account we drop them to ``LOCAL`` / ``SUBSCRIPTION`` so the form
+    starts in a valid state for the no-account flow.
+
+    ``host_name`` is the value of the form's "Name" field; it drives the
+    host name on the resulting workspace. (The agent itself is always
+    named ``system-services``.)
+    """
+    effective_url = git_url if git_url else _dev_only_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
+    effective_name = (
+        host_name if host_name else _dev_only_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
+    )
+    effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
+    has_account = bool(default_account_id and accounts)
+    effective_launch_mode = (
+        launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LOCAL)
+    )
+    effective_ai_provider = (
+        ai_provider
+        if ai_provider is not None
+        else (AIProvider.IMBUE_CLOUD if has_account else AIProvider.SUBSCRIPTION)
+    )
     template = JINJA_ENV.get_template("create.html")
     return template.render(
         git_url=effective_url,
-        agent_name=effective_name,
+        host_name=effective_name,
         branch=effective_branch,
         launch_modes=list(LaunchMode),
-        selected_launch_mode=launch_mode.value,
+        selected_launch_mode=effective_launch_mode.value,
+        ai_providers=list(AIProvider),
+        selected_ai_provider=effective_ai_provider.value,
+        accounts=accounts or [],
+        default_account_id=default_account_id,
+        gh_token=gh_token,
+        anthropic_api_key=anthropic_api_key,
+        error_message=error_message,
+    )
+
+
+_STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {
+    "INITIALIZING": "Starting...",
+    "CLONING_REPO": "Cloning repository...",
+    "CHECKING_OUT_BRANCH": "Checking out branch...",
+    "PROVISIONING_AI": "Provisioning AI access...",
+    "CREATING_WORKSPACE": "Creating workspace...",
+    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
+    "DONE": "Done. Redirecting...",
+}
+
+# IMBUE_CLOUD diverges in wording for the connection / agent-setup phases
+# where the user-facing mental model is "connecting to / setting up an
+# existing pool host" rather than "cloning / creating a new workspace".
+_STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
+    "INITIALIZING": "Starting...",
+    "CLONING_REPO": "Connecting to host...",
+    "CHECKING_OUT_BRANCH": "Checking out branch...",
+    "PROVISIONING_AI": "Provisioning AI access...",
+    "CREATING_WORKSPACE": "Setting up agent...",
+    "WAITING_FOR_READY": "Waiting for workspace to be ready...",
+    "DONE": "Done. Redirecting...",
+}
+
+
+@pure
+def status_text_for(
+    status: str,
+    error: str | None = None,
+    launch_mode: LaunchMode = LaunchMode.LOCAL,
+) -> str:
+    """Resolve the UI caption for an ``AgentCreationStatus`` value.
+
+    ``status`` is the stringified enum value (e.g. ``"CLONING_REPO"``).
+    ``error`` is consulted only for the ``FAILED`` case so the caption
+    can surface the underlying error message; for every other status the
+    text comes from the mode-aware ``_STATUS_TEXT_*`` maps.
+    """
+    if status == "FAILED":
+        return "Failed: {}".format(error or "unknown error")
+    text_map = _STATUS_TEXT_IMBUE_CLOUD if launch_mode is LaunchMode.IMBUE_CLOUD else _STATUS_TEXT_DEFAULT
+    return text_map.get(status, "Working...")
+
+
+@pure
+def render_creating_page(
+    creation_id: CreationId,
+    info: AgentCreationInfo,
+) -> str:
+    """Render the progress page shown while an agent is being created.
+
+    The page is keyed by ``creation_id`` (minds-internal in-flight handle)
+    rather than ``agent_id`` because the canonical agent id only comes
+    into existence once the inner ``mngr create`` returns -- the page
+    needs a stable handle to poll status from the moment the user kicks
+    off the form. The template's status-poll URL still includes this id
+    so SSE/log-streaming endpoints can find the right ``log_queue``.
+
+    The launch mode is read off ``info.launch_mode`` --
+    ``AgentCreator.start_creation`` records it before spawning the worker
+    thread, so the ``AgentCreationInfo`` snapshot is the single source of
+    truth for caption resolution (consistent with the SSE status events).
+    """
+    status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
+    template = JINJA_ENV.get_template("creating.html")
+    return template.render(
+        agent_id=creation_id,
+        status_text=status_text,
+        accent=workspace_accent(str(creation_id)),
     )
 
 
 @pure
-def render_creating_page(agent_id: AgentId, info: AgentCreationInfo) -> str:
-    """Render the progress page shown while an agent is being created.
-
-    The page streams logs from /api/create-agent/{agent_id}/logs via SSE
-    and auto-redirects to the agent when creation completes.
-    """
-    status_text_map = {
-        "CLONING": "Cloning repository...",
-        "CREATING": "Creating agent...",
-        "DONE": "Done. Redirecting...",
-        "FAILED": "Failed: {}".format(info.error or "unknown error"),
-    }
-    status_text = status_text_map.get(str(info.status), "Working...")
-    template = JINJA_ENV.get_template("creating.html")
-    return template.render(
-        agent_id=agent_id,
-        status_text=status_text,
-        accent=workspace_accent(str(agent_id)),
-    )
+def render_welcome_page() -> str:
+    """Render the welcome/splash page for first-time users."""
+    return JINJA_ENV.get_template("welcome.html").render()
 
 
 @pure
@@ -161,6 +303,53 @@ def render_auth_error_page(message: str) -> str:
     return JINJA_ENV.get_template("auth_error.html").render(message=message)
 
 
+@pure
+def render_recovery_page(
+    agent_id: AgentId,
+    ws_name: str,
+    return_to: str,
+    initial_status: str,
+) -> str:
+    """Render the workspace-recovery page shown when the system interface is unresponsive.
+
+    ``initial_status`` is one of ``"stuck"``/``"restarting"``/``"healthy"`` and
+    governs the page's initial UI state. ``return_to`` is the URL the page
+    reloads back to once the tracker reports HEALTHY again -- typically the
+    original plugin subdomain URL the user was navigating to.
+    """
+    return JINJA_ENV.get_template("recovery.html").render(
+        agent_id=str(agent_id),
+        ws_name=ws_name,
+        return_to=return_to,
+        initial_status=initial_status,
+        accent=workspace_accent(str(agent_id)),
+    )
+
+
+@pure
+def render_destroying_page(
+    agent_id: AgentId,
+    agent_name: str,
+    pid: int,
+    status: str,
+) -> str:
+    """Render the detail page for an in-flight or recently-completed destroy.
+
+    The page polls ``/api/destroying/<agent_id>/{status,log}`` to keep its
+    log tail and status badge up to date; once status flips to ``done`` it
+    redirects to ``/``. ``status`` is the initial server-side computed
+    value (``running``/``failed``/``done``) so the page renders correctly
+    even before the first poll completes.
+    """
+    return JINJA_ENV.get_template("destroying.html").render(
+        agent_id=str(agent_id),
+        agent_name=agent_name,
+        pid=pid,
+        status=status,
+        accent=workspace_accent(str(agent_id)),
+    )
+
+
 # -- Chrome (persistent shell) templates --
 
 
@@ -168,6 +357,7 @@ def render_auth_error_page(message: str) -> str:
 def render_chrome_page(
     is_mac: bool = False,
     is_authenticated: bool = False,
+    mngr_forward_origin: str = "",
     initial_workspaces: Sequence[dict[str, str]] | None = None,
 ) -> str:
     """Render the persistent chrome page (title bar + sidebar + content iframe).
@@ -175,25 +365,34 @@ def render_chrome_page(
     is_mac controls whether macOS-specific styling is applied (traffic light padding,
     hidden window controls).
 
+    ``mngr_forward_origin`` is exposed to the page-level JS via a
+    ``data-mngr-forward-origin`` attribute on the body so chrome.js can build
+    workspace links that target the plugin's port directly.
+
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     and sidebar are handled by separate WebContentsViews.
     """
     return JINJA_ENV.get_template("chrome.html").render(
         is_mac=is_mac,
         is_authenticated=is_authenticated,
+        mngr_forward_origin=mngr_forward_origin,
         initial_workspaces=initial_workspaces or [],
     )
 
 
 @pure
-def render_sidebar_page() -> str:
+def render_sidebar_page(mngr_forward_origin: str = "") -> str:
     """Render the standalone sidebar page for the Electron sidebar WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
     clicking a workspace sends an IPC message via the preload bridge to navigate
-    the content WebContentsView.
+    the content WebContentsView. ``mngr_forward_origin`` is exposed via
+    ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
+    ``/goto/<agent>/`` URL the plugin serves.
     """
-    return JINJA_ENV.get_template("sidebar.html").render()
+    return JINJA_ENV.get_template("sidebar.html").render(
+        mngr_forward_origin=mngr_forward_origin,
+    )
 
 
 # -- Workspace/settings/sharing/accounts --
@@ -204,23 +403,25 @@ def render_sharing_editor(
     agent_id: str,
     service_name: str,
     title: str,
+    mngr_forward_origin: str = "",
     initial_emails: list[str] | None = None,
-    is_request: bool = False,
-    request_id: str = "",
     has_account: bool = True,
     accounts: Sequence[object] | None = None,
     redirect_url: str = "",
     ws_name: str = "",
     account_email: str = "",
 ) -> str:
-    """Render the sharing editor page used for both request approval and direct editing."""
+    """Render the sharing editor page used by the workspace-settings sharing flow.
+
+    ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
+    the workspace link in the page title points at ``{mngr_forward_origin}/goto/<agent>/``.
+    """
     return JINJA_ENV.get_template("sharing.html").render(
         title=title,
         agent_id=agent_id,
         service_name=service_name,
+        mngr_forward_origin=mngr_forward_origin,
         initial_emails=initial_emails or [],
-        is_request=is_request,
-        request_id=request_id,
         has_account=has_account,
         accounts=accounts or [],
         redirect_url=redirect_url,
@@ -265,9 +466,18 @@ def render_workspace_settings(
 def render_accounts_page(
     accounts: Sequence[object],
     default_account_id: str | None = None,
+    enabled_by_user_id: Mapping[str, bool] | None = None,
 ) -> str:
-    """Render the manage accounts page."""
+    """Render the manage accounts page.
+
+    ``enabled_by_user_id`` maps each account's user_id to whether its
+    ``[providers.imbue_cloud_<slug>]`` block is enabled in settings.toml.
+    The template renders a "Signed out" indicator when an account is
+    present (still in sessions.json) but the block has been
+    auto-disabled by an observed auth error.
+    """
     return JINJA_ENV.get_template("accounts.html").render(
         accounts=accounts,
         default_account_id=default_account_id or "",
+        enabled_by_user_id=dict(enabled_by_user_id or {}),
     )

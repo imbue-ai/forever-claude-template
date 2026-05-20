@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEvent } from "../models/Response";
+import type { TaskInTurn } from "./turn-grouping";
 import { buildTaskRecords, buildTurns, eventsInTaskWindow, selectFinalMessages } from "./turn-grouping";
 
 function userMsg(ts: string, content: string, eventId: string = `u-${ts}`): TranscriptEvent {
@@ -51,6 +52,12 @@ function taskEvent(
     created_at: extras.created_at ?? ts,
     summary: extras.summary ?? null,
     summary_at: extras.summary_at ?? null,
+    // Default to step: true because the progress view renders steps
+    // only; regular tickets are filtered out by buildTurns. Tests that
+    // specifically exercise regular-ticket behaviour pass step: false.
+    step: extras.step ?? true,
+    parent_id: extras.parent_id,
+    assignee: extras.assignee,
   };
 }
 
@@ -301,7 +308,39 @@ describe("buildTurns", () => {
     expect(turns[1].tasks[1].is_carryover).toBe(false);
   });
 
-  it("orders multiple carryover tasks by created_at, not by reverse insertion", () => {
+  it("orders own tasks by started_at, not created_at, when the agent starts them out of order", () => {
+    // Agent plans two tickets up-front (t1 then t2), then starts t2
+    // FIRST and t1 SECOND. The end-of-turn order must reflect what the
+    // agent actually did (t2 above t1), not the order they were planned.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "do it"),
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "First planned" }),
+      taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Second planned" }),
+      taskEvent("t2", "in_progress", "2026-04-28T01:00:30Z"),
+      taskEvent("t2", "closed", "2026-04-28T01:00:40Z", { summary: "Did t2 first." }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:50Z"),
+    ];
+    const turns = buildTurns(events);
+    expect(turns[0].tasks.map((t) => t.title)).toEqual(["Second planned", "First planned"]);
+  });
+
+  it("sorts not-yet-started tasks by created_at after started ones", () => {
+    // t1 and t2 are planned and t1 is started; t3 is planned later and
+    // never started this turn. Started t1 sorts by its started_at;
+    // pending t2 and t3 fall back to created_at.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Alpha" }),
+      taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Bravo" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:25Z"),
+      taskEvent("t3", "open", "2026-04-28T01:00:30Z", { created_at: "2026-04-28T01:00:30Z", title: "Charlie" }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns[0].tasks.map((t) => t.title)).toEqual(["Alpha", "Bravo", "Charlie"]);
+    expect(turns[0].tasks.map((t) => t.status)).toEqual(["active", "pending", "pending"]);
+  });
+
+  it("orders multiple carryover tasks by started_at, not by reverse insertion", () => {
     // Repro of the chat-progress bug: a clarifying-question turn plans
     // two tickets up-front; the next turn starts the FIRST one. Both are
     // carryovers in the second turn, and the earlier-created (active) one
@@ -330,8 +369,13 @@ describe("eventsInTaskWindow", () => {
       is_carryover: false,
       continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
+      is_step: false,
+      parent_id: "",
+      children: [],
+      narration: null,
     };
     const body = [
       assistantMsg("2026-04-28T01:00:15Z", "before start"),
@@ -352,8 +396,13 @@ describe("eventsInTaskWindow", () => {
       is_carryover: false,
       continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: null,
+      is_step: false,
+      parent_id: "",
+      children: [],
+      narration: null,
     };
     const body = [toolUse("2026-04-28T01:00:25Z", "Read", "tc1"), toolUse("2026-04-28T01:00:45Z", "Edit", "tc2")];
     expect(eventsInTaskWindow(task, body)).toHaveLength(2);
@@ -371,8 +420,13 @@ describe("eventsInTaskWindow", () => {
       is_carryover: false,
       continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
+      is_step: false,
+      parent_id: "",
+      children: [],
+      narration: null,
     };
     function toolResult(ts: string, callId: string): TranscriptEvent {
       return {
@@ -405,7 +459,7 @@ describe("selectFinalMessages", () => {
     const a1 = assistantMsg("2026-04-28T01:00:10Z", "Here is the summary table...", "msg-summary");
     const a2 = assistantMsg("2026-04-28T01:00:20Z", "Waiting on your input.", "msg-waiting");
     const events = [a1, toolUse("2026-04-28T01:00:15Z", "Bash", "tc-1"), a2];
-    expect(selectFinalMessages(events).map((e) => e.event_id)).toEqual(["msg-summary", "msg-waiting"]);
+    expect(selectFinalMessages(events, []).map((e) => e.event_id)).toEqual(["msg-summary", "msg-waiting"]);
   });
 
   it("excludes tool-bearing assistant_messages even when they have text", () => {
@@ -420,7 +474,7 @@ describe("selectFinalMessages", () => {
       text: "Calling out to a tool.",
       tool_calls: [{ tool_call_id: "tc-x", tool_name: "Bash", input_preview: "{}" }],
     };
-    expect(selectFinalMessages([withTextAndTools])).toEqual([]);
+    expect(selectFinalMessages([withTextAndTools], [])).toEqual([]);
   });
 
   it("excludes empty-text assistant_messages", () => {
@@ -428,7 +482,7 @@ describe("selectFinalMessages", () => {
     // with text="". They aren't substantive prose and should not surface
     // as top-level final blocks.
     const empty = assistantMsg("2026-04-28T01:00:00Z", "", "a-empty");
-    expect(selectFinalMessages([empty])).toEqual([]);
+    expect(selectFinalMessages([empty], [])).toEqual([]);
   });
 
   it("ignores non-assistant events", () => {
@@ -437,6 +491,397 @@ describe("selectFinalMessages", () => {
       taskEvent("t1", "open", "2026-04-28T01:00:01Z"),
       assistantMsg("2026-04-28T01:00:02Z", "hi back", "a-hi"),
     ];
-    expect(selectFinalMessages(events).map((e) => e.event_id)).toEqual(["a-hi"]);
+    expect(selectFinalMessages(events, []).map((e) => e.event_id)).toEqual(["a-hi"]);
+  });
+
+  it("drops an earlier in-window message of a closed task when a later text exists in the same window", () => {
+    // Promote-on-close only surfaces the LAST text-only of the turn.
+    // Earlier in-window prose was just intermediate thinking that lived
+    // briefly as narration and got overwritten -- it doesn't deserve a
+    // permanent top-level slot.
+    const doneTask: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Pull headlines",
+      status: "done",
+      summary: "Pulled headline + summary + link from each newsletter.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:01:00Z",
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const early = assistantMsg("2026-04-28T01:00:10Z", "Halfway through.", "msg-early");
+    const wrapup = assistantMsg("2026-04-28T01:00:50Z", "All extracted -- here are the headlines.", "msg-wrapup");
+    expect(selectFinalMessages([early, wrapup], [doneTask]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+  });
+
+  it("keeps a text-only message that falls outside every task window", () => {
+    // Prose between tasks (after one task closed, before the next
+    // started) has no task to attach to -- it must render at top level
+    // or the user would never see it.
+    const earlier: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Setup",
+      status: "done",
+      summary: "Set things up.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:30Z",
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const between = assistantMsg("2026-04-28T01:00:40Z", "Quick check-in before next step.", "msg-between");
+    expect(selectFinalMessages([between], [earlier]).map((e) => e.event_id)).toEqual(["msg-between"]);
+  });
+
+  it("does NOT surface a trailing message of an unclosed task at top level", () => {
+    // No safety valve for unclosed tasks: it would fire transiently for
+    // every mid-task message (the latest is always "last" until the next
+    // arrives) and duplicate with the narration. Trailing prose in an
+    // unclosed task sits only in the narration slot.
+    const openTask: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Investigate",
+      status: "active",
+      summary: null,
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: null,
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Stuck -- need your call.", "msg-trailing");
+    expect(selectFinalMessages([trailing], [openTask])).toEqual([]);
+  });
+
+  it("promotes the last in-window message to top level when its containing task closed in the turn", () => {
+    // Promote-on-close: the close summary overwrites the task's caption
+    // (the narration slot). Without promotion the agent's last pre-close
+    // prose would vanish. The check is restricted to the LAST text-only
+    // of the turn so mid-turn closures don't keep flushing earlier
+    // intermediate thinking to top level.
+    const doneTask: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Investigate",
+      status: "done",
+      summary: "Found root cause, fix is X.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:01:00Z",
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const wrapup = assistantMsg("2026-04-28T01:00:50Z", "Found it -- the OAuth regex was too tight.", "msg-wrapup");
+    expect(selectFinalMessages([wrapup], [doneTask]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+  });
+
+  it("does NOT promote an earlier in-window message when a later text-only landed outside any window", () => {
+    // The promote-on-close rule only inspects the LAST text-only of the
+    // turn. If later prose landed outside all windows, that later prose
+    // is already at top level via the outside-window rule -- we don't
+    // also reach back and pull an earlier closed-task message up.
+    const doneTask: TaskInTurn = {
+      ticket_id: "t1",
+      title: "Investigate",
+      status: "done",
+      summary: "Done.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:30Z",
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const inWindow = assistantMsg("2026-04-28T01:00:20Z", "Looking into thing A.", "msg-inwindow");
+    const afterClose = assistantMsg("2026-04-28T01:00:40Z", "Wrap-up notes after closing.", "msg-after");
+    expect(selectFinalMessages([inWindow, afterClose], [doneTask]).map((e) => e.event_id)).toEqual(["msg-after"]);
+  });
+
+  it("surfaces a wrap-up at top level when the only enclosing task is a still-open regular ticket", () => {
+    // An agent often picks up a regular ticket as the umbrella for the
+    // turn's work and files step records beneath it. The ticket can stay
+    // in_progress across many turns. Text-only prose between or after
+    // the steps should NOT be swallowed by the ticket's window -- it's
+    // a wrap-up bounded by the steps, not by the umbrella ticket.
+    const parentTicket: TaskInTurn = {
+      ticket_id: "ticket-1",
+      title: "Crystallize email-inbox",
+      status: "active",
+      summary: null,
+      is_carryover: true,
+      continues_forward: true,
+      created_at: "2026-04-28T00:50:00Z",
+      started_at: "2026-04-28T00:50:00Z",
+      active_window_start: "2026-04-28T00:50:00Z",
+      active_window_end: null,
+      is_step: false,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const closedStep: TaskInTurn = {
+      ticket_id: "step-1",
+      title: "Ask you whether the digest should auto-refresh",
+      status: "done",
+      summary: "Asked the schedule question.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:30Z",
+      is_step: true,
+      parent_id: "ticket-1",
+      children: [],
+      narration: null,
+    };
+    parentTicket.children.push(closedStep);
+    const wrapup = assistantMsg(
+      "2026-04-28T01:00:40Z",
+      "No selection registered -- happy to wait, or go with the default.",
+      "msg-wrapup",
+    );
+    expect(selectFinalMessages([wrapup], [parentTicket]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+  });
+
+  it("does NOT swallow a later message into an abandoned still-open step", () => {
+    // Serial-step invariant: only one step should be in_progress at a
+    // time. If the agent forgets to close step A before starting (and
+    // closing) step B, A's stored window stretches indefinitely. The
+    // renderer caps A's effective end at B's start so any message after
+    // B finished lands outside every step's effective window.
+    const abandoned: TaskInTurn = {
+      ticket_id: "step-a",
+      title: "First, never closed",
+      status: "active",
+      summary: null,
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: null,
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const properlyClosed: TaskInTurn = {
+      ticket_id: "step-b",
+      title: "Second, closed cleanly",
+      status: "done",
+      summary: "Did the second step.",
+      is_carryover: false,
+      continues_forward: false,
+      created_at: "2026-04-28T01:00:10Z",
+      started_at: "2026-04-28T01:00:10Z",
+      active_window_start: "2026-04-28T01:00:10Z",
+      active_window_end: "2026-04-28T01:00:30Z",
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+    };
+    const wrapup = assistantMsg("2026-04-28T01:00:40Z", "Both done -- here is the wrap-up.", "msg-wrapup");
+    // 01:00:40 is after step-b closed; step-a's stored window has no
+    // end, but its effective end is capped at step-b's start
+    // (01:00:10), so step-a doesn't contain 01:00:40 either. Outside
+    // every window -> top level.
+    expect(selectFinalMessages([wrapup], [abandoned, properlyClosed]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+  });
+});
+
+describe("narration attribution", () => {
+  it("populates narration with the latest text-only message inside an active task's window", () => {
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
+      assistantMsg("2026-04-28T01:00:10Z", "Trying approach A.", "a1"),
+      assistantMsg("2026-04-28T01:00:20Z", "Approach A failed, trying B.", "a2"),
+    ];
+    const [turn] = buildTurns(events);
+    expect(turn.tasks).toHaveLength(1);
+    expect(turn.tasks[0].narration).toBe("Approach A failed, trying B.");
+  });
+
+  it("leaves narration null on a closed task -- the summary owns the slot", () => {
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
+      assistantMsg("2026-04-28T01:00:10Z", "Mid-task narration.", "a1"),
+      taskEvent("t1", "closed", "2026-04-28T01:00:30Z", { summary: "Did the thing.", step: true }),
+    ];
+    const [turn] = buildTurns(events);
+    expect(turn.tasks[0].status).toBe("done");
+    expect(turn.tasks[0].summary).toBe("Did the thing.");
+    expect(turn.tasks[0].narration).toBeNull();
+  });
+});
+
+describe("step-only filtering", () => {
+  it("drops the parent ticket and renders its child steps flat at the top level", () => {
+    // Agent picks up a ticket and files two step records beneath it.
+    // The progress view shows only steps -- the parent ticket is
+    // filtered out, and its child steps render flat in arrival order.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "do the auth refactor"),
+      taskEvent("auth-1", "in_progress", "2026-04-28T01:00:05Z", {
+        title: "Refactor auth middleware",
+        assignee: "agent-A",
+        step: false,
+      }),
+      taskEvent("step-1", "open", "2026-04-28T01:00:10Z", {
+        title: "Read the middleware",
+        parent_id: "auth-1",
+      }),
+      taskEvent("step-2", "open", "2026-04-28T01:00:20Z", {
+        title: "Edit it",
+        parent_id: "auth-1",
+      }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns).toHaveLength(1);
+    const tasks = turns[0].tasks;
+    expect(tasks.map((t) => t.ticket_id)).toEqual(["step-1", "step-2"]);
+    expect(tasks.every((t) => t.is_step)).toBe(true);
+    // No nesting: steps render flat regardless of their parent_id.
+    expect(tasks.every((t) => t.children.length === 0)).toBe(true);
+  });
+
+  it("leaves a standalone step (no parent) at the top level", () => {
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "quick lookup"),
+      taskEvent("step-x", "open", "2026-04-28T01:00:05Z", {
+        title: "Read the README",
+        step: true,
+        parent_id: "",
+      }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns[0].tasks).toHaveLength(1);
+    expect(turns[0].tasks[0].is_step).toBe(true);
+    expect(turns[0].tasks[0].children).toEqual([]);
+  });
+
+  it("drops a turn with only a regular ticket (no steps) -- progress block won't render", () => {
+    // A turn that contains only a regular ticket and no step records
+    // ends up with an empty task list after filtering. ChatPanel's
+    // `turn.tasks.length > 0` gate then falls back to plain rendering.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "pick up the auth refactor"),
+      taskEvent("auth-1", "in_progress", "2026-04-28T01:00:05Z", { title: "Refactor auth middleware", step: false }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns[0].tasks).toEqual([]);
+  });
+});
+
+describe("picked-up-ticket attribution", () => {
+  it("attributes a ticket to the turn containing its earliest observed event, not its created_at", () => {
+    // The ticket was originally created long before the current agent
+    // saw it (e.g. by agent-A). Agent-B's watcher only starts emitting
+    // events once B becomes the assignee, so the earliest event in B's
+    // stream is the in_progress one. That timestamp -- not created_at --
+    // is what should attribute the ticket to a turn.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T02:00:00Z", "turn 1 prompt"),
+      userMsg("2026-04-28T03:00:00Z", "pick up the auth ticket"),
+      // The ticket frontmatter says it was created on day 1, well before
+      // either turn began. But B's watcher only saw it transition to
+      // in_progress (with assignee=B) at 03:00:30, inside turn 2.
+      taskEvent("auth-1", "in_progress", "2026-04-28T03:00:30Z", {
+        title: "Auth refactor",
+        assignee: "agent-B",
+        created_at: "2026-04-27T10:00:00Z",
+      }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns).toHaveLength(2);
+    // The ticket lands in the picker's turn (turn 2), not the originator's.
+    expect(turns[0].tasks).toEqual([]);
+    expect(turns[1].tasks.map((t) => t.ticket_id)).toEqual(["auth-1"]);
+  });
+
+  it("falls back to created_at when the record has no first_observed_at signal", () => {
+    // Sanity: regular own-ticket flow still works. The agent created the
+    // ticket in this turn, so first_observed_at == created_at and the
+    // attribution behaves identically to the legacy rule.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "plan it"),
+      taskEvent("own-1", "open", "2026-04-28T01:00:05Z", {
+        title: "Plan step",
+        step: true,
+        created_at: "2026-04-28T01:00:05Z",
+      }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns[0].tasks.map((t) => t.ticket_id)).toEqual(["own-1"]);
+  });
+});
+
+describe("parent + children carryover", () => {
+  it("carries the parent ticket forward and nests new T2 child steps under it", () => {
+    // Plan scenario: B picks up auth-1 in T1, files step-1, closes it.
+    // In T2 B files step-2 under the same (still-in_progress) ticket.
+    // T2's progress block re-renders the parent + the newly added step.
+    // The closed step from T1 does NOT re-render in T2 -- standard
+    // carryover only propagates tasks that are still unfinished.
+    const events: TranscriptEvent[] = [
+      userMsg("2026-04-28T01:00:00Z", "do the refactor"),
+      taskEvent("auth-1", "in_progress", "2026-04-28T01:00:05Z", {
+        title: "Auth refactor",
+        assignee: "agent-A",
+        step: false,
+      }),
+      taskEvent("step-1", "open", "2026-04-28T01:00:10Z", {
+        title: "Read it",
+        parent_id: "auth-1",
+      }),
+      taskEvent("step-1", "closed", "2026-04-28T01:00:30Z", {
+        title: "Read it",
+        parent_id: "auth-1",
+        summary: "Read the middleware end-to-end.",
+        summary_at: "2026-04-28T01:00:30Z",
+      }),
+      userMsg("2026-04-28T02:00:00Z", "continue"),
+      taskEvent("step-2", "open", "2026-04-28T02:00:05Z", {
+        title: "Patch it",
+        parent_id: "auth-1",
+      }),
+    ];
+    const turns = buildTurns(events);
+    expect(turns).toHaveLength(2);
+    // Turn 1: parent ticket is filtered out, step-1 renders flat.
+    expect(turns[0].tasks.map((t) => t.ticket_id)).toEqual(["step-1"]);
+    expect(turns[0].tasks[0].is_step).toBe(true);
+    // Turn 2: ticket still filtered out; step-2 renders flat. step-1
+    // closed in turn 1 and does not carry over.
+    expect(turns[1].tasks.map((t) => t.ticket_id)).toEqual(["step-2"]);
   });
 });

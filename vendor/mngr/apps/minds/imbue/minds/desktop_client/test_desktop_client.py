@@ -1,4 +1,5 @@
 import json
+import queue
 from pathlib import Path
 
 import httpx
@@ -8,8 +9,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from starlette.testclient import TestClient
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.app import _build_mngr_exec_argv
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -18,21 +23,24 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
+from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
+from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import create_sharing_request_event
-from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.ssh_tunnel import RemoteSSHInfo
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
+from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 
 
@@ -317,104 +325,6 @@ def test_mngr_cli_resolver_landing_page_lists_single_discovered_agent(tmp_path: 
     assert str(agent_id) in response.text
 
 
-# -- SSH tunnel error handling tests --
-
-
-class _FailingTunnelManager(SSHTunnelManager):
-    """Tunnel manager that raises SSHTunnelError on every tunnel request."""
-
-    def get_tunnel_socket_path(
-        self,
-        ssh_info: RemoteSSHInfo,
-        remote_host: str,
-        remote_port: int,
-    ) -> Path:
-        raise SSHTunnelError("SSH connection failed: test error")
-
-
-class _RemoteStaticBackendResolver(StaticBackendResolver):
-    """StaticBackendResolver that also returns SSH info for all known agents."""
-
-    ssh_info: RemoteSSHInfo
-
-    def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
-        if self.url_by_agent_and_service.get(str(agent_id)) is not None:
-            return self.ssh_info
-        return None
-
-
-_TEST_SSH_INFO: RemoteSSHInfo = RemoteSSHInfo(
-    user="root",
-    host="remote.example.com",
-    port=22,
-    key_path=Path("/tmp/fake_key"),
-)
-
-
-def _setup_failing_tunnel_server(
-    tmp_path: Path,
-) -> tuple[TestClient, FileAuthStore, AgentId]:
-    """Set up a desktop client with a tunnel manager that always fails."""
-    agent_id = AgentId()
-    backend_resolver = _RemoteStaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {"web": "http://127.0.0.1:9100"}},
-        ssh_info=_TEST_SSH_INFO,
-    )
-    auth_dir = tmp_path / "auth"
-    auth_store = FileAuthStore(data_directory=auth_dir)
-
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=backend_resolver,
-        http_client=None,
-        tunnel_manager=_FailingTunnelManager(),
-    )
-    client = TestClient(app, base_url="http://localhost")
-    _authenticate_client(client=client, auth_store=auth_store)
-    return client, auth_store, agent_id
-
-
-# -- Backend not-yet-ready handling tests --
-
-
-class _DisconnectingTransport(httpx.AsyncBaseTransport):
-    """Transport that always raises RemoteProtocolError, simulating a backend
-    that accepted the TCP connection but hung up before sending any HTTP data.
-
-    This is what httpx surfaces when an SSH tunnel forwards to a port whose
-    server hasn't finished binding yet (e.g. uvicorn still starting up): the
-    SSH channel-open to the backend port fails and the tunnel relay closes
-    the local socket without writing anything.
-    """
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=request)
-
-
-def _setup_disconnecting_backend_server(
-    tmp_path: Path,
-) -> tuple[TestClient, FileAuthStore, AgentId]:
-    """Set up a desktop client whose backend always raises RemoteProtocolError."""
-    agent_id = AgentId()
-    backend_resolver = StaticBackendResolver(
-        url_by_agent_and_service={str(agent_id): {str(DEFAULT_SERVICE_NAME): "http://test-backend"}},
-    )
-    http_client = httpx.AsyncClient(transport=_DisconnectingTransport(), base_url="http://test-backend")
-    client, auth_store = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=http_client,
-    )
-    _authenticate_client(client=client, auth_store=auth_store)
-    return client, auth_store, agent_id
-
-
-# -- Backend URL with query string tests --
-
-
-# -- Landing page agent creation tests --
-
-
 def test_landing_page_shows_discovering_when_initial_discovery_not_done(tmp_path: Path) -> None:
     """Before initial discovery completes, show discovering state with auto-refresh."""
     backend_resolver = MngrCliBackendResolver()
@@ -481,7 +391,10 @@ def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/status returns 404 for unknown creation."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    unknown_id = AgentId()
+    # The URL handle is a ``CreationId`` (minds-internal in-flight handle),
+    # not a canonical mngr ``AgentId``; passing an AgentId-prefixed string
+    # would now fail to parse and never even reach the not-tracked check.
+    unknown_id = CreationId()
     response = client.get("/api/create-agent/{}/status".format(unknown_id))
     assert response.status_code == 404
 
@@ -558,10 +471,21 @@ def _create_test_server_with_agent_creator(
     """Create a desktop client with an agent creator for testing.
 
     The returned client is already authenticated with a global session.
+
+    The ``AgentCreator.root_concurrency_group`` is an ad-hoc group entered for
+    the helper and left active for the caller's test duration. These tests only
+    exercise HTTP endpoints (status polling, form rendering, etc.) -- they do
+    not actually run agent creation subprocesses against the group, so leaving
+    it in the ACTIVE state until GC is acceptable here.
     """
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    root_cg = ConcurrencyGroup(name="test-root")
+    root_cg.__enter__()
     agent_creator = AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path / "minds"),
+        root_concurrency_group=root_cg,
+        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
     client, auth_store = _create_test_desktop_client(
         tmp_path=tmp_path,
@@ -591,30 +515,30 @@ def test_create_form_submit_rejects_empty_git_url(tmp_path: Path) -> None:
     """POST /create with empty git_url returns 400."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.post("/create", data={"git_url": "", "agent_name": "test"})
+    response = client.post("/create", data={"git_url": "", "host_name": "test"})
     assert response.status_code == 400
 
 
-def test_create_form_submit_passes_agent_name(tmp_path: Path) -> None:
-    """POST /create passes agent_name to the creator."""
+def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
+    """POST /create passes host_name to the creator."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
-        data={"git_url": "file:///nonexistent-repo", "agent_name": "my-agent"},
+        data={"git_url": "file:///nonexistent-repo", "host_name": "my-workspace"},
         follow_redirects=False,
     )
     assert response.status_code == 303
     agent_creator.wait_for_all()
 
 
-def test_create_agent_api_passes_agent_name(tmp_path: Path) -> None:
-    """POST /api/create-agent passes agent_name to the creator."""
+def test_create_agent_api_passes_host_name(tmp_path: Path) -> None:
+    """POST /api/create-agent passes host_name to the creator."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "agent_name": "my-agent"},
+        json={"git_url": "file:///nonexistent-repo", "host_name": "my-agent"},
     )
     assert response.status_code == 200
     data = response.json()
@@ -630,7 +554,7 @@ def test_create_agent_api_returns_agent_id(tmp_path: Path) -> None:
     assert response.status_code == 200
     data = response.json()
     assert "agent_id" in data
-    assert data["status"] == "CLONING"
+    assert data["status"] == "INITIALIZING"
     agent_creator.wait_for_all()
 
 
@@ -640,6 +564,33 @@ def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
 
     response = client.post("/api/create-agent", json={"git_url": ""})
     assert response.status_code == 400
+
+
+def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
+    """POST /create with a host_name that fails HostName validation re-renders the form with an error."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "alphanumeric" in response.text
+    assert "bad.name" in response.text
+
+
+def test_create_agent_api_rejects_invalid_host_name(tmp_path: Path) -> None:
+    """POST /api/create-agent with a host_name that fails HostName validation returns 400."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo", "host_name": "bad.name"},
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert "alphanumeric" in body["error"]
 
 
 def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
@@ -671,7 +622,7 @@ def test_creating_page_returns_404_for_unknown(tmp_path: Path) -> None:
     """GET /creating/{agent_id} returns 404 for unknown agent creation."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.get("/creating/{}".format(AgentId()))
+    response = client.get("/creating/{}".format(CreationId()))
     assert response.status_code == 404
 
 
@@ -679,13 +630,26 @@ def test_creation_status_api_returns_status_for_tracked_agent(tmp_path: Path) ->
     """GET /api/create-agent/{id}/status returns a valid status for a tracked creation."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
-    agent_id = agent_creator.start_creation("file:///nonexistent-repo")
+    creation_id = agent_creator.start_creation("file:///nonexistent-repo")
 
-    response = client.get("/api/create-agent/{}/status".format(agent_id))
+    response = client.get("/api/create-agent/{}/status".format(creation_id))
     assert response.status_code == 200
     data = response.json()
-    assert data["agent_id"] == str(agent_id)
-    assert data["status"] in ("CLONING", "CREATING", "DONE", "FAILED")
+    # The status response now reports both ``creation_id`` (always present)
+    # and ``agent_id`` (only once mngr create returns a canonical id). For
+    # this test the create runs against a nonexistent repo so it may never
+    # produce an agent_id; just check that the creation_id round-trips.
+    assert data["creation_id"] == str(creation_id)
+    assert data["status"] in (
+        "INITIALIZING",
+        "CLONING_REPO",
+        "CHECKING_OUT_BRANCH",
+        "PROVISIONING_AI",
+        "CREATING_WORKSPACE",
+        "WAITING_FOR_READY",
+        "DONE",
+        "FAILED",
+    )
     agent_creator.wait_for_all()
 
 
@@ -803,7 +767,7 @@ def test_creation_logs_sse_returns_404_for_unknown(tmp_path: Path) -> None:
     """GET /api/create-agent/{id}/logs returns 404 for unknown agent."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    response = client.get("/api/create-agent/{}/logs".format(AgentId()))
+    response = client.get("/api/create-agent/{}/logs".format(CreationId()))
     assert response.status_code == 404
 
 
@@ -817,6 +781,74 @@ def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
     agent_creator.wait_for_all()
+
+
+def test_creation_logs_sse_emits_status_events(tmp_path: Path) -> None:
+    """The current ``AgentCreationStatus`` is surfaced as a ``{"_type": "status"}`` SSE event.
+
+    Regular log lines stay on the ``{"log": ...}`` channel. This test exercises
+    the polling dispatch in ``_stream_creation_logs`` by seeding a particular
+    status into the ``AgentCreator``'s private state and verifying the stream
+    emits a matching status event with the right ``status_text`` -- without
+    running a real agent creation (which would require Docker).
+    """
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    creation_id = CreationId()
+    log_queue: queue.Queue[str] = queue.Queue()
+    with agent_creator._lock:
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
+        agent_creator._launch_modes[str(creation_id)] = LaunchMode.LOCAL
+        agent_creator._log_queues[str(creation_id)] = log_queue
+
+    log_queue.put("regular log line")
+    log_queue.put(LOG_SENTINEL)
+
+    payloads: list[dict[str, object]] = []
+    with client.stream("GET", "/api/create-agent/{}/logs".format(creation_id)) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            payloads.append(json.loads(line[len("data: ") :]))
+            if payloads[-1].get("_type") == "done":
+                break
+
+    status_events = [p for p in payloads if p.get("_type") == "status"]
+    log_events = [p for p in payloads if "log" in p]
+    assert len(status_events) == 1
+    assert status_events[0]["status"] == "CREATING_WORKSPACE"
+    assert status_events[0]["status_text"] == "Creating workspace..."
+    assert any(p["log"] == "regular log line" for p in log_events)
+
+
+def test_creation_logs_sse_emits_status_text_for_imbue_cloud(tmp_path: Path) -> None:
+    """Status captions are launch-mode-aware via ``_STATUS_TEXT_IMBUE_CLOUD``."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    creation_id = CreationId()
+    log_queue: queue.Queue[str] = queue.Queue()
+    with agent_creator._lock:
+        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.CREATING_WORKSPACE
+        agent_creator._launch_modes[str(creation_id)] = LaunchMode.IMBUE_CLOUD
+        agent_creator._log_queues[str(creation_id)] = log_queue
+
+    log_queue.put(LOG_SENTINEL)
+
+    payloads: list[dict[str, object]] = []
+    with client.stream("GET", "/api/create-agent/{}/logs".format(creation_id)) as response:
+        assert response.status_code == 200
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            payloads.append(json.loads(line[len("data: ") :]))
+            if payloads[-1].get("_type") == "done":
+                break
+
+    status_events = [p for p in payloads if p.get("_type") == "status"]
+    assert status_events
+    assert status_events[0]["status"] == "CREATING_WORKSPACE"
+    assert status_events[0]["status_text"] == "Setting up agent..."
 
 
 def test_creating_page_rejects_unauthenticated(tmp_path: Path) -> None:
@@ -840,8 +872,8 @@ def test_create_form_submit_passes_launch_mode(tmp_path: Path) -> None:
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
-            "launch_mode": "DEV",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
         },
         follow_redirects=False,
     )
@@ -857,8 +889,8 @@ def test_create_agent_api_passes_launch_mode(tmp_path: Path) -> None:
         "/api/create-agent",
         json={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
-            "launch_mode": "DEV",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
         },
     )
     assert response.status_code == 200
@@ -875,7 +907,7 @@ def test_create_agent_api_rejects_invalid_launch_mode(tmp_path: Path) -> None:
         "/api/create-agent",
         json={
             "git_url": "file:///nonexistent-repo",
-            "agent_name": "my-agent",
+            "host_name": "my-agent",
             "launch_mode": "INVALID_MODE",
         },
     )
@@ -892,7 +924,203 @@ def test_create_form_shows_launch_mode_dropdown(tmp_path: Path) -> None:
     assert "launch_mode" in response.text
     assert "local" in response.text
     assert "cloud" in response.text
-    assert "dev" in response.text
+    assert "lima" in response.text
+    assert "imbue_cloud" in response.text
+
+
+def test_create_form_shows_ai_provider_dropdown(tmp_path: Path) -> None:
+    """GET /create form includes the AI provider dropdown with all three options."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/create")
+    assert response.status_code == 200
+    assert 'name="ai_provider"' in response.text
+    assert 'value="IMBUE_CLOUD"' in response.text
+    assert 'value="API_KEY"' in response.text
+    assert 'value="SUBSCRIPTION"' in response.text
+
+
+def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
+    """The .env-file checkbox has been removed from the form."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/create")
+    assert response.status_code == 200
+    assert "include_env_file" not in response.text
+
+
+def test_create_form_shows_gh_token_input_in_advanced(tmp_path: Path) -> None:
+    """The advanced section includes an optional GH_TOKEN field."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.get("/create")
+    assert response.status_code == 200
+    assert 'name="gh_token"' in response.text
+
+
+def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
+    """Selecting IMBUE_CLOUD compute without an account is rejected with a clear message."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "host_name": "my-agent",
+            "launch_mode": "IMBUE_CLOUD",
+            "ai_provider": "SUBSCRIPTION",
+            "account_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "imbue_cloud requires an account" in response.text
+
+
+def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
+    """Selecting IMBUE_CLOUD AI provider without an account is rejected."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "IMBUE_CLOUD",
+            "account_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "imbue_cloud requires an account" in response.text
+
+
+def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
+    """Selecting AI provider API_KEY without supplying a key is rejected."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert "Anthropic API key is required" in response.text
+
+
+def test_create_form_submit_accepts_subscription_with_no_account(tmp_path: Path) -> None:
+    """Subscription mode + no account is the no-account default and must be accepted."""
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "SUBSCRIPTION",
+            "account_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    agent_creator.wait_for_all()
+
+
+def test_create_agent_api_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
+    """The JSON API also rejects AI provider API_KEY without a key."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
+        },
+    )
+    assert response.status_code == 400
+    assert "anthropic_api_key is required" in response.json()["error"]
+
+
+def test_create_agent_api_rejects_invalid_ai_provider(tmp_path: Path) -> None:
+    """An unknown ai_provider is rejected by the JSON API."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "ai_provider": "BOGUS",
+        },
+    )
+    assert response.status_code == 400
+    assert "Invalid ai_provider" in response.json()["error"]
+
+
+def test_create_agent_api_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
+    """API parity with the form path: IMBUE_CLOUD compute requires an account."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "launch_mode": "IMBUE_CLOUD",
+            "ai_provider": "SUBSCRIPTION",
+        },
+    )
+    assert response.status_code == 400
+    assert "account_id is required" in response.json()["error"]
+
+
+def test_create_agent_api_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
+    """API parity with the form path: IMBUE_CLOUD AI provider requires an account."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    response = client.post(
+        "/api/create-agent",
+        json={
+            "git_url": "file:///nonexistent-repo",
+            "launch_mode": "LOCAL",
+            "ai_provider": "IMBUE_CLOUD",
+        },
+    )
+    assert response.status_code == 400
+    assert "account_id is required" in response.json()["error"]
+
+
+def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: Path) -> None:
+    """When validation fails and the form re-renders, the user's account_id choice
+    must survive instead of reverting to the config default. The form submits
+    ``account_id=""`` for "No account"; the re-rendered page must show that
+    option as ``selected`` and must NOT show any other account as selected."""
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
+
+    # Trigger a validation error (IMBUE_CLOUD AI without an account).
+    response = client.post(
+        "/create",
+        data={
+            "git_url": "file:///nonexistent-repo",
+            "host_name": "my-agent",
+            "launch_mode": "LOCAL",
+            "ai_provider": "IMBUE_CLOUD",
+            "account_id": "",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    # The "No account (private project)" option is selected when default_account_id is empty.
+    assert 'value=""' in response.text and "No account" in response.text
+    # And the IMBUE_CLOUD warning should be present.
+    assert "imbue_cloud requires an account" in response.text
 
 
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
@@ -979,11 +1207,17 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
 
 def _create_test_client_with_stores(
     tmp_path: Path,
+    cli: ImbueCloudCli | None = None,
 ) -> tuple[TestClient, FileAuthStore]:
-    """Create a desktop client with session store and config for testing new routes."""
+    """Create a desktop client with session store and config for testing new routes.
+
+    ``cli`` is forwarded to :func:`make_session_store_for_test` so callers
+    can seed the session store with specific accounts; defaults to a
+    fresh empty fake CLI.
+    """
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
-    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
     minds_config = MindsConfig(data_dir=tmp_path)
     request_inbox = RequestInbox()
 
@@ -1019,16 +1253,10 @@ def test_accounts_page_shows_empty_when_no_accounts(tmp_path: Path) -> None:
 
 def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
     """The /accounts page lists logged-in accounts."""
-    client, auth_store = _create_test_client_with_stores(tmp_path)
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
     _authenticate_client(client, auth_store)
-
-    session_store = MultiAccountSessionStore(data_dir=tmp_path)
-    session_store.add_or_update_session(
-        access_token="tok-123",
-        refresh_token=None,
-        user_id="user-test-123",
-        email="test@example.com",
-    )
 
     response = client.get("/accounts")
     assert response.status_code == 200
@@ -1076,9 +1304,11 @@ def test_requests_panel_card_routes_via_minds_bridge(tmp_path: Path) -> None:
     # Build the app inline so we can seed the inbox before creating the
     # TestClient and still have a concretely-typed handle to app.state.
     agent_id = str(AgentId())
-    event = create_sharing_request_event(agent_id=agent_id, service_name="web")
+    event = create_latchkey_permission_request_event(
+        agent_id=agent_id, scope="slack-api", rationale="Need to post status updates"
+    )
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
-    session_store = MultiAccountSessionStore(data_dir=tmp_path)
+    session_store = make_session_store_for_test(tmp_path)
     minds_config = MindsConfig(data_dir=tmp_path)
     request_inbox = RequestInbox().add_request(event)
     backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
@@ -1151,6 +1381,10 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
     assert config.get_auto_open_requests_panel() is False
 
 
+_TEST_PREAUTH_COOKIE = "test-preauth-cookie-value"
+_TEST_MNGR_FORWARD_PORT = 8421
+
+
 def _build_refresh_test_app(
     tmp_path: Path,
     resolver: MngrCliBackendResolver,
@@ -1174,17 +1408,21 @@ def _build_refresh_test_app(
         auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
         backend_resolver=resolver,
         http_client=http_client,
-        session_store=MultiAccountSessionStore(data_dir=tmp_path),
+        session_store=make_session_store_for_test(tmp_path),
         minds_config=MindsConfig(data_dir=tmp_path),
         request_inbox=RequestInbox(),
         paths=WorkspacePaths(data_dir=tmp_path),
+        mngr_forward_port=_TEST_MNGR_FORWARD_PORT,
+        mngr_forward_preauth_cookie=_TEST_PREAUTH_COOKIE,
     )
     return app, received
 
 
 def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> None:
-    """A refresh event on the mngr events stream triggers a POST to the agent's
-    workspace server broadcast endpoint with the correct service_name."""
+    """A refresh event on the mngr event stream triggers a POST to the
+    plugin's per-agent subdomain so the system interface broadcasts. The URL
+    is on the plugin's port and the request carries the ``mngr_forward_session``
+    cookie (set to the preauth value minds wired in)."""
     agent_id = AgentId()
     service_name = "web"
 
@@ -1207,25 +1445,12 @@ def test_refresh_event_posts_to_system_interface_broadcast(tmp_path: Path) -> No
     assert len(received) == 1, f"expected one POST, got {len(received)}: {[str(r.url) for r in received]}"
     request = received[0]
     assert request.method == "POST"
-    assert str(request.url) == f"http://ws-backend:9000/api/refresh-service/{service_name}/broadcast"
-
-
-def test_refresh_event_without_system_interface_backend_is_noop(tmp_path: Path) -> None:
-    """A refresh event for an agent whose system_interface URL isn't known does nothing."""
-    agent_id = AgentId()
-
-    # Resolver knows about the agent but not a system_interface service.
-    resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id))
-    app, received = _build_refresh_test_app(tmp_path, resolver)
-
-    with TestClient(app):
-        raw_line = json.dumps({"source": "refresh", "service_name": "web"})
-        resolver._fire_on_refresh(str(agent_id), raw_line)
-        # Give the reactor a moment to confirm nothing arrives. poll_until
-        # will run for the full timeout since the predicate never flips.
-        poll_until(lambda: len(received) > 0, timeout=0.2, poll_interval=0.02)
-
-    assert received == []
+    expected_url = (
+        f"http://{agent_id}.localhost:{_TEST_MNGR_FORWARD_PORT}/api/refresh-service/{service_name}/broadcast"
+    )
+    assert str(request.url) == expected_url
+    cookie_header = request.headers.get("cookie", "")
+    assert f"mngr_forward_session={_TEST_PREAUTH_COOKIE}" in cookie_header
 
 
 def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path) -> None:
@@ -1253,145 +1478,235 @@ def test_refresh_event_before_lifespan_is_dropped_without_raising(tmp_path: Path
     assert received == []
 
 
-# -- Subdomain forwarding (agent-id.localhost) tests --
+# -- system-interface restart + recovery tests --
 
 
-def _make_workspace_stub_backend() -> FastAPI:
-    """A FastAPI app that pretends to be a minds_workspace_server."""
-    stub = FastAPI()
-
-    @stub.get("/", response_class=HTMLResponse)
-    def workspace_root() -> HTMLResponse:
-        return HTMLResponse("<html><body>workspace-root</body></html>")
-
-    @stub.get("/api/layout")
-    def workspace_layout() -> JSONResponse:
-        return JSONResponse({"layout": "stub"})
-
-    return stub
-
-
-def _create_subdomain_test_client(
-    tmp_path: Path,
-    agent_id: AgentId,
-    workspace_app: FastAPI | None = None,
-) -> tuple[TestClient, FileAuthStore]:
-    """Build a desktop client whose resolver routes the given agent to a stub backend.
-
-    If *workspace_app* is supplied it is used as the workspace backend; otherwise
-    ``_make_workspace_stub_backend()`` provides a default stub.
-    """
-    workspace_transport = httpx.ASGITransport(app=workspace_app or _make_workspace_stub_backend())
-
-    class _WorkspaceRoutingTransport(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            host = request.url.host
-            if host == "workspace-backend":
-                return await workspace_transport.handle_async_request(request)
-            return httpx.Response(502, content=b"unknown host")
-
-    routing_client = httpx.AsyncClient(transport=_WorkspaceRoutingTransport(), follow_redirects=False, timeout=5.0)
-
-    auth_dir = tmp_path / "auth"
-    auth_store = FileAuthStore(data_directory=auth_dir)
-
-    discovered_agents = make_agents_json(agent_id)
-    resolver = make_resolver_with_data(
-        agents_json=discovered_agents,
-        service_logs={str(agent_id): make_service_log("system_interface", "http://workspace-backend")},
+def test_build_mngr_exec_argv_includes_agent_id_and_command() -> None:
+    aid = AgentId.generate()
+    argv = _build_mngr_exec_argv(
+        mngr_binary="/usr/local/bin/mngr",
+        agent_id=aid,
+        shell_command="echo hello",
     )
-
-    app = create_desktop_client(
-        auth_store=auth_store,
-        backend_resolver=resolver,
-        http_client=routing_client,
-    )
-    client = TestClient(app, base_url=f"http://{agent_id}.localhost")
-    return client, auth_store
+    assert argv[0] == "/usr/local/bin/mngr"
+    assert argv[1] == "exec"
+    assert argv[2] == str(aid)
+    assert argv[3] == "echo hello"
+    assert "--timeout" in argv
+    assert "--quiet" in argv
 
 
-def test_subdomain_forward_unauth_html_redirects_to_landing(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, _ = _create_subdomain_test_client(tmp_path, agent_id)
-    response = client.get("/", headers={"accept": "text/html"}, follow_redirects=False)
-    assert response.status_code == 302
-    location = response.headers["location"]
-    assert location.startswith("http://localhost:")
-    # The redirect target must be the bare-origin landing route, not /login
-    # (which requires a one_time_code query param and would otherwise return
-    # 422 when the browser follows the redirect).
-    assert location.endswith("/")
-    assert "/login" not in location
-
-
-def test_subdomain_forward_unauth_non_html_is_403(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, _ = _create_subdomain_test_client(tmp_path, agent_id)
-    response = client.get("/api/layout", headers={"accept": "application/json"})
+def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
     assert response.status_code == 403
 
 
-def test_subdomain_forward_auth_forwards_to_workspace_server(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id)
-    _authenticate_client(client=client, auth_store=auth_store)
-    response = client.get("/")
+def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
+    # Mark stuck so the page renders -- a HEALTHY agent with a valid return_to
+    # 302s straight to return_to (covered by the healthy-redirect test below).
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
+
+    # Use a legitimate localhost-subdomain return_to (the real plugin-emitted form).
+    safe_return_to = f"http://{agent_id}.localhost:8421/some/path"
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
+        follow_redirects=False,
+    )
     assert response.status_code == 200
-    assert "workspace-root" in response.text
+    assert str(agent_id) in response.text
+    assert safe_return_to in response.text
+    assert "Restart system interface" in response.text
 
 
-def test_subdomain_forward_unknown_agent_returns_404(tmp_path: Path) -> None:
-    # agent_id is NOT registered in the resolver; the subdomain should 404.
-    # Create a client with a DIFFERENT agent registered and then visit agent_id's subdomain.
-    agent_id = AgentId()
-    other_id = AgentId()
-    client, auth_store = _create_subdomain_test_client(tmp_path, other_id)
-    _authenticate_client(client=client, auth_store=auth_store)
-    # Switch base_url to the unregistered agent
-    client.base_url = httpx.URL(f"http://{agent_id}.localhost")
-    response = client.get("/")
-    assert response.status_code == 404
+def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
+    """A return_to pointing at a non-localhost host must be dropped, not rendered.
 
+    Otherwise the recovery page would be an open-redirect: an attacker could
+    craft ``?return_to=https://evil.com/`` and the page would navigate the
+    user there after a successful restart.
+    """
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
 
-# -- Session cookie stripping tests --
-
-
-def _make_cookie_echo_backend() -> FastAPI:
-    """A workspace stub that echoes back the Cookie header it receives."""
-    stub = FastAPI()
-
-    @stub.get("/cookies")
-    def echo_cookies(request: FastAPIRequest) -> JSONResponse:
-        return JSONResponse({"cookie_header": request.headers.get("cookie")})
-
-    return stub
-
-
-def test_subdomain_forward_strips_session_cookie(tmp_path: Path) -> None:
-    """The proxy must strip the minds_session cookie so workspace servers
-    cannot extract and reuse it against other agents."""
-    agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id, workspace_app=_make_cookie_echo_backend())
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/cookies")
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=https://evil.com/phish",
+        follow_redirects=False,
+    )
     assert response.status_code == 200
+    assert "evil.com" not in response.text
+    # The data-return-to attribute should be empty so the page falls back to reload().
+    assert 'data-return-to=""' in response.text
 
-    received_cookie = response.json()["cookie_header"]
-    assert received_cookie is None or SESSION_COOKIE_NAME not in received_cookie
 
+def test_recovery_page_drops_protocol_relative_return_to(tmp_path: Path) -> None:
+    """Protocol-relative URLs like ``//evil.com/`` must not be treated as relative."""
+    client, auth_store, agent_id = _setup_test_server(tmp_path)
+    _authenticate_client(client, auth_store)
 
-def test_subdomain_forward_preserves_non_session_cookies(tmp_path: Path) -> None:
-    """The proxy must preserve cookies that are not the session cookie."""
-    agent_id = AgentId()
-    client, auth_store = _create_subdomain_test_client(tmp_path, agent_id, workspace_app=_make_cookie_echo_backend())
-    _authenticate_client(client=client, auth_store=auth_store)
-    client.cookies.set("app_preference", "dark-mode-92741", path="/")
-
-    response = client.get("/cookies")
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=//evil.com/phish",
+        follow_redirects=False,
+    )
     assert response.status_code == 200
+    assert "evil.com" not in response.text
 
-    received_cookie = response.json()["cookie_header"]
-    assert received_cookie is not None
-    assert "app_preference=dark-mode-92741" in received_cookie
-    assert SESSION_COOKIE_NAME not in received_cookie
+
+def test_recovery_page_allows_relative_return_to(tmp_path: Path) -> None:
+    """A same-origin relative path must be preserved.
+
+    Pre-arranges STUCK so the page renders (a HEALTHY agent with a valid
+    return_to 302s to it; that path is covered separately).
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to=/agents/{agent_id}/",
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert f"/agents/{agent_id}/" in response.text
+
+
+def test_restart_api_requires_authentication(tmp_path: Path) -> None:
+    client, _, agent_id = _setup_test_server(tmp_path)
+    response = client.post(f"/api/agents/{agent_id}/restart-system-interface")
+    assert response.status_code == 403
+
+
+def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path: Path) -> None:
+    """create_desktop_client should expose the tracker on app.state for handlers."""
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    tracker = SystemInterfaceHealthTracker()
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        system_interface_health_tracker=tracker,
+    )
+
+    assert app.state.system_interface_health_tracker is tracker
+
+
+def _setup_test_server_with_tracker(
+    tmp_path: Path,
+    tracker: SystemInterfaceHealthTracker,
+) -> tuple[TestClient, FileAuthStore, AgentId]:
+    """Build a test client wired to a real SystemInterfaceHealthTracker.
+
+    The default ``_setup_test_server`` helper doesn't accept a tracker, and
+    several tests need to verify the recovery page reads the tracker's
+    current state. Constructing a fresh app per test keeps the tests
+    isolated from each other.
+    """
+    agent_id = AgentId()
+    auth_dir = tmp_path / "auth"
+    auth_store = FileAuthStore(data_directory=auth_dir)
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=backend_resolver,
+        http_client=None,
+        system_interface_health_tracker=tracker,
+    )
+    client = TestClient(app, base_url="http://localhost")
+    _authenticate_client(client=client, auth_store=auth_store)
+    return client, auth_store, agent_id
+
+
+def test_recovery_page_initial_status_reflects_tracker_stuck(tmp_path: Path) -> None:
+    """The recovery page must read the tracker's current health into ``initial_status``.
+
+    Without this wiring the page would always render with ``data-initial-status="healthy"``,
+    so the JS would not show the busy state when the user lands on the page mid-restart.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'data-initial-status="stuck"' in response.text
+
+
+def test_recovery_page_initial_status_reflects_tracker_restarting(tmp_path: Path) -> None:
+    """A user landing on the recovery page during an in-flight restart must see RESTARTING."""
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_restarting(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.RESTARTING
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'data-initial-status="restarting"' in response.text
+
+
+def test_recovery_page_redirects_to_return_to_when_agent_already_healthy(tmp_path: Path) -> None:
+    """Regression: if the tracker says HEALTHY at recovery-page-render time, 302 to return_to.
+
+    Catches a real-world race where the chrome SSE pushes ``stuck`` and the
+    chrome JS navigates to /recovery, but the background probe loop flips
+    the tracker back to HEALTHY in the brief window before the GET lands.
+    Without the redirect, ``initial_status="healthy"`` would render the
+    "System interface not responding" page and the JS would never auto-
+    reload (the SSE doesn't push events for HEALTHY agents).
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    # With no record in the tracker, get_health returns HEALTHY by default.
+    assert tracker.get_health(agent_id) == AgentHealth.HEALTHY
+    safe_return_to = f"http://{agent_id}.localhost:8421/"
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == safe_return_to
+
+
+def test_recovery_page_renders_normally_when_healthy_but_no_return_to(tmp_path: Path) -> None:
+    """No return_to + HEALTHY: render the page (with a working restart button) instead of erroring.
+
+    Falls back to the manual restart path. The page itself still renders
+    correctly with ``initial_status="healthy"``; the user can hit the
+    restart button if they want to.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+
+    response = client.get(f"/agents/{agent_id}/recovery", follow_redirects=False)
+
+    assert response.status_code == 200
+    assert 'data-initial-status="healthy"' in response.text
+
+
+def test_recovery_page_does_not_redirect_when_stuck_even_with_return_to(tmp_path: Path) -> None:
+    """STUCK + return_to: still render the page so the user sees the problem + restart button.
+
+    Defends against the cleanup-side regression where the new HEALTHY-only
+    redirect accidentally widens to all states.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    client, _, agent_id = _setup_test_server_with_tracker(tmp_path, tracker)
+    tracker.mark_stuck(agent_id)
+    safe_return_to = f"http://{agent_id}.localhost:8421/"
+
+    response = client.get(
+        f"/agents/{agent_id}/recovery?return_to={safe_return_to}",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert 'data-initial-status="stuck"' in response.text

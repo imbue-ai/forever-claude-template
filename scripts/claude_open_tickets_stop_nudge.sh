@@ -26,11 +26,12 @@ tk_script="${repo_root}/vendor/tk/ticket"
 # parent-walk and potentially land on a random ancestor).
 export TICKETS_DIR="$tickets_dir"
 
-# `tk ready` is a built-in that lists open + in_progress tickets (with deps
-# resolved -- and we don't use deps).
-open_count=$("$tk_script" ready 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+# `tk steps` lists this agent's open step records only (regular tickets
+# are managed cross-agent and aren't part of the per-turn progress flow
+# the chat view renders).
+open_count=$("$tk_script" steps 2>/dev/null | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
 
 if [[ "${open_count:-0}" -gt 0 ]]; then
-    echo "[task-management] Stopping with ${open_count} ticket(s) still open. They'll appear at the top of the next turn's progress block." >&2
+    echo "[task-management] Stopping with ${open_count} step record(s) still open. They'll appear at the top of the next turn's progress block." >&2
 fi
 exit 0

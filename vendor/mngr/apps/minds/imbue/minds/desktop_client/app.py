@@ -4,80 +4,96 @@ import html
 import json
 import os
 import queue
-import re
-import socket as socket_module
+import subprocess
+import threading
 from collections.abc import AsyncGenerator
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
-from typing import Any
 from typing import Final
-from urllib.parse import quote
+from urllib.parse import urlparse
 
 import httpx
-import paramiko
-import websockets
-import websockets.asyncio.client
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import Request
-from fastapi import WebSocket
-from fastapi import WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
-from websockets import ClientConnection
+from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
+from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
+from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
-from imbue.minds.desktop_client.api_v1 import get_cf_client_with_auth
 from imbue.minds.desktop_client.api_v1 import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.auth import AuthStoreInterface
-from imbue.minds.desktop_client.auth_backend_client import AuthBackendClient
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.backend_resolver import MngrStreamManager
-from imbue.minds.desktop_client.cloudflare_client import CloudflareClient
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
-from imbue.minds.desktop_client.cookie_manager import create_subdomain_auth_token
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
-from imbue.minds.desktop_client.cookie_manager import verify_subdomain_auth_token
 from imbue.minds.desktop_client.deps import BackendResolverDep
-from imbue.minds.desktop_client.latchkey.gateway import LatchkeyGatewayManager
+from imbue.minds.desktop_client.destroying import DestroyingStatus
+from imbue.minds.desktop_client.destroying import delete_destroying
+from imbue.minds.desktop_client.destroying import list_destroying
+from imbue.minds.desktop_client.destroying import lookup_host_id
+from imbue.minds.desktop_client.destroying import read_destroying
+from imbue.minds.desktop_client.destroying import read_log_chunk
+from imbue.minds.desktop_client.destroying import start_destroy
+from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.request_events import RequestInbox
-from imbue.minds.desktop_client.request_events import RequestStatus
-from imbue.minds.desktop_client.request_events import SharingRequestEvent
-from imbue.minds.desktop_client.request_events import append_response_event
-from imbue.minds.desktop_client.request_events import create_request_response_event
+from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
+from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.request_handler import find_handler_for_event
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelError
-from imbue.minds.desktop_client.ssh_tunnel import SSHTunnelManager
-from imbue.minds.desktop_client.ssh_tunnel import parse_url_host_port
+from imbue.minds.desktop_client.sharing_handler import SharingError
+from imbue.minds.desktop_client.sharing_handler import enable_sharing_via_cloudflare
+from imbue.minds.desktop_client.sharing_handler import parse_emails_form_value
+from imbue.minds.desktop_client.sharing_handler import resolve_account_email_for_workspace
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_router
+from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import render_accounts_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
+from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
+from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.templates import workspace_accent
-from imbue.minds.desktop_client.tunnel_token_store import load_tunnel_token as _load_tunnel_token
-from imbue.minds.desktop_client.tunnel_token_store import save_tunnel_token as _save_tunnel_token
+from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -85,17 +101,30 @@ from imbue.minds.primitives import ServiceName
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import InvalidName
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
-_EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
-    {
-        "transfer-encoding",
-        "content-encoding",
-        "content-length",
-    }
-)
+def _json_error(message: str, status_code: int) -> Response:
+    """Return a small ``{"error": ...}`` JSON response."""
+    return Response(
+        content=json.dumps({"error": message}),
+        media_type="application/json",
+        status_code=status_code,
+    )
+
+
+def _enqueue_health_change(
+    health_queue: "asyncio.Queue[tuple[str, AgentHealth]]",
+    change_event: asyncio.Event,
+    agent_id: AgentId,
+    status: AgentHealth,
+) -> None:
+    """Push a health-change event into ``health_queue`` and wake the SSE loop."""
+    health_queue.put_nowait((str(agent_id), status))
+    change_event.set()
 
 
 # -- Dependency injection helpers --
@@ -106,6 +135,16 @@ def _get_auth_store(request: Request) -> AuthStoreInterface:
 
 
 AuthStoreDep = Annotated[AuthStoreInterface, Depends(_get_auth_store)]
+
+
+def _get_mngr_forward_origin(request: Request) -> str:
+    """Build the bare-origin URL of the ``mngr forward`` plugin.
+
+    Used by templates to construct ``/goto/<agent>/`` URLs that target the
+    plugin (which owns subdomain forwarding) rather than minds.
+    """
+    port = request.app.state.mngr_forward_port or 8421
+    return f"http://localhost:{port}"
 
 
 # -- Auth helpers --
@@ -128,63 +167,6 @@ def _is_authenticated(
     )
 
 
-# -- WebSocket forwarding helpers --
-
-
-async def _forward_client_to_backend(
-    client_websocket: WebSocket,
-    backend_ws: ClientConnection,
-) -> None:
-    """Forward messages from the client WebSocket to the backend.
-
-    Terminates via WebSocketDisconnect (client disconnects),
-    ConnectionClosed (backend disconnects), or RuntimeError (Starlette
-    raises this when receive() is called after a disconnect was already
-    delivered).
-    """
-    try:
-        while True:
-            data = await client_websocket.receive()
-            msg_type = data.get("type", "")
-            if msg_type == "websocket.disconnect":
-                break
-            if "text" in data:
-                await backend_ws.send(data["text"])
-            elif "bytes" in data:
-                await backend_ws.send(data["bytes"])
-            else:
-                logger.trace("Ignoring WebSocket message with no text or bytes: {}", msg_type)
-    except WebSocketDisconnect:
-        logger.trace("Client WebSocket disconnected")
-    except RuntimeError as e:
-        logger.trace("Client WebSocket receive error (likely post-disconnect): {}", e)
-    except websockets.exceptions.ConnectionClosed:
-        logger.debug("Backend WebSocket closed while forwarding client message")
-
-    try:
-        await backend_ws.close()
-    except websockets.exceptions.ConnectionClosed:
-        logger.trace("Backend WebSocket already closed during cleanup")
-
-
-async def _forward_backend_to_client(
-    client_websocket: WebSocket,
-    backend_ws: ClientConnection,
-    agent_id: AgentId,
-) -> None:
-    """Forward messages from the backend WebSocket to the client."""
-    try:
-        async for msg in backend_ws:
-            if isinstance(msg, str):
-                await client_websocket.send_text(msg)
-            else:
-                await client_websocket.send_bytes(msg)
-    except websockets.exceptions.ConnectionClosed:
-        logger.debug("Backend WebSocket closed for {}", agent_id)
-    except RuntimeError as e:
-        logger.trace("Client WebSocket send error (likely post-disconnect): {}", e)
-
-
 # -- Lifespan --
 
 
@@ -193,47 +175,81 @@ async def _managed_lifespan(
     inner_app: FastAPI,
     is_externally_managed_client: bool,
 ) -> AsyncGenerator[None, None]:
-    """Manage the httpx client and SSH tunnel lifecycles for the desktop client."""
+    """Manage the httpx client lifecycle and capture the running event loop.
+
+    SSH tunnels (forward + reverse) live in ``cli/run.py``'s
+    ``SSHTunnelManager``, which is solely used by the surviving Latchkey
+    discovery callback and is cleaned up by ``cli/run.py``.
+    """
     if not is_externally_managed_client:
         inner_app.state.http_client = httpx.AsyncClient(
             follow_redirects=False,
             timeout=_PROXY_TIMEOUT_SECONDS,
         )
-    inner_app.state.ssh_http_clients: dict[str, httpx.AsyncClient] = {}
-    # Captured here so background callbacks (e.g. the mngr events refresh
+    # Captured here so background callbacks (e.g. the mngr event refresh
     # dispatch) can schedule async work on the server's running loop via
     # asyncio.run_coroutine_threadsafe.
     inner_app.state.event_loop = asyncio.get_running_loop()
     try:
         yield
     finally:
+        # Signal SSE handlers to exit before anything else. Setting the
+        # event alone isn't enough -- the chrome SSE blocks on a
+        # ``change_event.wait()`` with a 30s timeout, so it'd take up to
+        # 30s to notice the shutdown. Poke the backend resolver's
+        # change callback (which fires the same change_event) to wake
+        # every chrome SSE handler immediately; they then see the
+        # shutdown event set and return cleanly from their generators.
+        inner_app.state.shutdown_event.set()
+        backend_resolver = inner_app.state.backend_resolver
+        if isinstance(backend_resolver, MngrCliBackendResolver):
+            backend_resolver.notify_change()
         # Clear the captured loop reference first so background callbacks that
         # race with shutdown see None and drop their events instead of trying
         # to schedule on a loop that is about to close.
         inner_app.state.event_loop = None
-        for client in inner_app.state.ssh_http_clients.values():
-            await client.aclose()
-        inner_app.state.ssh_http_clients.clear()
         if not is_externally_managed_client:
             await inner_app.state.http_client.aclose()
-        # Stop mngr observe/events subprocesses before cleaning up tunnels.
-        # This runs inside uvicorn's lifespan shutdown, which happens BEFORE
-        # uvicorn re-raises the captured SIGTERM signal. A finally block
-        # around uvicorn.run() would never execute because uvicorn calls
-        # signal.raise_signal(SIGTERM) after shutdown, killing the process.
-        stream_manager: MngrStreamManager | None = inner_app.state.stream_manager
-        if stream_manager is not None:
-            logger.info("Stopping stream manager subprocesses...")
-            stream_manager.stop()
-            logger.info("Stream manager stopped.")
-        latchkey_gateway_manager: LatchkeyGatewayManager | None = inner_app.state.latchkey_gateway_manager
-        if latchkey_gateway_manager is not None:
-            logger.info("Stopping latchkey gateway manager...")
-            latchkey_gateway_manager.stop()
-            logger.info("Latchkey gateway manager stopped.")
-        tunnel_manager: SSHTunnelManager | None = inner_app.state.tunnel_manager
-        if tunnel_manager is not None:
-            tunnel_manager.cleanup()
+        # Stop every long-lived strand that's blocked on external I/O
+        # BEFORE draining the concurrency group. The CG's __exit__ just
+        # joins threads with a timeout; threads blocked on subprocess
+        # pipes or socket reads with no read timeout can't unblock on
+        # their own. If we drain the CG while they're still wedged, it
+        # times out waiting for them and surfaces "N strands did not
+        # finish in time" warnings on every clean shutdown.
+        #
+        # Order matters within this block only to the extent that each
+        # stop() returns quickly; their effects (terminate subprocess,
+        # close httpx connection) all unblock threads independently.
+        # Redundant cleanup calls in ``cli/run.py``'s finally block
+        # remain as fallbacks for startup-error paths that never reach
+        # this lifespan teardown.
+        envelope_stream_consumer = inner_app.state.envelope_stream_consumer
+        if envelope_stream_consumer is not None:
+            # SIGTERMs the mngr forward subprocess; closes its pipes so
+            # the three mngr-forward-{stdout,stderr,lifecycle} reader
+            # threads exit their for-line loops.
+            envelope_stream_consumer.terminate()
+        permission_requests_consumer = inner_app.state.permission_requests_consumer
+        if permission_requests_consumer is not None:
+            # Sets the consumer's stop event AND closes the in-flight
+            # follow-stream httpx client so the latchkey-permission-
+            # requests-consumer thread unblocks from its iter_lines read
+            # (which uses read=None timeout and otherwise blocks forever
+            # waiting for the gateway to push the next request).
+            permission_requests_consumer.stop()
+        # Exit the root ConcurrencyGroup. ``__exit__`` waits up to
+        # ``shutdown_timeout_seconds`` for any still-in-flight strands (e.g.
+        # a detached tunnel-setup task) to finish.
+        root_concurrency_group: ConcurrencyGroup | None = inner_app.state.root_concurrency_group
+        if root_concurrency_group is not None:
+            logger.info("Exiting root concurrency group...")
+            try:
+                root_concurrency_group.__exit__(None, None, None)
+            except ConcurrencyExceptionGroup as exc:
+                # Strands reported failures or timed out during shutdown;
+                # log but don't propagate so other cleanup below can run.
+                logger.warning("Root concurrency group exit reported errors: {}", exc)
 
 
 # -- Route handlers (module-level, using Depends for dependency injection) --
@@ -288,6 +304,15 @@ def _handle_authenticate(
     return response
 
 
+def _handle_welcome_page(request: Request, auth_store: AuthStoreDep) -> Response:
+    """Render the welcome/splash page for first-time users."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        html = render_login_page()
+        return HTMLResponse(content=html)
+    html = render_welcome_page()
+    return HTMLResponse(content=html)
+
+
 def _handle_landing_page(
     request: Request,
     auth_store: AuthStoreDep,
@@ -298,6 +323,8 @@ def _handle_landing_page(
         return HTMLResponse(content=html)
 
     all_agent_ids = backend_resolver.list_known_workspace_ids()
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, all_agent_ids)
 
     if all_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
@@ -314,8 +341,10 @@ def _handle_landing_page(
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
+            mngr_forward_origin=_get_mngr_forward_origin(request),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
+            destroying_status_by_agent_id=destroying_status_by_agent_id,
         )
         return HTMLResponse(content=html)
 
@@ -324,416 +353,209 @@ def _handle_landing_page(
     # completed with no agents found, show the create form so the user can
     # create their first agent instead of polling forever.
     if not backend_resolver.has_completed_initial_discovery():
-        html = render_landing_page(accessible_agent_ids=(), is_discovering=True)
+        html = render_landing_page(
+            accessible_agent_ids=(),
+            mngr_forward_origin=_get_mngr_forward_origin(request),
+            is_discovering=True,
+        )
         return HTMLResponse(content=html)
 
     git_url = request.query_params.get("git_url", "")
     branch = request.query_params.get("branch", "")
-    html = render_create_form(git_url=git_url, branch=branch)
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    html = render_create_form(
+        git_url=git_url,
+        branch=branch,
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+    )
     return HTMLResponse(content=html)
 
 
-def _connect_backend_websocket(
-    ws_url: str,
-    subprotocols: list[str],
-    tunnel_socket_path: Path | None,
-) -> websockets.asyncio.client.connect:
-    """Create a websockets connect context manager, optionally through an SSH tunnel.
-
-    When tunnel_socket_path is provided, connects via a Unix domain socket that
-    tunnels through SSH to the remote backend. Otherwise, connects directly.
-    """
-    ws_subprotocols = [websockets.Subprotocol(s) for s in subprotocols] if subprotocols else None
-
-    if tunnel_socket_path is not None:
-        sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
-        try:
-            sock.connect(str(tunnel_socket_path))
-            sock.setblocking(False)
-        except OSError:
-            sock.close()
-            raise
-        return websockets.connect(ws_url, subprotocols=ws_subprotocols, sock=sock)
-
-    return websockets.connect(ws_url, subprotocols=ws_subprotocols)
-
-
-# -- SSH tunnel helpers --
-
-
-def _get_tunnel_socket_path(
-    tunnel_manager: SSHTunnelManager | None,
-    agent_id: AgentId,
-    backend_url: str,
-    backend_resolver: BackendResolverInterface,
-) -> Path | None:
-    """Get the Unix socket path for tunneling to a remote backend, or None for local."""
-    if tunnel_manager is None:
-        return None
-
-    ssh_info = backend_resolver.get_ssh_info(agent_id)
-    if ssh_info is None:
-        return None
-
-    remote_host, remote_port = parse_url_host_port(backend_url)
-    return tunnel_manager.get_tunnel_socket_path(
-        ssh_info=ssh_info,
-        remote_host=remote_host,
-        remote_port=remote_port,
-    )
-
-
-def _get_tunnel_http_client(
-    app: FastAPI,
-    agent_id: AgentId,
-    backend_url: str,
-    backend_resolver: BackendResolverInterface,
-) -> httpx.AsyncClient | None:
-    """Get an httpx client configured for SSH tunneling, or None for direct connection.
-
-    Creates a fresh client each time to avoid stale connections when SSH
-    tunnels are recreated after a broken pipe.
-    """
-    tunnel_manager: SSHTunnelManager | None = app.state.tunnel_manager
-    socket_path = _get_tunnel_socket_path(tunnel_manager, agent_id, backend_url, backend_resolver)
-    if socket_path is None:
-        return None
-
-    transport = httpx.AsyncHTTPTransport(uds=str(socket_path))
-    return httpx.AsyncClient(
-        transport=transport,
-        follow_redirects=False,
-        timeout=_PROXY_TIMEOUT_SECONDS,
-    )
-
-
-# -- Auth bridge: bare origin -> per-subdomain session cookie --
-
-
-def _handle_goto_workspace(
-    agent_id: str,
-    request: Request,
-    auth_store: AuthStoreDep,
-) -> Response:
-    """Redirect an authenticated user from the bare origin to a workspace subdomain,
-    carrying a short-lived signed token that sets the subdomain's session cookie
-    on first landing.
-
-    Flow:
-      1. Landing page click fetches ``/goto/<agent-id>/``.
-      2. This handler verifies the bare-origin session cookie (fails back to
-         ``/`` for unauth users).
-      3. Mints a short-lived token and 302s to
-         ``http://<agent-id>.localhost:PORT/_subdomain_auth?token=...&next=/``.
-      4. The subdomain's ``/_subdomain_auth`` handler sets the subdomain cookie.
-
-    We route through this bridge because ``Domain=localhost`` cookies don't
-    cross from ``localhost`` into ``<agent>.localhost`` (public-suffix rule).
-    """
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=302, headers={"Location": "/"})
-
-    try:
-        parsed_id = AgentId(agent_id)
-    except ValueError:
-        return Response(status_code=404)
-
-    signing_key = auth_store.get_signing_key()
-    token = create_subdomain_auth_token(signing_key=signing_key, agent_id=str(parsed_id))
-
-    # Preserve the user's desired landing path on the subdomain.
-    next_url = request.query_params.get("next", "/")
-    if not next_url.startswith("/"):
-        next_url = "/"
-
-    host_header = request.headers.get("host", "")
-    port = host_header.split(":")[-1] if ":" in host_header else str(request.app.state.auth_server_port or 8420)
-
-    encoded_next = quote(next_url, safe="")
-    location = f"http://{parsed_id}.localhost:{port}{_SUBDOMAIN_AUTH_PATH}?token={token}&next={encoded_next}"
-    return Response(status_code=302, headers={"Location": location})
-
-
-# -- Subdomain forwarding to per-workspace minds_workspace_server --
-
-_WORKSPACE_SUBDOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(agent-[a-f0-9]+)\.(?:localhost|127\.0\.0\.1)(?::\d+)?$",
-    re.IGNORECASE,
-)
-_WORKSPACE_SERVER_SERVICE_NAME: Final[ServiceName] = ServiceName("system_interface")
-
-
-def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
-    """Return the agent ID if ``host_header`` is ``<agent-id>.localhost(:port)``.
-
-    Returns None for bare ``localhost``, ``127.0.0.1``, or unparseable values;
-    those requests are served by the desktop client's own routes.
-    """
-    if not host_header:
-        return None
-    match = _WORKSPACE_SUBDOMAIN_PATTERN.match(host_header)
-    if match is None:
-        return None
-    try:
-        return AgentId(match.group(1))
-    except ValueError:
-        return None
-
-
-def _unauthenticated_subdomain_response(request: Request) -> Response:
-    """Redirect to the bare-origin landing page for HTML navigations; 403 otherwise.
-
-    The landing page (``/``) renders the login prompt for unauthenticated
-    users. We deliberately do not redirect to ``/login`` because that route
-    requires a ``one_time_code`` query parameter -- sending a browser there
-    without one yields a 422 validation error. Users get their OTP from the
-    terminal output of the desktop client, not from this redirect.
-    """
-    accept = request.headers.get("accept", "")
-    if "text/html" in accept:
-        auth_port = request.app.state.auth_server_port or 8420
-        location = f"http://localhost:{auth_port}/"
-        return Response(status_code=302, headers={"Location": location})
-    return Response(status_code=403, content="Not authenticated")
-
-
-async def _forward_workspace_http(
-    request: Request,
-    workspace_backend_url: str,
-    http_client: httpx.AsyncClient,
-) -> Response:
-    """Byte-forward an HTTP request to a workspace_server URL.
-
-    Streams SSE responses (detected by the client's ``accept: text/event-stream``),
-    buffers everything else. Does NOT rewrite body or headers: the workspace_server
-    already emits /service/<name>/ prefixed URLs, scoped cookies, and the SW shim.
-    """
-    base = workspace_backend_url.rstrip("/")
-    path = request.url.path.lstrip("/")
-    url = f"{base}/{path}" if path else base + "/"
-    if request.url.query:
-        url = f"{url}?{request.url.query}"
-
-    headers = dict(request.headers)
-    headers.pop("host", None)
-
-    # Strip the desktop client's session cookie so agent-controlled workspace
-    # servers cannot extract and reuse it against other agents.
-    raw_cookie = headers.get("cookie")
-    if raw_cookie is not None:
-        stripped = "; ".join(
-            c.strip() for c in raw_cookie.split(";") if not c.strip().startswith(SESSION_COOKIE_NAME + "=")
-        )
-        if stripped:
-            headers["cookie"] = stripped
-        else:
-            del headers["cookie"]
-
-    body = await request.body()
-
-    accept = request.headers.get("accept", "")
-    is_likely_sse = "text/event-stream" in accept
-
-    if is_likely_sse:
-        backend_request = http_client.build_request(method=request.method, url=url, headers=headers, content=body)
-        try:
-            backend_response = await http_client.send(backend_request, stream=True)
-        except httpx.ConnectError:
-            return Response(status_code=502, content="Workspace server connection refused")
-        except httpx.TimeoutException:
-            return Response(status_code=504, content="Workspace server stream timed out")
-
-        async def _stream() -> AsyncGenerator[bytes, None]:
-            try:
-                async for chunk in backend_response.aiter_bytes():
-                    yield chunk
-            except (httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
-                logger.warning("Workspace server SSE stream failed for {}: {}", request.url.path, e)
-            finally:
-                await backend_response.aclose()
-
-        media_type = backend_response.headers.get("content-type", "text/event-stream")
-        return StreamingResponse(
-            _stream(),
-            status_code=backend_response.status_code,
-            media_type=media_type,
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    try:
-        backend_response = await http_client.request(method=request.method, url=url, headers=headers, content=body)
-    except httpx.ConnectError:
-        return Response(status_code=502, content="Workspace server connection refused")
-    except httpx.ReadError:
-        return Response(status_code=502, content="Workspace server connection lost")
-    except httpx.RemoteProtocolError:
-        return Response(status_code=502, content="Workspace server disconnected without response")
-    except httpx.TimeoutException:
-        return Response(status_code=504, content="Workspace server timed out")
-
-    response = Response(content=backend_response.content, status_code=backend_response.status_code)
-    for header_key, header_value in backend_response.headers.multi_items():
-        if header_key.lower() in _EXCLUDED_RESPONSE_HEADERS:
-            continue
-        response.headers.append(header_key, header_value)
-    return response
-
-
-_SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
-
-
-def _handle_subdomain_auth_bridge(request: Request, agent_id: AgentId) -> Response:
-    """Validate an inbound ``/_subdomain_auth`` token and set a subdomain cookie.
-
-    The bare-origin ``/goto/{agent_id}/`` handler mints a short-lived signed
-    token and redirects the browser to ``http://<agent_id>.localhost:PORT/
-    _subdomain_auth?token=...&next=/...``. That's this handler. We verify the
-    token was issued for this specific agent, then set a host-only session
-    cookie on the subdomain and redirect to ``next``. Subsequent requests on
-    this subdomain carry the cookie and pass the normal auth check.
-
-    We do this dance because ``Domain=localhost`` cookies don't propagate to
-    subdomains in Chromium / curl (localhost is treated as a public suffix).
-    """
-    auth_store: AuthStoreInterface = request.app.state.auth_store
-    token = request.query_params.get("token", "")
-    next_url = request.query_params.get("next", "/")
-    if not next_url.startswith("/"):
-        next_url = "/"
-    signing_key = auth_store.get_signing_key()
-    if not verify_subdomain_auth_token(token=token, signing_key=signing_key, agent_id=str(agent_id)):
-        return Response(status_code=403, content="Invalid or expired subdomain auth token")
-
-    cookie_value = create_session_cookie(signing_key=signing_key)
-    response = Response(status_code=302, headers={"Location": next_url})
-    response.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=cookie_value,
-        path="/",
-        httponly=True,
-        samesite="lax",
-    )
-    return response
-
-
-async def _handle_workspace_forward_http(request: Request) -> Response:
-    """Forward an HTTP request arriving at ``<agent-id>.localhost:8420`` to that
-    workspace's minds_workspace_server. Called from subdomain-routing middleware.
-    """
-    host_header = request.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        return Response(status_code=404)
-
-    # Auth-bridge: /_subdomain_auth?token=... sets the subdomain cookie. It
-    # must be handled BEFORE the auth check because there's no cookie yet.
-    if request.url.path == _SUBDOMAIN_AUTH_PATH:
-        return _handle_subdomain_auth_bridge(request, agent_id)
-
-    auth_store: AuthStoreInterface = request.app.state.auth_store
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return _unauthenticated_subdomain_response(request)
-
-    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
-    if agent_id not in backend_resolver.list_known_workspace_ids():
-        return Response(status_code=404, content=f"Unknown workspace: {agent_id}")
-
-    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
-    if workspace_url is None:
-        if "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content="<p>Workspace server not yet available. Retrying...</p>")
-        return Response(status_code=503, content="Workspace server not yet available")
-
-    try:
-        tunnel_client = await asyncio.get_running_loop().run_in_executor(
-            None, _get_tunnel_http_client, request.app, agent_id, workspace_url, backend_resolver
-        )
-    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.warning("SSH tunnel setup failed for workspace {}: {}", agent_id, e)
-        return Response(status_code=502, content=f"SSH tunnel to remote workspace failed: {e}")
-
-    active_client = tunnel_client or request.app.state.http_client
-    return await _forward_workspace_http(
-        request=request, workspace_backend_url=workspace_url, http_client=active_client
-    )
-
-
-async def _handle_workspace_forward_websocket(websocket: WebSocket) -> None:
-    """Forward a WebSocket upgrade arriving at ``<agent-id>.localhost:8420`` to the
-    workspace's minds_workspace_server. Auth still honored via the session cookie.
-    """
-    host_header = websocket.headers.get("host", "")
-    agent_id = _parse_workspace_subdomain(host_header)
-    if agent_id is None:
-        await websocket.close(code=4004, reason="Unknown host")
-        return
-
-    auth_store: AuthStoreInterface = websocket.app.state.auth_store
-    if not _is_authenticated(cookies=websocket.cookies, auth_store=auth_store):
-        await websocket.close(code=4003, reason="Not authenticated")
-        return
-
-    backend_resolver: BackendResolverInterface = websocket.app.state.backend_resolver
-    if agent_id not in backend_resolver.list_known_workspace_ids():
-        await websocket.close(code=4004, reason=f"Unknown workspace: {agent_id}")
-        return
-
-    workspace_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
-    if workspace_url is None:
-        await websocket.close(code=1013, reason="Workspace server not yet available")
-        return
-
-    try:
-        tunnel_socket_path = await asyncio.get_running_loop().run_in_executor(
-            None,
-            _get_tunnel_socket_path,
-            websocket.app.state.tunnel_manager,
-            agent_id,
-            workspace_url,
-            backend_resolver,
-        )
-    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.debug("SSH tunnel setup failed for workspace WS {}: {}", agent_id, e)
-        try:
-            await websocket.close(code=1011, reason="SSH tunnel failed")
-        except RuntimeError:
-            pass
-        return
-
-    ws_backend = workspace_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/")
-    path = websocket.url.path.lstrip("/")
-    ws_url = f"{ws_backend}/{path}" if path else ws_backend + "/"
-    if websocket.url.query:
-        ws_url = f"{ws_url}?{websocket.url.query}"
-
-    client_subprotocol_header = websocket.headers.get("sec-websocket-protocol")
-    subprotocols: list[str] = []
-    if client_subprotocol_header:
-        subprotocols = [s.strip() for s in client_subprotocol_header.split(",")]
-
-    try:
-        backend_ws_conn = _connect_backend_websocket(
-            ws_url=ws_url, subprotocols=subprotocols, tunnel_socket_path=tunnel_socket_path
-        )
-        async with backend_ws_conn as backend_ws:
-            await websocket.accept(subprotocol=backend_ws.subprotocol)
-            await asyncio.gather(
-                _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws),
-                _forward_backend_to_client(client_websocket=websocket, backend_ws=backend_ws, agent_id=agent_id),
-            )
-    except (ConnectionRefusedError, OSError, TimeoutError, SSHTunnelError, paramiko.SSHException) as connection_error:
-        logger.debug("Backend WebSocket connection failed for workspace {}: {}", agent_id, connection_error)
-        try:
-            await websocket.close(code=1011, reason="Backend connection failed")
-        except RuntimeError:
-            pass
-
-
 # -- Agent creation route handlers --
+
+
+def _run_tunnel_setup(
+    agent_id: AgentId,
+    imbue_cloud_cli: ImbueCloudCli,
+    account_email: str,
+    notification_dispatcher: NotificationDispatcher,
+    agent_display_name: str,
+) -> None:
+    """Create a Cloudflare tunnel via the plugin and inject its token into the agent.
+
+    Runs on a detached thread scheduled by ``_OnCreatedCallbackFactory`` on
+    the desktop client's root ``ConcurrencyGroup``. Failures are logged via
+    loguru and surfaced to the user via ``notification_dispatcher``.
+
+    The plugin owns all tunnel state (token, services, auth policy);
+    minds keeps no local cache. ``create_tunnel`` is idempotent on the
+    connector side, so re-injecting on every agent (re)creation just
+    delivers the existing token rather than rotating.
+    """
+    try:
+        info = imbue_cloud_cli.create_tunnel(account=account_email, agent_id=str(agent_id))
+    except ImbueCloudCliError as exc:
+        logger.warning("Failed to create tunnel for {}: {}", agent_id, exc)
+        _notify_tunnel_failure(
+            notification_dispatcher=notification_dispatcher,
+            agent_display_name=agent_display_name,
+            error_message=str(exc),
+        )
+        return
+    if info.token is None:
+        logger.warning("Tunnel created for {} but no token returned", agent_id)
+        return
+    inject_tunnel_token_into_agent(agent_id, info.token.get_secret_value())
+    logger.debug("Injected tunnel token into agent {}", agent_id)
+
+
+def _notify_tunnel_failure(
+    notification_dispatcher: NotificationDispatcher,
+    agent_display_name: str,
+    error_message: str,
+) -> None:
+    """Dispatch an OS notification for a tunnel-setup failure (no rate limit).
+
+    ``NotificationDispatcher.dispatch`` spawns its own background thread or
+    subprocess per channel and swallows channel-specific errors internally,
+    so a top-level ``except`` wrapper here would only mask genuine bugs.
+    """
+    notification_dispatcher.dispatch(
+        NotificationRequest(
+            title="Tunnel setup failed",
+            message=(
+                f"Couldn't set up the Cloudflare tunnel for '{agent_display_name}'. "
+                f"Sharing may be unavailable. Error: {error_message}"
+            ),
+            urgency=NotificationUrgency.NORMAL,
+        ),
+        agent_display_name=agent_display_name,
+    )
+
+
+class _OnCreatedCallbackFactory(MutableModel):
+    """Callable that records the workspace<->account association and schedules Cloudflare tunnel setup.
+
+    ``__call__`` is the single hook that runs once the inner ``mngr create``
+    has returned the canonical ``AgentId`` -- before this refactor minds
+    pre-generated an id and associated it with the account synchronously
+    in the route handler, but for imbue_cloud agents that pre-generated
+    id is fictional (the lease forces it back to the pool host's pre-baked
+    id), so the association ended up keyed under a phantom row. We now
+    do the ``associate_workspace`` call here, where ``agent_id`` is
+    guaranteed canonical.
+
+    The tunnel-setup work is scheduled on a detached thread on the root
+    ``ConcurrencyGroup`` so the agent-creation thread can flip status to
+    ``DONE`` without waiting on a multi-second Cloudflare round-trip.
+    """
+
+    session_store: MultiAccountSessionStore = Field(frozen=True, description="Session store for account lookup")
+    imbue_cloud_cli: ImbueCloudCli = Field(
+        frozen=True,
+        description="CLI wrapper for `mngr imbue_cloud tunnels create`.",
+    )
+    root_concurrency_group: ConcurrencyGroup = Field(
+        frozen=True,
+        description="Root group on which the detached tunnel task is scheduled.",
+    )
+    notification_dispatcher: NotificationDispatcher = Field(
+        frozen=True,
+        description="Dispatcher for surfacing tunnel-setup failures as OS notifications.",
+    )
+    backend_resolver: BackendResolverInterface = Field(
+        frozen=True,
+        description=(
+            "Backend resolver pinged via notify_change() after the association write so the "
+            "chrome SSE workspace list refreshes its 'account' field without waiting for the "
+            "next 30s discovery heartbeat."
+        ),
+    )
+    account_id: str = Field(
+        frozen=True,
+        default="",
+        description=(
+            "Account that owns this workspace. Empty when no account is selected (private "
+            "workspace), in which case no association is recorded and no tunnel is set up."
+        ),
+    )
+
+    def __call__(self, agent_id: AgentId) -> None:
+        if not self.account_id:
+            return
+        # Bind the workspace to the account using the canonical agent id --
+        # this is what later ``get_account_for_workspace`` lookups (e.g. for
+        # the destruction handler) expect to find.
+        self.session_store.associate_workspace(self.account_id, str(agent_id))
+        # Wake the chrome SSE so the workspace tile picks up its new
+        # 'account' field immediately. Without this, the chrome shows
+        # the workspace as unassociated until the next discovery cycle
+        # (~30s+) writes an unrelated change.
+        if isinstance(self.backend_resolver, MngrCliBackendResolver):
+            self.backend_resolver.notify_change()
+        account = self.session_store.get_account_for_workspace(str(agent_id))
+        if account is None:
+            # The account vanished between selection and now (logout?). The
+            # association above is still in place; we just skip the tunnel.
+            return
+        # ``_build_on_created_callback`` doesn't have easy access to the
+        # user-chosen name at this point (see ``backend_resolver``), so fall
+        # back to the short form of the agent id for the notification copy.
+        agent_display_name = str(agent_id)[:8]
+        self.root_concurrency_group.start_new_thread(
+            target=_run_tunnel_setup,
+            kwargs={
+                "agent_id": agent_id,
+                "imbue_cloud_cli": self.imbue_cloud_cli,
+                "account_email": str(account.email),
+                "notification_dispatcher": self.notification_dispatcher,
+                "agent_display_name": agent_display_name,
+            },
+            name=f"tunnel-setup-{agent_id}",
+            # is_checked=False so that a failing tunnel task does not poison
+            # the root CG for unrelated strands; failures are surfaced via
+            # notifications + loguru from within ``_run_tunnel_setup``.
+            is_checked=False,
+        )
+
+
+def _build_on_created_callback(
+    request: Request,
+    account_id: str,
+) -> _OnCreatedCallbackFactory | None:
+    """Build a callback that injects the tunnel token after agent creation.
+
+    Returns None if no account is selected (nothing to inject).
+    """
+    if not account_id:
+        return None
+
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    imbue_cloud_cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    root_concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    notification_dispatcher: NotificationDispatcher | None = request.app.state.notification_dispatcher
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+
+    if (
+        session_store is None
+        or imbue_cloud_cli is None
+        or root_concurrency_group is None
+        or notification_dispatcher is None
+    ):
+        return None
+
+    return _OnCreatedCallbackFactory(
+        session_store=session_store,
+        imbue_cloud_cli=imbue_cloud_cli,
+        root_concurrency_group=root_concurrency_group,
+        notification_dispatcher=notification_dispatcher,
+        backend_resolver=backend_resolver,
+        account_id=account_id,
+    )
 
 
 async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep) -> Response:
@@ -747,26 +569,100 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 
     form = await request.form()
     git_url = str(form.get("git_url", "")).strip()
-    agent_name = str(form.get("agent_name", "")).strip()
+    host_name = str(form.get("host_name", "")).strip()
     branch = str(form.get("branch", "")).strip()
-    # HTML checkboxes submit their value only when checked; absence means unchecked.
-    include_env_file = form.get("include_env_file") is not None
     try:
         launch_mode = LaunchMode(str(form.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
         launch_mode = LaunchMode.LOCAL
-    if not git_url:
-        html = render_create_form(git_url="", agent_name=agent_name, branch=branch, launch_mode=launch_mode)
-        return HTMLResponse(content=html, status_code=400)
+    try:
+        ai_provider = AIProvider(str(form.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
+    except ValueError:
+        ai_provider = AIProvider.SUBSCRIPTION
+    account_id = str(form.get("account_id", "")).strip()
+    anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
+    gh_token = str(form.get("gh_token", "")).strip()
 
-    agent_id = agent_creator.start_creation(
+    session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
+
+    def _re_render_with_error(message: str, status: int = 400) -> Response:
+        accounts_list = session_store_inst.list_accounts() if session_store_inst else []
+        # Re-render with the user's submitted account_id pre-selected
+        # (including "" -> "No account") rather than the config default,
+        # so a validation error doesn't silently revert their choice.
+        html_body = render_create_form(
+            git_url=git_url,
+            host_name=host_name,
+            branch=branch,
+            launch_mode=launch_mode,
+            ai_provider=ai_provider,
+            accounts=accounts_list,
+            default_account_id=account_id,
+            gh_token=gh_token,
+            anthropic_api_key=anthropic_api_key,
+            error_message=message,
+        )
+        return HTMLResponse(content=html_body, status_code=status)
+
+    if not git_url:
+        return _re_render_with_error("Repository URL is required.")
+
+    # Validate the host name eagerly so the user sees the error inline on
+    # the form rather than as a deferred "FAILED" status on the creating
+    # page. An empty value falls through; ``start_creation`` substitutes a
+    # repo-derived fallback for the API path.
+    if host_name:
+        try:
+            HostName(host_name)
+        except InvalidName as exc:
+            return _re_render_with_error(str(exc))
+
+    is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
+    is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
+    if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        return _re_render_with_error(
+            "imbue_cloud requires an account. Select an account or pick a different "
+            "option for both the compute and AI providers."
+        )
+
+    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
+        return _re_render_with_error("An Anthropic API key is required when AI provider is set to api_key.")
+
+    # Resolve the account email when needed (imbue_cloud compute or AI). The
+    # mngr_imbue_cloud plugin owns the SuperTokens session and is responsible
+    # for fetching a fresh access token at the time of each subprocess
+    # invocation, so minds only needs to know which account to ask for.
+    account_email = ""
+    if account_id and session_store_inst is not None and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        account_email = session_store_inst.get_account_email(account_id) or ""
+
+    branch_or_tag = branch
+    if is_imbue_cloud_compute and not branch_or_tag:
+        branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)
+
+    # Build a post-creation callback that injects the tunnel token
+    on_created = _build_on_created_callback(request, account_id)
+
+    # ``start_creation`` returns a CreationId (minds-internal handle for
+    # tracking the in-flight create) -- the canonical AgentId only exists
+    # after ``mngr create`` returns. Workspace<->account association is now
+    # done from the on_created callback (which fires post-canonical-id) so
+    # the association is keyed under the right id.
+    creation_id = agent_creator.start_creation(
         git_url,
-        agent_name=agent_name,
+        host_name=host_name,
         branch=branch,
         launch_mode=launch_mode,
-        include_env_file=include_env_file,
+        ai_provider=ai_provider,
+        account_email=account_email,
+        branch_or_tag=branch_or_tag,
+        anthropic_api_key=anthropic_api_key,
+        gh_token=gh_token,
+        on_created=on_created,
     )
-    return Response(status_code=303, headers={"Location": "/creating/{}".format(agent_id)})
+
+    creating_url = "/creating/{}".format(creation_id)
+    return Response(status_code=303, headers={"Location": creating_url})
 
 
 def _handle_create_page(
@@ -779,7 +675,16 @@ def _handle_create_page(
 
     git_url = request.query_params.get("git_url", "")
     branch = request.query_params.get("branch", "")
-    html = render_create_form(git_url=git_url, branch=branch)
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    minds_config: MindsConfig | None = request.app.state.minds_config
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    html = render_create_form(
+        git_url=git_url,
+        branch=branch,
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+    )
     return HTMLResponse(content=html)
 
 
@@ -804,9 +709,8 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             media_type="application/json",
         )
     git_url = str(body.get("git_url", "")).strip()
-    agent_name = str(body.get("agent_name", "")).strip()
+    host_name = str(body.get("host_name", "")).strip()
     branch = str(body.get("branch", "")).strip()
-    include_env_file = bool(body.get("include_env_file", False))
     try:
         launch_mode = LaunchMode(str(body.get("launch_mode", LaunchMode.LOCAL.value)))
     except ValueError:
@@ -815,22 +719,77 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
             content='{"error": "Invalid launch_mode"}',
             media_type="application/json",
         )
+    try:
+        ai_provider = AIProvider(str(body.get("ai_provider", AIProvider.SUBSCRIPTION.value)))
+    except ValueError:
+        return Response(
+            status_code=400,
+            content='{"error": "Invalid ai_provider"}',
+            media_type="application/json",
+        )
+    anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
+    gh_token = str(body.get("gh_token", "")).strip()
+    account_id = str(body.get("account_id", "")).strip()
     if not git_url:
         return Response(
             status_code=400,
             content='{"error": "git_url is required"}',
             media_type="application/json",
         )
+    # Validate the host name eagerly so a malformed value returns 400 from
+    # the API rather than failing deferred in the background thread.
+    if host_name:
+        try:
+            HostName(host_name)
+        except InvalidName as exc:
+            return Response(
+                status_code=400,
+                content=json.dumps({"error": str(exc)}),
+                media_type="application/json",
+            )
+    # Mirror the form path's account requirement so the API rejects
+    # imbue_cloud-without-account up front instead of failing later inside
+    # the background thread with a vague MngrCommandError.
+    is_imbue_cloud_compute = launch_mode is LaunchMode.IMBUE_CLOUD
+    is_imbue_cloud_ai = ai_provider is AIProvider.IMBUE_CLOUD
+    if not account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        return Response(
+            status_code=400,
+            content='{"error": "account_id is required when launch_mode or ai_provider is IMBUE_CLOUD"}',
+            media_type="application/json",
+        )
+    if ai_provider is AIProvider.API_KEY and not anthropic_api_key:
+        return Response(
+            status_code=400,
+            content='{"error": "anthropic_api_key is required when ai_provider is API_KEY"}',
+            media_type="application/json",
+        )
 
-    agent_id = agent_creator.start_creation(
+    # Resolve the account email when an imbue_cloud field is selected so the
+    # background creation can mint a LiteLLM key / lease a pool host. The
+    # session store is the source of truth for email <-> user_id mapping.
+    account_email = ""
+    if account_id and (is_imbue_cloud_compute or is_imbue_cloud_ai):
+        session_store_inst: MultiAccountSessionStore | None = request.app.state.session_store
+        if session_store_inst is not None:
+            account_email = session_store_inst.get_account_email(account_id) or ""
+
+    creation_id = agent_creator.start_creation(
         git_url,
-        agent_name=agent_name,
+        host_name=host_name,
         branch=branch,
         launch_mode=launch_mode,
-        include_env_file=include_env_file,
+        ai_provider=ai_provider,
+        account_email=account_email,
+        anthropic_api_key=anthropic_api_key,
+        gh_token=gh_token,
     )
+    # API contract: the JSON field stays named ``agent_id`` for backwards
+    # compatibility with existing API clients, but the value is now a
+    # CreationId (minds-internal in-flight handle, distinct prefix from a
+    # canonical AgentId). The status-polling endpoints accept either.
     return Response(
-        content=json.dumps({"agent_id": str(agent_id), "status": "CLONING"}),
+        content=json.dumps({"agent_id": str(creation_id), "status": str(AgentCreationStatus.INITIALIZING)}),
         media_type="application/json",
     )
 
@@ -848,8 +807,12 @@ def _handle_creation_status_api(
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
 
-    parsed_id = AgentId(agent_id)
-    info = agent_creator.get_creation_info(parsed_id)
+    # The URL parameter is named ``agent_id`` for legacy API compatibility
+    # but it actually carries a ``CreationId`` (minds-internal in-flight
+    # handle). The canonical mngr ``AgentId`` is reported back through
+    # ``info.agent_id`` once ``mngr create`` returns.
+    creation_id = CreationId(agent_id)
+    info = agent_creator.get_creation_info(creation_id)
     if info is None:
         return Response(
             status_code=404,
@@ -857,7 +820,12 @@ def _handle_creation_status_api(
             media_type="application/json",
         )
 
-    result = {"agent_id": str(info.agent_id), "status": str(info.status)}
+    result: dict[str, str] = {
+        "creation_id": str(info.creation_id),
+        "status": str(info.status),
+    }
+    if info.agent_id is not None:
+        result["agent_id"] = str(info.agent_id)
     if info.redirect_url is not None:
         result["redirect_url"] = info.redirect_url
     if info.error is not None:
@@ -878,26 +846,57 @@ def _handle_creating_page(
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
 
-    parsed_id = AgentId(agent_id)
-    info = agent_creator.get_creation_info(parsed_id)
+    # ``agent_id`` route param is actually a CreationId (see comment in
+    # ``_handle_creation_status_api``).
+    creation_id = CreationId(agent_id)
+    info = agent_creator.get_creation_info(creation_id)
     if info is None:
         return Response(status_code=404, content="Unknown agent creation")
 
     if info.status == AgentCreationStatus.DONE and info.redirect_url is not None:
         return Response(status_code=307, headers={"Location": info.redirect_url})
 
-    html = render_creating_page(agent_id=parsed_id, info=info)
+    html = render_creating_page(creation_id=creation_id, info=info)
     return HTMLResponse(content=html)
 
 
 async def _stream_creation_logs(
     log_queue: queue.Queue[str],
     agent_creator: AgentCreator,
-    agent_id: AgentId,
+    creation_id: CreationId,
+    shutdown_event: threading.Event,
 ) -> AsyncGenerator[str, None]:
-    """Async generator that yields SSE events from a creation log queue."""
+    """Async generator that yields SSE events from a creation log queue.
+
+    Each iteration polls ``agent_creator.get_creation_info(creation_id)``
+    and emits a ``{"_type": "status", ...}`` event whenever the status
+    has changed since the last emission. This piggybacks on the existing
+    ~1s log-queue keepalive cadence; caption-update latency is therefore
+    bounded by the queue.get timeout below, which is acceptable since
+    each backend phase takes much longer than 1s.
+
+    Exits cleanly when ``shutdown_event`` is set so the server's
+    graceful-shutdown deadline doesn't have to cancel us mid-stream.
+    """
+    last_status: AgentCreationStatus | None = None
     streaming = True
     while streaming:
+        if shutdown_event.is_set():
+            return
+        info = agent_creator.get_creation_info(creation_id)
+        if info is not None and info.status != last_status:
+            last_status = info.status
+            status_event = {
+                "_type": "status",
+                "status": str(info.status),
+                "status_text": status_text_for(
+                    str(info.status),
+                    error=info.error,
+                    launch_mode=info.launch_mode,
+                ),
+            }
+            yield "data: {}\n\n".format(json.dumps(status_event))
+
         try:
             line = await asyncio.get_running_loop().run_in_executor(None, log_queue.get, True, 1.0)
         except (queue.Empty, TimeoutError, OSError):
@@ -906,7 +905,7 @@ async def _stream_creation_logs(
 
         if line == LOG_SENTINEL:
             streaming = False
-            info = agent_creator.get_creation_info(agent_id)
+            info = agent_creator.get_creation_info(creation_id)
             if info is not None:
                 result = {"status": str(info.status)}
                 if info.redirect_url is not None:
@@ -935,13 +934,15 @@ async def _handle_creation_logs_sse(
     if agent_creator is None:
         return Response(status_code=501, content="Agent creation not configured")
 
-    parsed_id = AgentId(agent_id)
-    log_queue = agent_creator.get_log_queue(parsed_id)
+    # ``agent_id`` route param carries a CreationId (see comment in
+    # ``_handle_creation_status_api``).
+    creation_id = CreationId(agent_id)
+    log_queue = agent_creator.get_log_queue(creation_id)
     if log_queue is None:
         return Response(status_code=404, content="Unknown agent creation")
 
     return StreamingResponse(
-        _stream_creation_logs(log_queue, agent_creator, parsed_id),
+        _stream_creation_logs(log_queue, agent_creator, creation_id, request.app.state.shutdown_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -949,6 +950,203 @@ async def _handle_creation_logs_sse(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# -- Agent destruction route handlers --
+
+
+def _resolve_destroying_for_landing(
+    paths: WorkspacePaths | None,
+    all_agent_ids: tuple[AgentId, ...],
+) -> dict[str, str]:
+    """Walk ``<paths.data_dir>/destroying/``, delete DONE records, return marker map.
+
+    Returns ``{agent_id_str: "running" | "failed"}`` for any in-flight or
+    failed destroy whose agent_id is currently known to the resolver. DONE
+    records (pid dead AND agent missing from the resolver) are deleted on
+    the spot so the row vanishes naturally on the next refresh.
+
+    Returns an empty dict (and does no work) when ``paths`` is None --
+    that path is exercised by tests that build a minimal app without
+    a real data dir.
+    """
+    if paths is None:
+        return {}
+    in_resolver = frozenset(all_agent_ids)
+    records = list_destroying(paths, in_resolver)
+    marker: dict[str, str] = {}
+    for agent_id, record in records.items():
+        if record.status == DestroyingStatus.DONE:
+            delete_destroying(agent_id, paths)
+            continue
+        marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
+    return marker
+
+
+def _agent_in_resolver(request: Request, agent_id: AgentId) -> bool:
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    return agent_id in backend_resolver.list_known_workspace_ids()
+
+
+async def _handle_destroy_agent_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """POST /api/destroy-agent/<agent_id>: spawn a detached destroy.
+
+    Idempotent: if a destroy is already running for this agent, returns
+    200 with the existing record's status. Otherwise spawns the
+    detached subprocess and returns 202.
+
+    Always returns ``redirect_url: "/"`` so the settings-page JS can
+    immediately navigate to the landing page (where the destroying
+    marker is already visible).
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=501, content='{"error": "Destroy not configured"}', media_type="application/json")
+
+    parsed_id = AgentId(agent_id)
+
+    # Disassociate the workspace from the session store synchronously.
+    # Tokens live in the plugin's session store; minds only owns the
+    # workspace<->account mapping, which we want broken before mngr
+    # destroy returns regardless of whether the destroy succeeds.
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if session_store:
+        account = session_store.get_account_for_workspace(agent_id)
+        if account:
+            session_store.disassociate_workspace(str(account.user_id), agent_id)
+
+    # Idempotent: short-circuit if a destroy is already running.
+    existing = read_destroying(parsed_id, paths, agent_in_resolver=_agent_in_resolver(request, parsed_id))
+    if existing is not None and existing.status == DestroyingStatus.RUNNING:
+        return Response(
+            status_code=200,
+            content=json.dumps({"agent_id": agent_id, "status": "running", "redirect_url": "/"}),
+            media_type="application/json",
+        )
+
+    host_id = lookup_host_id(parsed_id)
+    start_destroy(parsed_id, paths, host_id)
+
+    return Response(
+        status_code=202,
+        content=json.dumps({"agent_id": agent_id, "status": "running", "redirect_url": "/"}),
+        media_type="application/json",
+    )
+
+
+def _handle_destroying_status_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """GET /api/destroying/<agent_id>/status: live status of a destroy."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    parsed_id = AgentId(agent_id)
+    record = read_destroying(parsed_id, paths, agent_in_resolver=_agent_in_resolver(request, parsed_id))
+    if record is None:
+        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    return Response(
+        content=json.dumps(
+            {
+                "agent_id": agent_id,
+                "pid": record.pid,
+                "pid_alive": record.pid_alive,
+                "agent_in_resolver": record.agent_in_resolver,
+                "status": str(record.status).lower(),
+            }
+        ),
+        media_type="application/json",
+    )
+
+
+def _handle_destroying_log_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """GET /api/destroying/<agent_id>/log?after=<bytes>: tail the destroy log."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    parsed_id = AgentId(agent_id)
+    after_str = request.query_params.get("after", "0")
+    try:
+        after = max(int(after_str), 0)
+    except ValueError:
+        after = 0
+    try:
+        content_bytes, next_offset = read_log_chunk(parsed_id, paths, after)
+    except FileNotFoundError:
+        return Response(status_code=404, content='{"error": "No record"}', media_type="application/json")
+    return Response(
+        content=json.dumps(
+            {
+                "bytes_read": len(content_bytes),
+                "next_offset": next_offset,
+                "content": content_bytes.decode("utf-8", errors="replace"),
+            }
+        ),
+        media_type="application/json",
+    )
+
+
+def _handle_destroying_dismiss_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """POST /api/destroying/<agent_id>/dismiss: remove the destroy record."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=200, content="{}", media_type="application/json")
+    parsed_id = AgentId(agent_id)
+    delete_destroying(parsed_id, paths)
+    return Response(status_code=200, content="{}", media_type="application/json")
+
+
+def _handle_destroying_page(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """GET /destroying/<agent_id>: the destroy detail / log-tail page."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content="Not authenticated")
+    paths: WorkspacePaths | None = request.app.state.api_v1_paths
+    if paths is None:
+        return Response(status_code=404, content="No record")
+    parsed_id = AgentId(agent_id)
+    in_resolver = parsed_id in backend_resolver.list_known_workspace_ids()
+    record = read_destroying(parsed_id, paths, agent_in_resolver=in_resolver)
+    if record is None:
+        return Response(status_code=404, content="No record")
+    workspace_name = backend_resolver.get_workspace_name(parsed_id)
+    if not workspace_name:
+        info = backend_resolver.get_agent_display_info(parsed_id)
+        workspace_name = info.agent_name if info else agent_id
+    html = render_destroying_page(
+        agent_id=parsed_id,
+        agent_name=workspace_name or agent_id,
+        pid=record.pid,
+        status=str(record.status).lower(),
+    )
+    return HTMLResponse(content=html)
 
 
 # -- Telegram setup route handlers --
@@ -1056,6 +1254,7 @@ def _handle_chrome_page(
     html = render_chrome_page(
         is_mac=is_mac,
         is_authenticated=authenticated,
+        mngr_forward_origin=_get_mngr_forward_origin(request),
         initial_workspaces=initial_workspaces,
     )
     return HTMLResponse(content=html)
@@ -1063,7 +1262,7 @@ def _handle_chrome_page(
 
 def _handle_chrome_sidebar(request: Request) -> Response:
     """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
-    html = render_sidebar_page()
+    html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
     return HTMLResponse(content=html)
 
 
@@ -1092,34 +1291,102 @@ async def _handle_chrome_events(
         change_event = asyncio.Event()
         loop = asyncio.get_running_loop()
 
+        # Health transitions from the system-interface tracker arrive on
+        # background threads (envelope reader, probe loop, restart endpoint).
+        # We accumulate them into a per-connection queue and drain them
+        # in the main generator loop so each subscriber sees every event.
+        health_queue: asyncio.Queue[tuple[str, AgentHealth]] = asyncio.Queue()
+
         def _on_change() -> None:
             loop.call_soon_threadsafe(change_event.set)
 
+        def _on_health_change(agent_id: AgentId, status: AgentHealth) -> None:
+            loop.call_soon_threadsafe(_enqueue_health_change, health_queue, change_event, agent_id, status)
+
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
+
+        tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
+        if tracker is not None:
+            tracker.add_on_change_callback(_on_health_change)
 
         try:
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
             last_workspace_data = _build_workspace_list(backend_resolver, session_store)
-            yield "data: {}\n\n".format(json.dumps({"type": "workspaces", "workspaces": last_workspace_data}))
+            has_accounts = bool(session_store and session_store.list_accounts())
+            yield "data: {}\n\n".format(
+                json.dumps({"type": "workspaces", "workspaces": last_workspace_data, "has_accounts": has_accounts})
+            )
             inbox: RequestInbox | None = request.app.state.request_inbox
             last_request_count = inbox.get_pending_count() if inbox else 0
-            yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": last_request_count}))
+            # ``auto_open`` is bundled with ``request_count`` (rather than its
+            # own SSE event) so the Electron shell sees both atomically when
+            # deciding whether to auto-open the panel on count increases.
+            minds_config: MindsConfig | None = request.app.state.minds_config
+            auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+            yield "data: {}\n\n".format(
+                json.dumps({"type": "request_count", "count": last_request_count, "auto_open": auto_open})
+            )
 
-            # Wait for changes and push updates until client disconnects
+            if tracker is not None:
+                for aid, status in tracker.snapshot_all().items():
+                    yield "data: {}\n\n".format(
+                        json.dumps({"type": "system_interface_status", "agent_id": str(aid), "status": status.value})
+                    )
+
+            # Wait for changes and push updates until client disconnects.
+            #
+            # Loop ordering invariant: ``change_event.clear()`` runs
+            # immediately after ``wait()`` returns and BEFORE draining the
+            # per-connection queue. A producer always pushes to the queue
+            # first and then sets the event. With this ordering:
+            #
+            # - Producer fires between ``wait()`` returning and ``clear()``:
+            #   queue gets the item, event is wiped, but this iteration's
+            #   drain catches the item.
+            # - Producer fires between ``clear()`` and drain: queue gets the
+            #   item, event is set again. Drain catches the item. Next
+            #   ``wait()`` returns immediately, drain is empty -- a benign
+            #   false wake.
+            # - Producer fires after drain: event is set. Next ``wait()``
+            #   returns immediately and drain catches the item.
+            #
+            # Clearing at the bottom of the loop instead would lose the
+            # wakeup for any producer that fires between the drain and the
+            # bottom-of-loop clear, leaving the queued item idle for up to
+            # 30s -- a UX regression for health-state transitions like
+            # RESTARTING -> HEALTHY.
+            shutdown_event: threading.Event = request.app.state.shutdown_event
             connected = not await request.is_disconnected()
-            while connected:
-                # Wait for a change signal or timeout (timeout for disconnect checks)
-                change_event.clear()
+            while connected and not shutdown_event.is_set():
+                # Wait for a change signal or timeout (timeout for disconnect checks).
                 try:
                     await asyncio.wait_for(change_event.wait(), timeout=30.0)
                 except TimeoutError:
                     pass
+                # Clear BEFORE draining so any producer firing between drain
+                # and the next ``wait()`` re-sets the event and is observed
+                # promptly. See the comment above for the full invariant.
+                change_event.clear()
+
+                # Server-side shutdown signalled (via lifespan teardown
+                # calling backend_resolver.notify_change() right after
+                # setting shutdown_event). Exit the generator cleanly so
+                # uvicorn's graceful-shutdown deadline doesn't have to
+                # cancel us mid-stream.
+                if shutdown_event.is_set():
+                    break
 
                 connected = not await request.is_disconnected()
                 if not connected:
                     break
+
+                while not health_queue.empty():
+                    aid_str, status = health_queue.get_nowait()
+                    yield "data: {}\n\n".format(
+                        json.dumps({"type": "system_interface_status", "agent_id": aid_str, "status": status.value})
+                    )
 
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 if current_data != last_workspace_data:
@@ -1130,10 +1397,15 @@ async def _handle_chrome_events(
                 current_request_count = inbox.get_pending_count() if inbox else 0
                 if current_request_count != last_request_count:
                     last_request_count = current_request_count
-                    yield "data: {}\n\n".format(json.dumps({"type": "request_count", "count": current_request_count}))
+                    auto_open = minds_config.get_auto_open_requests_panel() if minds_config else True
+                    yield "data: {}\n\n".format(
+                        json.dumps({"type": "request_count", "count": current_request_count, "auto_open": auto_open})
+                    )
         finally:
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
+            if tracker is not None:
+                tracker.remove_on_change_callback(_on_health_change)
 
     return StreamingResponse(
         _event_generator(),
@@ -1172,6 +1444,243 @@ def _build_workspace_list(
     return workspaces
 
 
+# -- System-interface recovery / restart --
+
+# Minds creates two mngr agents per workspace, both with ``work_dir=/code``
+# in the same container:
+#   - a ``claude``-type agent with the user-chosen name -- runs the user's
+#     Claude conversation in tmux session ``${MNGR_PREFIX}<user-name>``.
+#   - a ``main``-type agent always named ``system-services`` -- runs the
+#     bootstrap service manager (which spawns ``svc-*`` windows from
+#     ``services.toml``, including the system interface) in tmux session
+#     ``${MNGR_PREFIX}system-services``.
+# The restart endpoint is invoked with the user agent's id, but the
+# system interface lives under the system-services agent's session, so
+# the kill must explicitly target that session.
+#
+# ``MNGR_PREFIX`` is propagated into the container's host env (see
+# ``_remote_host_env_flags`` in ``agent_creator.py``) and sourced by
+# ``mngr exec`` via ``build_source_env_prefix``, so it is reliably
+# available in the shell that runs this command.
+#
+# The bootstrap manager prefixes every services.toml-managed tmux window
+# with ``svc-`` and runs the system interface under the
+# ``system_interface`` service entry, so the window we kick is always
+# ``svc-system_interface``.
+_SERVICES_AGENT_NAME: Final[str] = "system-services"
+_RESTART_TMUX_WINDOW: Final[str] = "svc-system_interface"
+# How long a single workspace probe through the plugin is allowed to hang.
+# Used by the background system-interface-health probe loop -- we want a short,
+# snappy timeout so a wedged workspace doesn't gate the recovery UI.
+_WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
+# Timeout for the ``mngr exec`` dispatch itself (must be > 0 and short --
+# the inner command is non-blocking, so anything beyond a few seconds means
+# the mngr CLI got stuck talking to its provider).
+_RESTART_DISPATCH_TIMEOUT_SECONDS: Final[float] = 10.0
+
+
+def _build_restart_shell_command() -> str:
+    """Compose the shell command that ``mngr exec`` runs on the agent host.
+
+    Kills the ``svc-system_interface`` window in the system-services
+    tmux session (``${MNGR_PREFIX}system-services``), then ``touch``es
+    ``services.toml`` to re-trigger the bootstrap watch loop which
+    respawns the service. Both run regardless of each other's success
+    so a stale tmux state still produces a touch and vice versa.
+
+    ``mngr exec`` runs commands in the agent's work_dir by default, so
+    ``services.toml`` is referenced as a relative path.
+    """
+    return (
+        f'tmux kill-window -t "${{MNGR_PREFIX}}{_SERVICES_AGENT_NAME}:{_RESTART_TMUX_WINDOW}" '
+        f"2>/dev/null; touch services.toml"
+    )
+
+
+def _build_mngr_exec_argv(
+    mngr_binary: str,
+    agent_id: AgentId,
+    shell_command: str,
+) -> list[str]:
+    """Build the argv list for ``mngr exec`` to dispatch ``shell_command`` on ``agent_id``.
+
+    ``MNGR_HOST_DIR`` selection lives at the call-site (it is injected as
+    an env var on the subprocess), so it is intentionally not a parameter
+    here.
+    """
+    return [
+        mngr_binary,
+        "exec",
+        str(agent_id),
+        shell_command,
+        "--timeout",
+        str(_RESTART_DISPATCH_TIMEOUT_SECONDS),
+        "--quiet",
+    ]
+
+
+def _sanitize_recovery_return_to(raw: str) -> str:
+    """Return a safe value for the recovery page's ``return_to`` parameter.
+
+    The recovery page navigates the user back to ``return_to`` after a
+    successful restart. Without validation, this is an open-redirect
+    primitive: a crafted URL like ``?return_to=https://evil.com/`` would
+    cause the page to navigate to an attacker-controlled site.
+
+    The only legitimate values are:
+      - Relative URLs starting with ``/`` (same-origin).
+      - Absolute URLs whose host is ``localhost`` or ends in ``.localhost``
+        (the convention used by the mngr_forward subdomain plugin, where
+        each agent is served at ``<agent-id>.localhost:<port>``).
+
+    Anything else is dropped (returned as ``""``) and the recovery page
+    falls back to ``window.location.reload()``.
+    """
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return ""
+    # Relative URL with no scheme/host -- must start with a single '/' so we
+    # don't accidentally allow protocol-relative URLs ("//evil.com/path"),
+    # which urlparse parses with netloc="evil.com".
+    if not parsed.scheme and not parsed.netloc:
+        return raw if raw.startswith("/") and not raw.startswith("//") else ""
+    # Absolute URL: allow only http(s) on localhost / *.localhost hosts.
+    if parsed.scheme not in ("http", "https"):
+        return ""
+    host = parsed.hostname or ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return raw
+    return ""
+
+
+def _handle_recovery_page(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
+) -> Response:
+    """Render the workspace-recovery page (shown by the 503 redirect or by direct nav)."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return HTMLResponse(content=render_login_page(), status_code=403)
+    aid = AgentId(agent_id)
+    ws_name = backend_resolver.get_workspace_name(aid)
+    if not ws_name:
+        info = backend_resolver.get_agent_display_info(aid)
+        ws_name = info.agent_name if info else str(agent_id)
+    tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
+    initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
+    return_to = _sanitize_recovery_return_to(request.query_params.get("return_to", ""))
+    # If the agent has already recovered by the time the chrome navigates
+    # here (a real race: the background probe loop can flip the tracker
+    # back to HEALTHY in the brief window between the STUCK SSE push and
+    # the recovery-page GET landing), redirecting straight back to
+    # ``return_to`` is the right answer. Rendering the recovery page with
+    # ``initial_status="healthy"`` would otherwise wedge the user: the
+    # page's JS only auto-reloads on a streaming ``status=healthy`` SSE
+    # event, and the SSE doesn't push events for HEALTHY agents (the
+    # ``snapshot_all`` filter intentionally excludes them), so the user
+    # would sit on a misleading "not responding" page forever.
+    if initial_status == AgentHealth.HEALTHY.value and return_to:
+        return RedirectResponse(url=return_to, status_code=302)
+    html_body = render_recovery_page(
+        agent_id=aid,
+        ws_name=ws_name,
+        return_to=return_to,
+        initial_status=initial_status,
+    )
+    return HTMLResponse(content=html_body)
+
+
+async def _handle_restart_system_interface_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Restart the system_interface tmux window on the agent host.
+
+    Dispatches the ``tmux kill-window`` + ``touch services.toml`` command
+    via ``mngr exec`` (which internally routes through the mngr Host
+    abstraction, so local and remote agents are handled uniformly) and
+    returns 200 as soon as that dispatch succeeds. The workspace tmux
+    window is gone by then, so an immediate fetch of the workspace URL
+    will reliably hit the plugin's 503 "System interface starting..."
+    loader instead of the still-live pre-restart UI. The background
+    system-interface health probe loop flips the tracker back to HEALTHY
+    when the workspace responds 200 again.
+
+    No backend_resolver dependency is taken: ``mngr exec`` routes by
+    agent ID through the mngr Host abstraction, so the per-agent backend
+    URL the resolver carries is not needed here.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    aid = AgentId(agent_id)
+
+    tracker: SystemInterfaceHealthTracker | None = request.app.state.system_interface_health_tracker
+    mngr_binary: str = request.app.state.mngr_binary
+    mngr_host_dir: Path = request.app.state.mngr_host_dir
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if concurrency_group is None:
+        # Validate preconditions before transitioning the tracker -- otherwise
+        # we would fire RESTARTING then immediately STUCK, producing a brief
+        # "Restarting..." flicker on the recovery page even though no
+        # dispatch was ever attempted.
+        return _json_error("Cannot dispatch restart: no concurrency group available", status_code=503)
+
+    if tracker is not None:
+        tracker.mark_restarting(aid)
+    shell_command = _build_restart_shell_command()
+    argv = _build_mngr_exec_argv(
+        mngr_binary=mngr_binary,
+        agent_id=aid,
+        shell_command=shell_command,
+    )
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+    loop = asyncio.get_running_loop()
+
+    def _dispatch() -> tuple[int | None, str]:
+        finished = concurrency_group.run_process_to_completion(
+            argv,
+            timeout=_RESTART_DISPATCH_TIMEOUT_SECONDS + 5.0,
+            is_checked_after=False,
+            env=env,
+        )
+        return finished.returncode, finished.stderr
+
+    try:
+        exit_status, stderr_text = await loop.run_in_executor(None, _dispatch)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ConcurrencyGroupError) as exc:
+        # OSError covers fork/exec failures, RuntimeError covers the executor
+        # itself, TimeoutExpired fires when ``run_process_to_completion`` hits
+        # its ``timeout=`` argument, and ConcurrencyGroupError covers
+        # StrandTimedOutError / ProcessSetupError raised by the group when
+        # waiting on the strand. All of these are "dispatch failed" semantics
+        # and should produce the same structured 502 + mark_stuck.
+        logger.warning("Restart dispatch for {} failed: {}", aid, exc)
+        if tracker is not None:
+            tracker.mark_stuck(aid)
+        return _json_error(f"Restart command failed: {exc}", status_code=502)
+    if exit_status != 0:
+        logger.warning("Restart command for {} exited {}: {}", aid, exit_status, stderr_text)
+        if tracker is not None:
+            tracker.mark_stuck(aid)
+        return _json_error(f"Restart command exited {exit_status}: {stderr_text}", status_code=502)
+
+    mngr_forward_port: int = request.app.state.mngr_forward_port or 0
+    preauth_cookie: str | None = request.app.state.mngr_forward_preauth_cookie
+    if (mngr_forward_port == 0 or not preauth_cookie) and tracker is not None:
+        # Plugin probing is disabled, so the background probe loop is a
+        # no-op and nothing else will clear the RESTARTING state. Treat
+        # the successful dispatch as success optimistically so the
+        # recovery page auto-returns.
+        tracker.record_success(aid)
+    return Response(status_code=200, content="{}", media_type="application/json")
+
+
 # -- Account management routes --
 
 
@@ -1186,7 +1695,14 @@ def _handle_accounts_page(
     minds_config: MindsConfig | None = request.app.state.minds_config
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
-    html = render_accounts_page(accounts=accounts, default_account_id=default_account_id)
+    enabled_by_user_id = {
+        str(account.user_id): is_imbue_cloud_provider_enabled_for_account(str(account.email)) for account in accounts
+    }
+    html = render_accounts_page(
+        accounts=accounts,
+        default_account_id=default_account_id,
+        enabled_by_user_id=enabled_by_user_id,
+    )
     return HTMLResponse(content=html)
 
 
@@ -1210,12 +1726,19 @@ async def _handle_account_logout(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Log out a specific account."""
+    """Log out a specific account.
+
+    Routes through the same plugin-side signout as ``_handle_signout_api``
+    so the SuperTokens session is actually revoked, the
+    ``[providers.imbue_cloud_<slug>]`` block is torn down, and the
+    identity cache reflects the new state. Without this, just dropping
+    the cache would let the next ``auth list`` call resurrect the
+    account because the plugin still holds the session on disk.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
-    session_store: MultiAccountSessionStore | None = request.app.state.session_store
-    if session_store:
-        session_store.remove_session(user_id)
+    if request.app.state.session_store is not None:
+        signout_user_via_plugin(request, user_id)
     return Response(status_code=303, headers={"Location": "/accounts"})
 
 
@@ -1272,6 +1795,14 @@ async def _handle_workspace_associate(
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
     if session_store and user_id:
         session_store.associate_workspace(user_id, agent_id)
+        # Wake the chrome SSE so the workspace tile picks up its new
+        # 'account' field immediately rather than at the next 30s SSE
+        # heartbeat. Without this, the user clicks Associate, the page
+        # reloads via 303, but the chrome panel still shows the old
+        # unassociated state for ~half a minute.
+        backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+        if isinstance(backend_resolver, MngrCliBackendResolver):
+            backend_resolver.notify_change()
     location = redirect_url if redirect_url else f"/workspace/{agent_id}/settings"
     return Response(status_code=303, headers={"Location": location})
 
@@ -1281,21 +1812,30 @@ async def _handle_workspace_disassociate(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Disassociate a workspace from its account and tear down tunnels."""
+    """Disassociate a workspace from its account and tear down its tunnel."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
     session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
     if session_store:
         account = session_store.get_account_for_workspace(agent_id)
         if account:
-            # Tear down Cloudflare tunnel
-            cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-            if cf_client is not None:
+            # Tear down the Cloudflare tunnel for this agent (if any). The
+            # plugin owns tunnel state -- minds keeps no local cache.
+            if cli is not None:
                 try:
-                    cf_client.delete_tunnel(AgentId(agent_id))
-                except (httpx.HTTPError, ValueError, OSError) as e:
+                    tunnel = cli.find_tunnel_for_agent(account=str(account.email), agent_id=agent_id)
+                    if tunnel is not None:
+                        cli.delete_tunnel(account=str(account.email), tunnel_name=tunnel.tunnel_name)
+                except ImbueCloudCliError as e:
                     logger.warning("Failed to delete tunnel during disassociation: {}", e)
             session_store.disassociate_workspace(str(account.user_id), agent_id)
+            # Mirror the associate handler: poke the chrome SSE so the
+            # tile flips back to unassociated immediately instead of
+            # waiting out the 30s heartbeat.
+            backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+            if isinstance(backend_resolver, MngrCliBackendResolver):
+                backend_resolver.notify_change()
     return Response(status_code=303, headers={"Location": f"/workspace/{agent_id}/settings"})
 
 
@@ -1316,8 +1856,19 @@ def _handle_requests_panel(
 
     cards = []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
     for req in pending:
-        service_name = req.service_name if isinstance(req, SharingRequestEvent) else ""
+        handler = find_handler_for_event(handlers, req)
+        if handler is not None:
+            kind_label = handler.kind_label()
+            display_label = handler.display_name_for_event(req)
+        else:
+            # Fall through: unknown request type. Should never happen in
+            # practice -- a request without a registered handler can't be
+            # rendered or resolved -- but we still surface it in the
+            # panel so the user sees something is wrong.
+            kind_label = "request"
+            display_label = ""
         parsed_id = AgentId(req.agent_id)
         ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
         if not ws_name:
@@ -1334,8 +1885,8 @@ def _handle_requests_panel(
         agent_id_attr = html.escape(json.dumps(req.agent_id), quote=True)
         cards.append(
             f'<div class="req-card" onclick="navigateToRequest({event_id_attr}, {agent_id_attr})">'
-            f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">sharing: {ws_name}</div>'
-            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{service_name}</div></div>'
+            f'<div style="font-size:13px;color:#e2e8f0;font-weight:500;">{kind_label}: {ws_name}</div>'
+            f'<div style="font-size:12px;color:#64748b;margin-top:2px;">{display_label}</div></div>'
         )
 
     html_content = (
@@ -1415,7 +1966,13 @@ def _handle_request_page(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Render the request editing page using the shared sharing editor."""
+    """Render the request editing page.
+
+    Dispatches by request type to the registered
+    :class:`RequestEventHandler`. The route layer is intentionally
+    agnostic about what each request kind looks like: it authenticates,
+    looks up the event, and forwards to the handler.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
     inbox: RequestInbox | None = request.app.state.request_inbox
@@ -1425,33 +1982,18 @@ def _handle_request_page(
     if req_event is None:
         return HTMLResponse(content="<p>Request not found</p>", status_code=404)
 
-    is_sharing = isinstance(req_event, SharingRequestEvent)
-    service_name = req_event.service_name if is_sharing else ""
-    emails: list[str] = []
-    if is_sharing:
-        emails.extend(req_event.suggested_emails)
-    emails = list(dict.fromkeys(emails))
-
-    ws_name, account_email, has_account, accounts = _resolve_ws_name_and_account(
-        req_event.agent_id,
-        request,
-        backend_resolver,
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handler = find_handler_for_event(handlers, req_event)
+    if handler is None:
+        return HTMLResponse(
+            content=f"<p>No handler registered for request type {req_event.request_type!r}</p>",
+            status_code=500,
+        )
+    return handler.render_request_page(
+        req_event=req_event,
+        backend_resolver=backend_resolver,
+        mngr_forward_origin=_get_mngr_forward_origin(request),
     )
-
-    html = render_sharing_editor(
-        agent_id=req_event.agent_id,
-        service_name=service_name,
-        title=f"Sharing Request: {service_name}",
-        initial_emails=emails,
-        is_request=True,
-        request_id=request_id,
-        has_account=has_account,
-        accounts=accounts,
-        redirect_url=f"/requests/{request_id}",
-        ws_name=ws_name,
-        account_email=account_email,
-    )
-    return HTMLResponse(content=html)
 
 
 def _handle_sharing_page(
@@ -1475,7 +2017,7 @@ def _handle_sharing_page(
         agent_id=agent_id,
         service_name=service_name,
         title=f"Sharing: {service_name}",
-        is_request=False,
+        mngr_forward_origin=_get_mngr_forward_origin(request),
         has_account=has_account,
         accounts=accounts,
         redirect_url=f"/sharing/{agent_id}/{service_name}",
@@ -1492,57 +2034,35 @@ async def _handle_sharing_enable(
     auth_store: AuthStoreDep,
     backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Enable or update sharing for a server. Handles both request approval and direct editing."""
+    """Enable or update sharing for a service via the workspace-settings editor.
+
+    Sharing is configured exclusively from this editor; agents no longer
+    write sharing-request events back into the inbox.
+
+    On a soft failure (no signed-in account, plugin error, etc.) the
+    handler returns 502 with a JSON ``{"error": "..."}`` body. The
+    sharing editor JS surfaces that inline instead of silently
+    redirecting to a now-empty status page.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
     form = await request.form()
-    emails_json = str(form.get("emails", "[]"))
+    emails = parse_emails_form_value(str(form.get("emails", "[]")))
     try:
-        emails = json.loads(emails_json)
-    except json.JSONDecodeError:
-        emails = []
-
-    sharing_succeeded = False
-    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-    if cf_client is not None:
-        parsed_id = AgentId(agent_id)
-        parsed_service = ServiceName(service_name)
-        backend_url = backend_resolver.get_backend_url(parsed_id, parsed_service)
-        if backend_url:
-            paths: WorkspacePaths = request.app.state.api_v1_paths
-            stored_token = _load_tunnel_token(paths.data_dir, parsed_id)
-            if stored_token is None:
-                token, _ = cf_client.create_tunnel(parsed_id)
-                if token:
-                    _save_tunnel_token(paths.data_dir, parsed_id, token)
-                    inject_tunnel_token_into_agent(parsed_id, token)
-            cf_client.add_service(parsed_id, parsed_service, backend_url)
-            sharing_succeeded = True
-            # Apply auth rules if emails were provided
-            if emails:
-                rules: list[dict[str, object]] = [
-                    {"action": "allow", "include": [{"email": {"email": e}} for e in emails]},
-                ]
-                cf_client.set_service_auth(parsed_id, str(parsed_service), rules)
-
-    # If there's a pending request for this agent/server, mark it as granted only if sharing succeeded
-    inbox: RequestInbox | None = request.app.state.request_inbox
-    if inbox is not None and sharing_succeeded:
-        for req in inbox.get_pending_requests():
-            if isinstance(req, SharingRequestEvent) and req.agent_id == agent_id and req.service_name == service_name:
-                paths = request.app.state.api_v1_paths
-                response_event = create_request_response_event(
-                    request_event_id=str(req.event_id),
-                    status=RequestStatus.GRANTED,
-                    agent_id=agent_id,
-                    request_type=req.request_type,
-                    service_name=service_name,
-                )
-                append_response_event(paths.data_dir, response_event)
-                request.app.state.request_inbox = inbox.add_response(response_event)
-                break
-
+        enable_sharing_via_cloudflare(
+            request=request,
+            agent_id=AgentId(agent_id),
+            service_name=ServiceName(service_name),
+            emails=emails,
+            backend_resolver=backend_resolver,
+        )
+    except SharingError as exc:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": str(exc)}),
+            media_type="application/json",
+        )
     return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
@@ -1552,14 +2072,54 @@ async def _handle_sharing_disable(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Disable sharing for a server."""
+    """Disable sharing for a service via the imbue_cloud plugin.
+
+    Removes the service from its tunnel (DNS + Access app teardown
+    happen connector-side). The tunnel itself stays around so re-
+    enabling later doesn't re-issue a fresh token.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content="Not authenticated")
 
-    cf_client, _ = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-    if cf_client is not None:
-        cf_client.remove_service(AgentId(agent_id), service_name)
+    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if cli is None:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": "imbue_cloud CLI is not configured."}),
+            media_type="application/json",
+        )
+    parsed_id = AgentId(agent_id)
+    try:
+        account_email = resolve_account_email_for_workspace(session_store, parsed_id)
+    except SharingError as exc:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": str(exc)}),
+            media_type="application/json",
+        )
 
+    try:
+        tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
+    except ImbueCloudCliError as exc:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": f"Failed to look up the tunnel: {exc}"}),
+            media_type="application/json",
+        )
+    if tunnel is None:
+        # No tunnel = nothing to disable. Treat as success so the JS
+        # redirect lands on the (already-disabled) status page.
+        return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
+
+    try:
+        cli.remove_service(account=account_email, tunnel_name=tunnel.tunnel_name, service_name=service_name)
+    except ImbueCloudCliError as exc:
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": f"Failed to disable sharing: {exc}"}),
+            media_type="application/json",
+        )
     return Response(status_code=303, headers={"Location": f"/sharing/{agent_id}/{service_name}"})
 
 
@@ -1569,44 +2129,88 @@ def _handle_sharing_status_api(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """JSON API to get current sharing status for the editor JS."""
+    """JSON API to get current sharing status for the editor JS.
+
+    Reads tunnel + service + per-service auth from the imbue_cloud
+    plugin (the connector is the source of truth -- minds keeps no
+    local copy). The JS contract is::
+
+        {"enabled": bool, "url": str | null, "policy": {"emails": [str, ...], ...}}
+
+    ``policy`` is the AuthPolicy shape the plugin emits. Default policy
+    when sharing isn't yet enabled is the workspace's associated account
+    email.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
 
-    cf_client, error_response = get_cf_client_with_auth(request, agent_id=AgentId(agent_id))
-    if error_response is not None:
+    cli: ImbueCloudCli | None = request.app.state.imbue_cloud_cli
+    session_store: MultiAccountSessionStore | None = request.app.state.session_store
+    if cli is None:
         return Response(
-            content=json.dumps({"enabled": False, "url": None, "auth_rules": []}),
-            media_type="application/json",
-        )
-    if cf_client is None:
-        return Response(
-            content=json.dumps({"enabled": False, "url": None, "auth_rules": []}),
+            content=json.dumps({"enabled": False, "url": None, "policy": {"emails": []}}),
             media_type="application/json",
         )
 
     parsed_id = AgentId(agent_id)
-    services = cf_client.list_services(parsed_id)
-    if services is None:
-        default_rules = cf_client.get_tunnel_auth(parsed_id) or []
+    try:
+        account_email = resolve_account_email_for_workspace(session_store, parsed_id)
+    except SharingError as exc:
+        # No associated account = no plugin call available; surface
+        # an empty default rather than 502 since the page itself
+        # already shows the "associate an account" affordance for
+        # this state.
+        logger.debug("Sharing status: {}", exc)
         return Response(
-            content=json.dumps({"enabled": False, "url": None, "auth_rules": default_rules}),
+            content=json.dumps({"enabled": False, "url": None, "policy": {"emails": []}}),
             media_type="application/json",
         )
 
-    hostname = services.get(service_name)
-    if hostname:
-        auth_rules = cf_client.get_service_auth(parsed_id, service_name)
-        if auth_rules is None:
-            auth_rules = cf_client.get_tunnel_auth(parsed_id) or []
+    default_policy = {"emails": [account_email]}
+    try:
+        tunnel = cli.find_tunnel_for_agent(account=account_email, agent_id=str(parsed_id))
+    except ImbueCloudCliError as exc:
+        logger.warning("Failed to list tunnels for {}: {}", parsed_id, exc)
         return Response(
-            content=json.dumps({"enabled": True, "url": f"https://{hostname}", "auth_rules": auth_rules}),
+            content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
+            media_type="application/json",
+        )
+    if tunnel is None or service_name not in tunnel.services:
+        return Response(
+            content=json.dumps({"enabled": False, "url": None, "policy": default_policy}),
             media_type="application/json",
         )
 
-    default_rules = cf_client.get_tunnel_auth(parsed_id) or []
+    try:
+        service_entries = cli.list_services(account_email, tunnel.tunnel_name)
+    except ImbueCloudCliError as exc:
+        logger.warning("Failed to list services for tunnel {}: {}", tunnel.tunnel_name, exc)
+        service_entries = []
+    hostname = next(
+        (entry.get("hostname") for entry in service_entries if entry.get("service_name") == service_name),
+        None,
+    )
+
+    try:
+        policy = cli.get_service_auth(account_email, tunnel.tunnel_name, service_name)
+    except ImbueCloudCliError:
+        try:
+            policy = cli.get_tunnel_auth(account_email, tunnel.tunnel_name)
+        except ImbueCloudCliError:
+            policy = default_policy
+    if not policy.get("emails") and not policy.get("email_domains"):
+        # Empty policy means "use tunnel default"; surface the owner's
+        # email so the editor doesn't render an empty ACL.
+        policy = default_policy
+
     return Response(
-        content=json.dumps({"enabled": False, "url": None, "auth_rules": default_rules}),
+        content=json.dumps(
+            {
+                "enabled": True,
+                "url": f"https://{hostname}" if hostname else None,
+                "policy": policy,
+            }
+        ),
         media_type="application/json",
     )
 
@@ -1615,24 +2219,21 @@ async def _handle_request_grant(
     request_id: str,
     request: Request,
     auth_store: AuthStoreDep,
-    backend_resolver: BackendResolverDep,
 ) -> Response:
-    """Grant a request by redirecting to the sharing enable handler."""
-    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
-    inbox: RequestInbox | None = request.app.state.request_inbox
-    if inbox is None:
-        return HTMLResponse(content="Request inbox not available", status_code=500)
-    req_event = inbox.get_request_by_id(request_id)
-    if req_event is None:
-        return HTMLResponse(content="Request not found", status_code=404)
+    """Dispatch a grant to the handler that claims the event's request type.
 
-    if isinstance(req_event, SharingRequestEvent):
-        return await _handle_sharing_enable(
-            req_event.agent_id, req_event.service_name, request, auth_store, backend_resolver
-        )
-
-    return Response(status_code=303, headers={"Location": "/"})
+    The route layer is intentionally agnostic: it authenticates, looks
+    up the request event, finds the registered
+    :class:`RequestEventHandler` whose ``handles_request_type`` matches,
+    and forwards the rest. Per-handler differences (form parsing,
+    response shape, side effects) live in the handler.
+    """
+    return await _dispatch_request_action(
+        request_id=request_id,
+        request=request,
+        auth_store=auth_store,
+        action="grant",
+    )
 
 
 async def _handle_request_deny(
@@ -1640,28 +2241,47 @@ async def _handle_request_deny(
     request: Request,
     auth_store: AuthStoreDep,
 ) -> Response:
-    """Deny a request and write a response event."""
+    """Dispatch a deny to the handler that claims the event's request type."""
+    return await _dispatch_request_action(
+        request_id=request_id,
+        request=request,
+        auth_store=auth_store,
+        action="deny",
+    )
+
+
+async def _dispatch_request_action(
+    request_id: str,
+    request: Request,
+    auth_store: AuthStoreInterface,
+    action: str,
+) -> Response:
+    """Shared body of grant/deny dispatchers.
+
+    Authenticates, looks up the request event, picks the right handler,
+    and forwards. ``action`` must be ``"grant"`` or ``"deny"``.
+    """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
-        return Response(status_code=403, content="Not authenticated")
+        return _json_error("Not authenticated", status_code=403)
     inbox: RequestInbox | None = request.app.state.request_inbox
     if inbox is None:
-        return HTMLResponse(content="Request inbox not available", status_code=500)
+        return _json_error("Request inbox not available", status_code=500)
     req_event = inbox.get_request_by_id(request_id)
     if req_event is None:
-        return HTMLResponse(content="Request not found", status_code=404)
+        return _json_error("Request not found", status_code=404)
 
-    paths: WorkspacePaths = request.app.state.api_v1_paths
-    response_event = create_request_response_event(
-        request_event_id=request_id,
-        status=RequestStatus.DENIED,
-        agent_id=req_event.agent_id,
-        request_type=req_event.request_type,
-        service_name=req_event.service_name if isinstance(req_event, SharingRequestEvent) else None,
-    )
-    append_response_event(paths.data_dir, response_event)
-    request.app.state.request_inbox = inbox.add_response(response_event)
-
-    return Response(status_code=303, headers={"Location": "/"})
+    handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    handler = find_handler_for_event(handlers, req_event)
+    if handler is None:
+        return _json_error(
+            f"No handler registered for request type '{req_event.request_type}'",
+            status_code=400,
+        )
+    if action == "grant":
+        return await handler.apply_grant_request(request, req_event)
+    if action == "deny":
+        return await handler.apply_deny_request(request, req_event)
+    return _json_error(f"Unsupported action '{action}'", status_code=500)
 
 
 _request_event_apps: dict[int, FastAPI] = {}
@@ -1669,15 +2289,38 @@ _refresh_event_apps: dict[int, FastAPI] = {}
 
 
 def _handle_request_event_callback(agent_id_str: str, raw_line: str) -> None:
-    """Process an incoming request event and add it to the app's inbox."""
+    """Process an incoming request event and add it to the app's inbox.
+
+    After mutating the inbox, fires the resolver's change notification so
+    the chrome SSE wakes up and pushes the new ``request_count`` immediately
+    (otherwise it would lag up to 30s for the next poll tick, breaking the
+    requests panel auto-open and badge UX).
+
+    ``LATCHKEY_PERMISSION`` events from the JSONL stream are ignored
+    here: latchkey 2.9.0 ships a gateway extension that owns the
+    pending-permission queue, and the desktop client consumes it via
+    :class:`PermissionRequestsConsumer` instead. Any latchkey events
+    that still arrive over the legacy JSONL channel are stale (the
+    agents migrating to the extension write directly to the gateway
+    now) and would only double-count.
+    """
     event = parse_request_event(raw_line)
     if event is None:
+        return
+    if event.request_type == str(RequestType.LATCHKEY_PERMISSION):
+        logger.debug(
+            "Ignoring legacy JSONL latchkey-permission event from agent {}; the gateway extension owns this flow now",
+            agent_id_str,
+        )
         return
     for app in _request_event_apps.values():
         current_inbox: RequestInbox | None = app.state.request_inbox
         if current_inbox is not None:
             app.state.request_inbox = current_inbox.add_request(event)
             logger.info("Request event from agent {}: {}", agent_id_str, event.request_type)
+            backend_resolver: BackendResolverInterface = app.state.backend_resolver
+            if isinstance(backend_resolver, MngrCliBackendResolver):
+                backend_resolver.notify_change()
 
 
 def _parse_refresh_service_name(raw_line: str) -> str | None:
@@ -1693,43 +2336,31 @@ def _parse_refresh_service_name(raw_line: str) -> str | None:
 
 
 async def _dispatch_refresh_broadcast(app: FastAPI, agent_id: AgentId, service_name: str) -> None:
-    """POST to the agent's workspace server so it emits a refresh_service WS broadcast.
+    """POST to the agent's system interface so it emits a refresh_service WS broadcast.
 
-    Resolves the ``system_interface`` backend URL for the agent (going through
-    an SSH tunnel automatically for remote agents) and calls
-    ``/api/refresh-service/{service_name}/broadcast``. Errors are logged but
-    swallowed -- a missed refresh is never worth crashing on.
+    Routed through the ``mngr forward`` plugin's per-agent subdomain
+    (``<agent>.localhost:<plugin_port>``) so we reuse the plugin's existing
+    SSH tunnel to the agent rather than maintaining one in minds. Auth on
+    the plugin uses the same ``preauth_cookie`` value the plugin trusts for
+    the Electron-shell pre-set; minds knows that value because it minted it
+    in ``cli/run.py``. Errors are logged but swallowed -- a missed refresh
+    is never worth crashing on.
     """
-    backend_resolver: BackendResolverInterface = app.state.backend_resolver
-    backend_url = backend_resolver.get_backend_url(agent_id, _WORKSPACE_SERVER_SERVICE_NAME)
-    if backend_url is None:
-        logger.debug(
-            "No system_interface backend for agent {}; dropping refresh for service {}",
-            agent_id,
-            service_name,
-        )
+    plugin_port: int = app.state.mngr_forward_port or 8421
+    preauth_cookie: str | None = app.state.mngr_forward_preauth_cookie
+    if preauth_cookie is None:
+        logger.debug("Refresh broadcast skipped for {}/{}: no preauth cookie wired", agent_id, service_name)
         return
-
-    url = f"{backend_url.rstrip('/')}/api/refresh-service/{service_name}/broadcast"
-    # Tunnel setup performs a blocking SSH handshake for remote agents, so
-    # run it in a thread pool to avoid stalling the desktop client's event
-    # loop (mirrors the approach used by the HTTP proxy path).
+    url = f"http://{agent_id}.localhost:{plugin_port}/api/refresh-service/{service_name}/broadcast"
+    http_client: httpx.AsyncClient = app.state.http_client
     try:
-        tunnel_client = await asyncio.get_running_loop().run_in_executor(
-            None, _get_tunnel_http_client, app, agent_id, backend_url, backend_resolver
+        response = await http_client.post(
+            url,
+            cookies={"mngr_forward_session": preauth_cookie},
         )
-    except (SSHTunnelError, paramiko.SSHException, OSError) as e:
-        logger.warning("Refresh broadcast tunnel setup for {} failed: {}", url, e)
-        return
-    http_client = tunnel_client or app.state.http_client
-    try:
-        response = await http_client.post(url)
         response.raise_for_status()
     except httpx.HTTPError as e:
         logger.warning("Refresh broadcast POST to {} failed: {}", url, e)
-    finally:
-        if tunnel_client is not None:
-            await tunnel_client.aclose()
 
 
 def _log_refresh_dispatch_result(
@@ -1752,7 +2383,7 @@ def _log_refresh_dispatch_result(
 
 
 def _handle_refresh_event_callback(agent_id_str: str, raw_line: str) -> None:
-    """Fan a refresh event out to every registered app's workspace server.
+    """Fan a refresh event out to every registered app's system interface.
 
     Runs on the mngr-events reader thread, so the async POST is scheduled
     on each app's captured event loop via run_coroutine_threadsafe.
@@ -1793,39 +2424,50 @@ def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,
     http_client: httpx.AsyncClient | None,
-    tunnel_manager: SSHTunnelManager | None = None,
-    latchkey_gateway_manager: LatchkeyGatewayManager | None = None,
     agent_creator: AgentCreator | None = None,
-    cloudflare_client: CloudflareClient | None = None,
+    imbue_cloud_cli: ImbueCloudCli | None = None,
     telegram_orchestrator: TelegramSetupOrchestrator | None = None,
     notification_dispatcher: NotificationDispatcher | None = None,
     paths: WorkspacePaths | None = None,
     minds_config: MindsConfig | None = None,
-    stream_manager: MngrStreamManager | None = None,
+    client_env_config: ClientEnvConfig | None = None,
+    envelope_stream_consumer: EnvelopeStreamConsumer | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    auth_backend_client: AuthBackendClient | None = None,
     request_inbox: RequestInbox | None = None,
+    request_event_handlers: tuple[RequestEventHandler, ...] = (),
     server_port: int = 0,
+    mngr_forward_port: int = 0,
+    mngr_forward_preauth_cookie: str | None = None,
     output_format: OutputFormat | None = None,
+    root_concurrency_group: ConcurrencyGroup | None = None,
+    system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
+    mngr_binary: str = "mngr",
+    mngr_host_dir: Path | None = None,
 ) -> FastAPI:
-    """Create the desktop client FastAPI application.
+    """Create the bare-origin minds FastAPI application.
 
-    When tunnel_manager is provided, the server can proxy traffic to remote agents
-    by tunneling through SSH. Without it, only local agents are reachable.
+    The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
+    (``libs/mngr_forward``) now; this app only serves minds-specific routes
+    on the bare origin (login, landing, accounts, workspace settings,
+    sharing, telegram, agent create / destroy). Workspace links go to
+    ``http://localhost:<mngr_forward_port>/goto/<agent>/`` instead of being
+    routed in-process.
 
-    When agent_creator is provided, the server can create new agents from git URLs
-    via the /create form and /api/create-agent API.
+    ``envelope_stream_consumer`` feeds discovery events into
+    ``backend_resolver`` and is also the bounce target for ``SIGHUP``-style
+    re-discovery after a SuperTokens signin writes a new provider entry.
 
-    When cloudflare_client is provided, the servers page shows global forwarding
-    URLs and toggle controls.
+    When ``agent_creator`` is provided, the server can create new agents
+    from git URLs via the /create form and /api/create-agent API.
 
-    When telegram_orchestrator is provided, the landing page shows Telegram setup
-    buttons and the /api/agents/{agent_id}/telegram/* endpoints are available.
+    When ``telegram_orchestrator`` is provided, the landing page shows
+    Telegram setup buttons and the /api/agents/{agent_id}/telegram/*
+    endpoints are available.
 
-    When paths is provided, the /api/v1/ REST API router is mounted with API
-    key authentication. The notification endpoint within the router additionally
-    requires notification_dispatcher to be provided; without it that endpoint
-    returns 501.
+    When ``paths`` is provided, the /api/v1/ REST API router is mounted with
+    API key authentication. The notification endpoint within the router
+    additionally requires ``notification_dispatcher`` to be provided;
+    without it that endpoint returns 501.
     """
     is_externally_managed_client = http_client is not None
 
@@ -1838,44 +2480,50 @@ def create_desktop_client(
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> Response:
-        logger.error("Unhandled exception on {} {}: {}", request.method, request.url.path, exc, exc_info=exc)
+        logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.url.path)
         return Response(status_code=500, content=f"Internal Server Error: {exc}")
-
-    @app.middleware("http")
-    async def _subdomain_forwarding_middleware(request: Request, call_next: Any) -> Response:
-        """Dispatch ``<agent-id>.localhost:PORT/*`` to the workspace_server byte-forward.
-
-        Bare ``localhost`` / ``127.0.0.1`` traffic falls through to the normal
-        desktop-client routes via ``call_next``. Unknown subdomains return 404.
-        """
-        host_header = request.headers.get("host", "")
-        agent_id = _parse_workspace_subdomain(host_header)
-        if agent_id is None:
-            return await call_next(request)
-        return await _handle_workspace_forward_http(request)
 
     app.state.auth_store = auth_store
     app.state.backend_resolver = backend_resolver
-    app.state.tunnel_manager = tunnel_manager
-    app.state.latchkey_gateway_manager = latchkey_gateway_manager
-    app.state.stream_manager = stream_manager
+    app.state.envelope_stream_consumer = envelope_stream_consumer
+    # Placeholder so the lifespan teardown can read this slot
+    # unconditionally; ``cli/run.py`` overwrites it with the running
+    # consumer right after starting it.
+    app.state.permission_requests_consumer = None
+    # Cross-thread flag the SSE handlers poll to exit cleanly on
+    # process shutdown. ``threading.Event`` (not ``asyncio.Event``) so
+    # tests that exercise the endpoints without invoking the lifespan
+    # context manager still see a valid, settable object on app.state
+    # -- and because the lifespan teardown setter runs in the asyncio
+    # event loop's thread but the SSE handlers read it from the same
+    # thread, so awaitability buys us nothing here.
+    app.state.shutdown_event = threading.Event()
     app.state.agent_creator = agent_creator
-    app.state.cloudflare_client = cloudflare_client
+    app.state.imbue_cloud_cli = imbue_cloud_cli
     app.state.telegram_orchestrator = telegram_orchestrator
     app.state.notification_dispatcher = notification_dispatcher
     app.state.session_store = session_store
-    app.state.auth_backend_client = auth_backend_client
     app.state.minds_config = minds_config
+    app.state.client_env_config = client_env_config
     app.state.request_inbox = request_inbox
+    app.state.request_event_handlers = request_event_handlers
     app.state.auth_server_port = server_port
+    app.state.mngr_forward_port = mngr_forward_port
+    app.state.mngr_forward_preauth_cookie = mngr_forward_preauth_cookie
     app.state.auth_output_format = output_format or OutputFormat.JSONL
+    app.state.root_concurrency_group = root_concurrency_group
+    app.state.system_interface_health_tracker = system_interface_health_tracker
+    app.state.mngr_binary = mngr_binary
+    app.state.mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
     # Populated with the running loop by _managed_lifespan on startup. Defined
     # up-front as None so background callbacks fired before startup (e.g. mngr
-    # events produced between stream_manager.start() and uvicorn.run()) see a
+    # events produced between consumer.start() and uvicorn.run()) see a
     # valid attribute and can choose to drop the event instead of crashing.
     app.state.event_loop = None
-    if paths is not None:
-        app.state.api_v1_paths = paths
+    # Always-set (possibly None) so consumers can read directly via
+    # ``app.state.api_v1_paths`` instead of using a defaulting attribute
+    # lookup -- the latter is flagged by the project ratchet.
+    app.state.api_v1_paths = paths
     if http_client is not None:
         app.state.http_client = http_client
 
@@ -1886,11 +2534,11 @@ def create_desktop_client(
         _refresh_event_apps[id(backend_resolver)] = app
         backend_resolver.add_on_refresh_callback(_handle_refresh_event_callback)
 
-    # Mount the auth routes (proxy to the remote_service_connector auth backend)
-    if session_store is not None and auth_backend_client is not None:
+    # Mount the auth routes (proxy to the mngr_imbue_cloud plugin's auth subcommands)
+    if session_store is not None and imbue_cloud_cli is not None:
         supertokens_router = create_supertokens_router(
             session_store=session_store,
-            auth_backend_client=auth_backend_client,
+            imbue_cloud_cli=imbue_cloud_cli,
             server_port=server_port,
             output_format=output_format or OutputFormat.JSONL,
         )
@@ -1916,13 +2564,10 @@ def create_desktop_client(
     app.get("/_chrome/events")(_handle_chrome_events)
 
     # Register routes
+    app.get("/welcome")(_handle_welcome_page)
     app.get("/login")(_handle_login)
     app.get("/authenticate")(_handle_authenticate)
     app.get("/")(_handle_landing_page)
-
-    # Auth bridge: same-origin redirect to a workspace subdomain that
-    # installs a subdomain-scoped session cookie on first visit.
-    app.get("/goto/{agent_id}/")(_handle_goto_workspace)
 
     # Account management routes
     app.get("/accounts")(_handle_accounts_page)
@@ -1955,19 +2600,91 @@ def create_desktop_client(
     app.get("/api/create-agent/{agent_id}/logs")(_handle_creation_logs_sse)
     app.get("/creating/{agent_id}")(_handle_creating_page)
 
+    # Agent destruction routes
+    app.post("/api/destroy-agent/{agent_id}")(_handle_destroy_agent_api)
+    app.get("/api/destroying/{agent_id}/status")(_handle_destroying_status_api)
+    app.get("/api/destroying/{agent_id}/log")(_handle_destroying_log_api)
+    app.post("/api/destroying/{agent_id}/dismiss")(_handle_destroying_dismiss_api)
+    app.get("/destroying/{agent_id}")(_handle_destroying_page)
+
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
     app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
 
-    # Catch-all WebSocket route for ``<agent-id>.localhost:PORT/*``. For
-    # requests arriving on the bare-origin host, the handler closes the WS
-    # with a 4004 since those paths aren't routed by any other handler.
-    @app.websocket("/{path:path}")
-    async def subdomain_forwarding_websocket(websocket: WebSocket, path: str) -> None:
-        host_header = websocket.headers.get("host", "")
-        if _parse_workspace_subdomain(host_header) is None:
-            await websocket.close(code=4004, reason="Not found")
-            return
-        await _handle_workspace_forward_websocket(websocket)
+    # System-interface recovery routes
+    app.get("/agents/{agent_id}/recovery")(_handle_recovery_page)
+    app.post("/api/agents/{agent_id}/restart-system-interface")(_handle_restart_system_interface_api)
 
     return app
+
+
+# How often the background probe loop polls agents that are currently STUCK
+# or RESTARTING. Picked to match the old branch's recovery-poll cadence
+# (the plan's default for the open question on probe interval).
+_HEALTH_PROBE_INTERVAL_SECONDS: Final[float] = 2.0
+
+
+def start_system_interface_health_probe_loop(
+    tracker: SystemInterfaceHealthTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_forward_port: int,
+    mngr_forward_preauth_cookie: str | None,
+    root_concurrency_group: ConcurrencyGroup | None,
+) -> None:
+    """Start a background thread that probes STUCK / RESTARTING agents.
+
+    For each non-HEALTHY agent in the tracker, the thread polls the plugin's
+    per-agent subdomain every ``_HEALTH_PROBE_INTERVAL_SECONDS``. A 200
+    response flips the tracker back to HEALTHY (which fires the on-change
+    callback feeding the SSE stream). The thread silently no-ops when there
+    are no non-HEALTHY agents.
+
+    Probing is skipped entirely when the plugin port or preauth cookie are
+    unset (e.g. minds running without the plugin) -- without a working
+    plugin route there is no way to ask whether the workspace recovered.
+    """
+    if mngr_forward_port == 0 or not mngr_forward_preauth_cookie or root_concurrency_group is None:
+        return
+
+    root_concurrency_group.start_new_thread(
+        target=_run_system_interface_health_probe_loop,
+        args=(tracker, backend_resolver, mngr_forward_port, mngr_forward_preauth_cookie, root_concurrency_group),
+        name="system-interface-health-probe",
+        daemon=True,
+    )
+
+
+def _run_system_interface_health_probe_loop(
+    tracker: SystemInterfaceHealthTracker,
+    backend_resolver: BackendResolverInterface,
+    mngr_forward_port: int,
+    mngr_forward_preauth_cookie: str,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Loop body for the background system-interface health probe thread."""
+    if not isinstance(backend_resolver, MngrCliBackendResolver):
+        # Static resolvers used by tests don't expose the same subdomain
+        # routing, so probing them by ID is meaningless. Resolver type is
+        # fixed for the process lifetime, so exit the thread immediately
+        # rather than spinning forever doing nothing.
+        logger.debug(
+            "System-interface health probe thread exiting: backend_resolver is {}, not MngrCliBackendResolver",
+            type(backend_resolver).__name__,
+        )
+        return
+    with make_workspace_probe_client(
+        preauth_cookie=mngr_forward_preauth_cookie,
+        probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+    ) as probe_client:
+        while not root_concurrency_group.is_shutting_down():
+            for aid in tracker.snapshot_all():
+                probe_status = probe_workspace_through_plugin(
+                    mngr_forward_port=mngr_forward_port,
+                    preauth_cookie=mngr_forward_preauth_cookie,
+                    agent_id=aid,
+                    probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
+                    client=probe_client,
+                )
+                if probe_status == 200:
+                    tracker.record_success(aid)
+            threading.Event().wait(timeout=_HEALTH_PROBE_INTERVAL_SECONDS)

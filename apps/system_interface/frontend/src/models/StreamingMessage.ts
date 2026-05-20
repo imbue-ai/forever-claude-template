@@ -17,6 +17,32 @@ const explicitlyDisconnectedAgents = new Set<string>();
 // flight, so fetchEvents replacing eventsByAgent[agentId] does not drop them.
 const inFlightSnapshotBuffersByAgent = new Map<string, TranscriptEvent[]>();
 
+export type AuthErrorListener = (agentId: string, event: TranscriptEvent) => void;
+const authErrorListeners: AuthErrorListener[] = [];
+
+export function subscribeToAuthErrors(callback: AuthErrorListener): () => void {
+  authErrorListeners.push(callback);
+  return () => {
+    const index = authErrorListeners.indexOf(callback);
+    if (index >= 0) {
+      authErrorListeners.splice(index, 1);
+    }
+  };
+}
+
+function dispatchAuthErrorIfPresent(agentId: string, event: TranscriptEvent): void {
+  if (event.type !== "assistant_message" || event.is_auth_error !== true) {
+    return;
+  }
+  for (const listener of authErrorListeners) {
+    try {
+      listener(agentId, event);
+    } catch (error) {
+      console.warn("auth-error listener threw", error);
+    }
+  }
+}
+
 export interface StreamingMessage {
   conversationId: string;
   userPrompt: string;
@@ -45,6 +71,7 @@ export function connectToStream(agentId: string): void {
     } else {
       appendEvents(agentId, [event]);
     }
+    dispatchAuthErrorIfPresent(agentId, event);
   };
 
   eventSource.onerror = () => {

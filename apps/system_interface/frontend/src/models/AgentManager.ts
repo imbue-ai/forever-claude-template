@@ -13,7 +13,7 @@ export interface AgentState {
   labels: Record<string, string>;
   work_dir: string | null;
   // Per-agent chat activity. THINKING/TOOL_RUNNING/WAITING_ON_PERMISSION/IDLE,
-  // or null when the workspace server has no per-agent activity tracking
+  // or null when the system interface has no per-agent activity tracking
   // available (e.g. remote agents whose state directory is not present on
   // this host, proto-agents, non-Claude agent types).
   activity_state?: string | null;
@@ -31,6 +31,33 @@ export interface ProtoAgent {
   parent_agent_id: string | null;
 }
 
+// Names of the layout-mutation ops the agent-facing ``scripts/layout.py``
+// helper can emit. The frontend dispatches on this in DockviewWorkspace.
+export type LayoutOpName =
+  | "open"
+  | "focus"
+  | "split"
+  | "close"
+  | "move"
+  | "rename"
+  | "maximize"
+  | "restore"
+  | "replace-url"
+  | "refresh";
+
+export interface LayoutOpEvent {
+  op: LayoutOpName;
+  // Op-specific arguments. Shape is verified at the call site (DockviewWorkspace)
+  // rather than at the listener boundary -- the WS broadcast is the source of
+  // truth and ``scripts/layout.py`` enforces shape before broadcasting.
+  args: Record<string, unknown>;
+  // ``MNGR_AGENT_ID`` of the agent that invoked ``scripts/layout.py``. Empty
+  // string when the caller did not set ``MNGR_AGENT_ID``. Used to anchor
+  // splits against the requester's own chat panel and to resolve the ``self``
+  // ref.
+  requesterAgentId: string;
+}
+
 type WsEvent =
   | { type: "agents_updated"; agents: AgentState[] }
   | { type: "applications_updated"; applications: ApplicationEntry[] }
@@ -42,17 +69,21 @@ type WsEvent =
       parent_agent_id: string | null;
     }
   | { type: "proto_agent_completed"; agent_id: string; success: boolean; error: string | null }
-  | { type: "refresh_service"; service_name: string }
-  | { type: "open_tab"; service_name: string };
+  | {
+      type: "layout_op";
+      op: LayoutOpName;
+      args: Record<string, unknown>;
+      requester_agent_id?: string;
+    };
 
-export type RefreshServiceListener = (serviceName: string) => void;
-export type OpenTabListener = (serviceName: string) => void;
+export type LayoutOpListener = (event: LayoutOpEvent) => void;
+export type AgentsUpdatedListener = (agents: AgentState[]) => void;
 
 let agents: AgentState[] = [];
 let applications: ApplicationEntry[] = [];
 let protoAgents: ProtoAgent[] = [];
-let refreshListeners: RefreshServiceListener[] = [];
-let openTabListeners: OpenTabListener[] = [];
+let layoutOpListeners: LayoutOpListener[] = [];
+let agentsUpdatedListeners: AgentsUpdatedListener[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let connected = false;
@@ -114,6 +145,9 @@ function handleEvent(event: WsEvent): void {
   switch (event.type) {
     case "agents_updated":
       agents = event.agents;
+      for (const listener of agentsUpdatedListeners) {
+        listener(getAgents());
+      }
       break;
 
     case "applications_updated":
@@ -134,15 +168,13 @@ function handleEvent(event: WsEvent): void {
       break;
     }
 
-    case "refresh_service":
-      for (const listener of refreshListeners) {
-        listener(event.service_name);
-      }
-      break;
-
-    case "open_tab":
-      for (const listener of openTabListeners) {
-        listener(event.service_name);
+    case "layout_op":
+      for (const listener of layoutOpListeners) {
+        listener({
+          op: event.op,
+          args: event.args,
+          requesterAgentId: event.requester_agent_id ?? "",
+        });
       }
       break;
   }
@@ -156,8 +188,22 @@ export function isConnected(): boolean {
   return connected;
 }
 
+/**
+ * Returns true when the agent is the workspace's services-only "primary"
+ * agent (window 0 is sleep-infinity; bootstrap + services run in extra
+ * tmux windows). These agents are hidden from the user-facing agent list
+ * because destroying them would tear down the whole workspace.
+ */
+export function isPrimaryAgent(agent: AgentState): boolean {
+  return agent.labels?.is_primary === "true";
+}
+
 export function getAgents(): AgentState[] {
-  return agents;
+  // Filter at the data layer so every consumer (Dockview list, chat panel,
+  // create-agent modal, etc.) sees the same set without duplicating the
+  // filter logic. The raw list is still kept internally for callsites that
+  // need it (none today, but kept symmetric with getAgentById).
+  return agents.filter((a) => !isPrimaryAgent(a));
 }
 
 export function getAgentById(id: string): AgentState | undefined {
@@ -176,18 +222,18 @@ export function getProtoAgents(): ProtoAgent[] {
   return protoAgents;
 }
 
-export function addRefreshServiceListener(listener: RefreshServiceListener): void {
-  refreshListeners.push(listener);
+export function addLayoutOpListener(listener: LayoutOpListener): void {
+  layoutOpListeners.push(listener);
 }
 
-export function removeRefreshServiceListener(listener: RefreshServiceListener): void {
-  refreshListeners = refreshListeners.filter((l) => l !== listener);
+export function removeLayoutOpListener(listener: LayoutOpListener): void {
+  layoutOpListeners = layoutOpListeners.filter((l) => l !== listener);
 }
 
-export function addOpenTabListener(listener: OpenTabListener): void {
-  openTabListeners.push(listener);
+export function addAgentsUpdatedListener(listener: AgentsUpdatedListener): void {
+  agentsUpdatedListeners.push(listener);
 }
 
-export function removeOpenTabListener(listener: OpenTabListener): void {
-  openTabListeners = openTabListeners.filter((l) => l !== listener);
+export function removeAgentsUpdatedListener(listener: AgentsUpdatedListener): void {
+  agentsUpdatedListeners = agentsUpdatedListeners.filter((l) => l !== listener);
 }

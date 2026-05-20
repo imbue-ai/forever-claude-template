@@ -53,6 +53,9 @@ export interface TranscriptEvent {
     cache_write_tokens?: number | null;
   } | null;
 
+  // assistant_message: true when the text matches a known Claude auth-error pattern
+  is_auth_error?: boolean;
+
   // tool_result fields
   tool_call_id?: string;
   tool_name?: string;
@@ -67,6 +70,17 @@ export interface TranscriptEvent {
   created_at?: string;
   summary?: string | null;
   summary_at?: string | null;
+  // True iff the ticket is a turn-bound progress record ("step"), as
+  // opposed to a regular tk ticket. Step records nest under their
+  // parent ticket in the progress view; standalone steps render flat.
+  step?: boolean;
+  // The id of the ticket this one is nested under, if any.
+  parent_id?: string;
+  // The agent currently assigned to the ticket -- the load-bearing
+  // "this is now my work" signal for regular tickets (used by
+  // turn-grouping to attribute a picked-up ticket to the picker's
+  // first turn rather than the originator's creation turn).
+  assignee?: string;
 }
 
 // For hook compatibility

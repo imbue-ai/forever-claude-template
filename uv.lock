@@ -12,8 +12,8 @@ members = [
     "bootstrap",
     "cloudflare-tunnel",
     "forever-claude-template",
-    "minds-workspace-server",
     "runtime-backup",
+    "system-interface",
     "telegram-bot",
     "web-server",
 ]
@@ -350,7 +350,7 @@ wheels = [
 
 [[package]]
 name = "concurrency-group"
-version = "0.1.15"
+version = "0.1.17"
 source = { editable = "vendor/mngr/libs/concurrency_group" }
 dependencies = [
     { name = "imbue-common" },
@@ -587,6 +587,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "imbue-mngr" },
+    { name = "imbue-mngr-claude" },
     { name = "import-linter" },
     { name = "inline-snapshot" },
     { name = "pyright" },
@@ -613,6 +614,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
+    { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
     { name = "import-linter", specifier = ">=2.0" },
     { name = "inline-snapshot", specifier = ">=0.31" },
     { name = "pyright", specifier = ">=1.1" },
@@ -866,7 +868,7 @@ wheels = [
 
 [[package]]
 name = "imbue-common"
-version = "0.1.15"
+version = "0.1.17"
 source = { editable = "vendor/mngr/libs/imbue_common" }
 dependencies = [
     { name = "click" },
@@ -891,7 +893,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "imbue-mngr"
-version = "0.2.6"
+version = "0.2.8"
 source = { editable = "vendor/mngr/libs/mngr" }
 dependencies = [
     { name = "cel-python" },
@@ -920,7 +922,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cel-python", specifier = ">=0.1.5" },
+    { name = "cel-python", specifier = ">=0.5.0" },
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "concurrency-group", editable = "vendor/mngr/libs/concurrency_group" },
@@ -943,6 +945,20 @@ requires-dist = [
     { name = "tomlkit", specifier = ">=0.12.0" },
     { name = "urwid", specifier = ">=2.2.0" },
 ]
+
+[[package]]
+name = "imbue-mngr-claude"
+version = "0.2.8"
+source = { editable = "vendor/mngr/libs/mngr_claude" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "imbue-mngr-modal", editable = "vendor/mngr/libs/mngr_modal" }]
 
 [[package]]
 name = "import-linter"
@@ -1130,67 +1146,6 @@ wheels = [
 ]
 
 [[package]]
-name = "minds-workspace-server"
-version = "0.1.0"
-source = { editable = "apps/system_interface" }
-dependencies = [
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "imbue-common" },
-    { name = "imbue-mngr" },
-    { name = "pluggy" },
-    { name = "pydantic-settings" },
-    { name = "starlette" },
-    { name = "uvicorn" },
-    { name = "watchdog" },
-    { name = "websockets" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "coverage" },
-    { name = "import-linter" },
-    { name = "inline-snapshot" },
-    { name = "playwright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-playwright" },
-    { name = "pytest-timeout" },
-    { name = "resource-guards" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
-    { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
-    { name = "pluggy", specifier = ">=1.5" },
-    { name = "pydantic-settings", specifier = ">=2.13.1" },
-    { name = "starlette", specifier = ">=0.45" },
-    { name = "uvicorn", specifier = ">=0.34" },
-    { name = "watchdog", specifier = ">=4.0" },
-    { name = "websockets", specifier = ">=13.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "coverage" },
-    { name = "import-linter", specifier = ">=2.0" },
-    { name = "inline-snapshot", specifier = ">=0.13" },
-    { name = "playwright", specifier = ">=1.40" },
-    { name = "pytest", specifier = ">=9.0" },
-    { name = "pytest-cov", specifier = ">=7.0.0" },
-    { name = "pytest-playwright", specifier = ">=0.4" },
-    { name = "pytest-timeout", specifier = ">=2.3.0" },
-    { name = "resource-guards", editable = "vendor/mngr/libs/resource_guards" },
-    { name = "ruff", specifier = "~=0.12.8" },
-    { name = "ty", specifier = "==0.0.24" },
-]
-
-[[package]]
 name = "nodeenv"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1267,6 +1222,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pexpect"
+version = "4.9.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ptyprocess" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/c3/059298687310d527a58bb01f3b1965787ee3b40dce76752eda8b44e9a2c5/pexpect-4.9.0-py2.py3-none-any.whl", hash = "sha256:7236d1e080e4936be2dc3e326cec0af72acf9212a7e1d060210e70a47e253523", size = 63772, upload-time = "2023-11-25T06:56:14.81Z" },
+]
+
+[[package]]
 name = "playwright"
 version = "1.58.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1320,6 +1287,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/04/78/0acd37ca84ce3ddffaa92ef0f571e073faa6d8ff1f0559ab1272188ea2be/psutil-7.2.2-cp36-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:b58fabe35e80b264a4e3bb23e6b96f9e45a3df7fb7eed419ac0e5947c61e47cc", size = 148266, upload-time = "2026-01-28T18:15:31.597Z" },
     { url = "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl", hash = "sha256:eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988", size = 137737, upload-time = "2026-01-28T18:15:33.849Z" },
     { url = "https://files.pythonhosted.org/packages/8c/c7/7bb2e321574b10df20cbde462a94e2b71d05f9bbda251ef27d104668306a/psutil-7.2.2-cp37-abi3-win_arm64.whl", hash = "sha256:8c233660f575a5a89e6d4cb65d9f938126312bca76d8fe087b947b3a1aaac9ee", size = 134617, upload-time = "2026-01-28T18:15:36.514Z" },
+]
+
+[[package]]
+name = "ptyprocess"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/20/e5/16ff212c1e452235a90aeb09066144d0c5a6a8c0834397e03f5224495c4e/ptyprocess-0.7.0.tar.gz", hash = "sha256:5c5d0a3b48ceee0b48485e0c26037c0acd7d29765ca3fbb5cb3831d347423220", size = 70762, upload-time = "2020-12-28T15:15:30.155Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/22/a6/858897256d0deac81a172289110f31629fc4cee19b6f01283303e18c8db3/ptyprocess-0.7.0-py2.py3-none-any.whl", hash = "sha256:4b41f3967fce3af57cc7e94b888626c18bf37a083e3651ca8feeb66d492fef35", size = 13993, upload-time = "2020-12-28T15:15:28.35Z" },
 ]
 
 [[package]]
@@ -1712,7 +1688,7 @@ wheels = [
 
 [[package]]
 name = "resource-guards"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "vendor/mngr/libs/resource_guards" }
 dependencies = [
     { name = "pluggy" },
@@ -1855,6 +1831,71 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/81/69/17425771797c36cded50b7fe44e850315d039f28b15901ab44839e70b593/starlette-1.0.0.tar.gz", hash = "sha256:6a4beaf1f81bb472fd19ea9b918b50dc3a77a6f2e190a12954b25e6ed5eea149", size = 2655289, upload-time = "2026-03-22T18:29:46.779Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/c9/584bc9651441b4ba60cc4d557d8a547b5aff901af35bda3a4ee30c819b82/starlette-1.0.0-py3-none-any.whl", hash = "sha256:d3ec55e0bb321692d275455ddfd3df75fff145d009685eb40dc91fc66b03d38b", size = 72651, upload-time = "2026-03-22T18:29:45.111Z" },
+]
+
+[[package]]
+name = "system-interface"
+version = "0.1.0"
+source = { editable = "apps/system_interface" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "imbue-common" },
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-claude" },
+    { name = "pexpect" },
+    { name = "pluggy" },
+    { name = "pydantic-settings" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+    { name = "watchdog" },
+    { name = "websockets" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "coverage" },
+    { name = "import-linter" },
+    { name = "inline-snapshot" },
+    { name = "playwright" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-playwright" },
+    { name = "pytest-timeout" },
+    { name = "resource-guards" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
+    { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
+    { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
+    { name = "pexpect", specifier = ">=4.9" },
+    { name = "pluggy", specifier = ">=1.5" },
+    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "starlette", specifier = ">=0.45" },
+    { name = "uvicorn", specifier = ">=0.34" },
+    { name = "watchdog", specifier = ">=4.0" },
+    { name = "websockets", specifier = ">=13.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "coverage" },
+    { name = "import-linter", specifier = ">=2.0" },
+    { name = "inline-snapshot", specifier = ">=0.13" },
+    { name = "playwright", specifier = ">=1.40" },
+    { name = "pytest", specifier = ">=9.0" },
+    { name = "pytest-cov", specifier = ">=7.0.0" },
+    { name = "pytest-playwright", specifier = ">=0.4" },
+    { name = "pytest-timeout", specifier = ">=2.3.0" },
+    { name = "resource-guards", editable = "vendor/mngr/libs/resource_guards" },
+    { name = "ruff", specifier = "~=0.12.8" },
+    { name = "ty", specifier = "==0.0.24" },
 ]
 
 [[package]]

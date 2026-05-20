@@ -46,6 +46,23 @@ export interface TaskRecord {
   summary: string | null;
   /** Final status seen so far across all events. */
   final_status: TaskEventStatus;
+  /** True iff the underlying tk file has `step: true` (turn-bound
+   *  progress marker). Step records nest under their parent ticket in
+   *  the progress view; standalone steps render flat. */
+  step: boolean;
+  /** Id of the parent ticket this record is nested under, or "". */
+  parent_id: string;
+  /** Current assignee from the latest event (used for diagnostics; the
+   *  watcher already filters which agent sees the ticket, so the
+   *  frontend doesn't re-check this for routing). */
+  assignee: string;
+  /** The earliest task_event timestamp observed for this ticket in the
+   *  current agent's stream. Used for turn attribution instead of
+   *  `created_at` so a ticket picked up by THIS agent lands in the
+   *  picker's first-action turn rather than the originator's creation
+   *  turn (whose timestamp could be in any prior turn -- or any prior
+   *  agent's runtime -- when a ticket is handed off). */
+  first_observed_at: string;
 }
 
 /** A task as it should be rendered inside a specific turn. */
@@ -66,15 +83,45 @@ export interface TaskInTurn {
    *  badge -- because from the user's vantage point looking at a past
    *  turn, the work is not actively spinning in that turn anymore. */
   continues_forward: boolean;
-  /** Timestamp the ticket was created. Used for ordering tasks within a
-   *  turn (so a still-pending task created later than an active task
-   *  renders below it, not above). */
+  /** Timestamp the ticket was created. Fallback sort key for tasks that
+   *  haven't started yet by the end of THIS turn. */
   created_at: string;
+  /** Timestamp the ticket transitioned to in_progress, but only if that
+   *  transition happened by the end of THIS turn. Null for tasks still
+   *  pending in this turn. Used as the primary sort key so tasks within
+   *  a turn render in the order the agent actually started them, not the
+   *  order they were planned/created. */
+  started_at: string | null;
   /** Inclusive lower bound of the active window for tool-call attribution. */
   active_window_start: string | null;
   /** Inclusive upper bound of the active window. null = still active at
    *  end of turn. */
   active_window_end: string | null;
+  /** True iff this node represents a step record (turn-bound progress
+   *  marker) rather than a regular ticket. Drives ProgressBlock chrome:
+   *  steps render slimmer and (when nested) indented under their
+   *  parent; regular tickets render with a parent badge / heavier
+   *  border. */
+  is_step: boolean;
+  /** Id of the parent ticket this node is nested under, or "" if
+   *  standalone. Used during the nesting pass in buildTurns to fold a
+   *  step into its parent's `children` when both live in the same
+   *  turn. */
+  parent_id: string;
+  /** Step children grouped under this node (regular ticket or
+   *  standalone step). Empty when this node has no children in the
+   *  current turn. The renderer walks this recursively but in practice
+   *  the model is two levels: ticket -> steps, with steps having no
+   *  children of their own. */
+  children: TaskInTurn[];
+  /** Live status caption rendered under the task title, always visible.
+   *  Holds the text of the latest text-only assistant_message that fell
+   *  inside this task's active window. While the task is active this
+   *  acts as a "what's happening now" caption; once the task closes the
+   *  ProgressBlock renders `summary` instead (or nothing, if there's no
+   *  summary -- final state stays clean). Null when no text-only
+   *  message has landed in the window yet. */
+  narration: string | null;
 }
 
 export interface Turn {
@@ -119,6 +166,10 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
         closed_at: e.status === "closed" ? e.timestamp : null,
         summary: e.status === "closed" ? (e.summary ?? null) : null,
         final_status: e.status,
+        step: e.step ?? false,
+        parent_id: e.parent_id ?? "",
+        assignee: e.assignee ?? "",
+        first_observed_at: e.timestamp,
       });
       continue;
     }
@@ -139,6 +190,27 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
     }
     if (STATUS_RANK[e.status] >= STATUS_RANK[existing.final_status]) {
       existing.final_status = e.status;
+    }
+    // Track the earliest event timestamp seen in THIS agent's stream.
+    // For a regular ticket picked up from another agent, the first
+    // event in our stream is an in_progress one (the watcher only
+    // started surfacing it once we became assignee) -- earlier than
+    // any subsequent close, so the min is the picker's first action.
+    if (e.timestamp < existing.first_observed_at) {
+      existing.first_observed_at = e.timestamp;
+    }
+    // assignee changes over the ticket's life; the latest observed
+    // value wins. step / parent_id are immutable post-create in
+    // practice (tk doesn't expose a re-parent or convert-to-step
+    // operation), but we still update for symmetry / future-proofing.
+    if (e.assignee !== undefined && e.assignee !== "") {
+      existing.assignee = e.assignee;
+    }
+    if (e.parent_id !== undefined && e.parent_id !== "") {
+      existing.parent_id = e.parent_id;
+    }
+    if (e.step !== undefined) {
+      existing.step = e.step;
     }
   }
   return records;
@@ -188,12 +260,19 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
     });
   }
 
-  // Attribute each task record to its owning turn (created during) and
-  // any carryover turn (next turn after the owning one if not closed).
+  // Attribute each task record to its owning turn (the first turn whose
+  // window contains the earliest task_event we observed for this ticket
+  // in the current agent's stream) and any carryover turn. Using
+  // `first_observed_at` instead of `created_at` is what makes a ticket
+  // PICKED UP by this agent land in the picker's turn rather than the
+  // originator's creation turn -- the watcher only starts surfacing
+  // events for the ticket once we become its assignee, so its earliest
+  // event in our stream IS the picker's first action.
   for (const record of taskRecords.values()) {
+    const attribution_ts = record.first_observed_at || record.created_at;
     for (let i = 0; i < turns.length; i++) {
       const turn = turns[i];
-      const inWindow = record.created_at >= turn.start_ts && (turn.end_ts === "" || record.created_at < turn.end_ts);
+      const inWindow = attribution_ts >= turn.start_ts && (turn.end_ts === "" || attribution_ts < turn.end_ts);
       if (!inWindow) continue;
       // Owning turn entry.
       turn.tasks.push(makeTaskInTurn(record, turn, /* is_carryover */ false, turns.length, /* turn_index */ i));
@@ -213,16 +292,61 @@ export function buildTurns(events: TranscriptEvent[]): Turn[] {
     }
   }
 
-  // Within a turn, carryovers sit above own tasks; within each group sort
-  // by created_at so a later-created task renders below an earlier one.
-  // (The carryover unshift loop above happens to reverse insertion order,
-  // so without sorting carry too, multiple carryovers would render in
-  // reverse creation order.)
-  const byCreated = (a: TaskInTurn, b: TaskInTurn) => a.created_at.localeCompare(b.created_at);
+  // Within a turn, carryovers sit above own tasks; within each group, sort
+  // by the task's started_at (when the agent transitioned it to
+  // in_progress) so the order at end-of-turn matches the order the agent
+  // actually started tasks rather than the order they were planned. Tasks
+  // not yet started in this turn sink to the bottom of the group and sort
+  // among themselves by created_at. So e.g. if the agent plans t1 then t2
+  // up-front but starts t2 first, t2 renders above t1; a still-pending t3
+  // created after both renders below both.
+  const byStart = (a: TaskInTurn, b: TaskInTurn) => {
+    if (a.started_at !== null && b.started_at !== null) return a.started_at.localeCompare(b.started_at);
+    if (a.started_at !== null) return -1;
+    if (b.started_at !== null) return 1;
+    return a.created_at.localeCompare(b.created_at);
+  };
   for (const turn of turns) {
-    const carry = turn.tasks.filter((t) => t.is_carryover).sort(byCreated);
-    const own = turn.tasks.filter((t) => !t.is_carryover).sort(byCreated);
+    const carry = turn.tasks.filter((t) => t.is_carryover).sort(byStart);
+    const own = turn.tasks.filter((t) => !t.is_carryover).sort(byStart);
     turn.tasks = [...carry, ...own];
+  }
+
+  // Per-task narration: attribute each text-only assistant_message in the
+  // turn to the most-recently-started task whose active window contains
+  // it, and set that task's `narration` to the message text. Later
+  // matches overwrite earlier ones so the slot reflects the LATEST text
+  // in window. We skip done tasks because their slot will render
+  // `summary` (or nothing) instead -- narration is only meaningful while
+  // a task is still in flight.
+  for (const turn of turns) {
+    for (const e of turn.body_events) {
+      if (e.type !== "assistant_message") continue;
+      if (!e.text) continue;
+      if (e.tool_calls && e.tool_calls.length > 0) continue;
+      const containing = findContainingTask(e.timestamp, turn.tasks);
+      if (containing === null) continue;
+      if (containing.status === "done") continue;
+      containing.narration = e.text;
+    }
+  }
+
+  // Drop regular tickets from the rendered timeline. The progress view
+  // shows STEPS only -- regular tickets are substantive cross-agent
+  // units that can stay open across many turns, and rendering them
+  // inline among per-turn step records confuses the per-turn timeline
+  // (their windows span multiple turns, their captions don't map onto
+  // the "live status" model, and their presence visually clutters what
+  // the user reads as "what happened this turn"). Tickets are still
+  // tracked in tk for cross-agent coordination; they just don't render
+  // in the chat progress block.
+  //
+  // Any step whose `parent_id` pointed at a regular ticket simply
+  // renders flat at top level -- the parent isn't on screen to nest
+  // under. (The earlier nesting pass that folded step children into a
+  // parent ticket was removed along with the ticket rendering itself.)
+  for (const turn of turns) {
+    turn.tasks = turn.tasks.filter((t) => t.is_step);
   }
 
   return turns;
@@ -251,6 +375,12 @@ function makeTaskInTurn(
   // tasks are still live (the spinner is honest there).
   const is_last_turn = turn_index === total_turns - 1;
   const continues_forward = status !== "done" && !is_last_turn;
+  // Turn-local started_at: only expose it as a sort key if the start
+  // actually happened by the end of THIS turn. A task whose record has a
+  // started_at in a FUTURE turn must still be treated as pending here, so
+  // its turn-local started_at is null and it sorts by created_at.
+  const started_at_in_turn =
+    record.started_at !== null && (turnEnd === "" || record.started_at < turnEnd) ? record.started_at : null;
   return {
     ticket_id: record.ticket_id,
     title: record.title,
@@ -261,13 +391,65 @@ function makeTaskInTurn(
     is_carryover,
     continues_forward,
     created_at: record.created_at,
+    started_at: started_at_in_turn,
     // Pending tasks have no active window -- they haven't started yet,
     // so they own none of the body events. (Without this guard a pending
     // task's window would default to created_at..end-of-turn and scoop
     // up the in-progress task's tool calls when the user expanded it.)
     active_window_start: status === "pending" ? null : (record.started_at ?? record.created_at),
     active_window_end: status === "done" ? record.closed_at : null,
+    is_step: record.step,
+    parent_id: record.parent_id,
+    children: [],
+    narration: null,
   };
+}
+
+/** Find the step record whose active window contains `ts`. Returns null
+ *  if no step contains the timestamp. Pending steps (no active window)
+ *  are skipped.
+ *
+ *  Regular tickets are intentionally NOT eligible containers. A regular
+ *  ticket can stay open across many turns and contain many step records
+ *  beneath it; once the latest step closes, any subsequent text-only
+ *  message is a wrap-up bounded by the latest step, not by the
+ *  outer ticket -- treating the ticket as a container would swallow the
+ *  wrap-up into a slot the user can't easily see. Step records are
+ *  shorter-lived and are the natural unit for "live status" captions.
+ *
+ *  Effective windows: CLAUDE.md's step lifecycle says only one step is
+ *  in_progress at a time. If the agent forgets to close a step before
+ *  starting the next, the stored window of the abandoned step stretches
+ *  indefinitely and would otherwise swallow every subsequent message.
+ *  We enforce the serial-step invariant in the renderer by capping each
+ *  step's effective end at the start of the next step in the turn (when
+ *  one exists), so an abandoned step's window ends as soon as a later
+ *  step begins -- abandoned steps don't pollute the rest of the turn.
+ *
+ *  Walks nested children so callers can pass either the flat
+ *  pre-nesting list or the post-nesting tree. */
+function findContainingTask(ts: string, tasks: TaskInTurn[]): TaskInTurn | null {
+  const steps: TaskInTurn[] = [];
+  const visit = (t: TaskInTurn): void => {
+    if (t.is_step && t.active_window_start !== null) steps.push(t);
+    for (const child of t.children) visit(child);
+  };
+  for (const t of tasks) visit(t);
+  steps.sort((a, b) => (a.active_window_start ?? "").localeCompare(b.active_window_start ?? ""));
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const start = step.active_window_start!;
+    if (ts < start) continue;
+    const originalEnd = step.active_window_end;
+    const nextStart = i + 1 < steps.length ? steps[i + 1].active_window_start : null;
+    let effectiveEnd: string | null = originalEnd;
+    if (nextStart !== null && (effectiveEnd === null || nextStart < effectiveEnd)) {
+      effectiveEnd = nextStart;
+    }
+    if (effectiveEnd !== null && ts > effectiveEnd) continue;
+    return step;
+  }
+  return null;
 }
 
 /** Pick out the body_events that fall inside a task's active window.
@@ -307,25 +489,50 @@ export function eventsInTaskWindow(task: TaskInTurn, body_events: TranscriptEven
 }
 
 /**
- * Pick the assistant_messages from a turn that should render at the top
- * level of the progress block rather than be hidden inside a task's
- * expandable panel. The rule is "text-only": non-empty `text` and no
- * `tool_calls`. This covers two distinct cases that a single
- * "last-non-empty-message" heuristic silently dropped:
+ * Pick the text-only assistant_messages from a turn that should render
+ * at the top level of the progress block (below the timeline), rather
+ * than being absorbed into a task's narration slot.
  *
- *   1. Multiple separate prose messages in one turn (e.g. a summary
- *      followed by a "waiting on your input" note). Both must remain
- *      visible, in chronological order.
- *   2. The agent leaves a task open at turn end and replies with a
- *      final text message. That message's timestamp lands inside the
- *      open task's window and would otherwise be buried in its
- *      dropdown.
+ * Rules:
+ *   - Message must be a text-only assistant_message (non-empty `text`
+ *     and no `tool_calls`). Tool-bearing messages always stay inside
+ *     their task's expanded panel.
+ *   - Messages whose timestamp falls outside every task's active
+ *     window render at top level (standalone prose between or around
+ *     tasks).
+ *   - Promote-on-close: the LAST text-only message of the turn, when
+ *     its containing task closed within the turn, ALSO renders at top
+ *     level. The close summary takes the task's caption slot, so the
+ *     agent's last in-flight prose would otherwise vanish; promoting
+ *     it preserves the wrap-up where the agent naturally wrote it.
+ *     We only fire this for the LAST text-only of the turn, not every
+ *     closed task, so mid-turn closures don't keep flushing earlier
+ *     intermediate thinking to top level -- only the genuine
+ *     end-of-turn wrap-up surfaces.
  *
- * Tool-bearing assistant_messages are intentionally excluded -- they
- * stay inside their task's expanded panel where the tool calls live.
+ *   In-window messages whose containing task is still active at turn
+ *   end (unclosed) stay only in the narration slot. There's no safety
+ *   valve for that case: it would fire transiently for every mid-task
+ *   message (the latest is always "last" until the next arrives) and
+ *   duplicate with the narration. Agents who want a prominent wrap-up
+ *   should close the task; the promote-on-close rule then surfaces it.
  */
-export function selectFinalMessages(body_events: TranscriptEvent[]): TranscriptEvent[] {
-  return body_events.filter(
+export function selectFinalMessages(body_events: TranscriptEvent[], tasks: TaskInTurn[]): TranscriptEvent[] {
+  const textOnly = body_events.filter(
     (ev) => ev.type === "assistant_message" && !!ev.text && !(ev.tool_calls && ev.tool_calls.length > 0),
   );
+  if (textOnly.length === 0) return [];
+  const result: TranscriptEvent[] = [];
+  for (const ev of textOnly) {
+    if (findContainingTask(ev.timestamp, tasks) === null) {
+      result.push(ev);
+    }
+  }
+  const lastMsg = textOnly[textOnly.length - 1];
+  const lastContaining = findContainingTask(lastMsg.timestamp, tasks);
+  if (lastContaining !== null && lastContaining.status === "done" && !result.includes(lastMsg)) {
+    result.push(lastMsg);
+  }
+  result.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return result;
 }

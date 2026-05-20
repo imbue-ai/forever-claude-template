@@ -187,3 +187,57 @@ def test_no_gitignored_files_are_tracked() -> None:
         "The following tracked files match .gitignore patterns (remove with `git rm --cached`):\n"
         + "\n".join(f"  - {f}" for f in offending)
     )
+
+
+def test_gitignore_patterns_use_double_star() -> None:
+    """Ensure every active .gitignore pattern starts with **/ or contains a path separator.
+
+    .dockerignore is a symlink to .gitignore so Docker reads the same file
+    git does. Bare patterns like `runtime/` are gitignore-recursive (match
+    at any depth) but match only at the build context root under
+    dockerignore syntax, so the two formats disagree on what they exclude.
+    Requiring **/ (or an interior path separator like `apps/.../static/`)
+    forces both formats to interpret each pattern the same way.
+
+    See also test_dockerignore_is_symlink_to_gitignore below for the other
+    half of this contract.
+    """
+    gitignore = (_REPO_ROOT / ".gitignore").read_text()
+    violations: list[str] = []
+    for lineno, line in enumerate(gitignore.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        pattern = stripped.lstrip("!")
+        if pattern.startswith("**/"):
+            continue
+        # Contains a / before the last char (e.g. */*/_tasks/)
+        core = pattern.rstrip("/")
+        if "/" in core:
+            continue
+        violations.append(f"  line {lineno}: {stripped}")
+    assert len(violations) == 0, (
+        "The following .gitignore patterns need a **/ prefix.\n"
+        "This keeps .gitignore directly compatible with .dockerignore "
+        "(which is a symlink to .gitignore):\n" + "\n".join(violations)
+    )
+
+
+def test_dockerignore_is_symlink_to_gitignore() -> None:
+    """Ensure .dockerignore is a symlink resolving to .gitignore.
+
+    Pair-test for test_gitignore_patterns_use_double_star: keeping
+    .dockerignore as a symlink means there is exactly one ignore file to
+    maintain. Docker reads the symlink target, so as long as the patterns
+    are valid in both formats (enforced by the **/-prefix rule), the
+    Docker build context excludes the same files git does.
+    """
+    dockerignore = _REPO_ROOT / ".dockerignore"
+    assert dockerignore.is_symlink(), (
+        f"{dockerignore} must be a symlink to .gitignore "
+        "(see test_gitignore_patterns_use_double_star)"
+    )
+    target = dockerignore.readlink()
+    assert str(target) == ".gitignore", (
+        f"{dockerignore} symlink target is {target!r}, expected '.gitignore'"
+    )

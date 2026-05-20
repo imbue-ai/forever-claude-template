@@ -1,6 +1,6 @@
 """Request and response event types for the minds request inbox.
 
-Agents write request events (sharing, permissions) to
+Agents write request events (permissions, latchkey-permission) to
 ``$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl``. The desktop
 client watches these and presents them in an inbox panel. Response
 events (grant/deny) are written by the desktop client to
@@ -39,8 +39,8 @@ _RESPONSE_EVENTS_FILENAME: Final[str] = "events.jsonl"
 class RequestType(UpperCaseStrEnum):
     """Type of request an agent can make."""
 
-    SHARING = auto()
     PERMISSIONS = auto()
+    LATCHKEY_PERMISSION = auto()
 
 
 class RequestStatus(UpperCaseStrEnum):
@@ -58,35 +58,15 @@ def _now_iso() -> IsoTimestamp:
     return IsoTimestamp(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
 
 
-class SharingStatusSnapshot(FrozenModel):
-    """Snapshot of the current sharing status, included in a sharing request event."""
-
-    enabled: bool = Field(description="Whether sharing is currently enabled")
-    url: str | None = Field(default=None, description="Current shared URL if enabled")
-    auth_rules: list[dict[str, object]] = Field(
-        default_factory=list, description="Current Cloudflare Access auth policy rules"
-    )
-
-
 class RequestEvent(EventEnvelope):
     """Base class for all request events written by agents."""
 
     agent_id: str = Field(description="Agent ID that made the request")
-    request_type: str = Field(description="Type of request (e.g. 'SHARING', 'PERMISSIONS')")
+    request_type: str = Field(description="Type of request (e.g. 'PERMISSIONS', 'LATCHKEY_PERMISSION')")
     is_user_requested: bool = Field(
         default=False,
         description="If true, desktop client auto-navigates to the request page",
     )
-
-
-class SharingRequestEvent(RequestEvent):
-    """A request to modify sharing settings for a service."""
-
-    service_name: str = Field(description="Name of the service to share")
-    current_status: SharingStatusSnapshot | None = Field(
-        default=None, description="Current sharing state for pre-populating the form"
-    )
-    suggested_emails: list[str] = Field(default_factory=list, description="Suggested email addresses to share with")
 
 
 class PermissionsRequestEvent(RequestEvent):
@@ -96,35 +76,65 @@ class PermissionsRequestEvent(RequestEvent):
     description: str = Field(default="", description="Human-readable description of the request")
 
 
+class LatchkeyPermissionRequestEvent(RequestEvent):
+    """A request for the user to authorize the agent to use a latchkey-managed scope.
+
+    The agent declares which Detent scope schema it wants (e.g.
+    ``slack-api``), which permission schemas under that scope it would
+    like, and why. The user picks the final permission set in the
+    desktop dialog (which may broaden or narrow the agent's request);
+    the desktop client launches ``latchkey auth browser`` if no
+    credentials exist for the service yet.
+    """
+
+    scope: str = Field(
+        description="Detent scope schema the agent wants permissions under (e.g. 'slack-api').",
+    )
+    permissions: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Permission schemas the agent requested under the scope; the user may grant a "
+            "different subset in the dialog."
+        ),
+    )
+    rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+
+
 class RequestResponseEvent(EventEnvelope):
     """A response to a request, written by the desktop client."""
 
     request_event_id: str = Field(description="event_id of the original request")
     status: str = Field(description="Resolution status: 'GRANTED' or 'DENIED'")
     agent_id: str = Field(description="Agent ID the request was for")
-    service_name: str | None = Field(default=None, description="Service name (for sharing requests)")
+    scope: str | None = Field(
+        default=None,
+        description=(
+            "Detent scope schema (for request types that scope to one, e.g. latchkey-permission). "
+            "Used as part of the dedup key."
+        ),
+    )
     request_type: str = Field(description="Type of request that was responded to")
 
 
-def create_sharing_request_event(
+def create_latchkey_permission_request_event(
     agent_id: str,
-    service_name: str,
+    scope: str,
+    rationale: str,
+    permissions: tuple[str, ...] = (),
     is_user_requested: bool = False,
-    current_status: SharingStatusSnapshot | None = None,
-    suggested_emails: list[str] | None = None,
-) -> SharingRequestEvent:
-    """Create a new sharing request event with auto-generated metadata."""
-    return SharingRequestEvent(
+) -> "LatchkeyPermissionRequestEvent":
+    """Create a new latchkey-permission request event with auto-generated metadata."""
+    return LatchkeyPermissionRequestEvent(
         timestamp=_now_iso(),
-        type=EventType("sharing_request"),
+        type=EventType("latchkey_permission_request"),
         event_id=_generate_event_id(),
         source=EventSource(REQUESTS_EVENT_SOURCE_NAME),
         agent_id=agent_id,
-        request_type=str(RequestType.SHARING),
+        request_type=str(RequestType.LATCHKEY_PERMISSION),
         is_user_requested=is_user_requested,
-        service_name=service_name,
-        current_status=current_status,
-        suggested_emails=suggested_emails or [],
+        scope=scope,
+        permissions=permissions,
+        rationale=rationale,
     )
 
 
@@ -133,7 +143,7 @@ def create_request_response_event(
     status: RequestStatus,
     agent_id: str,
     request_type: str,
-    service_name: str | None = None,
+    scope: str | None = None,
 ) -> RequestResponseEvent:
     """Create a new request response event."""
     return RequestResponseEvent(
@@ -144,21 +154,18 @@ def create_request_response_event(
         request_event_id=request_event_id,
         status=str(status),
         agent_id=agent_id,
-        service_name=service_name,
+        scope=scope,
         request_type=request_type,
     )
 
 
 def _dedup_key(event: RequestEvent | RequestResponseEvent) -> tuple[str, str | None, str]:
     """Compute the deduplication key for a request or response event."""
-    service_name: str | None = None
-    if isinstance(event, SharingRequestEvent):
-        service_name = event.service_name
-    elif isinstance(event, RequestResponseEvent):
-        service_name = event.service_name
+    if isinstance(event, (LatchkeyPermissionRequestEvent, RequestResponseEvent)):
+        scope = event.scope
     else:
-        pass
-    return (event.agent_id, service_name, event.request_type)
+        scope = None
+    return (event.agent_id, scope, event.request_type)
 
 
 class RequestInbox(FrozenModel):
@@ -224,15 +231,26 @@ def parse_request_event(line: str) -> RequestEvent | None:
         if not isinstance(data, dict):
             return None
         request_type = data.get("request_type", "")
-        if request_type == str(RequestType.SHARING):
-            return SharingRequestEvent.model_validate(data)
-        elif request_type == str(RequestType.PERMISSIONS):
+        if request_type == str(RequestType.PERMISSIONS):
             return PermissionsRequestEvent.model_validate(data)
+        elif request_type == str(RequestType.LATCHKEY_PERMISSION):
+            return LatchkeyPermissionRequestEvent.model_validate(data)
         else:
             return RequestEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         logger.warning("Failed to parse request event: {} (line: {})", e, line[:200])
         return None
+
+
+# Field names that older versions of the schema wrote on response
+# events but the current schema no longer accepts. These are stripped
+# from raw JSON before validation so a historical events.jsonl from a
+# previous minds version still loads cleanly. ``scope`` (the modern
+# replacement for ``service_name`` on response events) is informational
+# only -- pending-request filtering uses ``request_event_id`` -- so
+# legacy entries that lose their service identity on the way in are
+# still functionally correct.
+_LEGACY_RESPONSE_EVENT_FIELDS: tuple[str, ...] = ("service_name",)
 
 
 def parse_response_event(line: str) -> RequestResponseEvent | None:
@@ -241,6 +259,8 @@ def parse_response_event(line: str) -> RequestResponseEvent | None:
         data = json.loads(line)
         if not isinstance(data, dict):
             return None
+        for legacy_field in _LEGACY_RESPONSE_EVENT_FIELDS:
+            data.pop(legacy_field, None)
         return RequestResponseEvent.model_validate(data)
     except (json.JSONDecodeError, ValueError, TypeError) as e:
         logger.warning("Failed to parse response event: {} (line: {})", e, line[:200])

@@ -1,5 +1,20 @@
 # Minds Chat — Progress View
 
+> **Update (post-implementation):** the "use tk tickets directly as per-turn
+> progress markers" model proved fragile across multiple agents sharing a
+> TICKETS_DIR — sibling agents' turn-markers leaked into each other's
+> progress views. The follow-up plan
+> [tk step / ticket model](../tk-step-ticket-model/plan-tk-step-ticket-model.md)
+> splits the concept: regular tk tickets remain cross-agent issue records,
+> while a new `step: true` frontmatter field marks turn-bound progress
+> records. The chat progress view now shows both — a step record renders
+> as a node on the timeline as before; a regular ticket the agent has
+> picked up renders as a top-level node with its child steps nested
+> underneath. References to "tickets" below as the progress-marker concept
+> should now be read as "step records" unless they're explicitly about
+> cross-agent work tracking.
+
+
 ## Refined prompt
 
 > Fetch this design file, read its readme, and implement the relevant aspects of the design. https://api.anthropic.com/v1/design/h/5tMCxah6DGHF9wqFoEpoGg?open_file=Minds+Chat+-+Progress+View.html

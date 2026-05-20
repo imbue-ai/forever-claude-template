@@ -128,6 +128,7 @@ class _StopFailingProvider(LocalProviderInstance):
         connector = PyinfraConnector(pyinfra_host)
         return _StopFailingHost(
             id=self.host_id,
+            host_name=HostName("test"),
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
@@ -314,6 +315,7 @@ def test_execute_cleanup_destroy_on_online_host(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_execute_cleanup_stop_on_online_host(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,

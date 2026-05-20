@@ -2,12 +2,15 @@
 
 # Default create command settings -- apply to all mngr create from this repo
 [commands.create]
+type = "claude"
 connect = false
 ensure_clean = false
-pass_env = ["MINDS_WORKSPACE_NAME", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
+pass_env = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
 host_env = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
+    # might as well use the latest model if we actually do want to try fast mode, sure
+    "CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE=1",
     # Lock Claude Code to the version pinned in agent_types.claude.version and the
     # Dockerfile's CLAUDE_CODE_VERSION; disable the auto-updater + background
     # feedback pings so the installed binary cannot silently drift. Tracks the
@@ -21,7 +24,17 @@ host_env = [
     "TICKETS_DIR=/code/runtime/tickets",
 ]
 worktree_base_folder = "/worktree/"
-disable_plugin = ["recursive", "ttyd"]
+# claude_subagent_proxy is upstream mngr's experimental Claude-Code-Task ->
+# mngr-managed-subagent proxy. It is not used here. Without this disable, when
+# the proxy plugin is present in the system-tool mngr install it gets the
+# on_after_provisioning hook fired, which installs a PreToolUse:Agent hook
+# (spawn.py) into each new agent's .claude/settings.local.json -- and that
+# hook then wedges parent agents in a Haiku retry loop whenever it hits a
+# permanent error (e.g. the proxy package isn't in /code/.venv, or
+# `mngr-proxy-child` isn't a registered agent type in the resolved mngr).
+# The disable is non-strict (commands.create.disable_plugin path), so this is
+# safe even on installs that don't include the proxy plugin at all.
+disable_plugin = ["recursive", "ttyd", "claude_subagent_proxy"]
 yes = true
 
 # for the list command -- ensures that we don't see other agents when we're listing, even if we happen to list remote agents
@@ -34,23 +47,40 @@ include = ["""has(labels.workspace)"""]
 [agent_types.claude]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
-cli_args = """--dangerously-skip-permissions"""
-settings_overrides = {model = "opus[1m]", fastMode = true}
+cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode,TodoWrite,TaskCreate,TaskList,TaskUpdate"""
+settings_overrides = {model = "opus[1m]", fastMode = false}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
-version = "2.1.116"
+version = "2.1.141"
+# Share the services agent's CLAUDE_CONFIG_DIR across every other agent so
+# auth, plugins, marketplaces, and settings are configured exactly once
+# (inside the services agent) and inherited via the host env file the
+# bootstrap writes. Disabled below on the "main" type, which still owns
+# the per-agent config dir that everyone else points at.
+use_env_config_dir = true
 
-# The "main" agent type -- inherits everything from claude, then disables every
-# path that pulls user-local content into the workspace. The repo at the
-# requested git ref is the canonical workspace definition; nothing from the
-# invoking user's ~/.claude/ or ~/.mngr/ should leak in.
+# The "main" (services) agent type -- inherits everything from claude, then
+# disables every path that pulls user-local content into the workspace. The
+# repo at the requested git ref is the canonical workspace definition;
+# nothing from the invoking user's ~/.claude/ or ~/.mngr/ should leak in.
 [agent_types.main]
 parent_type = "claude"
 sync_home_settings = false
 sync_claude_json = false
 sync_claude_credentials = false
 sync_credentials_on_login = false
+# Keep this agent's per-agent CLAUDE_CONFIG_DIR (don't inherit the parent's
+# new shared-mode default). Every other agent in the workspace points at
+# *this* directory via the host env var the bootstrap writes.
+use_env_config_dir = false
+# Window 0 of the services agent must never actually run claude -- the
+# bootstrap+services live in other tmux windows, and the real chat agents
+# are spun up separately by the bootstrap. The trailing "&& claude" is
+# unreachable; it exists only so ClaudeAgent.assemble_command can still
+# splice --resume / --session-id onto a claude-shaped invocation without
+# producing a syntactically bogus command.
+command = "sleep infinity && claude"
 
 # the "worker" agent type -- the default for delegated tasks
 [agent_types.worker]
@@ -73,11 +103,10 @@ is_enabled = false
 # the template that is shared across all agent types
 [create_templates.main]
 type = "main"
-# `/welcome` was previously injected by the minds desktop client at the moment
-# it issued `mngr create`. With minds switching to mngr_imbue_cloud the welcome
-# nudge belongs here so any caller (mngr CLI, minds, or anyone running `mngr
-# create --template main`) gets the same first-message behaviour.
-message = "/welcome"
+# `/welcome` is *not* set here anymore: the services agent's window 0 sleeps
+# forever (see `[agent_types.main] command`) and never reaches claude. The
+# bootstrap creates a separate chat agent on first boot and passes
+# `--message /welcome` to it instead.
 env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=0"]
 extra_window = [
     "bootstrap='uv run bootstrap'",
@@ -138,8 +167,8 @@ extra_provision_command = [
     "export PATH=$HOME/.local/bin:$PATH && uv tool install -e vendor/mngr/libs/mngr && uv tool install -e apps/system_interface --with-editable vendor/mngr/libs/mngr_claude --with-editable vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
     "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
     # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
-    # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
-    # because the uv installer prepends it.
+    # symlinks at /usr/local/bin/tk and /usr/local/bin/ticket).
+    # $HOME/.local/bin is already on PATH because the uv installer prepends it.
     "mkdir -p $HOME/.local/bin && ln -sf /code/vendor/tk/ticket $HOME/.local/bin/tk",
 ]
 
@@ -157,6 +186,24 @@ target_path = "/code/"
 # a different region can still override per-invocation with
 # ``-b --vps-region=<other>``.
 build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region=sjc", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown.
+# This also prevents shutdown when all agent tmux sessions exit.
+idle_mode = "disabled"
+# Same forwarding as the docker template; see comment there.
+pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+
+# template for OVH VPS provider (the imbue-cloud pool-bake's default)
+[create_templates.ovh]
+provider = "ovh"
+target_path = "/code/"
+# No plan / datacenter baked in: the pool-bake CLI
+# (``mngr imbue_cloud admin pool create``) appends
+# ``-b --vps-datacenter=<region>`` per invocation so a single bake
+# session can spread hosts across regions. Plan defaults come from
+# ``OvhProviderConfig.default_plan`` (``vps-2025-model1`` -- 1 vCPU /
+# 8 GB RAM / 80 GB SSD at ~$7.99/mo as of 2025-05). Operators who want
+# a different plan override per-invocation with ``-b --vps-plan=<code>``.
+build_arg = ["--file=Dockerfile", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
@@ -192,9 +239,12 @@ extra_window = [
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"
 ]
 
-# Worktree template: agent in a new git worktree, no services by default -- creates its own as needed
+# Worktree template: agent in a new git worktree, no services by default --
+# creates its own as needed. Uses the plain `claude` type (not `main`), so
+# worktree agents run a real claude binary and share the services agent's
+# CLAUDE_CONFIG_DIR via the inherited host env var.
 [create_templates.worktree]
-type = "main"
+type = "claude"
 
 # Worker template: general purpose sub agent for doing tasks reliably (and ensuring that they are verified)
 [create_templates.worker]

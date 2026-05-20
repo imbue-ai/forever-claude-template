@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -7,6 +7,10 @@ const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
 todesktop.init();
+
+// Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
+// and production installs are fully isolated (cookies, sessions, caches, etc.).
+app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
@@ -20,6 +24,7 @@ const mruWindows = []; // most recently focused first
 let appMenuInstalled = false;
 
 let backendBaseUrl = null;
+let mngrForwardBaseUrl = null;
 let workspaceList = []; // [{id, name, account}]
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
@@ -70,8 +75,15 @@ function toAbsoluteUrl(url) {
 // the agent's subdomain and redirects into the workspace's dockview UI.
 // Returns null if the backend hasn't come up yet.
 function workspaceUrlForAgent(agentId) {
-  if (!agentId || !backendBaseUrl) return null;
-  return `${backendBaseUrl}/goto/${encodeURIComponent(agentId)}/`;
+  // `/goto/` lives on the mngr_forward plugin (which owns subdomain
+  // forwarding), not the minds backend. Use mngrForwardBaseUrl when it has
+  // been received; fall back to backendBaseUrl during the startup window
+  // before the mngr_forward_started event arrives (rare -- the user can't
+  // open a workspace in that window).
+  if (!agentId) return null;
+  const origin = mngrForwardBaseUrl || backendBaseUrl;
+  if (!origin) return null;
+  return `${origin}/goto/${encodeURIComponent(agentId)}/`;
 }
 
 function findBundleForWorkspace(agentId) {
@@ -322,6 +334,7 @@ function createBundle() {
   // title bar otherwise has no way to learn its own window's title.
   chromeView.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
+    sendCurrentWorkspaceToBundleViews(bundle);
     primeViewWithCachedChromeState(chromeView.webContents);
   });
 
@@ -351,7 +364,7 @@ function wireContentViewEvents(bundle, contentView) {
     const newAgentId = parseWorkspaceId(url);
     if (bundle.currentWorkspaceId !== newAgentId) {
       bundle.currentWorkspaceId = newAgentId;
-      sendCurrentWorkspaceToBundleSidebar(bundle);
+      sendCurrentWorkspaceToBundleViews(bundle);
     }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -413,11 +426,9 @@ function registerShortcutsFor(bundle, wc) {
     // When the app menu is installed, it owns cmd+W / cmd+Q / cmd+N; handling
     // them here too would double-fire (e.g. two new windows per cmd+N).
     if (appMenuInstalled) return;
-    if (modifier && !input.shift && !input.alt && key === 'w') {
-      event.preventDefault();
-      if (!bundle.window.isDestroyed()) bundle.window.close();
-      return;
-    }
+    // Ctrl+W on non-macOS: do NOT close the window. The keystroke should
+    // reach the web content (terminal, editor) where it means "delete word"
+    // or "close tab" depending on the app.
     if (modifier && !input.shift && !input.alt && key === 'q') {
       event.preventDefault();
       initiateFullQuit();
@@ -453,7 +464,7 @@ function openSidebar(bundle) {
     bundle.window.contentView.addChildView(sidebarView);
     registerShortcutsFor(bundle, sidebarView.webContents);
     sidebarView.webContents.on('did-finish-load', () => {
-      sendCurrentWorkspaceToBundleSidebar(bundle);
+      sendCurrentWorkspaceToBundleViews(bundle);
       primeViewWithCachedChromeState(sidebarView.webContents);
     });
     if (backendBaseUrl) {
@@ -552,10 +563,18 @@ function toggleRequestsPanel(bundle) {
   else openRequestsPanel(bundle);
 }
 
-function sendCurrentWorkspaceToBundleSidebar(bundle) {
-  if (!bundle || !bundle.sidebarView) return;
-  if (bundle.sidebarView.webContents.isDestroyed()) return;
-  bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+function sendCurrentWorkspaceToBundleViews(bundle) {
+  if (!bundle) return;
+  // Both the titlebar (chrome view) and the sidebar key UI off the current
+  // workspace -- the titlebar uses it to scope the per-agent accent swatch
+  // and the auto-redirect to the recovery page (which only fires when a
+  // system_interface_status event matches the currently-displayed agent).
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
+  if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
+    bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
 }
 
 // -- Window opening / focusing --
@@ -575,7 +594,7 @@ function loadUrlIntoBundleContentView(bundle, url) {
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
-    sendCurrentWorkspaceToBundleSidebar(bundle);
+    sendCurrentWorkspaceToBundleViews(bundle);
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);
@@ -734,7 +753,16 @@ function saveSessionState() {
       const url = b.preErrorUrl || b.currentContentUrl;
       const relative = toRelativeBackendUrl(url);
       if (!relative) continue;
-      state.push({ url: relative });
+      const bounds = b.window.getBounds();
+      const display = screen.getDisplayMatching(bounds);
+      state.push({
+        url: relative,
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        displayId: display ? display.id : null,
+      });
     }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -758,6 +786,36 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   return results;
 }
 
+function restoreWindowBounds(bundle, entry) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (typeof entry.x !== 'number' || typeof entry.y !== 'number') return;
+  const width = typeof entry.width === 'number' ? entry.width : 1200;
+  const height = typeof entry.height === 'number' ? entry.height : 800;
+  const savedBounds = { x: entry.x, y: entry.y, width, height };
+
+  // Check if the saved display still exists
+  const displays = screen.getAllDisplays();
+  let targetDisplay = null;
+  if (entry.displayId) {
+    targetDisplay = displays.find((d) => d.id === entry.displayId);
+  }
+  if (!targetDisplay) {
+    // Saved monitor gone -- check if bounds are visible on any display
+    targetDisplay = screen.getDisplayMatching(savedBounds);
+    const db = targetDisplay.bounds;
+    const isVisible = savedBounds.x < db.x + db.width && savedBounds.x + savedBounds.width > db.x &&
+                      savedBounds.y < db.y + db.height && savedBounds.y + savedBounds.height > db.y;
+    if (!isVisible) {
+      // Place on primary display at a reasonable offset
+      const primary = screen.getPrimaryDisplay();
+      savedBounds.x = primary.bounds.x + 50;
+      savedBounds.y = primary.bounds.y + 50;
+    }
+  }
+
+  bundle.window.setBounds(savedBounds);
+}
+
 // ---------- Centralized chrome SSE ----------
 // Every chromeView and sidebarView used to open its own EventSource to
 // /_chrome/events. Chromium caps same-host HTTP/1.1 connections at 6, so
@@ -769,22 +827,67 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
 
 function handleChromeSSEEvent(evt) {
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
+    const oldIds = new Set(workspaceList.map((w) => w.id));
     latestChromeState.workspaces = evt.workspaces;
     workspaceList = evt.workspaces.map((w) => ({
       id: String(w.id),
       name: w.name ? String(w.name) : '',
       account: w.account ? String(w.account) : '',
     }));
+    const newIds = new Set(workspaceList.map((w) => w.id));
+
+    // Handle windows for destroyed workspaces: close them if other
+    // windows exist, otherwise navigate to home so the user isn't left
+    // with nothing.
+    for (const oldId of oldIds) {
+      if (!newIds.has(oldId)) {
+        const affected = [];
+        for (const b of bundles) {
+          if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
+            affected.push(b);
+          }
+        }
+        const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+        for (const b of affected) {
+          if (liveBundleCount - affected.length >= 1) {
+            b.window.close();
+          } else {
+            b.currentWorkspaceId = null;
+            if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+              b.contentView.webContents.loadURL(backendBaseUrl + '/');
+            }
+            updateOsTitle(b);
+          }
+        }
+      }
+    }
+
     updateAllOsTitles();
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'request_count') {
-    latestChromeState.requestCount = evt.count || 0;
-    // Requests panel HTML is static at load time. Refresh any visible panels
-    // so their cards reflect the new pending list. Debounced per-bundle so
-    // a burst of count changes coalesces into one reload per panel.
+    const prevCount = latestChromeState.requestCount;
+    const newCount = evt.count || 0;
+    // Backend defaults the setting to true, but treat a missing field the
+    // same way so older backends do not regress to no-auto-open.
+    const autoOpen = evt.auto_open !== false;
+    latestChromeState.requestCount = newCount;
+    // Auto-open only when the count actually went UP. Going down (e.g.
+    // user just approved/denied) should never reopen a panel the user
+    // closed, and equal counts mean nothing inbox-relevant changed.
+    const shouldAutoOpen = autoOpen && newCount > prevCount;
+    // Requests panel HTML is static at load time. Refresh visible panels
+    // so their cards reflect the new pending list, OR open hidden ones
+    // when shouldAutoOpen is set. ``openRequestsPanel`` reloads the panel
+    // itself for the visible-bundle case, so we never need to schedule a
+    // reload on top of an open call. Debounced per-bundle so a burst of
+    // count changes coalesces into one reload per panel.
     for (const b of bundles) {
-      scheduleRequestsPanelReload(b);
+      if (shouldAutoOpen && !b.requestsPanelVisible) {
+        openRequestsPanel(b);
+      } else {
+        scheduleRequestsPanelReload(b);
+      }
     }
   }
   broadcastChromeEvent(evt);
@@ -884,6 +987,70 @@ async function runChromeSSELoop() {
   }
 }
 
+// POST the system-interface restart API and resolve once the server has
+// acknowledged that the tmux kill dispatch finished (or the request
+// errors / times out). Callers navigate to the workspace URL afterward;
+// because the endpoint returns 200 only after the system_interface has
+// been killed, the plugin will then serve its 503 loader until the
+// workspace comes back -- giving the user a visible "System interface
+// starting" page instead of a silent reload onto the still-live
+// pre-restart UI.
+//
+// Always resolves (never rejects) so callers can chain navigation
+// regardless of network outcome.
+const RESTART_REQUEST_TIMEOUT_MS = 10000;
+function postRestartSystemInterface(agentId) {
+  return new Promise((resolve) => {
+    if (!agentId || !backendBaseUrl) {
+      resolve();
+      return;
+    }
+    let req;
+    try {
+      req = net.request({
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/restart-system-interface`,
+        method: 'POST',
+        useSessionCookies: true,
+      });
+    } catch (e) {
+      console.warn('[restart] failed to construct restart request:', e);
+      resolve();
+      return;
+    }
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      console.warn(`[restart] restart API timed out for ${agentId} after ${RESTART_REQUEST_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch (_) { /* ignore */ }
+      settle();
+    }, RESTART_REQUEST_TIMEOUT_MS);
+    req.on('response', (response) => {
+      response.on('data', () => {});
+      response.on('end', () => {
+        clearTimeout(timer);
+        settle();
+      });
+      response.on('error', () => {
+        clearTimeout(timer);
+        settle();
+      });
+      if (response.statusCode >= 400) {
+        console.warn(`[restart] restart API returned ${response.statusCode} for ${agentId}`);
+      }
+    });
+    req.on('error', (err) => {
+      console.warn(`[restart] restart API request failed for ${agentId}:`, err);
+      clearTimeout(timer);
+      settle();
+    });
+    req.end();
+  });
+}
+
 function sleepInterruptible(ms) {
   const tick = chromeSseReconnectTick;
   return new Promise((resolve) => {
@@ -953,7 +1120,7 @@ function fetchInitialChromeState(timeoutMs = 4000) {
             const parsed = JSON.parse(payload);
             if (parsed.type === 'workspaces' && Array.isArray(parsed.workspaces)) {
               clearTimeout(timer);
-              finish({ authenticated: true, workspaces: parsed.workspaces });
+              finish({ authenticated: true, workspaces: parsed.workspaces, hasAccounts: !!parsed.has_accounts });
               return;
             }
             if (parsed.type === 'auth_required') {
@@ -1160,6 +1327,7 @@ async function startBackendWithRetry() {
       (status) => broadcastStatusToLoadingWindows(status),
       (event) => handleNotification(event),
       (event) => handleAuthEvent(event),
+      (event) => handleMngrForwardStarted(event),
     );
 
     // Use `localhost` (not `127.0.0.1`) so the auth cookie, which is issued with
@@ -1183,6 +1351,47 @@ async function startBackendWithRetry() {
 
     if (isFirstStart && initialBundle && !initialBundle.window.isDestroyed()) {
       const savedState = loadSessionState();
+
+      // Consume the one-time login code via net.request BEFORE checking
+      // chrome state. This hits /authenticate which sets the minds_session
+      // cookie in the default session (used by net.request, chromeView, and
+      // SSE). We follow the redirect so Electron processes the Set-Cookie
+      // header, then copy the cookie to the content partition.
+      await new Promise((resolve) => {
+        const authenticateUrl = loginUrl.replace('/login?', '/authenticate?');
+        console.log('[startup] Consuming one-time code via', authenticateUrl);
+        const req = net.request({ url: authenticateUrl, method: 'GET', useSessionCookies: true });
+        req.on('response', async (resp) => {
+          console.log('[startup] /authenticate response status:', resp.statusCode);
+          resp.on('data', () => {});
+          resp.on('end', async () => {
+            try {
+              const defaultCookies = await session.defaultSession.cookies.get({ name: 'minds_session' });
+              console.log('[startup] Default session cookies after /authenticate:', defaultCookies.length);
+              const contentSession = session.fromPartition(CONTENT_PARTITION);
+              for (const c of defaultCookies) {
+                const domain = (c.domain || 'localhost').replace(/^\./, '');
+                await contentSession.cookies.set({
+                  url: `http://${domain}`,
+                  name: c.name, value: c.value,
+                  httpOnly: c.httpOnly, path: c.path || '/',
+                  sameSite: c.sameSite || 'lax',
+                });
+              }
+              console.log('[startup] Cookie synced to content partition');
+            } catch (err) {
+              console.warn('[startup] Failed to sync cookie to content partition:', err);
+            }
+            resolve();
+          });
+        });
+        req.on('error', (err) => {
+          console.warn('[startup] /authenticate request failed:', err);
+          resolve();
+        });
+        req.end();
+      });
+
       const chromeState = await fetchInitialChromeState();
       const authenticated = chromeState && chromeState.authenticated;
 
@@ -1208,23 +1417,30 @@ async function startBackendWithRetry() {
       }
 
       if (!authenticated) {
-        // No valid session cookie -- route through loginUrl to consume the
-        // one-time code. Keep saved state on disk so the next quit-and-relaunch
-        // after auth can restore. Don't open any additional restored windows
-        // because they'd all 403.
+        // The one-time code was already consumed above but fetchInitialChromeState
+        // still returned unauthenticated (should not happen, but handle gracefully).
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
-          initialBundle.contentView.webContents.loadURL(loginUrl);
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
+        }
+      } else if (!chromeState.hasAccounts && restorable.length === 0) {
+        // Locally authenticated but user has never signed in with SuperTokens
+        // and has no saved windows -- show the welcome/onboarding page.
+        if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
+          initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/welcome');
         }
       } else if (restorable.length === 0) {
-        // Authenticated, but nothing to restore -- land on the home page.
+        // Has accounts but nothing to restore -- land on the create page.
         if (initialBundle.contentView && !initialBundle.contentView.webContents.isDestroyed()) {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }
       } else {
+        // Restore saved windows with their positions and sizes
         const [first, ...rest] = restorable;
+        restoreWindowBounds(initialBundle, first);
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
         for (const entry of rest) {
-          openNewWindow(toAbsoluteUrl(entry.url));
+          const bundle = openNewWindow(toAbsoluteUrl(entry.url));
+          restoreWindowBounds(bundle, entry);
         }
       }
     } else {
@@ -1277,6 +1493,44 @@ function handleNotification(event) {
   });
   notification.show();
 }
+
+// Pre-set the plugin's session cookie on `localhost:<mngr_forward_port>` so
+// the user is already authenticated to the `mngr forward` plugin before any
+// agent-subdomain navigation. The plugin's server treats a cookie value
+// matching the freshly-minted preauth token as authenticated -- see
+// `libs/mngr_forward/imbue/mngr_forward/cookie.py::verify_session_cookie`.
+//
+// Mirrors the cookie into the workspace content partition so any
+// chrome/iframe / WebContentsView using that partition is authenticated too.
+async function handleMngrForwardStarted(event) {
+  const port = event.mngr_forward_port;
+  const preauth = event.preauth_cookie;
+  if (!port || !preauth) {
+    console.warn('[startup] mngr_forward_started missing port or preauth_cookie:', event);
+    return;
+  }
+  const url = `http://localhost:${port}`;
+  // Cache the plugin origin so workspaceUrlForAgent() can build /goto/ URLs
+  // against the correct port (the plugin, not minds).
+  mngrForwardBaseUrl = url;
+  const baseSpec = {
+    url,
+    name: 'mngr_forward_session',
+    value: preauth,
+    httpOnly: true,
+    sameSite: 'lax',
+    path: '/',
+  };
+  try {
+    await session.defaultSession.cookies.set(baseSpec);
+    const contentSession = session.fromPartition(CONTENT_PARTITION);
+    await contentSession.cookies.set(baseSpec);
+    console.log('[startup] mngr_forward_session cookie pre-set on', url);
+  } catch (err) {
+    console.warn('[startup] Failed to set mngr_forward_session cookie:', err);
+  }
+}
+
 
 function handleAuthEvent(event) {
   if (event.event === 'auth_success') {
@@ -1392,17 +1646,39 @@ ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !agentId) return;
-  // Don't offer "Open in new window" if the sender's window is already on this workspace
-  if (bundle.currentWorkspaceId === agentId) return;
-  const menu = Menu.buildFromTemplate([
-    {
+  const isCurrent = bundle.currentWorkspaceId === agentId;
+  const workspaceUrl = workspaceUrlForAgent(agentId);
+  const template = [];
+  // Don't offer "Open in new window" if the sender's window is already on this workspace.
+  if (!isCurrent) {
+    template.push({
       label: 'Open in new window',
       click: () => {
-        openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
+        openOrFocusWorkspace(agentId, workspaceUrl);
         closeSidebar(bundle);
       },
+    });
+    template.push({ type: 'separator' });
+  }
+  template.push({
+    label: 'Restart system interface',
+    click: async () => {
+      // Close the sidebar first so the user gets immediate visual feedback
+      // while we wait for the restart dispatch to ack. The endpoint returns
+      // 200 once `mngr exec` finishes killing the system_interface tmux window;
+      // navigating before that ack would race against a still-live backend
+      // and leave the user looking at the unchanged iframe.
+      closeSidebar(bundle);
+      await postRestartSystemInterface(agentId);
+      if (workspaceUrl && bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+        // The plugin now serves its styled 503 loader (the
+        // "System interface starting" page), which auto-refreshes into the
+        // workspace once the system interface is back.
+        bundle.contentView.webContents.loadURL(workspaceUrl);
+      }
     },
-  ]);
+  });
+  const menu = Menu.buildFromTemplate(template);
   // sidebar coords are relative to the sidebar view, which sits at (0, TITLEBAR_HEIGHT)
   const px = Math.round(x || 0);
   const py = Math.round((y || 0) + TITLEBAR_HEIGHT);
@@ -1417,6 +1693,16 @@ ipcMain.on('retry', async (event) => {
   await shutdown();
   prepareAllWindowsForRetry();
   await startBackendWithRetry();
+});
+
+ipcMain.on('close-workspace-windows', (_event, agentId) => {
+  if (!agentId) return;
+  for (const b of bundles) {
+    if (b.window.isDestroyed()) continue;
+    if (b.currentWorkspaceId === agentId) {
+      b.window.close();
+    }
+  }
 });
 
 ipcMain.on('open-log-file', () => {
@@ -1455,6 +1741,20 @@ ipcMain.on('window-close', (event) => {
 
 function initiateFullQuit() {
   app.quit();
+}
+
+// Route POSIX SIGTERM / SIGINT through `app.quit()` so they trigger the
+// same `before-quit` chain that window-close uses (which already runs
+// `backend.shutdown()`, SIGTERMing the python backend and waiting for
+// uvicorn's graceful exit). Without these handlers Node's default for
+// these signals is to exit immediately, which orphans the python backend
+// and the `mngr forward` / `observe` subprocesses. The `just minds-stop`
+// recipe sends SIGTERM to this process so the clean-shutdown chain can run.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    console.log(`[lifecycle] ${signal} received, requesting app.quit()`);
+    app.quit();
+  });
 }
 
 app.on('window-all-closed', async () => {

@@ -7,15 +7,18 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.logging import log_span
-from imbue.mngr.api.agent_addr import find_agents_by_addresses
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
 from imbue.mngr.api.find import ensure_host_started
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.cli.address_params import AGENT_ADDRESS
+from imbue.mngr.cli.address_params import HOST_ADDRESS
+from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -27,9 +30,13 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.polling import poll_until
@@ -39,11 +46,13 @@ class StartCliOptions(CommonCliOptions):
     """Options passed from the CLI to the start command."""
 
     agents: tuple[str, ...]
-    agent_list: tuple[str, ...]
+    agent_list: tuple[AgentAddress, ...]
     connect: bool
     connect_command: str | None
+    restart: bool
+    no_resume: bool
     # Planned features (not yet implemented)
-    host: tuple[str, ...]
+    host: tuple[HostAddress, ...]
 
 
 def _output(message: str, output_opts: OutputOptions) -> None:
@@ -52,7 +61,7 @@ def _output(message: str, output_opts: OutputOptions) -> None:
         write_human_line(message)
 
 
-def _output_result(started_agents: Sequence[str], output_opts: OutputOptions) -> None:
+def _output_result(started_agents: Sequence[str], output_opts: OutputOptions, *, is_restart: bool = False) -> None:
     """Output the final result."""
     if output_opts.format_template is not None:
         items = [{"name": name} for name in started_agents]
@@ -66,7 +75,8 @@ def _output_result(started_agents: Sequence[str], output_opts: OutputOptions) ->
             emit_event("start_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
             if started_agents:
-                write_human_line("Successfully started {} agent(s)", len(started_agents))
+                verb = "restarted" if is_restart else "started"
+                write_human_line("Successfully {} {} agent(s)", verb, len(started_agents))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -105,15 +115,27 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
 @optgroup.option(
     "--agent",
     "agent_list",
+    type=AGENT_ADDRESS,
     multiple=True,
-    help="Agent name or ID to start (can be specified multiple times)",
+    help="Agent address (NAME[@HOST[.PROVIDER]]) to start (can be specified multiple times)",
 )
 @optgroup.option(
     "--host",
+    type=HOST_ADDRESS,
     multiple=True,
     help="Host(s) to start all stopped agents on [repeatable] [future]",
 )
 @optgroup.group("Behavior")
+@optgroup.option(
+    "--restart",
+    is_flag=True,
+    help="Stop the agent first if it is already running, ensuring a clean start.",
+)
+@optgroup.option(
+    "--no-resume",
+    is_flag=True,
+    help="Skip sending the resume message after starting.",
+)
 @optgroup.option(
     "--connect/--no-connect",
     default=False,
@@ -138,35 +160,52 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         raise NotImplementedError("--host is not implemented yet")
 
     # Validate input
-    agent_identifiers = expand_stdin_placeholder(opts.agents) + list(opts.agent_list)
+    agent_addresses: list[AgentAddress] = parse_agent_addresses_or_raise(expand_stdin_placeholder(opts.agents)) + list(
+        opts.agent_list
+    )
 
-    if not agent_identifiers:
+    if not agent_addresses:
         if STDIN_PLACEHOLDER not in opts.agents:
             raise click.UsageError("Must specify at least one agent (use '-' to read from stdin)")
         return
 
-    if opts.connect and len(agent_identifiers) > 1:
+    if opts.connect and len(agent_addresses) > 1:
         raise click.UsageError("--connect can only be used with a single agent")
 
-    # Find agents to start (STOPPED agents)
-    agents_to_start = find_agents_by_addresses(
-        raw_identifiers=agent_identifiers,
+    _start_agents(agent_addresses, mngr_ctx, output_opts, opts)
+
+
+def _start_agents(
+    agent_addresses: list[AgentAddress],
+    mngr_ctx: MngrContext,
+    output_opts: OutputOptions,
+    opts: StartCliOptions,
+) -> None:
+    is_restart = opts.restart
+    send_resume = not opts.no_resume
+
+    # Find agents: STOPPED only for normal start, any state for restart
+    target_state = None if is_restart else AgentLifecycleState.STOPPED
+    matched_agents = find_all_agents(
+        addresses=agent_addresses,
         filter_all=False,
-        target_state=AgentLifecycleState.STOPPED,
+        target_state=target_state,
         mngr_ctx=mngr_ctx,
     )
 
-    if not agents_to_start:
-        _output("No stopped agents found to start", output_opts)
+    if not matched_agents:
+        if is_restart:
+            _output("No agents found matching the given addresses", output_opts)
+        else:
+            _output("No stopped agents found to start", output_opts)
         return
 
-    # Start each agent
     started_agents: list[str] = []
     last_started_agent = None
     last_started_host = None
 
     # Group agents by host to avoid starting the same host multiple times
-    agents_by_host = group_agents_by_host(agents_to_start)
+    agents_by_host = group_agents_by_host(matched_agents)
 
     for host_key, agent_list in agents_by_host.items():
         host_id_str, _ = host_key.split(":", 1)
@@ -179,22 +218,30 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
         # Ensure host is started (always start since this is the start command)
         online_host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
 
-        # Start each agent on this host
-        agent_ids_to_start = [match.agent_id for match in agent_list]
-        online_host.start_agents(agent_ids_to_start)
+        agent_ids = [match.agent_id for match in agent_list]
 
-        # Emit discovery events for started agents and host
+        # Stop agents first when restarting
+        if is_restart:
+            with log_span("Stopping {} agent(s) for restart", len(agent_ids)):
+                online_host.stop_agents(agent_ids)
+
+        # Start agents on this host
+        with log_span("Starting {} agent(s)", len(agent_ids)):
+            online_host.start_agents(agent_ids)
+
+        # Emit discovery events for agents and host
         emit_discovery_events_for_host(mngr_ctx.config, online_host)
 
         for match in agent_list:
+            verb = "Restarted" if is_restart else "Started"
             started_agents.append(str(match.agent_name))
-            _output(f"Started agent: {match.agent_name}", output_opts)
+            _output(f"{verb} agent: {match.agent_name}", output_opts)
 
             # Get the agent object for potential connect and resume message
             for agent in online_host.get_agents():
                 if agent.id == match.agent_id:
-                    # Send resume message if configured
-                    _send_resume_message_if_configured(agent, output_opts)
+                    if send_resume:
+                        _send_resume_message_if_configured(agent, output_opts)
 
                     # Track for potential connect
                     if opts.connect:
@@ -203,42 +250,56 @@ def start(ctx: click.Context, **kwargs: Any) -> None:
                     break
 
     # Output final result
-    _output_result(started_agents, output_opts)
+    _output_result(started_agents, output_opts, is_restart=is_restart)
 
     # Connect if requested and we started exactly one agent
-    if opts.connect and last_started_agent is not None and last_started_host is not None:
-        resolved_command = resolve_connect_command(opts.connect_command, mngr_ctx)
-        if resolved_command is not None:
-            session_name = f"{mngr_ctx.config.prefix}{last_started_agent.name}"
-            run_connect_command(
-                resolved_command,
-                str(last_started_agent.name),
-                session_name,
-                is_local=last_started_host.is_local,
-            )
-        else:
-            connection_opts = ConnectionOptions(
-                is_reconnect=True,
-                retry_count=mngr_ctx.config.retry.connect_retry_times,
-                retry_delay=mngr_ctx.config.retry.connect_retry_delay,
-                session_command=None,
-                is_unknown_host_allowed=False,
-            )
-            logger.info("Connecting to agent: {}", last_started_agent.name)
-            connect_to_agent(last_started_agent, last_started_host, mngr_ctx, connection_opts)
+    _maybe_connect(opts, last_started_agent, last_started_host, mngr_ctx)
+
+
+def _maybe_connect(
+    opts: StartCliOptions,
+    last_started_agent: AgentInterface | None,
+    last_started_host: OnlineHostInterface | None,
+    mngr_ctx: MngrContext,
+) -> None:
+    if not opts.connect or last_started_agent is None or last_started_host is None:
+        return
+
+    resolved_command = resolve_connect_command(opts.connect_command, mngr_ctx)
+    if resolved_command is not None:
+        session_name = f"{mngr_ctx.config.prefix}{last_started_agent.name}"
+        run_connect_command(
+            resolved_command,
+            str(last_started_agent.name),
+            session_name,
+            is_local=last_started_host.is_local,
+        )
+    else:
+        connection_opts = ConnectionOptions(
+            is_reconnect=True,
+            retry_count=mngr_ctx.config.retry.connect_retry_times,
+            retry_delay=mngr_ctx.config.retry.connect_retry_delay,
+            session_command=None,
+            is_unknown_host_allowed=False,
+        )
+        logger.info("Connecting to agent: {}", last_started_agent.name)
+        connect_to_agent(last_started_agent, last_started_host, mngr_ctx, connection_opts)
 
 
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="start",
     one_line_description="Start stopped agent(s)",
-    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--connect]",
+    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect]",
     description="""For remote hosts, this restores from the most recent snapshot and starts
 the container/instance. For local agents, this starts the agent's tmux
 session.
 
 If multiple agents share a host, they will all be started together when
 the host starts.
+
+Use --restart to stop any running agents first, ensuring a clean start.
+Use --no-resume to skip sending the resume message after starting.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -247,6 +308,7 @@ Supports custom format templates via --format. Available fields: name.""",
     examples=(
         ("Start an agent by name", "mngr start my-agent"),
         ("Start multiple agents", "mngr start agent1 agent2"),
+        ("Restart a running agent cleanly", "mngr start my-agent --restart"),
         ("Start and connect", "mngr start my-agent --connect"),
         ("Start all stopped agents", "mngr list --ids | mngr start -"),
         ("Custom format template output", "mngr start agent1 agent2 --format '{name}'"),

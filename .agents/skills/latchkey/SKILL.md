@@ -1,6 +1,6 @@
 ---
 name: latchkey
-description: Interact with third-party or self-hosted services (Slack, Google Workspace, Dropbox, GitHub, Linear, Coolify...) using their HTTP APIs on the user's behalf.
+description: Use whenever you want to use latchkey commands or interact with third-party or self-hosted services (Slack, Google Workspace, Dropbox, GitHub, Linear, Coolify...) using their HTTP APIs on the user's behalf.
 compatibility: Requires node.js, curl and latchkey (npm install -g latchkey). A desktop/GUI environment is required for the browser functionality.
 ---
 
@@ -18,7 +18,7 @@ Usage:
 2. **Pass through all regular curl arguments** - latchkey is a transparent wrapper.
 3. **Check for `latchkey services list`** to get a list of supported services. Use `--viable` to only show the currently configured ones.
 4. **Use `latchkey services info <service_name>`** to get information about a specific service (auth options, credentials status, API docs links, special requirements, etc.).
-5. **Submit a permission request to the user if necessary** by calling `curl -XPOST http://localhost:8000/api/permissions/request` when either there are no credentials for the given service or the curl requests come back with the "request not permitted by the user" message.
+5. **Submit a permission request to the user if necessary** by calling `latchkey curl -XPOST http://latchkey-self.invalid/extensions/permission-requests` (see the "Ask for user permission" example below) when either there are no credentials for the given service or the curl requests come back with the "request not permitted by the user" message.
 6. **Look for the newest documentation of the desired public API online.** Avoid bot-only endpoints.
 
 
@@ -46,14 +46,32 @@ latchkey curl 'https://discord.com/api/v10/users/@me'
 ### Ask for user permission
 
 When either there are no credentials for the given service yet or our
-requests come back with the "request not permitted by the user
-message", ask the user for permission first:
+requests come back with the "request not permitted by the user"
+message, ask the user for permission first. The requests are sent to
+Latchkey via the reserved `latchkey-self.invalid` host:
 
 ```bash
-curl -XPOST http://localhost:8000/api/permissions/request -d '{"request_type": "LATCHKEY_PERMISSION", "service_name": "discord", "rationale": "I'd like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
+# 1. Retrieve the list of available permissions if necessary.
+latchkey curl http://latchkey-self.invalid/permissions/available/discord
+
+# 2. Retrieve the list of your existing permissions if necessary.
+latchkey curl http://latchkey-self.invalid/permissions/self | jq .rules
+
+# 3. Ask for the necessary missing permissions.
+latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "scope": "discord_api", "permissions": ["discord-read-all"], "rationale": "I'"'"'d like to access your Discord account to read server and channel information so I can help you summarize conversations."}'
 ```
 
-After that, wait for a system message to see if the user approved or denied the permission request.
+Try to strike a balance: do not require needlessly broad
+permissions while also minimizing the need for multiple
+iterations with additional permission requests.
+
+The body must be a JSON object with exactly four string fields:
+`agent_id` (use `$MNGR_AGENT_ID`), `scope`, `permissions`, and `rationale`.
+
+After posting, wait for a system message indicating whether the user
+approved or denied the permission request.
 
 ### Detect expired credentials and force a new login to Discord
 ```bash

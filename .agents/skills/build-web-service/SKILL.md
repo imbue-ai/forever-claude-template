@@ -9,7 +9,7 @@ metadata:
 
 A "web service" here is something the user can click on as a tab in
 the desktop client and see render at `/service/<name>/`, proxied
-through the workspace_server.
+through the system_interface.
 
 There is one canonical path (scaffold a new FastAPI lib) and one
 escape hatch (wrap a pre-existing third-party server). Modify/remove
@@ -26,7 +26,7 @@ flows go through the `edit-services` skill.
   below.
 
 If you would otherwise scaffold a FastAPI lib whose only job is to
-shell out to a third-party tool, do not do that -- the workspace_server
+shell out to a third-party tool, do not do that -- the system_interface
 already proxies `/service/<name>/...` to whatever URL you register.
 Adding a Python proxy in front of the third-party server adds a hop,
 costs an extra process, and complicates WebSocket and streaming
@@ -45,7 +45,7 @@ under `libs/<your-package>/` so they get an isolated tab and prefix.
 - **Pick a free port.** `ss -tln` lists what's bound. The scaffolder
   picks the lowest free port at or above 8081 by parsing
   `services.toml` and `runtime/applications.toml`; if you're choosing
-  manually, avoid `8000` (workspace_server) and `8080` (the example
+  manually, avoid `8000` (system_interface) and `8080` (the example
   `web` service).
 - **Bind to `127.0.0.1`** (not `0.0.0.0`). The forwarder reaches your
   app from inside the same container; binding to all interfaces is
@@ -109,7 +109,7 @@ What gets updated:
 
   The `ROOT_PATH=/service/<name>` prefix is what makes FastAPI emit
   prefix-correct OpenAPI links and absolute redirects when reached
-  through the workspace_server. Standalone `uv run <name>` keeps
+  through the system_interface. Standalone `uv run <name>` keeps
   working at `/` because the env var is unset there.
 
 The bootstrap service manager picks up the new entry automatically
@@ -137,11 +137,8 @@ sync and most pages don't need otherwise.
 
 If your service renders HTML that a person will look at (anything
 beyond a pure JSON API, a webhook receiver, or a transparent proxy of
-a third-party tool), invoke the `frontend-design` skill **before**
-writing the markup. Default hand-rolled CSS produces the bland
-card-with-system-font-stack look that `frontend-design` is specifically
-designed to replace; running it up-front is much cheaper than reskinning
-later.
+a third-party tool), you must invoke the `frontend-design` skill **before**
+writing the markup. Always do this before working on UI, regardless of the scope of the work.
 
 Skip this step for routes that emit only JSON, only redirects, or that
 serve an existing third-party UI through the escape hatch below --
@@ -181,11 +178,11 @@ new tab. Without this step the user would have to discover it via the
 (pure JSON APIs, webhook receivers, etc.).
 
 ```bash
-python3 scripts/web_view.py open <name>
+python3 scripts/layout.py open <name>
 ```
 
-`web_view.py` POSTs to a loopback-only workspace_server endpoint that
-broadcasts an `open_tab` message over its WebSocket. The frontend
+`layout.py` POSTs to a loopback-only workspace_server endpoint that
+broadcasts a `layout_op` message over its WebSocket. The frontend
 focuses the panel if a tab for `<name>` is already open, otherwise
 splits a new iframe alongside the primary chat (60% web / 40% chat).
 The script briefly waits for the service to appear in
@@ -196,13 +193,18 @@ To force a reload of an already-open tab (e.g. after redeploying the
 service) without prompting the user to click Refresh:
 
 ```bash
-python3 scripts/web_view.py refresh <name>
+python3 scripts/layout.py refresh <name>
 ```
 
-`web_view.py list` prints every user-facing registered service name
-(one per line; the workspace chrome's own `system_interface` entry is
-hidden), which is useful when the user is asking about what tabs are
-available.
+You should always `refresh` services after making changes, to make sure the user can see the updates.
+
+For anything beyond `open` / `refresh` -- splitting, moving, focusing,
+renaming, maximizing, replacing an iframe's URL, inspecting the live
+tree -- see the `manage-layout` skill. `layout.py list` is also useful
+when the user is asking about what tabs are available (it prints every
+user-facing registered service plus every mngr-level agent, with
+open/running flags; the workspace chrome's own `system_interface` entry
+is hidden).
 
 ## Escape hatch: wrap an existing server
 

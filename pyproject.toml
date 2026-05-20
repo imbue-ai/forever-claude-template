@@ -28,6 +28,16 @@ dev = [
     # used by test_mngr_template_stacking.py to verify .mngr/settings.toml
     # composes correctly with vendor/mngr's apply_create_template logic
     "imbue-mngr",
+    # imbue-mngr-claude isn't imported by any /code/ python -- it's here so
+    # `uv sync --all-packages` registers it in /code/.venv. Without it,
+    # `uv run mngr ...` (e.g. from the bootstrap window) resolves to
+    # /code/.venv/bin/mngr but pluggy can't discover the claude plugin via
+    # entry points, so settings.toml fields like `use_env_config_dir`,
+    # `auto_allow_permissions`, etc. fail to parse as "Unknown fields".
+    # Keeping the venv's mngr in lockstep with the tool-installed mngr
+    # (which has --with-editable mngr_claude on the system_interface tool
+    # install) avoids a cwd-dependent divergence.
+    "imbue-mngr-claude",
 ]
 
 [tool.uv]
@@ -45,6 +55,7 @@ web-server = { workspace = true }
 runtime-backup = { workspace = true }
 imbue-common = { path = "vendor/mngr/libs/imbue_common", editable = true }
 imbue-mngr = { path = "vendor/mngr/libs/mngr", editable = true }
+imbue-mngr-claude = { path = "vendor/mngr/libs/mngr_claude", editable = true }
 resource-guards = { path = "vendor/mngr/libs/resource_guards", editable = true }
 concurrency-group = { path = "vendor/mngr/libs/concurrency_group", editable = true }
 

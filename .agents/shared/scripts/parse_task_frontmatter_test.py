@@ -189,18 +189,97 @@ def test_resolve_multiple_matches_fails_loud(tmp_path: Path) -> None:
         parse_task_frontmatter.resolve(pattern)
 
 
-def test_extra_keys_are_ignored(tmp_path: Path) -> None:
+def test_extra_string_keys_pass_through(tmp_path: Path) -> None:
     task = _write_task(
         tmp_path,
         """---
 lead_agent: a
 lead_report_dir: b
-future_extension: whatever
+ticket_id: task-42
+flow: verify
+---
+body
+""",
+    )
+    result = parse_task_frontmatter.parse(task)
+    assert result == {
+        "lead_agent": "a",
+        "lead_report_dir": "b",
+        "ticket_id": "task-42",
+        "flow": "verify",
+    }
+
+
+def test_non_string_extra_keys_are_dropped(tmp_path: Path) -> None:
+    """Only string values survive -- lists / mappings / numbers don't eval cleanly."""
+    task = _write_task(
+        tmp_path,
+        """---
+lead_agent: a
+lead_report_dir: b
 nested:
   x: 1
+inputs:
+  - commit.diff
+  - commit.log
+count: 3
 ---
 body
 """,
     )
     result = parse_task_frontmatter.parse(task)
     assert set(result.keys()) == {"lead_agent", "lead_report_dir"}
+
+
+def test_extra_key_with_invalid_shell_identifier_fails_loud(tmp_path: Path) -> None:
+    """Keys with dashes (or other shell-illegal chars) must fail loud, not silently drop."""
+    task = _write_task(
+        tmp_path,
+        """---
+lead_agent: a
+lead_report_dir: b
+staged-inputs: commit.diff
+---
+body
+""",
+    )
+    with pytest.raises(ValueError, match=r"staged-inputs.*shell identifier"):
+        parse_task_frontmatter.parse(task)
+
+
+def test_extra_key_starting_with_digit_fails_loud(tmp_path: Path) -> None:
+    """POSIX shell identifiers cannot begin with a digit."""
+    task = _write_task(
+        tmp_path,
+        """---
+lead_agent: a
+lead_report_dir: b
+1st_input: commit.diff
+---
+body
+""",
+    )
+    with pytest.raises(ValueError, match=r"1st_input.*shell identifier"):
+        parse_task_frontmatter.parse(task)
+
+
+def test_render_orders_required_first_then_extras_alphabetized(tmp_path: Path) -> None:
+    task = _write_task(
+        tmp_path,
+        """---
+lead_agent: a
+lead_report_dir: b
+ticket_id: task-42
+flow: verify
+---
+body
+""",
+    )
+    fields = parse_task_frontmatter.parse(task)
+    rendered = parse_task_frontmatter._render(fields)
+    assert rendered == (
+        "LEAD_AGENT=a\n"
+        "LEAD_REPORT_DIR=b\n"
+        "FLOW=verify\n"
+        "TICKET_ID=task-42\n"
+    )
