@@ -151,7 +151,7 @@ def _ensure_host_claude_config_dir(target: Path) -> None:
 def _read_host_name() -> str | None:
     """Read host_name from $MNGR_HOST_DIR/data.json.
 
-    Same source as workspace_server._read_host_name. Returns None if any
+    Same source as system_interface._read_host_name. Returns None if any
     step fails so callers can decide whether to fall back.
     """
     host_dir = os.environ.get(_HOST_DIR_ENV_VAR, "")

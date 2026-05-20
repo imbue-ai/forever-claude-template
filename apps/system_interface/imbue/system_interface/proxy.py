@@ -2,7 +2,7 @@ import re
 from typing import Final
 
 from imbue.imbue_common.pure import pure
-from imbue.minds_workspace_server.primitives import ServiceName
+from imbue.system_interface.primitives import ServiceName
 
 _COOKIE_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"(;\s*[Pp]ath\s*=\s*)([^;]*)")
 

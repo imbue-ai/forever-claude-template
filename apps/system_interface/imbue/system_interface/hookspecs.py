@@ -4,13 +4,13 @@ from typing import Any
 import pluggy
 from fastapi import FastAPI
 
-hookspec = pluggy.HookspecMarker("minds_workspace_server")
-hookimpl = pluggy.HookimplMarker("minds_workspace_server")
+hookspec = pluggy.HookspecMarker("system_interface")
+hookimpl = pluggy.HookimplMarker("system_interface")
 
 EventBroadcaster = Callable[[str, dict[str, Any]], None]
 
 
-class MindsWorkspaceServerHookSpec:
+class SystemInterfaceHookSpec:
     @hookspec
     def endpoint(self, app: FastAPI) -> None:
         """Register additional endpoints on the FastAPI application."""

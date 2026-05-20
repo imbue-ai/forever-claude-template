@@ -43,7 +43,7 @@ const SVG_REFRESH =
   '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>';
 
 // Every non-system_interface service is reached at /service/<name>/ on the
-// same origin as the dockview UI itself. The workspace_server's service
+// same origin as the dockview UI itself. The system_interface's service
 // dispatcher handles the proxying, SW bootstrap, and header rewriting.
 function getServiceUrl(serviceName: string): string {
   return `/service/${serviceName}/`;
@@ -1475,7 +1475,7 @@ function initializeDockview(parentElement: HTMLElement): void {
   addAgentsUpdatedListener(agentsUpdatedListener);
 
   // Agent-driven layout ops arrive as {type: "layout_op", op, args} on
-  // the workspace-server WebSocket. ``scripts/layout.py`` is the source
+  // the system-interface WebSocket. ``scripts/layout.py`` is the source
   // of those messages; per-op handlers below dispatch on ``event.op``.
   _layoutOpListener = (event: LayoutOpEvent) => {
     void handleLayoutOp(event);

@@ -1,9 +1,9 @@
-"""Route handlers for ``/service/<name>/...`` forwarding inside minds_workspace_server.
+"""Route handlers for ``/service/<name>/...`` forwarding inside system_interface.
 
 Mirrors the pattern used by the desktop client's ``/forwarding/...`` routes
 but strictly local (all target services run on 127.0.0.1 inside the same
 workspace, so no SSH tunnel logic is needed) and without agent-id in the
-path (one workspace per workspace_server process).
+path (one workspace per system_interface process).
 
 Responsibilities:
 - First-navigation HTML requests serve a bootstrap page that registers a
@@ -33,13 +33,13 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 from websockets import ClientConnection
 
-from imbue.minds_workspace_server.agent_manager import AgentManager
-from imbue.minds_workspace_server.primitives import ServiceName
-from imbue.minds_workspace_server.proxy import generate_backend_loading_html
-from imbue.minds_workspace_server.proxy import generate_bootstrap_html
-from imbue.minds_workspace_server.proxy import generate_service_worker_js
-from imbue.minds_workspace_server.proxy import rewrite_cookie_path
-from imbue.minds_workspace_server.proxy import rewrite_proxied_html
+from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.primitives import ServiceName
+from imbue.system_interface.proxy import generate_backend_loading_html
+from imbue.system_interface.proxy import generate_bootstrap_html
+from imbue.system_interface.proxy import generate_service_worker_js
+from imbue.system_interface.proxy import rewrite_cookie_path
+from imbue.system_interface.proxy import rewrite_proxied_html
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 

@@ -26,35 +26,35 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
-from imbue.minds_workspace_server.agent_discovery import AgentInfo
-from imbue.minds_workspace_server.agent_discovery import discover_agents
-from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
-from imbue.minds_workspace_server.agent_discovery import send_message
-from imbue.minds_workspace_server.agent_manager import AgentManager
-from imbue.minds_workspace_server.config import Config
-from imbue.minds_workspace_server.event_queues import AgentEventQueues
-from imbue.minds_workspace_server.events import BufferBehavior
-from imbue.minds_workspace_server.layout_ops import LayoutMutex
-from imbue.minds_workspace_server.layout_ops import is_broadcasting_op
-from imbue.minds_workspace_server.layout_ops import is_known_op
-from imbue.minds_workspace_server.layout_ops import is_mutating_op
-from imbue.minds_workspace_server.layout_ops import layout_inspect
-from imbue.minds_workspace_server.layout_ops import layout_list
-from imbue.minds_workspace_server.models import AgentCreationError
-from imbue.minds_workspace_server.models import AgentListItem
-from imbue.minds_workspace_server.models import AgentListResponse
-from imbue.minds_workspace_server.models import CreateAgentResponse
-from imbue.minds_workspace_server.models import CreateChatRequest
-from imbue.minds_workspace_server.models import CreateWorktreeRequest
-from imbue.minds_workspace_server.models import DestroyAgentResponse
-from imbue.minds_workspace_server.models import ErrorResponse
-from imbue.minds_workspace_server.models import RandomNameResponse
-from imbue.minds_workspace_server.models import SendMessageRequest
-from imbue.minds_workspace_server.models import SendMessageResponse
-from imbue.minds_workspace_server.plugins import get_plugin_manager
-from imbue.minds_workspace_server.service_dispatcher import register_service_routes
-from imbue.minds_workspace_server.session_watcher import AgentSessionWatcher
-from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+from imbue.system_interface.agent_discovery import AgentInfo
+from imbue.system_interface.agent_discovery import discover_agents
+from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
+from imbue.system_interface.agent_discovery import send_message
+from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.config import Config
+from imbue.system_interface.event_queues import AgentEventQueues
+from imbue.system_interface.events import BufferBehavior
+from imbue.system_interface.layout_ops import LayoutMutex
+from imbue.system_interface.layout_ops import is_broadcasting_op
+from imbue.system_interface.layout_ops import is_known_op
+from imbue.system_interface.layout_ops import is_mutating_op
+from imbue.system_interface.layout_ops import layout_inspect
+from imbue.system_interface.layout_ops import layout_list
+from imbue.system_interface.models import AgentCreationError
+from imbue.system_interface.models import AgentListItem
+from imbue.system_interface.models import AgentListResponse
+from imbue.system_interface.models import CreateAgentResponse
+from imbue.system_interface.models import CreateChatRequest
+from imbue.system_interface.models import CreateWorktreeRequest
+from imbue.system_interface.models import DestroyAgentResponse
+from imbue.system_interface.models import ErrorResponse
+from imbue.system_interface.models import RandomNameResponse
+from imbue.system_interface.models import SendMessageRequest
+from imbue.system_interface.models import SendMessageResponse
+from imbue.system_interface.plugins import get_plugin_manager
+from imbue.system_interface.service_dispatcher import register_service_routes
+from imbue.system_interface.session_watcher import AgentSessionWatcher
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 _LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -174,7 +174,7 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
 
 
 def _inject_base_path_meta_tag(html_content: str, root_path: str) -> str:
-    meta_tag = f'<meta name="minds-workspace-server-base-path" content="{root_path}">'
+    meta_tag = f'<meta name="system-interface-base-path" content="{root_path}">'
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 
@@ -196,7 +196,7 @@ def _read_host_name() -> str:
 
 def _inject_hostname_meta_tag(html_content: str) -> str:
     hostname = _read_host_name()
-    meta_tag = f'<meta name="minds-workspace-server-hostname" content="{hostname}">'
+    meta_tag = f'<meta name="system-interface-hostname" content="{hostname}">'
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 
@@ -424,7 +424,7 @@ _LAYOUT_FILENAME = "layout.json"
 def _primary_agent_layout_dir() -> Path | None:
     """Return the workspace layout directory for this workspace's primary agent.
 
-    The workspace_server always serves a single workspace (its own primary
+    The system_interface always serves a single workspace (its own primary
     agent); the layout lives at $MNGR_HOST_DIR/agents/<MNGR_AGENT_ID>/workspace_layout/.
     Returns None if either env var is missing, which should only happen in
     dev/test setups that don't care about persistence.
@@ -719,7 +719,7 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
         error = ErrorResponse(detail=f"Failed to destroy agent '{agent_name}': {output}")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
-    # Remove the agent from the workspace server's tracked state immediately
+    # Remove the agent from the system_interface's tracked state immediately
     # so the frontend reflects the destruction without waiting for mngr observe.
     agent_manager.remove_agent(agent_id)
 
@@ -746,7 +746,7 @@ async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
       success, broadcast the ``layout_op`` WS message and return.
 
     The endpoint is locked to loopback clients (no authentication exists
-    between callers and the workspace server inside the container).
+    between callers and the system interface inside the container).
     """
     client_host = request.client.host if request.client is not None else ""
     if client_host not in _LOOPBACK_CLIENT_HOSTS:
@@ -831,7 +831,7 @@ async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
 def _inject_agent_id_meta_tag(html_content: str) -> str:
     """Inject the primary agent ID as a meta tag for the frontend."""
     agent_id = os.environ.get("MNGR_AGENT_ID", "")
-    meta_tag = f'<meta name="minds-workspace-server-agent-id" content="{agent_id}">'
+    meta_tag = f'<meta name="system-interface-agent-id" content="{agent_id}">'
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 

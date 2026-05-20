@@ -23,11 +23,6 @@ from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds_workspace_server.agent_discovery import discover_agents
-from imbue.minds_workspace_server.models import AgentCreationError
-from imbue.minds_workspace_server.models import AgentStateItem
-from imbue.minds_workspace_server.models import ApplicationEntry
-from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
@@ -37,6 +32,11 @@ from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
+from imbue.system_interface.agent_discovery import discover_agents
+from imbue.system_interface.models import AgentCreationError
+from imbue.system_interface.models import AgentStateItem
+from imbue.system_interface.models import ApplicationEntry
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
 _APPLICATIONS_TOML_BASENAME = "applications.toml"
@@ -228,7 +228,7 @@ class AgentManager:
     def broadcaster(self) -> WebSocketBroadcaster:
         """The WebSocketBroadcaster this manager owns. Primarily useful to
         callers that need to reuse the same broadcaster across related
-        application state (e.g. the workspace_server lifespan when an
+        application state (e.g. the system_interface lifespan when an
         externally-constructed AgentManager is injected for tests)."""
         return self._broadcaster
 
@@ -612,8 +612,8 @@ class AgentManager:
         """
         agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
         if agent_state_dir:
-            return Path(agent_state_dir) / "workspace_server" / "observe"
-        return Path.home() / ".mngr" / "workspace_server" / "observe"
+            return Path(agent_state_dir) / "system_interface" / "observe"
+        return Path.home() / ".mngr" / "system_interface" / "observe"
 
     def _resolve_observe_cwd(self) -> Path:
         """Return the cwd for the mngr observe subprocess.
@@ -662,19 +662,19 @@ class AgentManager:
             # agent typically has providers enabled (e.g. modal) that are not
             # authenticated. Provider errors make `list_agents` error out,
             # which in turn prevents periodic DISCOVERY_FULL snapshots from
-            # being written, so the workspace server's agent list drifts out
+            # being written, so the system_interface's agent list drifts out
             # of sync with reality whenever an individual event is missed.
+            # `is_checked_by_group=False` because we terminate this long-running
+            # subprocess explicitly via `.terminate()` in `stop()`; that SIGTERM
+            # produces a non-zero exit code that should not surface as a
+            # ProcessError when the concurrency group exits. The watchdog thread
+            # below is responsible for distinguishing graceful shutdown from
+            # unexpected early exit.
             process = self._observe_cg.run_process_in_background(
                 command=cmd,
                 cwd=self._resolve_observe_cwd(),
                 on_output=self._handle_observe_output_line,
                 shutdown_event=self._shutdown_event,
-                # The observe subprocess is long-lived and stopped via SIGTERM,
-                # which produces a non-zero returncode (-15). With the default
-                # is_checked_by_group=True, the concurrency group's __exit__
-                # would treat that as a process failure and raise ProcessError
-                # during stop(). The watchdog below is the sole intended channel
-                # for surfacing unexpected exits.
                 is_checked_by_group=False,
             )
         except (OSError, InvalidConcurrencyGroupStateError):

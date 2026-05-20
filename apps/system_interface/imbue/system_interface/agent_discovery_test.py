@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from imbue.minds_workspace_server.agent_discovery import read_claude_config_dir_from_env_file
+from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 
 
 def test_reads_claude_config_dir_from_env_file(tmp_path: Path) -> None:
@@ -23,7 +23,7 @@ def test_falls_back_to_host_env_when_per_agent_env_lacks_config_dir(
 ) -> None:
     """Mimics use_env_config_dir=True chat agents: mngr_claude does not write
     CLAUDE_CONFIG_DIR to the per-agent env file, but the bootstrap wrote it
-    to $MNGR_HOST_DIR/env. Without this layer the workspace_server's
+    to $MNGR_HOST_DIR/env. Without this layer the system_interface's
     session_watcher pointed at ~/.claude and chat messages never showed up
     in the UI."""
     host_dir = tmp_path / "host"

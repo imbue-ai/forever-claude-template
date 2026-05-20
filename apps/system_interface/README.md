@@ -1,4 +1,4 @@
-# Minds Workspace Server
+# System Interface
 
 Web chat interface for viewing and interacting with mngr-managed Claude agents.
 
@@ -8,7 +8,7 @@ updates via Server-Sent Events.
 ## Usage
 
 ```bash
-minds-workspace-server
+system-interface
 ```
 
 Opens at http://127.0.0.1:8000 by default.
@@ -18,7 +18,7 @@ Opens at http://127.0.0.1:8000 by default.
 ```bash
 # Backend
 cd apps/system_interface
-uv run minds-workspace-server
+uv run system-interface
 
 # Frontend (with hot reload)
 cd apps/system_interface/frontend
@@ -52,7 +52,7 @@ python3 scripts/layout.py inspect
 ```
 
 Every op POSTs `{op, args, agent_id}` to the loopback-only
-`/api/layout/broadcast` endpoint on the workspace server. Mutating ops
+`/api/layout/broadcast` endpoint on the system interface. Mutating ops
 acquire an in-process advisory mutex (HTTP 409 with the in-flight
 holder's metadata on contention); reads bypass it. Panels are
 addressed by stable, type-prefixed refs: `service:<name>`,
@@ -68,4 +68,4 @@ cd apps/system_interface/frontend
 npm run build
 ```
 
-This compiles the frontend into `imbue/minds_workspace_server/static/`.
+This compiles the frontend into `imbue/system_interface/static/`.

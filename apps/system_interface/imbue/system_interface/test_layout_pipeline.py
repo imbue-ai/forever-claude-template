@@ -31,11 +31,11 @@ from typing import Generator
 import pytest
 import uvicorn
 
-from imbue.minds_workspace_server.agent_manager import AgentManager
-from imbue.minds_workspace_server.config import Config
-from imbue.minds_workspace_server.models import AgentStateItem
-from imbue.minds_workspace_server.server import create_application
-from imbue.minds_workspace_server.ws_broadcaster import WebSocketBroadcaster
+from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.config import Config
+from imbue.system_interface.models import AgentStateItem
+from imbue.system_interface.server import create_application
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 from imbue.mngr.utils.polling import wait_for
 
 pytestmark = pytest.mark.acceptance
@@ -94,7 +94,7 @@ def layout_server(
         work_dir=str(tmp_path / "work"),
     )
 
-    config = Config(minds_workspace_server_host="127.0.0.1", minds_workspace_server_port=_PORT)
+    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
     app = create_application(config=config, agent_manager=manager)
 
     server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT, log_level="error"))
