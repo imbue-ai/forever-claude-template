@@ -1603,6 +1603,42 @@ body {
   color: var(--pv-fg-muted);
   line-height: 1.55;
 }
+.pv-tl-narration p {
+  margin: 0 0 0.4em;
+}
+.pv-tl-narration p:last-child {
+  margin-bottom: 0;
+}
+.pv-tl-narration code {
+  font-size: 0.9em;
+  padding: 0.1em 0.35em;
+  background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
+  border-radius: 3px;
+}
+.pv-tl-narration pre {
+  margin: 0.4em 0;
+  padding: 0.5em 0.7em;
+  background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.9em;
+}
+.pv-tl-narration pre code {
+  padding: 0;
+  background: none;
+}
+.pv-tl-narration a {
+  color: var(--pv-fg-muted);
+  text-decoration: underline;
+}
+.pv-tl-narration ul,
+.pv-tl-narration ol {
+  margin: 0.3em 0;
+  padding-left: 1.5em;
+}
+.pv-tl-narration li {
+  margin-bottom: 0.15em;
+}
 
 /* Id badge in front of regular-ticket titles. Visually subtle -- the
    title is the primary thing the user reads; the badge is the secondary

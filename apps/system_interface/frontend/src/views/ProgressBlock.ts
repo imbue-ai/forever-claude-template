@@ -10,7 +10,7 @@
  */
 
 import m from "mithril";
-import { MarkdownContent } from "../markdown";
+import { MarkdownContent, renderMarkdown } from "../markdown";
 import type { TranscriptEvent } from "../models/Response";
 import { renderAssistantMessageChildren } from "./message-renderers";
 import type { TaskInTurn, TaskUiStatus } from "./turn-grouping";
@@ -83,7 +83,7 @@ function renderTaskCaption(task: TaskInTurn): m.Vnode | null {
   if (task.status === "done") {
     return task.summary ? m("div.pv-tl-summary", task.summary) : null;
   }
-  return task.narration ? m("div.pv-tl-narration", task.narration) : null;
+  return task.narration ? m("div.pv-tl-narration.markdown-content", m.trust(renderMarkdown(task.narration))) : null;
 }
 
 function renderExpandedTaskBody(
