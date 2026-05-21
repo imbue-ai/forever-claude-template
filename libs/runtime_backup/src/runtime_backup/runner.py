@@ -38,8 +38,8 @@ def _clear_stale_index_lock() -> None:
     runtime-backup is the only writer of this worktree's git index and its
     ticks run strictly sequentially, so any ``index.lock`` present at the
     start of a tick is necessarily stale -- left behind by a previous tick's
-    git process that was killed before it could release the lock (e.g. a
-    SIGKILL when ``mngr stop`` interrupted a commit).
+    git process that was killed before it could release the lock (whenever
+    something kills the process mid-commit).
 
     Git never clears a stale lock itself, so without this every subsequent
     ``git add`` fails identically and backups stop forever. We resolve the
@@ -81,8 +81,8 @@ def _now_iso_utc() -> str:
 
 def _do_tick(should_push: bool) -> None:
     """Run one backup tick: add, commit-if-dirty, push-if-token."""
-    # Clear any stale index.lock first, so a commit killed by a prior `mngr
-    # stop` cannot wedge every future tick.
+    # Clear any stale index.lock first, so a commit interrupted by something
+    # killing the process cannot wedge every future tick.
     _clear_stale_index_lock()
 
     add_result = _git("add", "-A")

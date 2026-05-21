@@ -28,10 +28,10 @@ that has already happened and just polls.
 - Each tick first clears a stale `index.lock` from the runtime worktree if
   one is present. This service is the worktree's only git writer and its
   ticks are sequential, so any lock seen at tick start was left by a prior
-  tick's git process that was killed before releasing it (e.g. a SIGKILL
-  when `mngr stop` interrupted a commit). Git never clears such a lock
-  itself, so without this every later `git add` would fail identically and
-  backups would stop permanently and silently.
+  tick's git process that was killed before releasing it (if something kills
+  the process mid-commit). Git never clears such a lock itself, so without
+  this every later `git add` would fail identically and backups would stop
+  permanently and silently.
 - On any git failure the service logs to stderr and `/tmp/runtime-backup.log`
   and tries again on the next tick. It does not exit, so bootstrap's
   `restart = "on-failure"` policy is only triggered on a hard crash.
