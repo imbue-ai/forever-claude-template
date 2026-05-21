@@ -500,8 +500,27 @@ function openIframeTab(url: string, title: string, panelType: PanelType = "ifram
   });
 }
 
-export function openIframeTabForAgent(_agentId: string, url: string, title: string): void {
-  openIframeTab(url, title);
+export function openIframeTabForAgent(agentId: string, url: string, title: string): void {
+  if (!dockview) return;
+  const existing = dockview.panels.find((p) => {
+    const pp = panelParams.get(p.id);
+    return pp?.panelType === "iframe" && pp.agentId === agentId && pp.url === url;
+  });
+  if (existing) {
+    if (!existing.api.isActive) {
+      dockview.setActivePanel(existing);
+    }
+    return;
+  }
+  const panelId = `iframe-agent-${agentId}-${Date.now()}`;
+  const params: PanelParams = { panelType: "iframe", agentId, url, title };
+  panelParams.set(panelId, params);
+  dockview.addPanel({
+    id: panelId,
+    component: "iframe",
+    title,
+    params,
+  });
 }
 
 export function openSubagentTab(agentId: string, subagentSessionId: string, description: string): void {
