@@ -18,6 +18,9 @@ host_env = [
     "DISABLE_AUTOUPDATER=1",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
     "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1",
+    # Disable claude.ai account MCP connector sync -- it's an OAuth side
+    # channel to third-party services that bypasses the latchkey gateway.
+    "ENABLE_CLAUDEAI_MCP_SERVERS=false",
     # Tickets live inside runtime/ so they ride the runtime-backup branch.
     # tk reads TICKETS_DIR if set; absolute path so it works from worktree
     # subdirs too. /code/ is the container WORKDIR (set by the Dockerfile).
