@@ -224,11 +224,6 @@ function externalLinkIcon(): m.Vnode {
 
 export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   let mode: Mode = "select_provider";
-  // The OAuth provider chosen on the select screen. `submitOAuthCode`
-  // reads it to tailor the verifying copy: the console flow restarts the
-  // mind's claude agents (its credential lands in the cached .claude.json),
-  // the subscription flow does not.
-  let oauthProvider: "claudeai" | "console" | null = null;
   let sessionId: string | null = null;
   let oauthUrl: string | null = null;
   let code = "";
@@ -276,7 +271,6 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
 
   async function startOAuth(chosen: "claudeai" | "console"): Promise<void> {
     clearError();
-    oauthProvider = chosen;
     startVerifying(
       "Starting sign-in...",
       chosen === "claudeai"
@@ -302,12 +296,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   async function submitOAuthCode(): Promise<void> {
     if (!sessionId || !code.trim()) return;
     clearError();
-    startVerifying(
-      "Verifying code...",
-      oauthProvider === "console"
-        ? "Completing sign-in and restarting this mind's Claude agents so the new credentials take effect."
-        : "Completing the OAuth handshake.",
-    );
+    startVerifying("Verifying code...", "Completing sign-in.");
     try {
       const status = await m.request<ClaudeAuthStatus>({
         method: "POST",
@@ -334,10 +323,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   async function submitApiKey(): Promise<void> {
     if (!apiKey.trim()) return;
     clearError();
-    startVerifying(
-      "Restarting Claude agents...",
-      "Saving your API key and respawning every running claude in this mind so the new key takes effect.",
-    );
+    startVerifying("Saving your API key...", "Applying it to this mind.");
     try {
       const status = await m.request<ClaudeAuthStatus>({
         method: "POST",
@@ -467,7 +453,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
                 [
                   m("span.claude-login-alt-text", [
                     m("span.claude-login-alt-name", "Use an API key"),
-                    m("span.claude-login-alt-desc", "Paste a raw sk-ant-... key. Restarts every running claude."),
+                    m("span.claude-login-alt-desc", "Paste a raw sk-ant-... API key."),
                   ]),
                   m("span.claude-login-alt-go", chevronRightIcon()),
                 ],
@@ -517,10 +503,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
             apiKeyRevealed ? "Hide" : "Show",
           ),
         ]),
-        m(
-          "p.claude-login-helper",
-          "Saving restarts every running claude agent so the new key takes effect. In-progress runs resume automatically.",
-        ),
+        m("p.claude-login-helper", "You can find or create API keys at console.anthropic.com."),
       ]),
     ];
   }
@@ -675,7 +658,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
               void submitApiKey();
             },
           },
-          "Save & restart agents",
+          "Save & finish",
         ),
       ]);
     }
