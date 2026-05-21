@@ -1,17 +1,24 @@
 """Unit tests for the runtime-backup runner.
 
-Focus: the stale-index-lock recovery that keeps a `mngr stop` interrupting a
-commit from permanently wedging every future backup tick.
+Focus: the stale-index-lock recovery that keeps an interrupted commit from
+permanently wedging every future backup tick, and the age guard that keeps it
+from disturbing a genuinely in-progress git operation.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
-from runtime_backup.runner import _clear_stale_index_lock, _do_tick
+from runtime_backup.runner import (
+    STALE_LOCK_MIN_AGE_SECONDS,
+    _clear_stale_index_lock,
+    _do_tick,
+)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -27,7 +34,13 @@ def _init_repo(repo: Path) -> None:
     _git(repo, "config", "user.name", "test")
 
 
-def test_clear_stale_index_lock_removes_lock_in_linked_worktree(
+def _age_lock(lock_path: Path) -> None:
+    """Backdate a lock file's mtime so it counts as stale (past the age guard)."""
+    old = time.time() - STALE_LOCK_MIN_AGE_SECONDS - 60
+    os.utime(lock_path, (old, old))
+
+
+def test_clear_stale_index_lock_removes_aged_lock_in_linked_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Faithful to production: runtime/ is a linked worktree, so the lock
@@ -44,11 +57,28 @@ def test_clear_stale_index_lock_removes_lock_in_linked_worktree(
 
     lock_path = main / ".git" / "worktrees" / "runtime" / "index.lock"
     lock_path.write_text("")
+    _age_lock(lock_path)
     assert lock_path.exists()
 
     _clear_stale_index_lock()
 
     assert not lock_path.exists()
+
+
+def test_clear_stale_index_lock_keeps_fresh_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recently-created lock might belong to a live git operation, so it
+    must be left alone rather than yanked out from under that operation."""
+    monkeypatch.chdir(tmp_path)
+    runtime = tmp_path / "runtime"
+    _init_repo(runtime)
+    lock_path = runtime / ".git" / "index.lock"
+    lock_path.write_text("")  # fresh: mtime is now
+
+    _clear_stale_index_lock()
+
+    assert lock_path.exists()
 
 
 def test_clear_stale_index_lock_noop_when_no_lock_present(
@@ -77,8 +107,11 @@ def test_do_tick_self_heals_stale_index_lock(
     monkeypatch.chdir(tmp_path)
     runtime = tmp_path / "runtime"
     _init_repo(runtime)
-    # A leftover lock from a prior tick's git process that was SIGKILLed.
-    (runtime / ".git" / "index.lock").write_text("")
+    # A leftover lock from a prior tick's git process that was killed; aged
+    # past the guard so it is recognized as stale.
+    lock_path = runtime / ".git" / "index.lock"
+    lock_path.write_text("")
+    _age_lock(lock_path)
     # New runtime state waiting to be backed up.
     (runtime / "memory.txt").write_text("important state\n")
 

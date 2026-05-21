@@ -21,6 +21,13 @@ RUNTIME_DIR = Path("runtime")
 TICK_INTERVAL_SECONDS = 60
 LOG_FILE = Path("/tmp/runtime-backup.log")
 
+# Minimum age before an index.lock is treated as stale and removed. A real git
+# operation on the small runtime/ tree holds the lock for well under a second,
+# so a lock older than this cannot belong to a live operation. Set to the tick
+# interval so a lock skipped as possibly-live on one tick is guaranteed old
+# enough to clear on the next.
+STALE_LOCK_MIN_AGE_SECONDS = TICK_INTERVAL_SECONDS
+
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
     """Run a git command inside the runtime worktree, never raising."""
@@ -36,25 +43,47 @@ def _clear_stale_index_lock() -> None:
     """Remove a stale ``index.lock`` from the runtime worktree, if present.
 
     runtime-backup is the only writer of this worktree's git index and its
-    ticks run strictly sequentially, so any ``index.lock`` present at the
-    start of a tick is necessarily stale -- left behind by a previous tick's
-    git process that was killed before it could release the lock (whenever
-    something kills the process mid-commit).
+    ticks run strictly sequentially, so a lock here is normally stale -- left
+    behind by a previous tick's git process that was killed before it could
+    release the lock (whenever something kills the process mid-commit). Git
+    never clears such a lock itself, so without this every subsequent
+    ``git add`` fails identically and backups stop forever.
 
-    Git never clears a stale lock itself, so without this every subsequent
-    ``git add`` fails identically and backups stop forever. We resolve the
-    lock path via ``--absolute-git-dir`` so it is correct whether runtime/ is
-    a normal repo or (as in production) a linked worktree with a per-worktree
-    git dir.
+    The removal is deliberately *not* unconditional: to stay safe even if the
+    single-writer assumption is ever violated (a concurrent git process in the
+    worktree), the lock is only removed once it is older than
+    ``STALE_LOCK_MIN_AGE_SECONDS``. A live git operation on the small runtime/
+    tree holds the lock for well under a second, so an older lock cannot be
+    live; a genuinely in-progress operation is left untouched and reconsidered
+    on the next tick.
+
+    The lock path is resolved via ``--absolute-git-dir`` so it is correct
+    whether runtime/ is a normal repo or (as in production) a linked worktree
+    with a per-worktree git dir.
     """
     git_dir_result = _git("rev-parse", "--absolute-git-dir")
     if git_dir_result.returncode != 0:
         # runtime/ is not a git repo yet; nothing to clear.
         return
     lock_path = Path(git_dir_result.stdout.strip()) / "index.lock"
-    if not lock_path.exists():
+    try:
+        lock_age_seconds = time.time() - lock_path.stat().st_mtime
+    except OSError:
+        # No lock present (the common case), or it vanished underneath us.
         return
-    logger.warning("Removing stale git index lock at {}", lock_path)
+    if lock_age_seconds < STALE_LOCK_MIN_AGE_SECONDS:
+        logger.warning(
+            "git index.lock at {} is only {:.0f}s old; leaving it in case a "
+            "git operation is in progress (will reconsider next tick)",
+            lock_path,
+            lock_age_seconds,
+        )
+        return
+    logger.warning(
+        "Removing stale git index lock at {} ({:.0f}s old)",
+        lock_path,
+        lock_age_seconds,
+    )
     try:
         lock_path.unlink()
     except OSError as e:
