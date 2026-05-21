@@ -14,6 +14,7 @@ Use this skill when the user asks you to work with files located directly on the
 3. **Stop working** in case of upstream connection failures. Those are most likely caused by the user closing their locally running Minds app. Restarting the Minds app should usually help.
 
 The base URL is `http://latchkey-self.invalid/minds-api-proxy/api/v1/files`. Only the user's home directory and the user's system temp directory are accessible. Use the `$MINDS_API_KEY` env var for authentication (only when accessing the /minds-api-proxy endpoints).
+MOVE and COPY operations are not supported.
 
 
 ## Examples
