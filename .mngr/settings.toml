@@ -50,15 +50,17 @@ version = "2.1.141"
 # the per-agent config dir that everyone else points at.
 use_env_config_dir = true
 
-# The "main" (services) agent type -- inherits everything from claude, then
-# disables every path that pulls user-local content into the workspace. The
-# repo at the requested git ref is the canonical workspace definition;
-# nothing from the invoking user's ~/.claude/ or ~/.mngr/ should leak in.
+# The "main" (services) agent type. The repo at the requested git ref is the
+# canonical workspace definition, so the bulky user-local sync paths stay
+# off -- large ~/.claude skill/plugin trees and ~/.claude.json make
+# provisioning slow and flaky. Claude credentials are the deliberate
+# exception: sync_claude_credentials is on so a workspace is authenticated
+# out of the box (on macOS, converted from the host keychain).
 [agent_types.main]
 parent_type = "claude"
 sync_home_settings = false
 sync_claude_json = false
-sync_claude_credentials = false
+sync_claude_credentials = true
 sync_credentials_on_login = false
 # Keep this agent's per-agent CLAUDE_CONFIG_DIR (don't inherit the parent's
 # new shared-mode default). Every other agent in the workspace points at
