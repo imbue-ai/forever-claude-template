@@ -10,7 +10,7 @@
  *     OR carried over from a prior turn while still unfinished)
  *
  * Task attribution is two-step:
- *   1. Fold task_event events by ticket_id into TaskInfo (the latest
+ *   1. Fold task_event events by ticket_id into TaskRecord (the latest
  *      status wins; closed > in_progress > open). Track each transition
  *      timestamp (created_at / started_at / closed_at).
  *   2. Each task is "owned" by the turn whose window contains its
