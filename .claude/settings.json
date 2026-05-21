@@ -1,7 +1,8 @@
 {
   "autoMemoryDirectory": "runtime/memory",
   "env": {
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false"
   },
   "hooks": {
     "SessionStart": [

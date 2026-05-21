@@ -65,6 +65,15 @@ RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && \
     test -x /root/.local/bin/claude
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
+# Disable claude.ai account connector auto-sync. When Claude Code is logged in
+# with a Claude.ai subscription, MCP connectors enabled on the account are
+# fetched server-side and exposed as tools automatically -- an OAuth side
+# channel to third-party services (Gmail, Drive, ...) that never touches the
+# latchkey gateway or its permission model. Setting this at the image level
+# applies to every `claude` invocation in the container regardless of session
+# or settings file, so all service access must go through latchkey.
+ENV ENABLE_CLAUDEAI_MCP_SERVERS=false
+
 # Install Node.js for building the system_interface frontend.
 # NodeSource's setup_${NODE_MAJOR}.x pins the major, apt resolves within that
 # major. For full determinism we could fetch a static nodejs tarball instead;
