@@ -18,8 +18,15 @@
  *                                 description of the command; falls back
  *                                 to the raw command if absent)
  *   - "Searching <pattern>"       for Grep / Glob
+ *   - "Loading skill <name>"      for Skill
+ *   - "Searching the web <query>" for WebSearch
+ *   - "Fetching page <url>"       for WebFetch
  *   - "Delegating to sub-agent…"  for Agent / Task
- *   - "Running tool…"             for any other unmapped tool, or if the
+ *   - "Running <tool part>"       for MCP tools (parsed from the
+ *                                 mcp__<namespace>__<tool> convention)
+ *   - "Running <target>"          for any other unmapped tool that has a
+ *                                 recognizable target in its input params
+ *   - "Running tool…"             for fully unknown tools, or if the
  *                                 transcript hasn't surfaced the tool
  *                                 call yet (timing race).
  *
@@ -43,6 +50,14 @@ const VERB_BY_TOOL: Record<string, string> = {
   Bash: "Running",
   Grep: "Searching",
   Glob: "Searching",
+  Skill: "Loading skill",
+  ToolSearch: "Loading tool",
+  WebSearch: "Searching the web",
+  WebFetch: "Fetching page",
+  LSP: "Querying language server",
+  NotebookEdit: "Editing notebook",
+  Monitor: "Monitoring",
+  SendMessage: "Sending message",
 };
 
 const MAX_TARGET_LEN = 60;
@@ -90,6 +105,24 @@ function targetForToolCall(tc: ToolCall): string | null {
   return null;
 }
 
+/**
+ * Parse an MCP tool name like "mcp__sculptor__ask_user_question" or
+ * "mcp__plugin_playwright_playwright__browser_click" into a readable
+ * label like "Asking user question" or "Running browser click".
+ *
+ * Returns null for non-MCP names.
+ */
+function labelForMcpTool(name: string): string | null {
+  if (!name.startsWith("mcp__")) return null;
+  // Split on the double-underscore separator: "mcp__<namespace>__<tool>"
+  const lastSep = name.lastIndexOf("__");
+  if (lastSep <= 4) return null; // no tool part after the namespace
+  const toolPart = name.slice(lastSep + 2);
+  if (toolPart === "") return null;
+  const readable = toolPart.replace(/_/g, " ");
+  return `Running ${readable}`;
+}
+
 function labelForToolCall(tc: ToolCall): string {
   if (tc.tool_name === "Agent" || tc.tool_name === "Task") {
     return "Delegating to sub-agent…";
@@ -98,6 +131,13 @@ function labelForToolCall(tc: ToolCall): string {
   const target = targetForToolCall(tc);
   if (verb !== undefined && target !== null) return `${verb} ${target}`;
   if (verb !== undefined) return `${verb}…`;
+
+  const mcpLabel = labelForMcpTool(tc.tool_name);
+  if (mcpLabel !== null) return mcpLabel;
+
+  // Last resort: try to surface a target from the input params so the
+  // user sees *something* descriptive rather than a bare "Running tool…".
+  if (target !== null) return `Running ${target}`;
   return "Running tool…";
 }
 

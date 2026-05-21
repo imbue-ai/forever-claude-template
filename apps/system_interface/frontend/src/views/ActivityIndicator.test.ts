@@ -108,7 +108,57 @@ describe("labelForActivityState — TOOL_RUNNING transcript enrichment", () => {
     expect(labelForActivityState("TOOL_RUNNING", events)).toBe('Searching "registerTheme"');
   });
 
-  it("falls back to 'Running tool…' for unknown tools", () => {
+  it("labels Skill with 'Loading skill…' when no target", () => {
+    const events = [userMsg("2026-04-28T01:00:00Z"), toolUse("2026-04-28T01:00:01Z", "Skill", "tc1", "{}")];
+    expect(labelForActivityState("TOOL_RUNNING", events)).toBe("Loading skill…");
+  });
+
+  it("labels Skill with the skill name from the input", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z"),
+      toolUse("2026-04-28T01:00:01Z", "Skill", "tc1", '{"description":"run the autofix skill"}'),
+    ];
+    expect(labelForActivityState("TOOL_RUNNING", events)).toBe("Loading skill run the autofix skill");
+  });
+
+  it("labels WebSearch with the search query", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z"),
+      toolUse("2026-04-28T01:00:01Z", "WebSearch", "tc1", '{"pattern":"playwright MCP setup"}'),
+    ];
+    expect(labelForActivityState("TOOL_RUNNING", events)).toBe('Searching the web "playwright MCP setup"');
+  });
+
+  it("labels WebFetch with 'Fetching page…' when no target", () => {
+    const events = [userMsg("2026-04-28T01:00:00Z"), toolUse("2026-04-28T01:00:01Z", "WebFetch", "tc1", "{}")];
+    expect(labelForActivityState("TOOL_RUNNING", events)).toBe("Fetching page…");
+  });
+
+  it("labels MCP tools by parsing the tool name", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z"),
+      toolUse("2026-04-28T01:00:01Z", "mcp__plugin_playwright_playwright__browser_click", "tc1", "{}"),
+    ];
+    expect(labelForActivityState("TOOL_RUNNING", events)).toBe("Running browser click");
+  });
+
+  it("labels MCP tools with simple namespace", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z"),
+      toolUse("2026-04-28T01:00:01Z", "mcp__sculptor__ask_user_question", "tc1", "{}"),
+    ];
+    expect(labelForActivityState("TOOL_RUNNING", events)).toBe("Running ask user question");
+  });
+
+  it("falls back to target from input params for unknown non-MCP tools", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z"),
+      toolUse("2026-04-28T01:00:01Z", "SomeNewTool", "tc1", '{"description":"doing something useful"}'),
+    ];
+    expect(labelForActivityState("TOOL_RUNNING", events)).toBe("Running doing something useful");
+  });
+
+  it("falls back to 'Running tool…' for unknown tools with no parseable input", () => {
     const events = [userMsg("2026-04-28T01:00:00Z"), toolUse("2026-04-28T01:00:01Z", "SomeNewTool", "tc1", "{}")];
     expect(labelForActivityState("TOOL_RUNNING", events)).toBe("Running tool…");
   });
