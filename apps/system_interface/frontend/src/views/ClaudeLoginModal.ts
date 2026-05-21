@@ -35,7 +35,6 @@ interface OAuthStartResponse {
   oauth_url: string;
 }
 
-type Provider = "claudeai" | "console" | "api_key";
 type Mode = "select_provider" | "api_key_form" | "awaiting_oauth_code" | "verifying" | "success" | "error";
 
 export interface ClaudeLoginModalAttrs {
@@ -134,28 +133,66 @@ function closeIcon(): m.Vnode {
   );
 }
 
-function copyIcon(): m.Vnode {
+// The official Claude "burst" symbol. Source: Wikimedia Commons
+// `File:Claude_AI_symbol.svg`, released under CC0 1.0 (public domain).
+// Used to mark the Claude subscription as the recommended sign-in path.
+function claudeLogoIcon(): m.Vnode {
+  return m(
+    "svg.claude-login-logo",
+    { viewBox: "0 0 100 100", "aria-hidden": "true" },
+    m("path", {
+      d: "m19.6 66.5 19.7-11 .3-1-.3-.5h-1l-3.3-.2-11.2-.3L14 53l-9.5-.5-2.4-.5L0 49l.2-1.5 2-1.3 2.9.2 6.3.5 9.5.6 6.9.4L38 49.1h1.6l.2-.7-.5-.4-.4-.4L29 41l-10.6-7-5.6-4.1-3-2-1.5-2-.6-4.2 2.7-3 3.7.3.9.2 3.7 2.9 8 6.1L37 36l1.5 1.2.6-.4.1-.3-.7-1.1L33 25l-6-10.4-2.7-4.3-.7-2.6c-.3-1-.4-2-.4-3l3-4.2L28 0l4.2.6L33.8 2l2.6 6 4.1 9.3L47 29.9l2 3.8 1 3.4.3 1h.7v-.5l.5-7.2 1-8.7 1-11.2.3-3.2 1.6-3.8 3-2L61 2.6l2 2.9-.3 1.8-1.1 7.7L59 27.1l-1.5 8.2h.9l1-1.1 4.1-5.4 6.9-8.6 3-3.5L77 13l2.3-1.8h4.3l3.1 4.7-1.4 4.9-4.4 5.6-3.7 4.7-5.3 7.1-3.2 5.7.3.4h.7l12-2.6 6.4-1.1 7.6-1.3 3.5 1.6.4 1.6-1.4 3.4-8.2 2-9.6 2-14.3 3.3-.2.1.2.3 6.4.6 2.8.2h6.8l12.6 1 3.3 2 1.9 2.7-.3 2-5.1 2.6-6.8-1.6-16-3.8-5.4-1.3h-.8v.4l4.6 4.5 8.3 7.5L89 80.1l.5 2.4-1.3 2-1.4-.2-9.2-7-3.6-3-8-6.8h-.5v.7l1.8 2.7 9.8 14.7.5 4.5-.7 1.4-2.6 1-2.7-.6-5.8-8-6-9-4.7-8.2-.5.4-2.9 30.2-1.3 1.5-3 1.2-2.5-2-1.4-3 1.4-6.2 1.6-8 1.3-6.4 1.2-7.9.7-2.6v-.2H49L43 72l-9 12.3-7.2 7.6-1.7.7-3-1.5.3-2.8L24 86l10-12.8 6-7.9 4-4.6-.1-.5h-.3L17.2 77.4l-4.7.6-2-2 .2-3 1-1 8-5.5Z",
+    }),
+  );
+}
+
+function caretIcon(): m.Vnode {
   return m(
     "svg",
     {
-      width: 13,
-      height: 13,
+      width: 14,
+      height: 14,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      "aria-hidden": "true",
+    },
+    m("path", {
+      d: "M6 9l6 6 6-6",
+      stroke: "currentColor",
+      "stroke-width": 2,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+    }),
+  );
+}
+
+function externalLinkIcon(): m.Vnode {
+  return m(
+    "svg",
+    {
+      width: 15,
+      height: 15,
       viewBox: "0 0 24 24",
       fill: "none",
       "aria-hidden": "true",
     },
     [
-      m("rect", {
-        x: 9,
-        y: 9,
-        width: 11,
-        height: 11,
-        rx: 2,
+      m("path", {
+        d: "M14 4h6v6",
         stroke: "currentColor",
         "stroke-width": 2,
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
       }),
       m("path", {
-        d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1",
+        d: "M20 4l-9 9",
+        stroke: "currentColor",
+        "stroke-width": 2,
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round",
+      }),
+      m("path", {
+        d: "M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6",
         stroke: "currentColor",
         "stroke-width": 2,
         "stroke-linecap": "round",
@@ -184,6 +221,10 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   let verifyingDetail: string | null = null;
   let successStatus: ClaudeAuthStatus | null = null;
   let attrsRef: ClaudeLoginModalAttrs | null = null;
+  // Whether the "Other ways to sign in" section on the provider-selection
+  // screen is expanded. Collapsed by default so the Claude subscription
+  // path -- the option most users want -- carries the visual weight.
+  let alternativesExpanded = false;
 
   function clearError(): void {
     errorMessage = null;
@@ -347,56 +388,83 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
 
   // ----- Renderers -----
 
+  // The provider-selection screen leads with the Claude subscription as the
+  // recommended default -- a logo, headline, and full-width primary button --
+  // and tucks the Anthropic Console and API-key paths behind a collapsed
+  // "Other ways to sign in" disclosure so they don't compete for attention.
   function renderProviderSelection(): m.Vnode {
-    const providers: Array<{
-      id: Provider;
-      label: string;
-      description: string;
-    }> = [
-      {
-        id: "claudeai",
-        label: "Claude subscription",
-        description: "Sign in with your Claude.ai account. Uses your Pro / Max plan quota.",
-      },
-      {
-        id: "console",
-        label: "Anthropic Console",
-        description: "Sign in with an API-billing account from console.anthropic.com.",
-      },
-      {
-        id: "api_key",
-        label: "Use an API key",
-        description: "Paste a raw sk-ant-... key. Requires restarting every running claude.",
-      },
-    ];
-    return m("div.claude-login-providers", [
-      m("p.claude-login-intro", "Pick how you'd like to authenticate."),
-      ...providers.map((p) =>
+    return m("div.claude-login-select", [
+      m("div.claude-login-primary", [
+        claudeLogoIcon(),
+        m("h3.claude-login-primary-headline", "Sign in with your Claude subscription"),
         m(
-          "button.claude-login-provider",
+          "p.claude-login-primary-sub",
+          "Connect your Claude.ai account to use your Pro or Max plan quota in this mind.",
+        ),
+        m(
+          "button.claude-login-button.claude-login-button--primary.claude-login-button--block",
+          { type: "button", onclick: () => void startOAuth("claudeai") },
+          "Continue with Claude subscription",
+        ),
+      ]),
+      m("div.claude-login-alts", [
+        m(
+          "button.claude-login-alts-toggle",
           {
             type: "button",
+            "aria-expanded": String(alternativesExpanded),
             onclick: () => {
-              if (p.id === "api_key") {
-                mode = "api_key_form";
-                m.redraw();
-              } else {
-                void startOAuth(p.id);
-              }
+              alternativesExpanded = !alternativesExpanded;
+              m.redraw();
             },
           },
-          [m("div.claude-login-provider-label", p.label), m("div.claude-login-provider-description", p.description)],
+          [
+            m("span", "Other ways to sign in"),
+            m(
+              `span.claude-login-alts-caret${alternativesExpanded ? ".claude-login-alts-caret--open" : ""}`,
+              caretIcon(),
+            ),
+          ],
         ),
-      ),
+        alternativesExpanded
+          ? m("div.claude-login-alts-list", [
+              m("button.claude-login-alt", { type: "button", onclick: () => void startOAuth("console") }, [
+                m("span.claude-login-alt-text", [
+                  m("span.claude-login-alt-name", "Anthropic Console"),
+                  m("span.claude-login-alt-desc", "Sign in with an API-billing account from console.anthropic.com."),
+                ]),
+                m("span.claude-login-alt-go", "Use this"),
+              ]),
+              m(
+                "button.claude-login-alt",
+                {
+                  type: "button",
+                  onclick: () => {
+                    mode = "api_key_form";
+                    m.redraw();
+                  },
+                },
+                [
+                  m("span.claude-login-alt-text", [
+                    m("span.claude-login-alt-name", "Use an API key"),
+                    m("span.claude-login-alt-desc", "Paste a raw sk-ant-... key. Restarts every running claude."),
+                  ]),
+                  m("span.claude-login-alt-go", "Use this"),
+                ],
+              ),
+            ])
+          : null,
+      ]),
     ]);
   }
 
   function renderApiKeyForm(): m.Vnode[] {
     return [
+      m("p.claude-login-lead", "Paste an Anthropic API key. It's saved to this mind's host env file."),
       m("div.claude-login-field", [
         m("label.claude-login-step-label", { for: "claude-login-api-key-input" }, [
           m("span.claude-login-step-num", "1"),
-          "Paste your Anthropic API key",
+          "Your Anthropic API key",
         ]),
         m("div.claude-login-input-wrap", [
           m("input.claude-login-input.claude-login-input--mono.claude-login-input--with-action", {
@@ -431,7 +499,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
         ]),
         m(
           "p.claude-login-helper",
-          "Saved to the mind's host env file. Every running claude process is restarted so the new key takes effect.",
+          "Saving restarts every running claude agent so the new key takes effect. In-progress runs resume automatically.",
         ),
       ]),
     ];
@@ -439,38 +507,37 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
 
   function renderOAuthCodeEntry(): m.Vnode[] {
     return [
+      m("p.claude-login-lead", "Approve access in your browser, then paste the code Claude gives you back here."),
       m("div.claude-login-step", [
-        m("div.claude-login-step-label", [
-          m("span.claude-login-step-num", "1"),
-          "Open this URL in your browser and sign in",
-        ]),
-        m("div.claude-login-url-box", [
+        m("div.claude-login-step-label", [m("span.claude-login-step-num", "1"), "Open the sign-in page"]),
+        m(
+          "a.claude-login-button.claude-login-button--primary.claude-login-button--block.claude-login-button--link",
+          {
+            href: oauthUrl,
+            target: "_blank",
+            rel: "noopener noreferrer",
+          },
+          [m("span", "Open sign-in page"), externalLinkIcon()],
+        ),
+        m("p.claude-login-copylink", [
+          "Didn't open? ",
           m(
-            "a.claude-login-url",
-            {
-              href: oauthUrl,
-              target: "_blank",
-              rel: "noopener noreferrer",
-            },
-            oauthUrl,
-          ),
-          m(
-            "button.claude-login-url-action",
+            "button.claude-login-copylink-action",
             {
               type: "button",
               onclick: () => {
                 void copyOAuthUrl();
               },
-              "aria-label": "Copy URL to clipboard",
             },
-            [copyIcon(), urlCopied ? "Copied" : "Copy"],
+            urlCopied ? "Link copied" : "Copy the link",
           ),
+          urlCopied ? "" : " and paste it into your browser.",
         ]),
       ]),
       m("div.claude-login-step", [
         m("label.claude-login-step-label", { for: "claude-login-code-input" }, [
           m("span.claude-login-step-num", "2"),
-          "Paste the code shown after sign-in",
+          "Paste your code",
         ]),
         m("input.claude-login-input.claude-login-input--mono", {
           id: "claude-login-code-input",
@@ -489,6 +556,10 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
             }
           },
         }),
+        m(
+          "p.claude-login-helper",
+          "Claude shows a CODE#STATE string after you approve. Paste the whole thing, including the part after the #.",
+        ),
       ]),
     ];
   }
@@ -584,7 +655,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
               void submitApiKey();
             },
           },
-          "Save and restart",
+          "Save & restart agents",
         ),
       ]);
     }
@@ -604,7 +675,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
             void submitOAuthCode();
           },
         },
-        "Verify",
+        "Verify & finish",
       ),
     ]);
   }

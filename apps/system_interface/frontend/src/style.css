@@ -1552,67 +1552,149 @@ body {
   justify-content: space-between;
 }
 
-.claude-login-intro {
+/* One-line intro shown above a form's inputs */
+.claude-login-lead {
   color: var(--color-text-secondary);
-  margin: 0 0 14px;
+  margin: 0 0 18px;
   font-size: 0.875rem;
   line-height: 1.5;
 }
 
-/* Provider cards */
-.claude-login-providers {
+/* Provider selection: prominent subscription block + collapsed alternatives */
+.claude-login-select {
+  margin-bottom: 8px;
+}
+
+.claude-login-primary {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  text-align: center;
+  padding: 4px 4px 2px;
+}
+
+.claude-login-logo {
+  width: 46px;
+  height: 46px;
+  fill: hsl(14.8, 63.1%, 59.6%);
   margin-bottom: 12px;
 }
 
-.claude-login-provider {
+.claude-login-primary-headline {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0 0 4px;
+  letter-spacing: -0.005em;
+}
+
+.claude-login-primary-sub {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin: 0 auto 16px;
+  max-width: 320px;
+}
+
+/* "Other ways to sign in" disclosure */
+.claude-login-alts {
+  margin-top: 14px;
+  border-top: 1px solid var(--color-border-faint);
+  padding-top: 12px;
+}
+
+.claude-login-alts-toggle {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  text-align: left;
-  padding: 12px 14px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 auto;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
   cursor: pointer;
-  transition:
-    border-color 100ms ease,
-    background 100ms ease,
-    transform 80ms ease;
-  position: relative;
   font: inherit;
-  color: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
 }
 
-.claude-login-provider:hover {
-  border-color: var(--color-accent);
-  background: var(--color-accent-light);
+.claude-login-alts-toggle:hover {
+  color: var(--color-text-primary);
 }
 
-.claude-login-provider:active {
-  transform: scale(0.995);
-}
-
-.claude-login-provider:focus-visible {
+.claude-login-alts-toggle:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
-.claude-login-provider-label {
-  font-size: 0.9375rem;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.claude-login-alts-caret {
+  display: inline-flex;
+  transition: transform 120ms ease;
 }
 
-.claude-login-provider-description {
-  font-size: 0.8125rem;
+.claude-login-alts-caret--open {
+  transform: rotate(180deg);
+}
+
+.claude-login-alts-list {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+}
+
+.claude-login-alt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  width: 100%;
+  padding: 9px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: background 100ms ease;
+}
+
+.claude-login-alt:hover {
+  background: var(--color-bg-hover);
+}
+
+.claude-login-alt:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.claude-login-alt-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.claude-login-alt-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.claude-login-alt-desc {
+  font-size: 0.78rem;
   color: var(--color-text-secondary);
   line-height: 1.4;
+}
+
+.claude-login-alt-go {
+  flex: none;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-accent);
+  white-space: nowrap;
 }
 
 /* Numbered steps (OAuth flow) */
@@ -1647,66 +1729,35 @@ body {
   font-weight: 600;
 }
 
-/* URL display */
-.claude-login-url-box {
-  display: flex;
-  align-items: stretch;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--color-bg);
+/* "Copy the link" fallback under the Open-sign-in-page button */
+.claude-login-copylink {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin: 9px 0 0;
 }
 
-.claude-login-url {
-  flex: 1 1 auto;
-  padding: 10px 12px;
-  font-size: 0.8125rem;
-  line-height: 1.5;
+.claude-login-copylink-action {
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
   color: var(--color-accent);
-  word-break: break-all;
-  overflow-wrap: anywhere;
-  max-height: 88px;
-  overflow-y: auto;
   background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
-  min-width: 0;
 }
 
-.claude-login-url:hover {
-  text-decoration: underline;
-  filter: brightness(1.1);
+.claude-login-copylink-action:hover {
+  color: var(--color-accent-hover);
 }
 
-.claude-login-url:focus-visible {
+.claude-login-copylink-action:focus-visible {
   outline: 2px solid var(--color-accent);
-  outline-offset: -2px;
-}
-
-.claude-login-url-action {
-  flex: none;
-  padding: 0 14px;
-  font-size: 0.8125rem;
-  background: var(--color-surface);
-  border: none;
-  border-left: 1px solid var(--color-border);
-  cursor: pointer;
-  color: var(--color-accent);
-  font-weight: 500;
-  transition: background 80ms ease;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.claude-login-url-action:hover {
-  background: var(--color-accent-light);
-}
-
-.claude-login-url-action:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: -2px;
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 /* Inputs */
@@ -1820,6 +1871,22 @@ body {
 .claude-login-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Full-width button (subscription CTA, "Open sign-in page") */
+.claude-login-button--block {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  padding: 10px 16px;
+}
+
+/* An <a> styled as a button -- strip link decoration */
+.claude-login-button--link {
+  text-decoration: none;
+  box-sizing: border-box;
 }
 
 /* Inline error callout */
