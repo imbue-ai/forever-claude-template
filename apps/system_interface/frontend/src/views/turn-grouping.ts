@@ -14,7 +14,12 @@
  *      status wins; closed > in_progress > open). Track each transition
  *      timestamp (created_at / started_at / closed_at).
  *   2. Each task is "owned" by the turn whose window contains its
- *      created_at. Tasks that are still open at the END of their owning
+ *      first observed event timestamp (falling back to created_at when
+ *      the two coincide -- i.e. the agent created the ticket itself).
+ *      Using first_observed_at instead of created_at ensures that a
+ *      ticket picked up from another agent lands in the picker's turn,
+ *      not the originator's creation turn. Tasks that are still open
+ *      at the END of their owning
  *      turn appear ALSO in every subsequent turn as a carryover entry,
  *      up to and including the turn during which they get closed. The
  *      owning turn renders the task in its state-as-of-turn-end
