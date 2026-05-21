@@ -1,6 +1,9 @@
 """Per-agent activity state surfaced on the chat panel.
 
-The state is derived from two inputs:
+The state is derived from three inputs:
+- the agent's mngr lifecycle state (RUNNING, STOPPED, etc.) -- a non-running
+  agent is always IDLE regardless of the other signals, which prevents a
+  STOPPED agent from appearing as "Thinking..." due to stale transcript data
 - the ``permissions_waiting`` marker file written by the Claude readiness hooks
   (``$MNGR_AGENT_STATE_DIR/permissions_waiting``), which is the only state
   signal not represented in the session transcript
