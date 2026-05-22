@@ -24,8 +24,8 @@ _AGENT_ID_PATTERN = re.compile(r"agentId:\s*(\S+)")
 # synthetic turn-pair to close the dangling turn: an ``isMeta`` user message
 # with exactly this text, answered by a synthetic-model assistant message (see
 # ``_SYNTHETIC_MODEL``). This pair is inert -- Claude Code's own UI hides both,
-# and the agent never acts on it -- so the chat transcript view hides it too,
-# or the pair surfaces as a spurious exchange the user never had.
+# and the agent never acts on it -- so the chat transcript view hides it too;
+# otherwise the pair would surface as a spurious exchange the user never had.
 _RESUME_CONTINUATION_TEXT = "Continue from where you left off."
 
 # Model value Claude Code stamps on assistant messages the framework generates
