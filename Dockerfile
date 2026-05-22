@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unison \
     wget \
     xxd \
+    xmlstarlet \
     && rm -rf /var/lib/apt/lists/*
 
 # Install ttyd binary from GitHub releases (not available via apt)
