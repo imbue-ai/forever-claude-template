@@ -64,8 +64,8 @@ export function AgentTerminalPanel(): m.Component<AgentTerminalPanelAttrs> {
           m(
             "div",
             {
-              class: "agent-terminal-start-error",
-              style: "color: #b91c1c; font-size: 0.85em; padding: 4px 8px; flex: 0 0 auto;",
+              class: "agent-terminal-start-error text-red-500",
+              style: "font-size: 0.85em; padding: 4px 8px; flex: 0 0 auto;",
             },
             `Could not start agent: ${startError}`,
           ),
