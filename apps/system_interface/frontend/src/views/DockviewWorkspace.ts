@@ -838,17 +838,15 @@ function initializeDockview(parentElement: HTMLElement): void {
         case "iframe": {
           // Agent-terminal tabs route to AgentTerminalPanel, which starts the
           // agent before attaching its terminal session. Newer tabs carry the
-          // explicit isAgentTerminal flag; for tabs from layouts saved before
-          // that flag existed, fall back to the agentId -- only agent
-          // terminals point at a non-primary agent (every other iframe tab
-          // uses the primary agent id).
-          const iframeAgentId = params?.agentId ?? "";
-          const isAgentTerminal =
-            params?.isAgentTerminal === true || (iframeAgentId !== "" && iframeAgentId !== getPrimaryAgentId());
+          // explicit isAgentTerminal flag; tabs from layouts saved before that
+          // flag existed are recognized by the ttyd agent-dispatch key
+          // (`arg=agent`) in their URL, which only agent-terminal tabs use.
+          const iframeUrl = params?.url ?? "";
+          const isAgentTerminal = params?.isAgentTerminal === true || iframeUrl.includes("arg=agent");
           if (isAgentTerminal) {
             return createMithrilRenderer(AgentTerminalPanel, {
-              agentId: iframeAgentId,
-              url: params?.url ?? "",
+              agentId: params?.agentId ?? "",
+              url: iframeUrl,
               title: params?.title ?? "Tab",
             });
           }

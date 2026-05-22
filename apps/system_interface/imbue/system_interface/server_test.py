@@ -411,14 +411,14 @@ def test_start_unknown_agent_returns_404(client: TestClient) -> None:
 
 
 def test_start_running_agent_skips_subprocess(client: TestClient, app: FastAPI) -> None:
-    """A running agent is a no-op: the `mngr start` subprocess is not run."""
+    """A non-STOPPED agent is a no-op: the `mngr start` subprocess is not run."""
     _register_agent(app, "agent-running", "running-agent", "RUNNING")
 
     with patch("imbue.system_interface.server.run_local_command_modern_version") as mock_run:
         response = client.post("/api/agents/agent-running/start")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "already-running"
+    assert response.json()["status"] == "skipped"
     mock_run.assert_not_called()
 
 

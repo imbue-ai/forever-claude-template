@@ -26,6 +26,7 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
@@ -64,11 +65,6 @@ _FRONTEND_NOT_BUILT_HTML = (
 
 # Default number of events for tail-first loading
 _DEFAULT_TAIL_COUNT = 50
-
-# Lifecycle states in which an agent is already up: its tmux session exists
-# and its terminal is attachable, so the start endpoint can skip the `mngr
-# start` subprocess. Mirrors the "running" set in mngr's ensure_agent_started.
-_RUNNING_AGENT_STATES = frozenset({"RUNNING", "WAITING", "REPLACED", "RUNNING_UNKNOWN_AGENT_TYPE"})
 
 
 @asynccontextmanager
@@ -732,10 +728,10 @@ async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
     tab -- both for the chat-page "Open agent terminal" link and for terminal
     tabs restored from a saved dockview layout.
 
-    Agents that are already running are a fast no-op: the AgentManager's
-    cached state is checked first so the `mngr start` subprocess is skipped.
-    Even when it does run, `mngr start` only acts on STOPPED agents, so this
-    endpoint is safe to call unconditionally.
+    `mngr start` only acts on STOPPED agents, so for any other state there is
+    nothing to do (the agent is already up, or DONE and not startable) and
+    the subprocess is skipped. The endpoint is therefore safe to call
+    unconditionally.
     """
     agent_manager: AgentManager = request.app.state.agent_manager
     agent_state = agent_manager.get_agent_by_id(agent_id)
@@ -743,8 +739,11 @@ async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
         error = ErrorResponse(detail=f"Agent '{agent_id}' not found")
         return JSONResponse(content=error.model_dump(), status_code=404)
 
-    if agent_state.state in _RUNNING_AGENT_STATES:
-        return JSONResponse(content=StartAgentResponse(status="already-running").model_dump())
+    # Comparing against AgentLifecycleState keeps this in lockstep with mngr:
+    # a renamed lifecycle state fails the import rather than silently leaving
+    # a hand-copied string check stale.
+    if agent_state.state != AgentLifecycleState.STOPPED.value:
+        return JSONResponse(content=StartAgentResponse(status="skipped").model_dump())
 
     agent_name = agent_state.name
 
