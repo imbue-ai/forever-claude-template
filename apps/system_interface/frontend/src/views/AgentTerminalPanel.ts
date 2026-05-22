@@ -27,6 +27,15 @@ export function AgentTerminalPanel(): m.Component<AgentTerminalPanelAttrs> {
   let startError: string | null = null;
 
   async function ensureAgentStarted(agentId: string): Promise<void> {
+    // A restored layout tab can be routed here via the `arg=agent` URL
+    // heuristic without carrying an agentId. There is no agent to start in
+    // that case, and POSTing to `/api/agents//start` would just 404; skip
+    // straight to mounting the iframe with no error banner.
+    if (agentId === "") {
+      starting = false;
+      m.redraw();
+      return;
+    }
     try {
       const response = await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/start`), {
         method: "POST",
