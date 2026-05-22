@@ -410,16 +410,31 @@ def test_start_unknown_agent_returns_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_start_running_agent_skips_subprocess(client: TestClient, app: FastAPI) -> None:
-    """A non-STOPPED agent is a no-op: the `mngr start` subprocess is not run."""
+def test_start_invokes_mngr_start_regardless_of_cached_state(client: TestClient, app: FastAPI) -> None:
+    """The endpoint runs `mngr start` even for an agent cached as non-STOPPED.
+
+    The mngr observe discovery stream reports every agent as RUNNING
+    regardless of its real lifecycle state, so the endpoint cannot trust the
+    cached state to decide whether to start. `mngr start` is itself a no-op
+    for non-STOPPED agents, so it is run unconditionally.
+    """
     _register_agent(app, "agent-running", "running-agent", "RUNNING")
 
-    with patch("imbue.system_interface.server.run_local_command_modern_version") as mock_run:
+    finished = FinishedProcess(
+        returncode=0,
+        stdout="No stopped agents found to start",
+        stderr="",
+        command=("mngr", "start", "running-agent"),
+        is_output_already_logged=False,
+    )
+    with patch(
+        "imbue.system_interface.server.run_local_command_modern_version", return_value=finished
+    ) as mock_run:
         response = client.post("/api/agents/agent-running/start")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "skipped"
-    mock_run.assert_not_called()
+    assert response.json()["status"] == "ok"
+    assert mock_run.call_args.kwargs["command"] == ["mngr", "start", "running-agent"]
 
 
 def test_start_stopped_agent_invokes_mngr_start(client: TestClient, app: FastAPI) -> None:

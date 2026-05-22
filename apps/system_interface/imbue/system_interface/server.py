@@ -26,7 +26,6 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
@@ -728,22 +727,19 @@ async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
     tab -- both for the chat-page "Open agent terminal" link and for terminal
     tabs restored from a saved dockview layout.
 
-    `mngr start` only acts on STOPPED agents, so for any other state there is
-    nothing to do (the agent is already up, or DONE and not startable) and
-    the subprocess is skipped. The endpoint is therefore safe to call
-    unconditionally.
+    `mngr start` itself filters its targets to STOPPED agents, so it is a
+    clean no-op (exit 0) for an agent that is already up or is DONE. The
+    endpoint therefore runs it unconditionally rather than gating on the
+    agent's cached lifecycle state: that cached state is unreliable here
+    because the mngr observe discovery stream reports every agent as
+    RUNNING regardless of its real state, which would otherwise cause a
+    genuinely STOPPED agent's start to be skipped.
     """
     agent_manager: AgentManager = request.app.state.agent_manager
     agent_state = agent_manager.get_agent_by_id(agent_id)
     if agent_state is None:
         error = ErrorResponse(detail=f"Agent '{agent_id}' not found")
         return JSONResponse(content=error.model_dump(), status_code=404)
-
-    # Comparing against AgentLifecycleState keeps this in lockstep with mngr:
-    # a renamed lifecycle state fails the import rather than silently leaving
-    # a hand-copied string check stale.
-    if agent_state.state != AgentLifecycleState.STOPPED.value:
-        return JSONResponse(content=StartAgentResponse(status="skipped").model_dump())
 
     agent_name = agent_state.name
 
