@@ -68,9 +68,10 @@ interface PanelParams {
   // Drives both the WS-driven `refresh_service` broadcast match and the
   // presence of the per-tab Refresh button.
   serviceName?: string;
-  // True for iframe tabs that are an agent's terminal (set by
-  // openIframeTabForAgent). Routes the panel to AgentTerminalPanel, which
-  // ensures the agent is started before attaching its terminal session.
+  // True for iframe tabs that are an agent's terminal (set via the
+  // isAgentTerminal argument of openIframeTabForAgent). Routes the panel to
+  // AgentTerminalPanel, which ensures the agent is started before attaching
+  // its terminal session. Generic agent-owned iframes leave this undefined.
   isAgentTerminal?: boolean;
 }
 
@@ -505,7 +506,17 @@ function openIframeTab(url: string, title: string, panelType: PanelType = "ifram
   });
 }
 
-export function openIframeTabForAgent(agentId: string, url: string, title: string): void {
+// `isAgentTerminal` should be true only when the iframe is the agent's
+// terminal (so it routes to AgentTerminalPanel and the agent is started
+// before attaching). Generic iframe tabs opened for an agent (e.g. an LLM
+// `openTab` for an arbitrary web URL) must leave it false to avoid a
+// spurious agent-start POST and the terminal-startup UI.
+export function openIframeTabForAgent(
+  agentId: string,
+  url: string,
+  title: string,
+  isAgentTerminal = false,
+): void {
   if (!dockview) return;
   const existing = dockview.panels.find((p) => {
     const pp = panelParams.get(p.id);
@@ -518,7 +529,7 @@ export function openIframeTabForAgent(agentId: string, url: string, title: strin
     return;
   }
   const panelId = `iframe-agent-${agentId}-${Date.now()}`;
-  const params: PanelParams = { panelType: "iframe", agentId, url, title, isAgentTerminal: true };
+  const params: PanelParams = { panelType: "iframe", agentId, url, title, isAgentTerminal };
   panelParams.set(panelId, params);
   dockview.addPanel({
     id: panelId,
