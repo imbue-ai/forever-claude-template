@@ -125,17 +125,9 @@ class ClaudeOAuthSubmitCodeRequest(FrozenModel):
 
     session_id: str = Field(description="session_id returned by /start")
     code: str = Field(description="The CODE#STATE the user pasted from the browser")
-    chat_agent_name: str | None = Field(
-        default=None,
-        description="Name of the chat agent to check welcome-resend against after auth success",
-    )
 
 
 class ClaudeAuthApiKeyRequest(FrozenModel):
     """Request body for POST /api/claude-auth/submit-api-key."""
 
     api_key: SecretStr = Field(description="A raw `sk-ant-...` API key")
-    chat_agent_name: str | None = Field(
-        default=None,
-        description="Name of the chat agent to welcome-resend against after the restart",
-    )

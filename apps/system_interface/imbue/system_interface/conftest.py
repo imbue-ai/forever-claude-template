@@ -15,7 +15,6 @@ from playwright.sync_api import BrowserType
 from playwright.sync_api import Playwright
 from playwright.sync_api import sync_playwright
 
-from imbue.system_interface import claude_auth
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
@@ -266,24 +265,6 @@ def loguru_records() -> Iterator[list[str]]:
         yield messages
     finally:
         loguru_logger.remove(handler_id)
-
-
-@pytest.fixture(autouse=True)
-def reset_oauth_session() -> Iterator[None]:
-    """Clear any in-flight OAuth subprocess held in claude_auth module state.
-
-    `claude_auth` keeps the live pexpect spawn for the OAuth login flow
-    in module-level slots (`_current_oauth_record` /
-    `_current_oauth_process`) so the URL-parse and code-submit halves of
-    the flow can share a single subprocess. That same state survives
-    between tests in the same process, so any test that exercises the
-    OAuth path needs the slots cleared before AND after to avoid
-    cross-test contamination. Lives here (rather than in each test file)
-    per the project rule that all fixtures belong in conftest.py.
-    """
-    claude_auth.abort_oauth_login()
-    yield
-    claude_auth.abort_oauth_login()
 
 
 @pytest.fixture

@@ -11,9 +11,9 @@ Two sign-in paths:
    an `oauth/authorize` URL (`https://claude.com/cai/oauth/authorize?...`
    for `--claudeai` and `https://platform.claude.com/oauth/authorize?...`
    for `--console`) and waits for a `CODE#STATE` paste on stdin. The PTY
-   subprocess is held in module state between the `start_oauth_login` and
-   `submit_oauth_code` calls so the UI can collect the code from the user
-   in between.
+   subprocess is held on the `ClaudeAuthService` instance between the
+   `start_oauth_login` and `submit_oauth_code` calls so the UI can collect
+   the code from the user in between.
 
    The two providers store their credential differently, which dictates
    whether a restart is needed:
@@ -41,8 +41,9 @@ runs while every agent is stopped, so no still-running agent clobbers it
 from its stale in-memory copy.
 
 Dependencies that touch the outside world (subprocess invocation and
-pexpect-driven PTY spawning) are exposed as named callables on the module
-so tests can substitute deterministic fakes without `unittest.mock`.
+pexpect-driven PTY spawning) are injected into `ClaudeAuthService` at
+construction so tests can substitute deterministic fakes without
+`unittest.mock` or module-level monkeypatching.
 """
 
 from __future__ import annotations
@@ -62,11 +63,13 @@ from typing import Final
 import pexpect
 from loguru import logger as _loguru_logger
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.subprocess_utils import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import complete_onboarding
@@ -92,7 +95,7 @@ class ClaudeAuthError(RuntimeError):
 
 
 # Public type aliases for dependency injection. Tests pass deterministic
-# fakes; production code uses the module defaults.
+# fakes to `ClaudeAuthService`; production code uses the module defaults.
 CommandRunner = Callable[..., Any]
 PexpectSpawner = Callable[..., Any]
 
@@ -107,15 +110,6 @@ def _default_command_runner(
 
 def _default_pexpect_spawner(executable: str, args: list[str], timeout: float) -> Any:
     return pexpect.spawn(executable, args, timeout=timeout, encoding="utf-8")
-
-
-# Module-level injectable dependencies. Production callers use the
-# defaults; tests rebind these (claude_auth.command_runner = fake_runner)
-# rather than passing fakes through layered call sites or using
-# `unittest.mock`. Looking the values up at call time is intentional so
-# that rebinding after import takes effect immediately.
-command_runner: CommandRunner = _default_command_runner
-pexpect_spawner: PexpectSpawner = _default_pexpect_spawner
 
 
 class AuthStatus(FrozenModel):
@@ -178,49 +172,6 @@ def _parse_status_payload(payload: dict[str, object]) -> AuthStatus:
     )
 
 
-def get_auth_status(extra_env: Mapping[str, str] | None = None) -> AuthStatus:
-    """Invoke `claude auth status --json` and parse the result.
-
-    Returns `logged_in=False` if the `claude` binary is missing or doesn't
-    produce output, rather than raising, since the whole point of the
-    modal is to recover from broken auth state.
-
-    `extra_env` is overlaid on the current environment for the status
-    subprocess. The API-key path needs this: `submit_api_key` writes
-    `ANTHROPIC_API_KEY` to the host env *file*, but the long-lived
-    system-interface process that runs this check never received that
-    variable, so without overlaying the key here `claude auth status`
-    would report `loggedIn=false` for a perfectly valid key.
-    """
-    runner_env = {**os.environ, **extra_env} if extra_env is not None else None
-    try:
-        result = (
-            command_runner(
-                ["claude", "auth", "status", "--json"],
-                _CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS,
-                runner_env,
-            )
-            if runner_env is not None
-            else command_runner(
-                ["claude", "auth", "status", "--json"], _CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS
-            )
-        )
-    except ProcessSetupError as e:
-        logger.warning("claude auth status failed to launch: {}", e)
-        return AuthStatus(logged_in=False)
-
-    stdout = result.stdout.strip() if isinstance(result.stdout, str) else ""
-    if not stdout:
-        return AuthStatus(logged_in=False)
-    try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError as e:
-        raise ClaudeAuthError(f"claude auth status returned non-JSON output: {stdout!r}") from e
-    if not isinstance(payload, dict):
-        raise ClaudeAuthError(f"claude auth status returned non-object JSON: {payload!r}")
-    return _parse_status_payload(payload)
-
-
 def _format_env_file(env: dict[str, str]) -> str:
     """Render an env dict back into the host env file format (matches mngr's _format_env_file)."""
     lines: list[str] = []
@@ -254,42 +205,6 @@ def write_api_key_to_host_env(api_key: SecretStr, env_path_override: Path | None
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(_format_env_file(existing))
     return env_path
-
-
-def list_claude_agent_names() -> list[str]:
-    """Return the names of every `type: claude` agent in the local mind.
-
-    Uses `mngr list --format json` and filters to `type == "claude"`. This
-    excludes the `main`-type system-services agent, which has no
-    interactive claude process to restart.
-    """
-    result = command_runner(
-        ["mngr", "list", "--format", "json"], _MNGR_COMMAND_TIMEOUT_SECONDS
-    )
-    if result.returncode != 0:
-        raise ClaudeAuthError(
-            f"mngr list failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
-    stdout = result.stdout if isinstance(result.stdout, str) else ""
-    try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError as e:
-        raise ClaudeAuthError(f"mngr list returned non-JSON output: {stdout!r}") from e
-    if not isinstance(payload, dict):
-        raise ClaudeAuthError(f"mngr list returned non-object JSON: {payload!r}")
-    agents = payload.get("agents", [])
-    if not isinstance(agents, list):
-        raise ClaudeAuthError(f"mngr list 'agents' field is not a list: {agents!r}")
-    names: list[str] = []
-    for agent in agents:
-        if not isinstance(agent, dict):
-            continue
-        if agent.get("type") != "claude":
-            continue
-        name = agent.get("name")
-        if isinstance(name, str) and name:
-            names.append(name)
-    return names
 
 
 def _resolve_claude_config_path() -> Path:
@@ -347,75 +262,6 @@ def _prepare_claude_config_for_restart(api_key: SecretStr | None) -> None:
         _approve_api_key_in_claude_config(config_path, api_key)
 
 
-def restart_all_claude_agents(api_key: SecretStr | None = None) -> list[str]:
-    """Restart every `type: claude` agent via `mngr stop` then `mngr start`.
-
-    Stops every agent first, then prepares the shared Claude config (see
-    `_prepare_claude_config_for_restart`), then starts them again. The
-    stop-all/prepare/start-all ordering matters: editing `.claude.json`
-    while an agent is still running would be silently overwritten by that
-    agent's stale in-memory copy on its next write.
-
-    Agents are started with `--no-resume` so mngr does not deliver the
-    configured resume message (e.g. "Continue from where you left off")
-    after the restart -- an auth recovery is not a work interruption the
-    agent should pick back up from, and that message would otherwise
-    appear as a spurious turn in the chat.
-
-    `api_key`, when given, is additionally approved in the Claude config
-    so the API-key auth path's freshly-written key doesn't trip Claude's
-    custom-key challenge.
-
-    Returns the list of agent names that were restarted.
-    """
-    names = list_claude_agent_names()
-    for name in names:
-        logger.info("Stopping type:claude agent {} via mngr stop", name)
-        stop_result = command_runner(["mngr", "stop", name], _MNGR_COMMAND_TIMEOUT_SECONDS)
-        if stop_result.returncode != 0:
-            raise ClaudeAuthError(
-                f"mngr stop {name} failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
-            )
-    _prepare_claude_config_for_restart(api_key)
-    for name in names:
-        logger.info("Starting type:claude agent {} via mngr start --no-resume", name)
-        start_result = command_runner(
-            ["mngr", "start", "--no-resume", name], _MNGR_COMMAND_TIMEOUT_SECONDS
-        )
-        if start_result.returncode != 0:
-            raise ClaudeAuthError(
-                f"mngr start {name} failed (exit {start_result.returncode}): {start_result.stderr.strip()}"
-            )
-    return names
-
-
-def submit_api_key(api_key: SecretStr) -> AuthStatus:
-    """Write `ANTHROPIC_API_KEY` to host env then restart every claude agent.
-
-    All `type: claude` agents must be restarted: env vars are read at
-    process start, so already-running claudes won't pick up the new key
-    until their tmux sessions are torn down and respawned. The key is also
-    passed to the restart so it gets pre-approved in the Claude config.
-
-    The final status check overlays `ANTHROPIC_API_KEY` onto the
-    subprocess environment: the key was written to the host env *file*,
-    which the long-lived system-interface process never sourced, so a
-    plain `claude auth status` would report `loggedIn=false` for a valid
-    key and the modal would wrongly tell the user it was rejected.
-    """
-    write_api_key_to_host_env(api_key)
-    restart_all_claude_agents(api_key=api_key)
-    return get_auth_status(extra_env={_ANTHROPIC_API_KEY_ENV_VAR: api_key.get_secret_value()})
-
-
-# ---- OAuth PTY flow ----
-
-
-_oauth_lock = threading.Lock()
-_current_oauth_record: _OAuthSessionRecord | None = None
-_current_oauth_process: Any = None
-
-
 def _safe_terminate(process: Any) -> None:
     """Terminate a pexpect spawn without letting teardown errors propagate.
 
@@ -447,50 +293,6 @@ def _safe_close(process: Any) -> None:
         logger.warning("OAuth subprocess close raised: {}", e)
 
 
-def _spawn_oauth_and_parse_url(provider: OAuthProvider) -> tuple[Any, str]:
-    process = pexpect_spawner(
-        "claude",
-        ["auth", "login", f"--{provider.value}"],
-        _OAUTH_URL_WAIT_SECONDS,
-    )
-    match_index = process.expect([_OAUTH_URL_REGEX, pexpect.EOF, pexpect.TIMEOUT])
-    if match_index != 0:
-        _safe_terminate(process)
-        _safe_close(process)
-        if match_index == 1:
-            raise ClaudeAuthError("claude auth login exited before printing OAuth URL")
-        raise ClaudeAuthError("Timed out waiting for OAuth URL from claude auth login")
-    match = process.match
-    if match is None:
-        _safe_terminate(process)
-        _safe_close(process)
-        raise ClaudeAuthError("OAuth URL regex matched but pexpect.match is None (unexpected)")
-    return process, match.group(0)
-
-
-def start_oauth_login(provider: OAuthProvider) -> OAuthStartResult:
-    """Spawn `claude auth login --<provider>` and return the parsed OAuth URL.
-
-    Replaces any prior in-flight session: only one OAuth flow can be live
-    at a time per process, which matches the single-mind / single-user
-    deployment model.
-    """
-    global _current_oauth_record, _current_oauth_process
-    with _oauth_lock:
-        if _current_oauth_process is not None:
-            _safe_terminate(_current_oauth_process)
-            _safe_close(_current_oauth_process)
-            _current_oauth_record = None
-            _current_oauth_process = None
-        process, oauth_url = _spawn_oauth_and_parse_url(provider)
-        record = _OAuthSessionRecord(
-            session_id=uuid.uuid4().hex, provider=provider, oauth_url=oauth_url
-        )
-        _current_oauth_record = record
-        _current_oauth_process = process
-    return OAuthStartResult(session_id=record.session_id, oauth_url=record.oauth_url)
-
-
 def _drive_oauth_code(process: Any, code: str) -> None:
     process.timeout = _OAUTH_COMPLETE_WAIT_SECONDS
     try:
@@ -507,46 +309,254 @@ def _drive_oauth_code(process: Any, code: str) -> None:
         raise ClaudeAuthError("Timed out waiting for claude auth login to complete after code submit")
 
 
-def submit_oauth_code(session_id: str, code: str) -> AuthStatus:
-    """Send the user's pasted `CODE#STATE` to the live OAuth subprocess.
+class ClaudeAuthService(MutableModel):
+    """Stateful entry point for the in-mind Claude auth-recovery flows.
 
-    The Console (`--console`) provider writes its credential as
-    `primaryApiKey` inside the cached `.claude.json`, which an
-    already-running agent never re-reads -- so the console path restarts
-    every `type: claude` agent once the login completes. The subscription
-    (`--claudeai`) provider's credential is re-read live, so it skips the
-    restart.
+    Holds the injected `command_runner` / `pexpect_spawner` dependencies
+    and the in-flight OAuth subprocess. One instance is created per
+    application and stored on `app.state`; the OAuth subprocess held
+    between `start_oauth_login` and `submit_oauth_code` rides that
+    instance. Tests construct isolated instances with deterministic fakes.
     """
-    global _current_oauth_record, _current_oauth_process
-    with _oauth_lock:
-        record = _current_oauth_record
-        process = _current_oauth_process
-        if record is None or process is None or record.session_id != session_id:
-            raise ClaudeAuthError("No active OAuth session matches the provided session_id")
-        provider = record.provider
+
+    model_config = {"arbitrary_types_allowed": True, "extra": "forbid", "frozen": False}
+
+    command_runner: CommandRunner = _default_command_runner
+    pexpect_spawner: PexpectSpawner = _default_pexpect_spawner
+
+    # Only one OAuth flow can be live at a time per instance, which matches
+    # the single-mind / single-user deployment model. The lock and the live
+    # subprocess are private runtime state, not configuration data.
+    _oauth_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _current_oauth_record: _OAuthSessionRecord | None = PrivateAttr(default=None)
+    _current_oauth_process: Any = PrivateAttr(default=None)
+
+    def get_auth_status(self, extra_env: Mapping[str, str] | None = None) -> AuthStatus:
+        """Invoke `claude auth status --json` and parse the result.
+
+        Returns `logged_in=False` if the `claude` binary is missing or
+        doesn't produce output, rather than raising, since the whole point
+        of the modal is to recover from broken auth state.
+
+        `extra_env` is overlaid on the current environment for the status
+        subprocess. The API-key path needs this: `submit_api_key` writes
+        `ANTHROPIC_API_KEY` to the host env *file*, but the long-lived
+        system-interface process that runs this check never received that
+        variable, so without overlaying the key here `claude auth status`
+        would report `loggedIn=false` for a perfectly valid key.
+        """
+        runner_env = {**os.environ, **extra_env} if extra_env is not None else None
         try:
-            _drive_oauth_code(process, code)
-        finally:
-            # Terminate-then-close runs unconditionally so a timed-out
-            # `claude auth login` subprocess doesn't outlive the cleared
-            # module-state slot. _safe_terminate is a no-op when the
-            # process already reached EOF (the success path), so this is
-            # safe on both success and failure branches.
+            result = (
+                self.command_runner(
+                    ["claude", "auth", "status", "--json"],
+                    _CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS,
+                    runner_env,
+                )
+                if runner_env is not None
+                else self.command_runner(
+                    ["claude", "auth", "status", "--json"], _CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS
+                )
+            )
+        except ProcessSetupError as e:
+            logger.warning("claude auth status failed to launch: {}", e)
+            return AuthStatus(logged_in=False)
+
+        stdout = result.stdout.strip() if isinstance(result.stdout, str) else ""
+        if not stdout:
+            return AuthStatus(logged_in=False)
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            raise ClaudeAuthError(
+                f"claude auth status returned non-JSON output: {stdout!r}"
+            ) from e
+        if not isinstance(payload, dict):
+            raise ClaudeAuthError(f"claude auth status returned non-object JSON: {payload!r}")
+        return _parse_status_payload(payload)
+
+    def list_claude_agent_names(self) -> list[str]:
+        """Return the names of every `type: claude` agent in the local mind.
+
+        Uses `mngr list --format json` and filters to `type == "claude"`.
+        This excludes the `main`-type system-services agent, which has no
+        interactive claude process to restart.
+        """
+        result = self.command_runner(
+            ["mngr", "list", "--format", "json"], _MNGR_COMMAND_TIMEOUT_SECONDS
+        )
+        if result.returncode != 0:
+            raise ClaudeAuthError(
+                f"mngr list failed (exit {result.returncode}): {result.stderr.strip()}"
+            )
+        stdout = result.stdout if isinstance(result.stdout, str) else ""
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError as e:
+            raise ClaudeAuthError(f"mngr list returned non-JSON output: {stdout!r}") from e
+        if not isinstance(payload, dict):
+            raise ClaudeAuthError(f"mngr list returned non-object JSON: {payload!r}")
+        agents = payload.get("agents", [])
+        if not isinstance(agents, list):
+            raise ClaudeAuthError(f"mngr list 'agents' field is not a list: {agents!r}")
+        names: list[str] = []
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            if agent.get("type") != "claude":
+                continue
+            name = agent.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+        return names
+
+    def restart_all_claude_agents(self, api_key: SecretStr | None = None) -> list[str]:
+        """Restart every `type: claude` agent via `mngr stop` then `mngr start`.
+
+        Stops every agent first, then prepares the shared Claude config
+        (see `_prepare_claude_config_for_restart`), then starts them again.
+        The stop-all/prepare/start-all ordering matters: editing
+        `.claude.json` while an agent is still running would be silently
+        overwritten by that agent's stale in-memory copy on its next write.
+
+        Agents are started with `--no-resume` so mngr does not deliver the
+        configured resume message (e.g. "Continue from where you left
+        off") after the restart -- an auth recovery is not a work
+        interruption the agent should pick back up from, and that message
+        would otherwise appear as a spurious turn in the chat.
+
+        `api_key`, when given, is additionally approved in the Claude
+        config so the API-key auth path's freshly-written key doesn't trip
+        Claude's custom-key challenge.
+
+        Returns the list of agent names that were restarted.
+        """
+        names = self.list_claude_agent_names()
+        for name in names:
+            logger.info("Stopping type:claude agent {} via mngr stop", name)
+            stop_result = self.command_runner(
+                ["mngr", "stop", name], _MNGR_COMMAND_TIMEOUT_SECONDS
+            )
+            if stop_result.returncode != 0:
+                raise ClaudeAuthError(
+                    f"mngr stop {name} failed (exit {stop_result.returncode}): "
+                    f"{stop_result.stderr.strip()}"
+                )
+        _prepare_claude_config_for_restart(api_key)
+        for name in names:
+            logger.info("Starting type:claude agent {} via mngr start --no-resume", name)
+            start_result = self.command_runner(
+                ["mngr", "start", "--no-resume", name], _MNGR_COMMAND_TIMEOUT_SECONDS
+            )
+            if start_result.returncode != 0:
+                raise ClaudeAuthError(
+                    f"mngr start {name} failed (exit {start_result.returncode}): "
+                    f"{start_result.stderr.strip()}"
+                )
+        return names
+
+    def submit_api_key(self, api_key: SecretStr) -> AuthStatus:
+        """Write `ANTHROPIC_API_KEY` to host env then restart every claude agent.
+
+        All `type: claude` agents must be restarted: env vars are read at
+        process start, so already-running claudes won't pick up the new key
+        until their tmux sessions are torn down and respawned. The key is
+        also passed to the restart so it gets pre-approved in the Claude
+        config.
+
+        The final status check overlays `ANTHROPIC_API_KEY` onto the
+        subprocess environment: the key was written to the host env *file*,
+        which the long-lived system-interface process never sourced, so a
+        plain `claude auth status` would report `loggedIn=false` for a
+        valid key and the modal would wrongly tell the user it was
+        rejected.
+        """
+        write_api_key_to_host_env(api_key)
+        self.restart_all_claude_agents(api_key=api_key)
+        return self.get_auth_status(
+            extra_env={_ANTHROPIC_API_KEY_ENV_VAR: api_key.get_secret_value()}
+        )
+
+    def _spawn_oauth_and_parse_url(self, provider: OAuthProvider) -> tuple[Any, str]:
+        process = self.pexpect_spawner(
+            "claude",
+            ["auth", "login", f"--{provider.value}"],
+            _OAUTH_URL_WAIT_SECONDS,
+        )
+        match_index = process.expect([_OAUTH_URL_REGEX, pexpect.EOF, pexpect.TIMEOUT])
+        if match_index != 0:
             _safe_terminate(process)
             _safe_close(process)
-            _current_oauth_record = None
-            _current_oauth_process = None
-    if provider is OAuthProvider.CONSOLE:
-        restart_all_claude_agents()
-    return get_auth_status()
+            if match_index == 1:
+                raise ClaudeAuthError("claude auth login exited before printing OAuth URL")
+            raise ClaudeAuthError("Timed out waiting for OAuth URL from claude auth login")
+        match = process.match
+        if match is None:
+            _safe_terminate(process)
+            _safe_close(process)
+            raise ClaudeAuthError(
+                "OAuth URL regex matched but pexpect.match is None (unexpected)"
+            )
+        return process, match.group(0)
 
+    def start_oauth_login(self, provider: OAuthProvider) -> OAuthStartResult:
+        """Spawn `claude auth login --<provider>` and return the parsed OAuth URL.
 
-def abort_oauth_login() -> None:
-    """Drop any in-flight OAuth session (e.g. user closed the modal)."""
-    global _current_oauth_record, _current_oauth_process
-    with _oauth_lock:
-        if _current_oauth_process is not None:
-            _safe_terminate(_current_oauth_process)
-            _safe_close(_current_oauth_process)
-        _current_oauth_record = None
-        _current_oauth_process = None
+        Replaces any prior in-flight session: only one OAuth flow can be
+        live at a time per instance, which matches the single-mind /
+        single-user deployment model.
+        """
+        with self._oauth_lock:
+            if self._current_oauth_process is not None:
+                _safe_terminate(self._current_oauth_process)
+                _safe_close(self._current_oauth_process)
+                self._current_oauth_record = None
+                self._current_oauth_process = None
+            process, oauth_url = self._spawn_oauth_and_parse_url(provider)
+            record = _OAuthSessionRecord(
+                session_id=uuid.uuid4().hex, provider=provider, oauth_url=oauth_url
+            )
+            self._current_oauth_record = record
+            self._current_oauth_process = process
+        return OAuthStartResult(session_id=record.session_id, oauth_url=record.oauth_url)
+
+    def submit_oauth_code(self, session_id: str, code: str) -> AuthStatus:
+        """Send the user's pasted `CODE#STATE` to the live OAuth subprocess.
+
+        The Console (`--console`) provider writes its credential as
+        `primaryApiKey` inside the cached `.claude.json`, which an
+        already-running agent never re-reads -- so the console path
+        restarts every `type: claude` agent once the login completes. The
+        subscription (`--claudeai`) provider's credential is re-read live,
+        so it skips the restart.
+        """
+        with self._oauth_lock:
+            record = self._current_oauth_record
+            process = self._current_oauth_process
+            if record is None or process is None or record.session_id != session_id:
+                raise ClaudeAuthError("No active OAuth session matches the provided session_id")
+            provider = record.provider
+            try:
+                _drive_oauth_code(process, code)
+            finally:
+                # Terminate-then-close runs unconditionally so a timed-out
+                # `claude auth login` subprocess doesn't outlive the cleared
+                # instance-state slot. _safe_terminate is a no-op when the
+                # process already reached EOF (the success path), so this
+                # is safe on both success and failure branches.
+                _safe_terminate(process)
+                _safe_close(process)
+                self._current_oauth_record = None
+                self._current_oauth_process = None
+        if provider is OAuthProvider.CONSOLE:
+            self.restart_all_claude_agents()
+        return self.get_auth_status()
+
+    def abort_oauth_login(self) -> None:
+        """Drop any in-flight OAuth session (e.g. user closed the modal)."""
+        with self._oauth_lock:
+            if self._current_oauth_process is not None:
+                _safe_terminate(self._current_oauth_process)
+                _safe_close(self._current_oauth_process)
+            self._current_oauth_record = None
+            self._current_oauth_process = None

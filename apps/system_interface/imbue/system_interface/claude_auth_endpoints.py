@@ -4,6 +4,11 @@ Kept in a separate module from server.py so server.py doesn't grow with
 the modal-specific logic. The chokepoint `_on_auth_success` is where the
 paste and API-key paths converge so the welcome-resend check runs exactly
 once per successful login.
+
+The `ClaudeAuthService` (which holds the in-flight OAuth subprocess) and
+the `WelcomeResender` are created once in `create_application` and stored
+on `app.state`; each handler reads them from `request.app.state` so the
+OAuth subprocess survives between the `/start` and `/submit-code` calls.
 """
 
 from __future__ import annotations
@@ -15,13 +20,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from imbue.system_interface import claude_auth
-from imbue.system_interface import welcome_resend
 from imbue.system_interface.models import ClaudeAuthApiKeyRequest
 from imbue.system_interface.models import ClaudeAuthStatusResponse
 from imbue.system_interface.models import ClaudeOAuthStartRequest
 from imbue.system_interface.models import ClaudeOAuthStartResponse
 from imbue.system_interface.models import ClaudeOAuthSubmitCodeRequest
 from imbue.system_interface.models import ErrorResponse
+from imbue.system_interface.welcome_resend import WelcomeResender
 
 logger = _loguru_logger
 
@@ -38,23 +43,27 @@ def _error_response(detail: str, status_code: int = 400) -> JSONResponse:
     return JSONResponse(content=ErrorResponse(detail=detail).model_dump(), status_code=status_code)
 
 
-async def _on_auth_success(status: claude_auth.AuthStatus, chat_agent_name: str | None) -> None:
+async def _on_auth_success(
+    status: claude_auth.AuthStatus, welcome_resender: WelcomeResender
+) -> None:
     """Chokepoint for every auth-success path: run welcome-resend check.
 
-    `welcome_resend.check_and_resend_welcome` is itself failure-tolerant
-    (logs and returns False on internal errors), so we deliberately do
-    not wrap it in a broad try/except here. Anything it raises is a
-    structural bug that should propagate.
+    `WelcomeResender.check_and_resend_welcome` is itself failure-tolerant
+    (logs and returns False on internal errors, including an unresolved
+    target agent), so we deliberately do not wrap it in a broad
+    try/except here. Anything it raises is a structural bug that should
+    propagate.
     """
-    if not status.logged_in or not chat_agent_name:
+    if not status.logged_in:
         return
-    await run_in_threadpool(welcome_resend.check_and_resend_welcome, chat_agent_name)
+    await run_in_threadpool(welcome_resender.check_and_resend_welcome)
 
 
 async def get_status(request: Request) -> JSONResponse:
     """GET /api/claude-auth/status — current auth state."""
+    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
     try:
-        status = await run_in_threadpool(claude_auth.get_auth_status)
+        status = await run_in_threadpool(service.get_auth_status)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=500)
     return JSONResponse(content=_status_to_response(status).model_dump())
@@ -62,6 +71,7 @@ async def get_status(request: Request) -> JSONResponse:
 
 async def start_oauth(request: Request) -> JSONResponse:
     """POST /api/claude-auth/start — spawn `claude auth login --<provider>`."""
+    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
     try:
         body = ClaudeOAuthStartRequest.model_validate(await request.json())
     except (ValueError, TypeError) as e:
@@ -73,7 +83,7 @@ async def start_oauth(request: Request) -> JSONResponse:
             f"Unknown provider {body.provider!r}; must be 'claudeai' or 'console'"
         )
     try:
-        result = await run_in_threadpool(claude_auth.start_oauth_login, provider)
+        result = await run_in_threadpool(service.start_oauth_login, provider)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=500)
     return JSONResponse(
@@ -85,20 +95,24 @@ async def start_oauth(request: Request) -> JSONResponse:
 
 async def submit_oauth_code(request: Request) -> JSONResponse:
     """POST /api/claude-auth/submit-code — submit user's pasted CODE#STATE."""
+    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
+    welcome_resender: WelcomeResender = request.app.state.welcome_resender
     try:
         body = ClaudeOAuthSubmitCodeRequest.model_validate(await request.json())
     except (ValueError, TypeError) as e:
         return _error_response(f"Invalid request body: {e}")
     try:
-        status = await run_in_threadpool(claude_auth.submit_oauth_code, body.session_id, body.code)
+        status = await run_in_threadpool(service.submit_oauth_code, body.session_id, body.code)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=400)
-    await _on_auth_success(status, body.chat_agent_name)
+    await _on_auth_success(status, welcome_resender)
     return JSONResponse(content=_status_to_response(status).model_dump())
 
 
 async def submit_api_key(request: Request) -> JSONResponse:
     """POST /api/claude-auth/submit-api-key — persist key and restart claude agents."""
+    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
+    welcome_resender: WelcomeResender = request.app.state.welcome_resender
     try:
         body = ClaudeAuthApiKeyRequest.model_validate(await request.json())
     except (ValueError, TypeError) as e:
@@ -106,21 +120,27 @@ async def submit_api_key(request: Request) -> JSONResponse:
     if not body.api_key.get_secret_value().strip():
         return _error_response("api_key must be a non-empty string")
     try:
-        status = await run_in_threadpool(claude_auth.submit_api_key, body.api_key)
+        status = await run_in_threadpool(service.submit_api_key, body.api_key)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=500)
-    await _on_auth_success(status, body.chat_agent_name)
+    await _on_auth_success(status, welcome_resender)
     return JSONResponse(content=_status_to_response(status).model_dump())
 
 
 async def abort_oauth(request: Request) -> JSONResponse:
     """POST /api/claude-auth/abort — drop the in-flight OAuth subprocess."""
-    await run_in_threadpool(claude_auth.abort_oauth_login)
+    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
+    await run_in_threadpool(service.abort_oauth_login)
     return JSONResponse(content={"status": "ok"})
 
 
 def register_routes(application: FastAPI) -> None:
-    """Wire `/api/claude-auth/*` endpoints onto the FastAPI application."""
+    """Wire `/api/claude-auth/*` endpoints onto the FastAPI application.
+
+    The handlers read the `ClaudeAuthService` / `WelcomeResender` from
+    `app.state`; `create_application` is responsible for placing them
+    there before the app serves requests.
+    """
     application.add_api_route("/api/claude-auth/status", get_status, methods=["GET"])
     application.add_api_route("/api/claude-auth/start", start_oauth, methods=["POST"])
     application.add_api_route("/api/claude-auth/submit-code", submit_oauth_code, methods=["POST"])

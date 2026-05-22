@@ -1,7 +1,7 @@
 """Shared test fakes for the system_interface package.
 
-Houses deterministic stand-ins for outside-world dependencies that the
-`claude_auth` module exposes via injectable module-level callables
+Houses deterministic stand-ins for outside-world dependencies that
+`ClaudeAuthService` takes as constructor-injected callables
 (`command_runner`, `pexpect_spawner`). Both `claude_auth_test.py` and
 `claude_auth_endpoints_test.py` need the same fakes, so they live here
 rather than being copy-pasted into each test module.
