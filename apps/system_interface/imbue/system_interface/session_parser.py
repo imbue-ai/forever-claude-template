@@ -29,9 +29,17 @@ _AGENT_ID_PATTERN = re.compile(r"agentId:\s*(\S+)")
 _RESUME_CONTINUATION_TEXT = "Continue from where you left off."
 
 # Model value Claude Code stamps on assistant messages the framework generates
-# itself (e.g. the resume turn-pair's "No response requested." reply), as
-# opposed to real model output. These are bookkeeping, not real agent turns.
+# itself, as opposed to real model output. Note this model is NOT unique to the
+# resume turn-pair's reply: Claude Code also stamps it on API-error and auth
+# (e.g. "API Error: 529 Overloaded", "Please run /login") notices, which the
+# user does need to see. So the synthetic model alone is not enough to hide a
+# message -- the text must also match (see ``_is_resume_no_response_reply``).
 _SYNTHETIC_MODEL = "<synthetic>"
+
+# Exact text of the synthetic assistant message that answers the resume
+# continuation marker. The resume turn-pair is "Continue from where you left
+# off." -> "No response requested."; this is the reply half.
+_NO_RESPONSE_REQUESTED_TEXT = "No response requested."
 
 
 def _extract_text_content(content: str | list[dict[str, Any]] | Any) -> str:
@@ -84,15 +92,19 @@ def _is_resume_continuation_marker(raw: dict[str, Any]) -> bool:
     return text.strip() == _RESUME_CONTINUATION_TEXT
 
 
-def _is_synthetic_assistant_message(message: dict[str, Any]) -> bool:
-    """True if ``message`` is a framework-synthesized assistant message.
+def _is_resume_no_response_reply(message: dict[str, Any]) -> bool:
+    """True if ``message`` is the synthetic reply half of the resume turn-pair.
 
-    Such messages carry ``model == _SYNTHETIC_MODEL`` (e.g. the resume
-    turn-pair's "No response requested." reply). Keying on the model rather
-    than the text means a real agent turn that happens to say the same words
-    is still rendered. This is bookkeeping the chat transcript view must hide.
+    The reply is an assistant message that is BOTH stamped with the synthetic
+    model AND has exactly the no-response text. Both conditions are required:
+    the synthetic model alone also covers API-error and auth notices the user
+    must see, and the text alone could be a real agent turn that happens to say
+    those words. Only their conjunction is the inert bookkeeping reply, which
+    the chat transcript view hides to match Claude Code's own UI.
     """
-    return message.get("model") == _SYNTHETIC_MODEL
+    if message.get("model") != _SYNTHETIC_MODEL:
+        return False
+    return _extract_text_content(message.get("content")).strip() == _NO_RESPONSE_REQUESTED_TEXT
 
 
 def parse_session_lines(
@@ -167,7 +179,7 @@ def _parse_assistant_message(
     message: dict[str, Any] = raw.get("message", {})
 
     # Drop Claude Code's resume bookkeeping -- its own UI hides it, so do we.
-    if _is_synthetic_assistant_message(message):
+    if _is_resume_no_response_reply(message):
         return
 
     content_blocks: list[Any] = message.get("content", [])

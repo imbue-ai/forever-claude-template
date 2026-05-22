@@ -235,9 +235,9 @@ def test_resume_continuation_user_message_not_emitted() -> None:
 
 
 def test_synthetic_model_assistant_message_not_emitted() -> None:
-    """Framework-synthesized assistant messages (model "<synthetic>") -- such as
-    the resume pair's "No response requested." reply -- are bookkeeping, not
-    real agent turns, and must not surface as assistant_message events.
+    """The synthetic "No response requested." reply -- the answer half of the
+    resume turn-pair -- is bookkeeping, not a real agent turn, and must not
+    surface as an assistant_message event.
     """
     line = json.dumps(
         {
@@ -267,3 +267,29 @@ def test_resume_marker_filter_is_gated_and_does_not_over_hide() -> None:
     assert [e["type"] for e in events] == ["user_message", "assistant_message"]
     assert events[0]["content"] == "Continue from where you left off."
     assert events[1]["text"] == "No response requested."
+
+
+def test_synthetic_api_error_message_is_still_shown() -> None:
+    """Claude Code stamps the synthetic model on API-error and auth notices
+    too (e.g. "API Error: 529 Overloaded", "Please run /login"). Those tell the
+    user their turn failed and must stay visible -- only the exact
+    "No response requested." resume reply is hidden, not every synthetic message.
+    """
+    error_text = "API Error: 529 Overloaded. This is a server-side issue, usually temporary."
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "uuid": "uuid-e",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [{"type": "text", "text": error_text}],
+                "stop_reason": "stop_sequence",
+                "usage": {},
+            },
+        }
+    )
+    events = parse_session_lines([line])
+    assert [e["type"] for e in events] == ["assistant_message"]
+    assert events[0]["text"] == error_text
