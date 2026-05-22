@@ -18,6 +18,29 @@ _SOURCE = "claude/common_transcript"
 
 _AGENT_ID_PATTERN = re.compile(r"agentId:\s*(\S+)")
 
+# Claude Code's resume bookkeeping. Whenever ``claude --resume`` reloads a
+# session whose previous turn did not finish cleanly (the turn was interrupted,
+# or the process was stopped or crashed mid-turn), the framework injects a
+# synthetic turn-pair to close the dangling turn: an ``isMeta`` user message
+# with exactly this text, answered by a synthetic-model assistant message (see
+# ``_SYNTHETIC_MODEL``). This pair is inert -- Claude Code's own UI hides both,
+# and the agent never acts on it -- so the chat transcript view hides it too;
+# otherwise the pair would surface as a spurious exchange the user never had.
+_RESUME_CONTINUATION_TEXT = "Continue from where you left off."
+
+# Model value Claude Code stamps on assistant messages the framework generates
+# itself, as opposed to real model output. Note this model is NOT unique to the
+# resume turn-pair's reply: Claude Code also stamps it on API-error and auth
+# (e.g. "API Error: 529 Overloaded", "Please run /login") notices, which the
+# user does need to see. So the synthetic model alone is not enough to hide a
+# message -- the text must also match (see ``_is_resume_no_response_reply``).
+_SYNTHETIC_MODEL = "<synthetic>"
+
+# Exact text of the synthetic assistant message that answers the resume
+# continuation marker. The resume turn-pair is "Continue from where you left
+# off." -> "No response requested."; this is the reply half.
+_NO_RESPONSE_REQUESTED_TEXT = "No response requested."
+
 
 def _extract_text_content(content: str | list[dict[str, Any]] | Any) -> str:
     """Extract plain text from a message content field (string or list of blocks)."""
@@ -53,6 +76,35 @@ def _has_tool_results_only(content: str | list[Any] | Any) -> bool:
 def _make_event_id(uuid: str, suffix: str) -> str:
     """Derive a deterministic event_id from the source UUID and a suffix."""
     return f"{uuid}-{suffix}"
+
+
+def _is_resume_continuation_marker(raw: dict[str, Any]) -> bool:
+    """True if ``raw`` is Claude Code's synthetic resume-continuation user message.
+
+    The marker is an ``isMeta`` user message whose text is exactly the
+    resume-continuation sentinel (see ``_RESUME_CONTINUATION_TEXT``). Gating on
+    ``isMeta`` ensures a human who happens to type the same words is still
+    rendered. This is bookkeeping the chat transcript view must hide.
+    """
+    if not raw.get("isMeta"):
+        return False
+    text = _extract_text_content(raw.get("message", {}).get("content"))
+    return text.strip() == _RESUME_CONTINUATION_TEXT
+
+
+def _is_resume_no_response_reply(message: dict[str, Any]) -> bool:
+    """True if ``message`` is the synthetic reply half of the resume turn-pair.
+
+    The reply is an assistant message that is BOTH stamped with the synthetic
+    model AND has exactly the no-response text. Both conditions are required:
+    the synthetic model alone also covers API-error and auth notices the user
+    must see, and the text alone could be a real agent turn that happens to say
+    those words. Only their conjunction is the inert bookkeeping reply, which
+    the chat transcript view hides to match Claude Code's own UI.
+    """
+    if message.get("model") != _SYNTHETIC_MODEL:
+        return False
+    return _extract_text_content(message.get("content")).strip() == _NO_RESPONSE_REQUESTED_TEXT
 
 
 def parse_session_lines(
@@ -125,6 +177,11 @@ def _parse_assistant_message(
         return
 
     message: dict[str, Any] = raw.get("message", {})
+
+    # Drop Claude Code's resume bookkeeping -- its own UI hides it, so do we.
+    if _is_resume_no_response_reply(message):
+        return
+
     content_blocks: list[Any] = message.get("content", [])
     model: str = message.get("model", "unknown")
     stop_reason: str | None = message.get("stop_reason")
@@ -204,7 +261,8 @@ def _parse_user_message(
         event_id = _make_event_id(uuid, "user")
         if event_id not in existing_event_ids:
             text = _extract_text_content(content)
-            if text:
+            # Drop Claude Code's resume bookkeeping -- its own UI hides it, so do we.
+            if text and not _is_resume_continuation_marker(raw):
                 event: dict[str, Any] = {
                     "timestamp": timestamp,
                     "type": "user_message",
