@@ -13,25 +13,24 @@ Use this skill when the user asks you to work with files located directly on the
 2. **Submit a permission request to the user** by calling `latchkey curl -XPOST http://latchkey-self.invalid/permission-requests` when the curl request comes back with the "request not permitted by the user" message. See the "Ask for user permission" example below.
 3. **Stop working** in case of upstream connection failures. Those are most likely caused by the user closing their locally running Minds app. Restarting the Minds app should usually help.
 
-The base URL is `http://latchkey-self.invalid/minds-api-proxy/api/v1/files`. Only the user's home directory and the user's system temp directory are accessible. Use the `$MINDS_API_KEY` env var for authentication (only when accessing the /minds-api-proxy endpoints).
-MOVE and COPY operations are not supported.
+The base URL is `http://latchkey-self.invalid/minds-api-proxy/api/v1/files`. Only the user's home directory and the user's system temp directory are accessible. MOVE and COPY operations are not supported.
 
 
 ## Examples
 
 ### Retrieving a file
 ```bash
-latchkey curl -H "Authorization: Bearer $MINDS_API_KEY" -O http://latchkey-self.invalid/minds-api-proxy/api/v1/files/home/hynek/project/notes.txt
+latchkey curl -O http://latchkey-self.invalid/minds-api-proxy/api/v1/files/home/hynek/project/notes.txt
 ```
 
 ### Writing a file
 ```bash
-latchkey curl -H "Authorization: Bearer $MINDS_API_KEY" -T localfile.txt http://latchkey-self.invalid/minds-api-proxy/api/v1/files/home/hynek/project/remotefile.txt
+latchkey curl -T localfile.txt http://latchkey-self.invalid/minds-api-proxy/api/v1/files/home/hynek/project/remotefile.txt
 ```
 
 ### Listing a directory
 ```bash
-latchkey curl -H "Authorization: Bearer $MINDS_API_KEY" -s -X PROPFIND -H "Depth: 1" http://latchkey-self.invalid/minds-api-proxy/api/v1/files/home/hynek/project/ | xmlstarlet sel -N d=DAV: -t -m "//d:response/d:href" -v . -n
+latchkey curl -s -X PROPFIND -H "Depth: 1" http://latchkey-self.invalid/minds-api-proxy/api/v1/files/home/hynek/project/ | xmlstarlet sel -N d=DAV: -t -m "//d:response/d:href" -v . -n
 ```
 
 ### Ask for user permission
