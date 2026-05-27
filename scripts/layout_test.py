@@ -174,6 +174,66 @@ def test_open_external_url_skips_registration_and_posts_bare_url(monkeypatch: py
     assert posted == [("open", {"ref": "https://example.com/dashboard", "new_group": False})]
 
 
+def test_open_terminal_prints_returned_ref_to_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``open terminal`` is the one creation path the server resolves
+    synchronously: the broadcast endpoint pre-allocates the panel id and
+    returns ``terminal:<hash>`` in the HTTP response so the script can
+    print it. The agent then has a stable handle for follow-up ops
+    without round-tripping through ``inspect``."""
+    apps_file = tmp_path / "applications.toml"
+    _write_apps_toml(apps_file, ["terminal"])
+    monkeypatch.setenv(layout.ENV_APPLICATIONS_FILE, str(apps_file))
+
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        layout, "_post_layout", _make_fake_post(posted, (200, {"ok": True, "ref": "terminal:abcd1234"}))
+    )
+
+    rc = layout.main(["open", "terminal"])
+    assert rc == 0
+    assert posted == [("open", {"ref": "service:terminal", "new_group": False})]
+    assert capsys.readouterr().out.strip() == "terminal:abcd1234"
+
+
+def test_open_without_returned_ref_emits_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Non-terminal ``open`` responses (no ``ref`` field) must leave stdout
+    empty: callers parsing the script's stdout rely on it being silent
+    unless the server explicitly returns a synchronously-allocated ref."""
+    apps_file = tmp_path / "applications.toml"
+    _write_apps_toml(apps_file, ["web"])
+    monkeypatch.setenv(layout.ENV_APPLICATIONS_FILE, str(apps_file))
+
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+
+    rc = layout.main(["open", "web"])
+    assert rc == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_split_terminal_prints_returned_ref_to_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``split terminal`` shares the synchronous ref-return contract with
+    ``open terminal`` since both go through the same allocation path."""
+    monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        layout, "_post_layout", _make_fake_post(posted, (200, {"ok": True, "ref": "terminal:beef0000"}))
+    )
+
+    rc = layout.main(["split", "terminal", "--relative-to", "self", "--direction", "below"])
+    assert rc == 0
+    op, args = posted[0]
+    assert op == "split"
+    assert args["ref"] == "service:terminal"
+    assert capsys.readouterr().out.strip() == "terminal:beef0000"
+
+
 def test_open_url_prefix_alias_is_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
     """The ``url:https://...`` alias normalizes to the bare URL ref."""
     posted: list[tuple[str, dict[str, Any]]] = []

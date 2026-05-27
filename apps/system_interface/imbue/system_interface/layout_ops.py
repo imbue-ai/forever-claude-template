@@ -21,6 +21,7 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +169,22 @@ def _short_hash(panel_id: str) -> str:
     astronomically unlikely.
     """
     return hashlib.sha256(panel_id.encode("utf-8")).hexdigest()[:8]
+
+
+def allocate_terminal_panel_id() -> tuple[str, str]:
+    """Allocate a fresh panel id + ``terminal:<hash>`` ref for terminal creation.
+
+    Returned by the broadcast endpoint when the agent runs
+    ``layout.py open terminal`` / ``layout.py split terminal``: the server
+    pre-commits the panel id so the HTTP response can carry the ref the
+    frontend will ultimately give the new tab, and the frontend uses the
+    supplied id verbatim instead of generating its own. This is the only
+    creation path where the script returns a ref synchronously -- every
+    other ref kind either dedups against the existing panel set or is
+    discoverable via a subsequent ``inspect``.
+    """
+    panel_id = f"iframe-terminal-{uuid.uuid4().hex}"
+    return panel_id, f"terminal:{_short_hash(panel_id)}"
 
 
 def _resolve_ref(

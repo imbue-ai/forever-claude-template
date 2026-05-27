@@ -198,6 +198,49 @@ def test_list_round_trips_and_includes_seeded_agent(
     assert f"chat:{_AGENT_NAME}" in refs
 
 
+def test_open_terminal_returns_ref_via_stdout_and_broadcasts_panel_id(
+    layout_server: tuple[str, WebSocketBroadcaster],
+    tmp_path: Path,
+) -> None:
+    """Full pipeline check for the synchronous-ref-return path.
+
+    ``scripts/layout.py open terminal`` must (a) print the
+    ``terminal:<hash>`` ref the server allocated to stdout so the
+    calling agent can capture it, and (b) cause the broadcast to carry
+    the matching ``panel_id`` so the frontend uses the same id the ref
+    was derived from.
+    """
+    base_url, broadcaster = layout_server
+    sandbox = tmp_path / "cwd"
+    sandbox.mkdir()
+    # The script polls runtime/applications.toml for the named service;
+    # seed ``terminal`` so registration succeeds without the real
+    # forward_port pipeline.
+    applications_dir = sandbox / "runtime"
+    applications_dir.mkdir()
+    (applications_dir / "applications.toml").write_text(
+        '[[applications]]\nname = "terminal"\nurl = "http://localhost:9000/terminal"\n'
+    )
+
+    client_queue = broadcaster.register()
+    try:
+        result = _run_layout_script(["open", "terminal"], base_url=base_url, cwd=sandbox)
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        printed_ref = result.stdout.strip()
+        assert printed_ref.startswith("terminal:"), printed_ref
+
+        msg = _await_layout_op(client_queue, timeout=2.0)
+        assert msg["op"] == "open"
+        broadcast_args = msg["args"]
+        assert broadcast_args["ref"] == "service:terminal"
+        # The same panel id was used to derive the printed ref AND sent
+        # to the frontend, so the resulting tab is the one the script
+        # told the caller about.
+        assert broadcast_args["panel_id"].startswith("iframe-terminal-")
+    finally:
+        broadcaster.unregister(client_queue)
+
+
 def test_open_close_chat_ref_broadcasts_layout_ops(
     layout_server: tuple[str, WebSocketBroadcaster],
     tmp_path: Path,

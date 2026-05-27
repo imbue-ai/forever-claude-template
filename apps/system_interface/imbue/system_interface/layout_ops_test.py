@@ -6,6 +6,7 @@ from typing import Any
 
 from imbue.mngr.utils.polling import wait_for
 from imbue.system_interface.layout_ops import LayoutMutex
+from imbue.system_interface.layout_ops import allocate_terminal_panel_id
 from imbue.system_interface.layout_ops import is_broadcasting_op
 from imbue.system_interface.layout_ops import is_known_op
 from imbue.system_interface.layout_ops import is_mutating_op
@@ -222,6 +223,35 @@ def test_list_hides_reserved_system_interface_entry(tmp_path: Path) -> None:
     assert "service:web" in refs
     assert "service:api" in refs
     assert "service:system_interface" not in refs
+
+
+def test_allocate_terminal_panel_id_returns_terminal_ref_for_panel_id() -> None:
+    """The frontend uses the supplied panel id verbatim, so the returned
+    ref must be derived from that same panel id -- otherwise the script's
+    printed ``terminal:<hash>`` won't address the panel that gets created.
+
+    Asserts the shape contract (``iframe-terminal-<id>`` panel id paired
+    with a ``terminal:<8 hex chars>`` ref) rather than reimplementing the
+    short-hash mapping, which would couple the test to an internal helper.
+    """
+    panel_id, ref = allocate_terminal_panel_id()
+    assert panel_id.startswith("iframe-terminal-")
+    assert ref.startswith("terminal:")
+    hash_part = ref.removeprefix("terminal:")
+    assert len(hash_part) == 8
+    assert all(c in "0123456789abcdef" for c in hash_part)
+    # Successive allocations must not collide -- otherwise two
+    # near-simultaneous ``open terminal`` calls would clobber each other.
+    _, ref_again = allocate_terminal_panel_id()
+    assert ref_again != ref
+
+
+def test_allocate_terminal_panel_id_is_unique_per_call() -> None:
+    """Each ``open terminal`` / ``split terminal`` mints a fresh tab; the
+    server's allocation must never collide across calls or two
+    near-simultaneous terminal opens would clobber each other."""
+    ids = {allocate_terminal_panel_id()[0] for _ in range(50)}
+    assert len(ids) == 50
 
 
 def test_list_marks_running_agents(tmp_path: Path) -> None:

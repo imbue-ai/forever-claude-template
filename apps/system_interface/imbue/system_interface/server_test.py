@@ -336,6 +336,58 @@ def test_layout_broadcast_refresh_bypasses_mutex(app: FastAPI) -> None:
             }
 
 
+@pytest.mark.timeout(10)
+def test_layout_broadcast_open_terminal_allocates_panel_id_and_returns_ref(app: FastAPI) -> None:
+    """``open service:terminal`` is the synchronous-ref-return path.
+
+    The endpoint pre-mints the panel id (so the frontend uses it
+    verbatim and the resulting tab is deterministically addressable as
+    ``terminal:<hash>``), injects it into the broadcast args, and
+    returns the ref in the HTTP response. Every other op leaves the
+    args dict alone and returns just ``{ok: true}``.
+    """
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        with loopback_client.websocket_connect("/api/ws") as ws:
+            json.loads(ws.receive_text())
+            json.loads(ws.receive_text())
+
+            response = loopback_client.post(
+                "/api/layout/broadcast",
+                json={"op": "open", "args": {"ref": "service:terminal"}, "agent_id": "agent-42"},
+            )
+            assert response.status_code == 200
+            body = response.json()
+            ref = body["ref"]
+            assert ref.startswith("terminal:")
+
+            msg = json.loads(ws.receive_text())
+            assert msg["op"] == "open"
+            assert msg["requester_agent_id"] == "agent-42"
+            # The frontend must receive the same panel id the server returned
+            # the ref for, or the script's printed ref would address nothing.
+            panel_id = msg["args"]["panel_id"]
+            assert panel_id.startswith("iframe-terminal-")
+            assert msg["args"]["ref"] == "service:terminal"
+
+
+@pytest.mark.timeout(10)
+def test_layout_broadcast_open_non_terminal_returns_no_ref(app: FastAPI) -> None:
+    """Non-terminal opens must NOT carry a ``ref`` in the response: the
+    CLI uses presence-of-ref to decide whether to print to stdout, and a
+    stray ref on a regular service open would mislead callers."""
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        with loopback_client.websocket_connect("/api/ws") as ws:
+            json.loads(ws.receive_text())
+            json.loads(ws.receive_text())
+
+            response = loopback_client.post(
+                "/api/layout/broadcast",
+                json={"op": "open", "args": {"ref": "service:web"}, "agent_id": "agent-42"},
+            )
+            assert response.status_code == 200
+            assert "ref" not in response.json()
+
+
 def test_layout_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     """The layout broadcast endpoint refuses non-loopback callers."""
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:

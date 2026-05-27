@@ -291,7 +291,6 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   const items: Array<{ label: string; action: () => void; dividerAfter?: boolean }> = [];
   const openChatIds = getOpenChatAgentIds();
   const openAppNames = getOpenAppNames();
-  const primaryId = getPrimaryAgentId();
 
   // --- Existing items section ---
 
@@ -348,14 +347,9 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   });
 
   // Terminal -- always primary agent's work_dir
-  const primaryAgent = getAgentById(primaryId);
-  const terminalBaseUrl = getTerminalUrl();
-  const terminalUrl = primaryAgent?.work_dir
-    ? `${terminalBaseUrl}?arg=_&arg=workdir&arg=${encodeURIComponent(primaryAgent.work_dir)}`
-    : terminalBaseUrl;
   items.push({
     label: "New terminal",
-    action: () => openIframeTab(terminalUrl, "terminal"),
+    action: () => openIframeTab(buildTerminalUrl(), "terminal"),
   });
 
   items.push({
@@ -560,7 +554,25 @@ type AddPanelPlacementOptions = {
   position?: { referenceGroup: string } | { referencePanel: string; direction: "left" | "right" | "above" | "below" };
   initialWidth?: number;
   initialHeight?: number;
+  /** Server-supplied panel id used verbatim for the new tab. Set only on
+   *  agent-driven terminal creation (``open terminal`` / ``split terminal``):
+   *  the broadcast endpoint pre-mints the id so its HTTP response can
+   *  return the resulting ``terminal:<hash>`` ref synchronously. Ignored
+   *  for every other ref kind. */
+  panelIdHint?: string;
 };
+
+/** Build the URL the "New terminal" UI button (and agent-driven
+ *  ``open terminal``) points iframes at. Anchors the terminal at the
+ *  primary agent's work_dir when available; the ttyd backend interprets
+ *  the bare base URL as "open in $HOME" so the fallback is benign. */
+function buildTerminalUrl(): string {
+  const primaryAgent = getAgentById(getPrimaryAgentId());
+  const baseUrl = getTerminalUrl();
+  return primaryAgent?.work_dir
+    ? `${baseUrl}?arg=_&arg=workdir&arg=${encodeURIComponent(primaryAgent.work_dir)}`
+    : baseUrl;
+}
 
 /** Dedup-then-add for a ``service:``, ``chat:``, or ``https://`` ref.
  *
@@ -570,12 +582,43 @@ type AddPanelPlacementOptions = {
  *  chat: dedup by deterministic ``chat-<agent-id>``, https:// dedup by
  *  URL), focuses it and returns its id. Otherwise creates the panel with
  *  the supplied positioning and returns the new id. A bare ``https://``
- *  ref creates an ad-hoc external-URL iframe tab. Returns null when
- *  dockview isn't ready, the ref carries a prefix that doesn't create
- *  panels in v1 (terminal:/subagent:/url:), or the named chat agent is
- *  unknown. */
+ *  ref creates an ad-hoc external-URL iframe tab. ``service:terminal`` is
+ *  the one creation path that bypasses dedup: it mirrors the UI's "New
+ *  terminal" button (each call adds a fresh tab) and uses
+ *  ``addOptions.panelIdHint`` as the new panel id so the broadcast
+ *  endpoint can return the resulting ``terminal:<hash>`` ref synchronously.
+ *  Returns null when dockview isn't ready, the ref carries a prefix that
+ *  doesn't create panels in v1 (subagent:/url:/bare ``terminal:``), or the
+ *  named chat agent is unknown. */
 function addPanelForRef(ref: string, requesterAgentId: string, addOptions: AddPanelPlacementOptions): string | null {
   if (!dockview) return null;
+  // Strip ``panelIdHint`` from the addPanel spread: it's an
+  // addPanelForRef-internal hint, not a dockview placement field.
+  const { panelIdHint, ...placement } = addOptions;
+
+  if (ref === "service:terminal") {
+    const ownerId = requesterAgentId || getPrimaryAgentId();
+    const panelId = panelIdHint ?? `iframe-terminal-${Date.now()}`;
+    // Intentionally no ``serviceName``: terminals are addressed as
+    // ``terminal:<hash>`` via the URL-prefix branch of the server-side
+    // ref resolver, and ``serviceName`` would (a) wrongly route service
+    // dedup against this panel and (b) suppress the URL-prefix branch.
+    const params: PanelParams = {
+      panelType: "iframe",
+      agentId: ownerId,
+      url: buildTerminalUrl(),
+      title: "terminal",
+    };
+    panelParams.set(panelId, params);
+    dockview.addPanel({
+      id: panelId,
+      component: "iframe",
+      title: "terminal",
+      params,
+      ...placement,
+    });
+    return panelId;
+  }
 
   if (ref.startsWith("service:")) {
     const serviceName = ref.substring("service:".length);
@@ -600,7 +643,7 @@ function addPanelForRef(ref: string, requesterAgentId: string, addOptions: AddPa
       component: "iframe",
       title: serviceName,
       params,
-      ...addOptions,
+      ...placement,
     });
     return panelId;
   }
@@ -623,7 +666,7 @@ function addPanelForRef(ref: string, requesterAgentId: string, addOptions: AddPa
       title: agent.name,
       params,
       renderer: "always",
-      ...addOptions,
+      ...placement,
     });
     return panelId;
   }
@@ -648,7 +691,7 @@ function addPanelForRef(ref: string, requesterAgentId: string, addOptions: AddPa
       component: "iframe",
       title,
       params,
-      ...addOptions,
+      ...placement,
     });
     return panelId;
   }
@@ -731,12 +774,17 @@ function findSiblingGroupInDirection(
  *  Callers are responsible for any registration / validity check on the
  *  ref before invoking this (e.g. ``handleOpen`` drops unregistered
  *  services), since the WS broadcast itself is fire-and-forget. */
-function handleOpenPanelRequest(ref: string, requesterAgentId: string, forceNewGroup: boolean): void {
+function handleOpenPanelRequest(
+  ref: string,
+  requesterAgentId: string,
+  forceNewGroup: boolean,
+  panelIdHint?: string,
+): void {
   if (!dockview) return;
 
   const chatPanelId = findAnchorChatPanelId(requesterAgentId);
   if (chatPanelId === null) {
-    addPanelForRef(ref, requesterAgentId, {});
+    addPanelForRef(ref, requesterAgentId, { panelIdHint });
     return;
   }
   // Default: tab into an existing group to the right of the anchor chat
@@ -748,7 +796,7 @@ function handleOpenPanelRequest(ref: string, requesterAgentId: string, forceNewG
   const sibling =
     !forceNewGroup && anchorGroupId !== null ? findSiblingGroupInDirection(anchorGroupId, "right") : null;
   if (sibling !== null) {
-    addPanelForRef(ref, requesterAgentId, { position: { referenceGroup: sibling.id } });
+    addPanelForRef(ref, requesterAgentId, { position: { referenceGroup: sibling.id }, panelIdHint });
     return;
   }
   const containerWidth = dockviewContainer?.getBoundingClientRect().width ?? 0;
@@ -756,6 +804,7 @@ function handleOpenPanelRequest(ref: string, requesterAgentId: string, forceNewG
   addPanelForRef(ref, requesterAgentId, {
     position: { referencePanel: chatPanelId, direction: "right" },
     initialWidth,
+    panelIdHint,
   });
 }
 
@@ -1060,6 +1109,15 @@ async function handleLayoutOp(event: LayoutOpEvent): Promise<void> {
 async function handleOpen(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {
   const ref = asString(args.ref);
   if (!ref || !dockview) return;
+  // ``service:terminal`` is the one creation path that bypasses dedup:
+  // each ``open terminal`` adds a fresh tab, mirroring the UI's "New
+  // terminal" button. The broadcast endpoint allocates ``args.panel_id``
+  // so it can return the resulting ``terminal:<hash>`` ref synchronously.
+  if (ref === "service:terminal") {
+    const panelIdHint = asString(args.panel_id) ?? undefined;
+    handleOpenPanelRequest(ref, requesterAgentId, args.new_group === true, panelIdHint);
+    return;
+  }
   const existing = await resolveRefToPanelId(ref, requesterAgentId);
   if (existing !== null) {
     const panel = dockview.panels.find((p) => p.id === existing);
@@ -1116,9 +1174,10 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
 
   if (!ref.startsWith("service:") && !ref.startsWith("chat:") && !ref.startsWith("https://")) {
     // ``split`` creates new service, chat, and ad-hoc external-URL
-    // (``https://``) panels. Terminal and subagent panels, plus existing
-    // URL panels addressed by ``url:<hash>``, are created through other
-    // UI paths and only addressable once they exist.
+    // (``https://``) panels. Subagent panels and existing URL/terminal
+    // panels addressed by ``url:<hash>`` / ``terminal:<hash>`` are
+    // created through other UI paths and only addressable once they
+    // exist. Fresh terminals come in as ``service:terminal``.
     return;
   }
 
@@ -1140,10 +1199,15 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
   // an existing group ignores them anyway, so omit to keep intent clear.
   const sizeOptions = sibling !== null ? {} : sizes;
 
+  // ``service:terminal`` is the one creation path the server pre-allocates
+  // a panel id for (so its HTTP response can return the resulting
+  // ``terminal:<hash>`` ref); thread the hint through ``addPanelForRef``.
+  const panelIdHint = ref === "service:terminal" ? (asString(args.panel_id) ?? undefined) : undefined;
+
   // service:, chat:, and https:// all route through ``addPanelForRef``
   // which handles dedup (focus existing instead of duplicating) +
   // panelParams bookkeeping + the actual addPanel invocation.
-  addPanelForRef(ref, requesterAgentId, { position: positionOptions, ...sizeOptions });
+  addPanelForRef(ref, requesterAgentId, { position: positionOptions, ...sizeOptions, panelIdHint });
 }
 
 function directionFromArg(direction: string): "left" | "right" | "above" | "below" {

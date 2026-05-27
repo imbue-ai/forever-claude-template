@@ -35,6 +35,7 @@ from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.events import BufferBehavior
 from imbue.system_interface.layout_ops import LayoutMutex
+from imbue.system_interface.layout_ops import allocate_terminal_panel_id
 from imbue.system_interface.layout_ops import is_broadcasting_op
 from imbue.system_interface.layout_ops import is_known_op
 from imbue.system_interface.layout_ops import is_mutating_op
@@ -802,6 +803,19 @@ async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
         error = ErrorResponse(detail=f"Op {op!r} has no broadcast handler")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
+    # Terminal creation is the one path where the script returns a ref
+    # synchronously: the frontend's "New terminal" button gives each
+    # terminal a freshly-minted iframe panel id, so the server pre-mints
+    # one here, injects it into the broadcast args (the frontend uses it
+    # verbatim), and reports the resulting ``terminal:<hash>`` ref back
+    # in the HTTP response. Every other ref kind either dedups against
+    # the existing panel set or is discoverable via a subsequent
+    # ``inspect``.
+    allocated_ref: str | None = None
+    if op in {"open", "split"} and args_raw.get("ref") == "service:terminal":
+        panel_id, allocated_ref = allocate_terminal_panel_id()
+        args_raw = {**args_raw, "panel_id": panel_id}
+
     layout_mutex: LayoutMutex = request.app.state.layout_mutex
     if is_mutating_op(op):
         holder = layout_mutex.try_acquire(agent_id, op, args_raw)
@@ -825,7 +839,10 @@ async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
         broadcaster.broadcast_layout_op(op, args_raw, requester_agent_id=agent_id)
 
     logger.info("layout op={} agent_id={} args={}", op, agent_id, args_raw)
-    return JSONResponse(content={"ok": True})
+    response_body: dict[str, Any] = {"ok": True}
+    if allocated_ref is not None:
+        response_body["ref"] = allocated_ref
+    return JSONResponse(content=response_body)
 
 
 def _inject_agent_id_meta_tag(html_content: str) -> str:

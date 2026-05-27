@@ -239,6 +239,22 @@ def _report_failure(op: str, status: int, body: dict[str, Any] | str) -> int:
     return EXIT_HTTP_ERROR
 
 
+def _emit_allocated_ref(body: dict[str, Any] | str) -> None:
+    """Print the server-allocated ref to stdout when the response includes one.
+
+    Today this only fires for ``open`` / ``split`` targeting
+    ``service:terminal``: the server pre-mints the panel id (mirroring the
+    UI's "New terminal" button, which creates a fresh tab on every click)
+    and returns the resulting ``terminal:<hash>`` ref so callers can capture
+    it for later ops without round-tripping through ``inspect``.
+    """
+    if isinstance(body, dict):
+        ref = body.get("ref")
+        if isinstance(ref, str) and ref:
+            sys.stdout.write(ref)
+            sys.stdout.write("\n")
+
+
 def _emit_structured(data: Any, as_json: bool) -> None:
     if as_json:
         sys.stdout.write(json.dumps(data, indent=2))
@@ -282,6 +298,7 @@ def _cmd_open(args: argparse.Namespace) -> int:
     status, body = _post_layout("open", payload)
     if status != 200:
         return _report_failure("open", status, body)
+    _emit_allocated_ref(body)
     return EXIT_OK
 
 
@@ -317,6 +334,7 @@ def _cmd_split(args: argparse.Namespace) -> int:
     status, body = _post_layout("split", payload)
     if status != 200:
         return _report_failure("split", status, body)
+    _emit_allocated_ref(body)
     return EXIT_OK
 
 
