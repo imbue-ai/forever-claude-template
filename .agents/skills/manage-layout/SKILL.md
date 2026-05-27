@@ -7,107 +7,122 @@ metadata:
 
 # Managing the workspace dockview layout
 
-The user interacts with you and the services you create through a tabbed dockview interface defined in `apps/system_interface`.
-The user's chat with you is visible as one such tab in this interface (of ref-form `chat:name` where `name` is your name).
-They may additionally have a terminal view open of your chat interface; but the direct chat view is their primary interaction point with you.
-This client is fully scriptable from via `scripts/layout.py`. Use it whenever you want to:
+The user interacts with you (and the services you create) through a
+tabbed dockview defined in `apps/system_interface`. Your chat is one
+such tab; everything else -- service iframes, terminals, ad-hoc URL
+tabs, other agents' chats -- lives alongside it.
 
-- **Surface something new** alongside the chat (web view, terminal,
-  another agent's chat).
-- **Inspect** what's currently open, so you can reason about where to
-  put the new panel.
-- **Rearrange** what's already open -- split, move, focus, rename,
-  maximize/restore, replace an iframe's URL, or close a tab.
-- **Refresh** an iframe after redeploying its backing service.
+`scripts/layout.py` is the agent-facing helper. Use it whenever you
+want to surface, inspect, or rearrange tabs. Do not hand-edit the
+dockview layout config.
 
-The user may also ask you to do any of these things, in which case you should use the appropriate commands.
-You should only use this helper to mutate the view; do not manually edit the dockview layout configuration.
+## The two verbs you'll use 95% of the time
 
-## Refs: how you address a panel
+| Goal | Command |
+|---|---|
+| See what's currently open and how it's laid out | `python3 scripts/layout.py inspect` |
+| List everything addressable (services + agents) with open/running flags | `python3 scripts/layout.py list` |
+| Surface a service / URL / terminal / chat alongside your chat | `python3 scripts/layout.py open <target>` |
+| Close a tab | `python3 scripts/layout.py close <ref>` |
 
-Every panel has a stable, type-prefixed ref:
+`open` is the opinionated default. It puts the new tab to the right
+of your chat, joining whatever group already lives there if one is
+open. Targets it accepts:
+
+- A workspace service name (`web`) -- focuses an existing iframe for
+  that service if one is open; otherwise creates one.
+- `terminal` -- creates a fresh terminal in the primary agent's
+  work_dir (each call adds a new one, just like the UI's "New
+  terminal" button). The new tab's ref (`terminal:<hash>`) is printed
+  to stdout so you can capture it for later ops.
+- An external URL (`https://example.com`) -- focuses an existing
+  ad-hoc URL tab pointed at that URL, otherwise opens one.
+- A chat ref (`chat:alice`) -- opens another mngr-level agent's chat.
+
+Pass `--new-group` if you specifically want a fresh column instead of
+joining an existing right-side group. Reach for it when you want the
+new tab to be visually adjacent and full-height rather than mixed in
+with whatever else is open to the right.
+
+## Refs: how every panel is addressed
+
+Every panel has a stable, type-prefixed ref returned by `inspect`:
 
 | Prefix | Meaning | Example |
 |---|---|---|
 | `service:<name>` | The iframe for a registered workspace service. | `service:web` |
 | `chat:<agent-name>` | The chat tab for an mngr-level agent. | `chat:alice` |
-| `subagent:<session-id>` | A harness-level subagent panel. | `subagent:abcd1234` |
-| `terminal:<short-hash>` | An ad-hoc terminal tab. | `terminal:1a2b3c4d` |
+| `terminal:<short-hash>` | A terminal tab (one ref per terminal, since each is independent). | `terminal:1a2b3c4d` |
 | `url:<short-hash>` | An ad-hoc external URL tab. | `url:9f8e7d6c` |
+| `subagent:<session-id>` | A harness-level subagent panel. | `subagent:abcd1234` |
 
-Every ref-accepting argument (the positional ref on each subcommand,
-plus `--relative-to` on `split` / `move`) also accepts a bare service
-name (`web`) -- it expands to `service:web`. The literal `self`
-resolves to your own chat panel; it is accepted as a ref anywhere
-(most usefully as `--relative-to=self` for `split` / `move`).
+When you call `open terminal`, the new tab's `terminal:<hash>` ref is
+printed to stdout -- capture it if you need to address that specific
+terminal later (focus, move, close). Otherwise, run `inspect` to
+recover refs at any time.
 
-To open a panel pointed at an **external URL** (one not backed by a
-registered workspace service), pass a bare `https://` URL as the
-`open` / `split` target -- e.g. `open https://example.com`. The
-optional `url:` prefix (`url:https://example.com`) is also accepted.
-Once open, the resulting ad-hoc tab is addressed by its
-`url:<short-hash>` ref like any other (run `inspect` to get it).
+Shorthands accepted anywhere a ref is expected:
 
-Run `python3 scripts/layout.py inspect` to see refs for the
-currently-open panels.
+- A bare service name (`web`) expands to `service:web`.
+- A bare `https://` URL is accepted as an `open` / `split` target
+  (it creates a new ad-hoc URL tab); the optional `url:` prefix
+  (`url:https://example.com`) works too.
+- The literal `self` resolves to your own chat panel; most useful as
+  `--relative-to=self` on `split` / `move`.
 
-## Common operations
+`subagent:` and existing `terminal:<hash>` / `url:<hash>` refs only
+address panels that already exist (created via "New terminal" / "New
+URL" in the UI, or by the subagent harness). You can't create those
+from `open`.
+
+## Less common operations
+
+When `open` isn't enough, reach for one of these:
 
 | Goal | Command |
 |---|---|
-| List addressable things (services + agents) with open/running flags | `python3 scripts/layout.py list` |
-| Inspect the live tree (orientation, sizes, active panel) | `python3 scripts/layout.py inspect` |
-| Surface a service alongside the primary chat | `python3 scripts/layout.py open web` |
-| Open an external URL in a new tab | `python3 scripts/layout.py open https://example.com` |
-| Reload one tab after redeploying | `python3 scripts/layout.py refresh web` |
-| Add a second panel below an existing one | `python3 scripts/layout.py split api --relative-to=service:web --direction=below --ratio=0.4` |
-| Focus an existing tab | `python3 scripts/layout.py focus service:web` |
-| Move a tab next to another | `python3 scripts/layout.py move chat:alice --relative-to=service:web --direction=right` |
-| Rename a tab's label | `python3 scripts/layout.py rename service:web "Customer dashboard"` |
-| Maximize / restore a group | `python3 scripts/layout.py maximize service:web` / `python3 scripts/layout.py restore` |
-| Point an iframe at a new URL | `python3 scripts/layout.py replace-url service:web service:web/admin` |
-| Close a tab | `python3 scripts/layout.py close url:9f8e7d6c` |
+| Place a new panel with explicit positioning | `python3 scripts/layout.py split <target> --relative-to=<ref> --direction=<left\|right\|above\|below> [--ratio=0.4] [--new-group]` |
+| Focus an existing tab | `python3 scripts/layout.py focus <ref>` |
+| Move an open tab next to another | `python3 scripts/layout.py move <ref> --relative-to=<ref> --direction=<dir> [--new-group]` |
+| Rename a tab's label | `python3 scripts/layout.py rename <ref> "<title>"` |
+| Maximize / restore a group | `python3 scripts/layout.py maximize <ref>` / `python3 scripts/layout.py restore` |
+| Point an iframe at a new URL | `python3 scripts/layout.py replace-url <ref> service:<name>[/path]` |
+| Reload one tab (or every iframe for a service) | `python3 scripts/layout.py refresh <ref>` |
 
-Output for `list` and `inspect` is YAML by default; pass `--json` if
-you want to consume it programmatically.
+`split` is the customization escape hatch: it accepts the same
+targets as `open` plus full control over the anchor (`--relative-to`),
+direction, size ratio, and whether to share an existing group or
+carve a new one. Use it when `open`'s "to the right of your chat,
+joining adjacent groups" default isn't what you want.
 
-For anything you don't see above, run
-`python3 scripts/layout.py --help` and the per-subcommand `--help`.
+`open`, `split`, and `move` all default to **joining an existing
+group** that already lives in the requested direction relative to the
+anchor. Pass `--new-group` when you want a guaranteed fresh column
+or row instead -- e.g. you want the new tab to take up its own
+full-height column rather than tab into the iframe already there.
 
-## Share-existing-group vs. new-group
+Output for `list` and `inspect` is YAML by default; pass `--json` for
+programmatic consumption.
 
-`open`, `split`, and `move` default to **tabbing into an existing group**
-that already lives in the requested direction relative to the anchor.
-For example, `open service:terminal` from your chat with a `service:web`
-group already to the right adds `terminal` as a tab inside the web
-group rather than wedging another column between the two. Pass
-`--new-group` when you genuinely want a fresh column / row instead:
-
-```
-python3 scripts/layout.py split api --relative-to=service:web --direction=below --new-group
-```
+Run `python3 scripts/layout.py --help` (or `<subcommand> --help`) for
+the full surface.
 
 ## Exit codes
 
 `layout.py` uses distinct exit codes so wrapper scripts can branch:
 
 - `0` ok
-- `2` argparse CLI usage error (unknown subcommand, invalid `--direction`
-  choice, missing required argument). Not emitted by `layout.py` itself.
-- `10` requested service not registered yet (and registration polling
-  timed out -- did `forward_port.py` run?)
+- `10` requested service not registered yet
 - `11` couldn't reach the workspace server
 - `12` HTTP error other than the codes below
-- `13` mutex conflict -- another agent's layout op is in flight. The
-  stderr message includes the in-flight op's `agent_id`, `op`, `args`,
-  `started_at`, and `retry_after_ms`. Decide whether to retry.
-- `14` not-found (e.g. the ref you named doesn't match an open panel)
+- `13` mutex conflict -- another agent's layout op is in flight
+- `14` not-found (the ref you named doesn't match an open panel)
 - `15` bad request (malformed ref, unknown direction, unsupported URL)
 
 ## When NOT to use this skill
 
 - **Building a brand-new web service.** Use `build-web-service` to
-  scaffold the service first; `build-web-service` itself ends with a
-  `layout.py open <name>` call to surface the new tab.
+  scaffold the service first; it ends with a `layout.py open <name>`
+  call to surface the new tab.
 - **Persisting layout state.** The frontend auto-saves the layout on
   every change; you don't need to do anything special after a mutation.
