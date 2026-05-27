@@ -120,6 +120,9 @@ class AgentSessionWatcher:
         self._tool_name_by_call_id: dict[str, str] = {}
         self._existing_event_ids: set[str] = set()
         self._subagent_metadata: dict[str, dict[str, str]] = {}  # sub_id -> {agent_type, description}
+        # sub_ids whose meta.json we've already determined is permanently malformed.
+        # Used to log the warning once per file instead of once per poll cycle.
+        self._subagent_meta_read_failed: set[str] = set()
         # sub_id -> {parent_assistant_uuid, agent_id, first_timestamp} read from the subagent
         # jsonl's first line. Lets us link a parent Agent tool_use to its subagent the moment
         # the subagent starts writing, before any tool_result lands.
@@ -367,8 +370,11 @@ class AgentSessionWatcher:
                     except OSError:
                         pass
 
-            # Cache .meta.json (retry on each pass until present and parseable).
-            if sub_id not in self._subagent_metadata:
+            # Cache .meta.json. Retry on each pass while the read fails with OSError
+            # (transient: mid-write, momentary permission glitch). Give up after a
+            # JSONDecodeError (truly malformed -- won't self-heal) so we don't spam
+            # the log on every poll cycle.
+            if sub_id not in self._subagent_metadata and sub_id not in self._subagent_meta_read_failed:
                 meta_file = jsonl_file.with_suffix(".meta.json")
                 if meta_file.exists():
                     try:
@@ -378,8 +384,11 @@ class AgentSessionWatcher:
                             "description": meta.get("description", ""),
                             "session_id": sub_id,
                         }
-                    except (json.JSONDecodeError, OSError) as exc:
-                        logger.warning("Failed to read subagent meta.json %s: %s", meta_file, exc)
+                    except json.JSONDecodeError as exc:
+                        logger.warning("Subagent meta.json is not valid JSON, giving up: %s: %s", meta_file, exc)
+                        self._subagent_meta_read_failed.add(sub_id)
+                    except OSError as exc:
+                        logger.debug("Failed to read subagent meta.json %s: %s", meta_file, exc)
 
             # Cache parent linkage from the subagent jsonl's first line. The first line is
             # written when the subagent starts -- before any tool_result -- so this makes
