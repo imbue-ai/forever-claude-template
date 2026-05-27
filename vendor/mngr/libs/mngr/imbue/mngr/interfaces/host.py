@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shlex
 from abc import ABC
 from abc import abstractmethod
@@ -9,7 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Final
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -21,7 +19,6 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ParseSpecError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -40,30 +37,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostNameStyle
 from imbue.mngr.primitives import HostState
-from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import TransferMode
-
-# Default timeout for waiting for agent readiness before sending messages.
-# With hook-based polling, we return early when the agent signals readiness,
-# so this is a max wait time, not an unconditional delay.
-# Can be overridden via the MNGR_AGENT_READY_TIMEOUT environment variable.
-DEFAULT_AGENT_READY_TIMEOUT_SECONDS: Final[float] = 10.0
-
-
-def get_agent_ready_timeout() -> float:
-    """Return the agent ready timeout, respecting MNGR_AGENT_READY_TIMEOUT env var.
-
-    Falls back to DEFAULT_AGENT_READY_TIMEOUT_SECONDS if the env var is not set.
-    """
-    env_val = os.environ.get("MNGR_AGENT_READY_TIMEOUT")
-    if env_val is not None:
-        try:
-            return float(env_val)
-        except ValueError as e:
-            raise UserInputError(f"MNGR_AGENT_READY_TIMEOUT must be a number, got: {env_val!r}") from e
-    return DEFAULT_AGENT_READY_TIMEOUT_SECONDS
 
 
 class HostInterface(MutableModel, ABC):
@@ -172,14 +148,32 @@ class HostInterface(MutableModel, ABC):
         """Return lightweight data for all agents on this host."""
         ...
 
+    @abstractmethod
+    def rename_agent(
+        self,
+        agent_ref: DiscoveredAgent,
+        new_name: AgentName,
+        labels_to_merge: Mapping[str, str] | None = None,
+    ) -> DiscoveredAgent:
+        """Rename an agent (and optionally merge labels in the same write) and return its updated ref.
+
+        Works on both online and offline hosts. Online hosts additionally
+        rename the agent's tmux session and update its env file; offline
+        hosts edit only the provider's persisted agent data (data.json is
+        the source of truth for the agent name).
+
+        When ``labels_to_merge`` is non-empty, those keys/values are merged
+        into the agent's existing labels as part of the same read-modify-
+        write of ``data.json``, so an external observer (e.g. ``mngr
+        observe``) never sees an in-between state where the new name is set
+        but the new labels are not. Existing label keys are overwritten by
+        ``labels_to_merge``.
+        """
+        ...
+
     # =========================================================================
     # Agent-Derived Information
     # =========================================================================
-
-    @abstractmethod
-    def get_permissions(self) -> list[str]:
-        """Return the union of all permissions granted to agents on this host."""
-        ...
 
     @abstractmethod
     def get_state(self) -> HostState:
@@ -575,23 +569,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
-    def rename_agent(
-        self,
-        agent: AgentInterface,
-        new_name: AgentName,
-        labels_to_merge: Mapping[str, str] | None = None,
-    ) -> AgentInterface:
-        """Rename an agent (and optionally merge labels in the same write) and return it.
-
-        When ``labels_to_merge`` is non-empty, those keys/values are merged into
-        the agent's existing labels as part of the same read-modify-write of
-        ``data.json``, so an external observer (e.g. ``mngr observe``) never
-        sees an in-between state where the new name is set but the new labels
-        are not. Existing label keys are overwritten by ``labels_to_merge``.
-        """
-        ...
-
-    @abstractmethod
     def destroy_agent(self, agent: AgentInterface) -> None:
         """Remove an agent and all its associated state from this host."""
         ...
@@ -734,15 +711,6 @@ class AgentLabelOptions(FrozenModel):
     labels: dict[str, str] = Field(
         default_factory=dict,
         description="Key-value labels to attach to the agent",
-    )
-
-
-class AgentPermissionsOptions(FrozenModel):
-    """Permissions options for the agent."""
-
-    granted_permissions: tuple[Permission, ...] = Field(
-        default=(),
-        description="Permissions to grant to the agent",
     )
 
 
@@ -911,9 +879,10 @@ class CreateAgentOptions(FrozenModel):
         default=None,
         description="Message to send when the agent is started (resumed) after being stopped",
     )
-    ready_timeout_seconds: float = Field(
-        default_factory=get_agent_ready_timeout,
-        description="Timeout in seconds to wait for agent readiness before sending initial message",
+    ready_timeout_seconds: float | None = Field(
+        default=None,
+        description="Timeout in seconds to wait for agent readiness before sending initial message. "
+        "When None, falls back to MngrConfig.agent_ready_timeout at consumption time.",
     )
     git: AgentGitOptions | None = Field(
         default=None,
@@ -930,10 +899,6 @@ class CreateAgentOptions(FrozenModel):
     lifecycle: AgentLifecycleOptions = Field(
         default_factory=AgentLifecycleOptions,
         description="Lifecycle and idle detection options",
-    )
-    permissions: AgentPermissionsOptions = Field(
-        default_factory=AgentPermissionsOptions,
-        description="Permissions options",
     )
     label_options: AgentLabelOptions = Field(
         default_factory=AgentLabelOptions,
