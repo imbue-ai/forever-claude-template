@@ -129,7 +129,7 @@ def test_open_fails_when_service_not_registered(
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
     rc = layout.main(["open", "web"])
-    assert rc == layout.EXIT_NOT_REGISTERED
+    assert rc == layout.EXIT_ERROR
     assert posted == []
     err = capsys.readouterr().err
     assert "not registered" in err
@@ -358,7 +358,7 @@ def test_replace_url_rejects_non_service_non_https(
 
     with pytest.raises(SystemExit) as exc_info:
         layout.main(["replace-url", "service:web", "http://insecure.local/"])
-    assert exc_info.value.code == layout.EXIT_BAD_REQUEST
+    assert exc_info.value.code == layout.EXIT_ERROR
     assert posted == []
     err = capsys.readouterr().err
     assert "service:<name>" in err or "https://" in err
@@ -393,15 +393,22 @@ def test_close_normalizes_bare_service_shorthand(monkeypatch: pytest.MonkeyPatch
     assert posted == [("close", {"ref": "service:web"})]
 
 
-def test_network_failure_returns_distinct_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_network_failure_returns_exit_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Server-unreachable folds into the generic ``EXIT_ERROR`` -- the
+    specific cause is in stderr, where wrapper scripts that care can
+    surface it without needing a distinct exit code."""
     monkeypatch.setattr(layout, "_post_layout", lambda op, args: (-1, "Connection refused"))
     rc = layout.main(["refresh", "web"])
-    assert rc == layout.EXIT_NETWORK
+    assert rc == layout.EXIT_ERROR
 
 
 def test_conflict_returns_distinct_exit_code(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Mutex contention is the one error class that keeps its own exit
+    code: callers may want to retry-with-backoff on conflict but not on
+    any other failure, so branching has to be possible from the exit
+    code alone."""
     body = {
         "detail": "Another layout op is in flight",
         "retry_after_ms": 500,
@@ -410,21 +417,22 @@ def test_conflict_returns_distinct_exit_code(
     monkeypatch.setattr(layout, "_post_layout", lambda op, args: (409, body))
     rc = layout.main(["focus", "service:web"])
     assert rc == layout.EXIT_CONFLICT
+    assert rc != layout.EXIT_ERROR
     err = capsys.readouterr().err
     assert "agent_id=other-agent" in err
     assert "op=move" in err
 
 
-def test_not_found_returns_distinct_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_not_found_folds_into_exit_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(layout, "_post_layout", lambda op, args: (404, {"detail": "unknown ref"}))
     rc = layout.main(["focus", "service:nonexistent"])
-    assert rc == layout.EXIT_NOT_FOUND
+    assert rc == layout.EXIT_ERROR
 
 
-def test_bad_request_returns_distinct_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bad_request_folds_into_exit_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(layout, "_post_layout", lambda op, args: (400, {"detail": "bad arg"}))
     rc = layout.main(["close", "service:web"])
-    assert rc == layout.EXIT_BAD_REQUEST
+    assert rc == layout.EXIT_ERROR
 
 
 def test_post_layout_sends_agent_id_header_and_body(monkeypatch: pytest.MonkeyPatch) -> None:

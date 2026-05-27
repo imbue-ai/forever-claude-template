@@ -109,15 +109,14 @@ the full surface.
 
 ## Exit codes
 
-`layout.py` uses distinct exit codes so wrapper scripts can branch:
+`layout.py` uses three exit codes:
 
 - `0` ok
-- `10` requested service not registered yet
-- `11` couldn't reach the workspace server
-- `12` HTTP error other than the codes below
-- `13` mutex conflict -- another agent's layout op is in flight
-- `14` not-found (the ref you named doesn't match an open panel)
-- `15` bad request (malformed ref, unknown direction, unsupported URL)
+- `1` error (anything failed -- the specific reason is in stderr)
+- `3` mutex conflict -- another agent's layout op is in flight (retry
+  after a short backoff; the stderr message includes the in-flight
+  holder's `agent_id`, `op`, `args`, `started_at`, and a suggested
+  `retry_after_ms`)
 
 ## When NOT to use this skill
 

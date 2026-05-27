@@ -65,17 +65,16 @@ _REF_PREFIXES = ("service:", "chat:", "terminal:", "url:", "subagent:")
 _DIRECTIONS = ("left", "right", "above", "below")
 
 
-# Exit codes -- distinct so wrapper scripts can branch on them. Argparse uses
-# exit code 2 for any CLI usage error (unknown subcommand, invalid choice,
-# missing required argument), so the layout-specific codes start at 10 to
-# avoid that collision.
+# Exit codes -- intentionally minimal: 0 / 1 / 3.
+# Agents typically branch on "did it work" (0 vs anything else); the only
+# distinct code worth its own slot is contention, which is the one error
+# class where retry-with-backoff is the right response. Everything else
+# (network, not-registered, not-found, bad-request, generic HTTP) folds
+# into ``EXIT_ERROR``; the agent gets the specific reason from stderr.
+# Slot 2 is left alone to avoid colliding with argparse's CLI-usage exit.
 EXIT_OK = 0
-EXIT_NOT_REGISTERED = 10
-EXIT_NETWORK = 11
-EXIT_HTTP_ERROR = 12
-EXIT_CONFLICT = 13
-EXIT_NOT_FOUND = 14
-EXIT_BAD_REQUEST = 15
+EXIT_ERROR = 1
+EXIT_CONFLICT = 3
 
 
 def _workspace_base_url() -> str:
@@ -169,7 +168,7 @@ def _validate_ref(ref: str) -> None:
             f"error: ref {ref!r} must start with one of {_REF_PREFIXES}, "
             f"be a bare service name, or be an https:// URL\n"
         )
-        raise SystemExit(EXIT_BAD_REQUEST)
+        raise SystemExit(EXIT_ERROR)
 
 
 def _validate_replace_url(url: str) -> None:
@@ -179,7 +178,7 @@ def _validate_replace_url(url: str) -> None:
     sys.stderr.write(
         f"error: replace-url accepts only ``service:<name>[/<path>]`` shorthand or a full https:// URL (got {url!r})\n"
     )
-    raise SystemExit(EXIT_BAD_REQUEST)
+    raise SystemExit(EXIT_ERROR)
 
 
 def _post_layout(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
@@ -210,10 +209,16 @@ def _maybe_parse_json(text: str) -> dict[str, Any] | str:
 
 
 def _report_failure(op: str, status: int, body: dict[str, Any] | str) -> int:
-    """Translate (status, body) into a stderr message + exit code."""
+    """Translate (status, body) into a stderr message + exit code.
+
+    Everything except mutex contention exits 1; the specific reason is in
+    the stderr message. ``EXIT_CONFLICT`` (3) stays distinct because
+    retry-with-backoff is the right response, and wrapper scripts need to
+    branch on it.
+    """
     if status == -1:
         sys.stderr.write(f"error: could not reach workspace server: {body}\n")
-        return EXIT_NETWORK
+        return EXIT_ERROR
     detail: str = ""
     if isinstance(body, dict):
         detail = str(body.get("detail", body))
@@ -229,14 +234,14 @@ def _report_failure(op: str, status: int, body: dict[str, Any] | str) -> int:
             return EXIT_CONFLICT
         if status == 404:
             sys.stderr.write(f"error: layout op {op!r} target not found (HTTP 404): {detail}\n")
-            return EXIT_NOT_FOUND
+            return EXIT_ERROR
         if status == 400:
             sys.stderr.write(f"error: layout op {op!r} rejected (HTTP 400): {detail}\n")
-            return EXIT_BAD_REQUEST
+            return EXIT_ERROR
     else:
         detail = body
     sys.stderr.write(f"error: layout op {op!r} failed (HTTP {status}): {detail}\n")
-    return EXIT_HTTP_ERROR
+    return EXIT_ERROR
 
 
 def _emit_allocated_ref(body: dict[str, Any] | str) -> None:
@@ -292,7 +297,7 @@ def _cmd_open(args: argparse.Namespace) -> int:
                 f"after waiting {_REGISTRATION_TIMEOUT_SECONDS:.0f}s. "
                 f"Did you forward_port.py / start the service?\n"
             )
-            return EXIT_NOT_REGISTERED
+            return EXIT_ERROR
     _validate_ref(ref)
     payload: dict[str, Any] = {"ref": ref, "new_group": bool(args.new_group)}
     status, body = _post_layout("open", payload)
@@ -320,7 +325,7 @@ def _cmd_split(args: argparse.Namespace) -> int:
                 f"error: service {service_name!r} is not registered in {_applications_file()} "
                 f"after waiting {_REGISTRATION_TIMEOUT_SECONDS:.0f}s.\n"
             )
-            return EXIT_NOT_REGISTERED
+            return EXIT_ERROR
     _validate_ref(ref)
     relative_to = _normalize_ref(args.relative_to)
     _validate_ref(relative_to)
