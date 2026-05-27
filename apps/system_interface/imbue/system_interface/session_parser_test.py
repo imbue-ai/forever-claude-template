@@ -289,3 +289,84 @@ def test_user_message_with_array_content() -> None:
     events = parse_session_lines([line])
     assert len(events) == 1
     assert events[0]["content"] == "Part one\nPart two"
+
+
+def test_resume_continuation_user_message_not_emitted() -> None:
+    """Claude Code's isMeta "Continue from where you left off." resume marker
+    must not surface as a user_message -- the user never typed it. Claude Code
+    injects it (plus a synthetic reply) to close an unfinished turn on resume.
+    """
+    line = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-r",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "isMeta": True,
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Continue from where you left off."}],
+            },
+        }
+    )
+    assert parse_session_lines([line]) == []
+
+
+def test_synthetic_model_assistant_message_not_emitted() -> None:
+    """The synthetic "No response requested." reply -- the answer half of the
+    resume turn-pair -- is bookkeeping, not a real agent turn, and must not
+    surface as an assistant_message event.
+    """
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "uuid": "uuid-s",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [{"type": "text", "text": "No response requested."}],
+                "stop_reason": "stop_sequence",
+                "usage": {},
+            },
+        }
+    )
+    assert parse_session_lines([line]) == []
+
+
+def test_resume_marker_filter_is_gated_and_does_not_over_hide() -> None:
+    """The resume filters are precise: a human who actually types the
+    continuation words (a non-meta message) is still shown, and a real-model
+    assistant that happens to say "No response requested." is still shown.
+    """
+    typed = _make_user_line("uuid-1", "2026-01-01T00:00:00Z", "Continue from where you left off.")
+    real_reply = _make_assistant_line("uuid-2", "2026-01-01T00:00:01Z", "No response requested.")
+    events = parse_session_lines([typed, real_reply])
+    assert [e["type"] for e in events] == ["user_message", "assistant_message"]
+    assert events[0]["content"] == "Continue from where you left off."
+    assert events[1]["text"] == "No response requested."
+
+
+def test_synthetic_api_error_message_is_still_shown() -> None:
+    """Claude Code stamps the synthetic model on API-error and auth notices
+    too (e.g. "API Error: 529 Overloaded", "Please run /login"). Those tell the
+    user their turn failed and must stay visible -- only the exact
+    "No response requested." resume reply is hidden, not every synthetic message.
+    """
+    error_text = "API Error: 529 Overloaded. This is a server-side issue, usually temporary."
+    line = json.dumps(
+        {
+            "type": "assistant",
+            "uuid": "uuid-e",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [{"type": "text", "text": error_text}],
+                "stop_reason": "stop_sequence",
+                "usage": {},
+            },
+        }
+    )
+    events = parse_session_lines([line])
+    assert [e["type"] for e in events] == ["assistant_message"]
+    assert events[0]["text"] == error_text

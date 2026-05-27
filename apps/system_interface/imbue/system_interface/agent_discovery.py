@@ -153,7 +153,11 @@ def discover_agents(
 
 
 def send_message(agent_name: str, message: str) -> bool:
-    """Send a message to an agent. Returns True on success."""
+    """Send a message to an agent. Returns True on success.
+
+    STOPPED agents are automatically started before the message is sent
+    (`is_start_desired=True`), so messaging is possible regardless of agent state.
+    """
     mngr_ctx, cg = _get_mngr_context()
     try:
         result = send_message_to_agents(
@@ -161,6 +165,7 @@ def send_message(agent_name: str, message: str) -> bool:
             message_content=message,
             include_filters=(f'(name == "{agent_name}" || id == "{agent_name}")',),
             error_behavior=ErrorBehavior.CONTINUE,
+            is_start_desired=True,
         )
     finally:
         cg.__exit__(None, None, None)
