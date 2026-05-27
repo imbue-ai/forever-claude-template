@@ -1137,9 +1137,14 @@ async function handleOpen(args: Record<string, unknown>, requesterAgentId: strin
     return;
   }
   if (ref.startsWith("chat:")) {
+    // Drop silently if no agent with this name is currently known --
+    // ``addPanelForRef``'s chat branch is responsible for the actual
+    // dockview.addPanel call so all three creation paths (service /
+    // https / chat) share the same anchor-positioning and
+    // share-existing-group defaults.
     const agentName = ref.substring("chat:".length);
-    const agent = getAgents().find((a) => a.name === agentName);
-    if (agent) addChatPanel(agent.id, agent.name);
+    if (!getAgents().find((a) => a.name === agentName)) return;
+    handleOpenPanelRequest(ref, requesterAgentId, args.new_group === true);
     return;
   }
   // Other ref kinds (subagent/terminal/url:<hash>) are not creatable from
