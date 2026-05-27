@@ -55,8 +55,15 @@ running any `latchkey` command), then run:
 
 ```bash
 latchkey services list --viable
-latchkey services info <svc>   # for any obviously-involved service
+latchkey services info <svc>   # REQUIRED for each obviously-involved service
 ```
+
+Running `info` on the involved service(s) is essential -- `list --viable`
+only shows services that *could* be authenticated (either credentials exist
+*or* a browser auth flow is available); it does not tell you whether the
+specific service the user needs is already set up. You must run `info` on
+each involved service to see the actual current credential state (and to
+know whether you'll need to trigger an auth flow in Step 4).
 
 For services not covered by latchkey, do 1-2 web/docs searches. Stop as soon
 as you have enough to propose a plausible plan.
