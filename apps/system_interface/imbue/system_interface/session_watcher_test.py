@@ -239,7 +239,6 @@ def _write_subagent_session(
     *,
     agent_type: str = "Explore",
     description: str = "test sub",
-    write_meta: bool = True,
 ) -> Path:
     subagents_dir = parent_session_file.parent / parent_session_file.stem / "subagents"
     subagents_dir.mkdir(parents=True, exist_ok=True)
@@ -257,10 +256,9 @@ def _write_subagent_session(
         "sourceToolAssistantUUID": parent_assistant_uuid,
     }
     sub_file.write_text(json.dumps(first_line) + "\n")
-    if write_meta:
-        (subagents_dir / f"{sub_id}.meta.json").write_text(
-            json.dumps({"agentType": agent_type, "description": description})
-        )
+    (subagents_dir / f"{sub_id}.meta.json").write_text(
+        json.dumps({"agentType": agent_type, "description": description})
+    )
     return sub_file
 
 
