@@ -140,6 +140,11 @@ If the deployment happens to use telegram, incoming messages arrive via
 `read-telegram-history` are the telegram-specific implementation details
 it delegates to.
 
+If the user talks to you about files or directories on disk,
+unless context indicates otherwise, assume they mean their local
+disk, not the one in your sandbox. (Use the file-sharing skill to
+bridge the two if needed.)
+
 # Work delegation
 
 You can delegate larger tasks to sub-agents using the `launch-task` skill.
