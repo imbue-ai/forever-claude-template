@@ -45,7 +45,7 @@ function getAgentTerminalUrl(agentId: string): string {
 function openAgentTerminalTab(agentId: string): void {
   const agent = getAgentById(agentId);
   const title = agent?.name ? `${agent.name} terminal` : "agent terminal";
-  openIframeTabForAgent(agentId, getAgentTerminalUrl(agentId), title, true);
+  openIframeTabForAgent(agentId, getAgentTerminalUrl(agentId), title);
 }
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;

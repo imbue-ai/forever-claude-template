@@ -68,11 +68,6 @@ interface PanelParams {
   // Drives both the WS-driven `refresh_service` broadcast match and the
   // presence of the per-tab Refresh button.
   serviceName?: string;
-  // True for iframe tabs that are an agent's terminal (set via the
-  // isAgentTerminal argument of openIframeTabForAgent). Routes the panel to
-  // AgentTerminalPanel, which ensures the agent is started before attaching
-  // its terminal session. Generic agent-owned iframes leave this undefined.
-  isAgentTerminal?: boolean;
 }
 
 // Modal state
@@ -506,12 +501,7 @@ function openIframeTab(url: string, title: string, panelType: PanelType = "ifram
   });
 }
 
-// `isAgentTerminal` should be true only when the iframe is the agent's
-// terminal (so it routes to AgentTerminalPanel and the agent is started
-// before attaching). Generic iframe tabs opened for an agent (e.g. an LLM
-// `openTab` for an arbitrary web URL) must leave it false to avoid a
-// spurious agent-start POST and the terminal-startup UI.
-export function openIframeTabForAgent(agentId: string, url: string, title: string, isAgentTerminal = false): void {
+export function openIframeTabForAgent(agentId: string, url: string, title: string): void {
   if (!dockview) return;
   const existing = dockview.panels.find((p) => {
     const pp = panelParams.get(p.id);
@@ -524,7 +514,7 @@ export function openIframeTabForAgent(agentId: string, url: string, title: strin
     return;
   }
   const panelId = `iframe-agent-${agentId}-${Date.now()}`;
-  const params: PanelParams = { panelType: "iframe", agentId, url, title, isAgentTerminal };
+  const params: PanelParams = { panelType: "iframe", agentId, url, title };
   panelParams.set(panelId, params);
   dockview.addPanel({
     id: panelId,
@@ -843,12 +833,12 @@ function initializeDockview(parentElement: HTMLElement): void {
 
         case "iframe": {
           // Agent-terminal tabs route to AgentTerminalPanel, which starts the
-          // agent before attaching its terminal session. Newer tabs carry the
-          // explicit isAgentTerminal flag; tabs from layouts saved before that
-          // flag existed are recognized by the ttyd agent-dispatch key
-          // (`arg=agent`) in their URL, which only agent-terminal tabs use.
+          // agent before attaching its terminal session. They are identified
+          // by their URL shape: the terminal service URL plus the ttyd
+          // agent-dispatch key (`arg=agent`), which `getAgentTerminalUrl`
+          // constructs and no other iframe URL uses.
           const iframeUrl = params?.url ?? "";
-          const isAgentTerminal = params?.isAgentTerminal === true || iframeUrl.includes("arg=agent");
+          const isAgentTerminal = iframeUrl.startsWith(getTerminalUrl()) && iframeUrl.includes("arg=agent");
           if (isAgentTerminal) {
             return createMithrilRenderer(AgentTerminalPanel, {
               agentId: params?.agentId ?? "",
