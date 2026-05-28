@@ -201,6 +201,42 @@ RUN mkdir -p /root/.local/bin && ln -sf /mngr/code/vendor/tk/ticket /root/.local
 # the volume.
 RUN mv /mngr/code /docker_build_code
 
+# Bake the /mngr -> /mngr-vol/host_dir symlink at build time so the FCT
+# entrypoint's first-boot seed (which writes to /mngr/code) lands on the
+# mngr-managed persistent volume rather than on an image-layer directory
+# the volume mount would shadow at runtime.
+#
+# Why a symlink instead of mounting the volume directly at /mngr:
+#
+# - The mngr providers (mngr_vps_docker, libs/mngr/.../providers/docker)
+#   mount their unified per-host volume at /mngr-vol (or /mngr-state) and
+#   give each host its own subdir inside (host_dir/). The volume root
+#   carries provider-owned metadata (host_state.json, agents/<id>.json)
+#   that lives next to (but namespace-separated from) the agent-visible
+#   host_dir/ subtree. Mounting the volume directly at /mngr would
+#   collapse those two namespaces and produce on-disk file/directory
+#   collisions (provider's agents/<id>.json vs mngr core's agents/<id>/).
+# - The provider's container setup script
+#   (build_check_and_install_packages_command in
+#   libs/mngr/.../providers/ssh_host_setup.py) creates this same
+#   /mngr -> /mngr-vol/host_dir symlink at install time, but the install
+#   step runs via docker exec AFTER the container's CMD is already up --
+#   so the FCT first-boot seed would race the install-script's
+#   destructive `rm -rf /mngr; ln -s ...` with the in-flight
+#   /mngr/code.moving copy. Baking the symlink into the image makes the
+#   install-script's `[ -L /mngr ] || rm -rf /mngr` guard find an
+#   existing symlink and skip the rm; the subsequent `ln -sfn` is a
+#   no-op against the same target.
+#
+# /mngr-vol does not exist as a real directory in the image -- it
+# materializes at container runtime when the provider mounts the
+# volume. The provider's host-creation step
+# (_seed_host_volume_layout_on_outer in
+# libs/mngr_vps_docker/.../instance.py) seeds host_dir/ + agents/ on the
+# volume before the container starts, so the symlink's target exists by
+# the time fct_entrypoint.sh reads /mngr/code.
+RUN rm -rf /mngr && ln -s /mngr-vol/host_dir /mngr
+
 # Install the first-boot entrypoint at a stable image-layer path. It has
 # to live OUTSIDE /mngr/ (the volume mount path) so the runtime mount
 # does not shadow it, and OUTSIDE /docker_build_code (which gets cleaned
