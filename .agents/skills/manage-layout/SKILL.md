@@ -41,8 +41,10 @@ open. Targets it accepts:
 
 Pass `--new-group` if you specifically want a fresh column instead of
 joining an existing right-side group. Reach for it when you want the
-new tab to be visually adjacent and full-height rather than mixed in
-with whatever else is open to the right.
+new panel and the existing right-side panels visible at the same
+time. The default (joining an existing group) makes the new panel a
+tab inside that group, so only one of the group's tabs is shown at a
+time and the others are reached by clicking tabs.
 
 ## Refs: how every panel is addressed
 
@@ -97,9 +99,10 @@ joining adjacent groups" default isn't what you want.
 
 `open`, `split`, and `move` all default to **joining an existing
 group** that already lives in the requested direction relative to the
-anchor. Pass `--new-group` when you want a guaranteed fresh column
-or row instead -- e.g. you want the new tab to take up its own
-full-height column rather than tab into the iframe already there.
+anchor: your new panel becomes a tab inside that group, sharing its
+region with whatever else is already there (only one tab visible at a
+time). Pass `--new-group` to carve a fresh column or row instead, so
+the new panel and the existing one are both visible simultaneously.
 
 Output for `list` and `inspect` is YAML by default; pass `--json` for
 programmatic consumption.
