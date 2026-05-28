@@ -218,6 +218,12 @@ def test_get_events_caps_initial_load_to_tail(client: TestClient, tmp_path: Path
         assert backfill_events[0]["content"] == "Message 0"
         assert backfill_events[-1]["content"] == f"Message {total_events - _DEFAULT_TAIL_COUNT - 1}"
 
+        # A non-positive limit must not defeat the cap (``[-0:]`` would return
+        # the whole list); it falls back to the default tail count.
+        zero_limit = client.get("/api/agents/agent-123/events?limit=0")
+        assert zero_limit.status_code == 200
+        assert len(zero_limit.json()["events"]) == _DEFAULT_TAIL_COUNT
+
 
 def test_send_message_success(client: TestClient) -> None:
     """Sending a message to a known agent succeeds."""

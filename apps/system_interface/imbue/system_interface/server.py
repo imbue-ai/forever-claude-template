@@ -286,6 +286,10 @@ def _get_events(agent_id: str, request: Request) -> Response:
         limit = int(limit_str)
     except ValueError:
         limit = _DEFAULT_TAIL_COUNT
+    # A non-positive limit would defeat the tail cap (``[-0:]`` returns the whole
+    # list) and break backfill slicing, so fall back to the default.
+    if limit <= 0:
+        limit = _DEFAULT_TAIL_COUNT
 
     if before_event_id:
         events = watcher.get_backfill_events(before_event_id, limit=limit)
