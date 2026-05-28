@@ -178,11 +178,11 @@ new tab. Without this step the user would have to discover it via the
 (pure JSON APIs, webhook receivers, etc.).
 
 ```bash
-python3 scripts/web_view.py open <name>
+python3 scripts/layout.py open <name>
 ```
 
-`web_view.py` POSTs to a loopback-only workspace_server endpoint that
-broadcasts an `open_tab` message over its WebSocket. The frontend
+`layout.py` POSTs to a loopback-only workspace_server endpoint that
+broadcasts a `layout_op` message over its WebSocket. The frontend
 focuses the panel if a tab for `<name>` is already open, otherwise
 splits a new iframe alongside the primary chat (60% web / 40% chat).
 The script briefly waits for the service to appear in
@@ -193,13 +193,18 @@ To force a reload of an already-open tab (e.g. after redeploying the
 service) without prompting the user to click Refresh:
 
 ```bash
-python3 scripts/web_view.py refresh <name>
+python3 scripts/layout.py refresh <name>
 ```
 
-`web_view.py list` prints every user-facing registered service name
-(one per line; the workspace chrome's own `system_interface` entry is
-hidden), which is useful when the user is asking about what tabs are
-available.
+You should always `refresh` services after making changes, to make sure the user can see the updates.
+
+For anything beyond `open` / `refresh` -- splitting, moving, focusing,
+renaming, maximizing, replacing an iframe's URL, inspecting the live
+tree -- see the `manage-layout` skill. `layout.py list` is also useful
+when the user is asking about what tabs are available (it prints every
+user-facing registered service plus every mngr-level agent, with
+open/running flags; the workspace chrome's own `system_interface` entry
+is hidden).
 
 ## Escape hatch: wrap an existing server
 

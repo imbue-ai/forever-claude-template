@@ -1,63 +1,56 @@
 #!/usr/bin/env python3
 """Stop-hook detector: nudges the main agent to consider crystallizing the turn.
 
-Reads the Claude Code Stop-hook JSON payload from stdin, walks the transcript
-backward to the most recent user message, and counts non-read tool_use blocks
-in the turn that just finished. When the count crosses a threshold the script
-writes a reminder to stderr and exits 2 so the reminder surfaces to the agent.
+Reads the lead agent's common transcript (the agent-agnostic event log that
+``mngr`` maintains for every claude / codex agent at
+``$MNGR_AGENT_STATE_DIR/events/claude/common_transcript/events.jsonl``),
+walks the events backward to the most recent user message, and counts
+non-read tool calls in the turn that just finished. When the count crosses
+a threshold the script writes a reminder to stderr and exits 2 so the
+reminder surfaces to the agent.
 
-The detection is intentionally dumb: the main agent applies its own judgement
-about whether the turn is actually worth crystallizing.
+The detection is intentionally dumb: the main agent applies its own
+judgement about whether the turn is actually worth crystallizing.
+
+Why the common transcript and not the raw Claude transcript path the Stop
+hook payload hands us: the common transcript is what every other tool in
+this codebase reads, so the hook isn't a special-case consumer of
+Claude-specific JSONL anymore. The catch is that the common-transcript
+converter normally polls on a 5s interval, so the just-finished turn may
+not yet be flushed when we read. We solve that by invoking the converter's
+``--single-pass`` mode synchronously at hook entry.
 
 Suppression rules (in priority order):
 1. Worker sub-agent — workers run their own crystallization lifecycle.
 2. Latest turn already invoked a crystallized skill successfully.
 3. Latest turn is below the tool-call threshold.
-4. A lifecycle skill (do-something-new, crystallize-task) was invoked in this
-   transcript and no successful ``git commit`` has happened since. The live
-   phase is still in progress; the skill itself handles crystallization at the
-   commit boundary.
-5. We already nudged once for the current commit count — wait for the next
-   successful commit before re-arming.
+4. A lifecycle skill (do-something-new, crystallize-task) was invoked in
+   this transcript and no successful ``git commit`` has happened since.
+   The live phase is still in progress; the skill itself handles
+   crystallization at the commit boundary.
+5. We already nudged once for the current commit count — wait for the
+   next successful commit before re-arming.
 
 Runtime contract:
-- stdin: Claude Code Stop-hook JSON payload (must include ``transcript_path``).
+- stdin: Claude Code Stop-hook JSON payload (consumed for validity, not
+  for transcript path).
+- env: ``MNGR_AGENT_STATE_DIR`` resolves the common transcript location.
+  Unset (e.g. standalone Claude outside ``mngr``) → silent no-op.
 - exit 0: stay silent.
-- exit 2: print the reminder to stderr; Claude Code surfaces it to the agent.
+- exit 2: print the reminder to stderr; Claude Code surfaces it to the
+  agent.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-
-def _load_transcript_parsing() -> Any:
-    """Load the shared transcript_parsing module from .agents/shared/scripts/.
-
-    The module lives under ``.agents/shared/scripts/`` so it sits at a fixed
-    shared path that this top-level hook can locate. We load it via importlib
-    because the directory is not on the default import path.
-    """
-    workdir = os.environ.get("MNGR_AGENT_WORK_DIR")
-    base = Path(workdir) if workdir else Path(__file__).resolve().parent.parent
-    module_path = base / ".agents" / "shared" / "scripts" / "transcript_parsing.py"
-    spec = importlib.util.spec_from_file_location("transcript_parsing", module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load transcript_parsing from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_transcript_parsing = _load_transcript_parsing()
-iter_transcript = _transcript_parsing.iter_transcript
-is_user_tool_result_carrier = _transcript_parsing.is_user_tool_result_carrier
 
 # Tool names that count as "pure reads" and are excluded from the tally. The
 # spec (concise.md) is explicit about these three names.
@@ -77,15 +70,23 @@ LIFECYCLE_SKILL_NAMES: frozenset[str] = frozenset(
 # so we only nudge once per commit window.
 NUDGE_STATE_REL_PATH: str = "runtime/.crystallize_nudge_state.json"
 
-# Matches the Bash command of a successful ``git commit`` invocation. We
-# only require the literal ``git commit`` token; subcommands like
-# ``git commit-tree`` are excluded by the word boundary.
-_GIT_COMMIT_PATTERN = re.compile(r"\bgit commit\b")
+# Matches the Bash command of a successful ``git commit`` invocation. The
+# trailing negative lookahead excludes subcommands like ``git commit-tree``
+# and plurals like ``git commits`` -- a plain word boundary is insufficient
+# because ``\b`` also matches between ``commit`` and ``-``.
+_GIT_COMMIT_PATTERN = re.compile(r"\bgit commit(?![-\w])")
 
 # Matches a slash-style command marker in a user-message string, e.g.
 # ``<command-name>/do-something-new</command-name>``. The leading slash is
 # optional so we also catch the un-slashed form some clients emit.
 _COMMAND_NAME_PATTERN = re.compile(r"<command-name>/?([\w-]+)</command-name>")
+
+# Where the common-transcript converter script lives within an agent's
+# state dir (set up by mngr_claude's resource installer).
+_COMMON_TRANSCRIPT_SCRIPT_REL = Path("commands/common_transcript.sh")
+
+# Where the converted common-transcript events.jsonl lives.
+_COMMON_TRANSCRIPT_EVENTS_REL = Path("events/claude/common_transcript/events.jsonl")
 
 REMINDER_MESSAGE: str = (
     "The turn that just finished used {count} non-read tool calls.\n"
@@ -109,26 +110,84 @@ REMINDER_MESSAGE: str = (
 )
 
 
-def _iter_assistant_tool_uses(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collect all tool_use content blocks from assistant events in the turn."""
-    tool_uses: list[dict[str, Any]] = []
+def _read_common_transcript(path: Path) -> list[dict[str, Any]]:
+    """Return common-transcript events as a list; tolerates malformed lines."""
+    events: list[dict[str, Any]] = []
+    try:
+        handle = path.open(encoding="utf-8")
+    except OSError:
+        return events
+    with handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                events.append(parsed)
+    return events
+
+
+def _flush_common_transcript(state_dir: Path) -> None:
+    """Synchronously run the common-transcript converter so events.jsonl
+    catches up with the just-finished turn. Best-effort; a flush failure
+    is logged-and-skipped, not fatal."""
+    script = state_dir / _COMMON_TRANSCRIPT_SCRIPT_REL
+    if not script.is_file():
+        return
+    try:
+        result = subprocess.run(
+            [str(script), "--single-pass"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if result.returncode != 0:
+        # The hook still runs against whatever the 5s poller had time to
+        # write before we got here -- worst case we miss the most recent
+        # tool calls, which only causes an under-count (silent), never an
+        # over-count (false alarm).
+        return
+
+
+def _parse_input_preview(preview: Any) -> dict[str, Any] | None:
+    """Best-effort decode of a common-transcript ``input_preview`` string.
+
+    The converter JSON-encodes the tool input and truncates to 200 chars
+    (with a literal ``...`` suffix). Short inputs round-trip cleanly;
+    long ones fail to parse and the caller falls back to substring
+    matching on the raw preview.
+    """
+    if not isinstance(preview, str):
+        return None
+    candidate = preview[:-3] if preview.endswith("...") else preview
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _iter_tool_calls(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collect all tool_calls entries from assistant_message events in order."""
+    tool_calls: list[dict[str, Any]] = []
     for event in events:
-        if event.get("type") != "assistant":
+        if event.get("type") != "assistant_message":
             continue
-        message = event.get("message")
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                tool_uses.append(block)
-    return tool_uses
+        for call in event.get("tool_calls") or ():
+            if isinstance(call, dict):
+                tool_calls.append(call)
+    return tool_calls
 
 
-def _count_qualifying(tool_uses: list[dict[str, Any]]) -> int:
-    return sum(1 for block in tool_uses if block.get("name") not in READ_ONLY_TOOLS)
+def _count_qualifying(tool_calls: list[dict[str, Any]]) -> int:
+    return sum(1 for call in tool_calls if call.get("tool_name") not in READ_ONLY_TOOLS)
 
 
 _FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
@@ -152,29 +211,47 @@ def _skill_is_crystallized(skill_md_path: Path) -> bool:
     return bool(_CRYSTALLIZED_PATTERN.search(match.group(1)))
 
 
-def _errored_tool_use_ids(events: list[dict[str, Any]]) -> set[str]:
-    """Set of tool_use_ids whose tool_result reported is_error=True."""
+def _errored_tool_call_ids(events: list[dict[str, Any]]) -> set[str]:
+    """Set of tool_call_ids whose tool_result reported is_error=True."""
     out: set[str] = set()
     for event in events:
-        if event.get("type") != "user":
+        if event.get("type") != "tool_result":
             continue
-        message = event.get("message")
-        if not isinstance(message, dict):
+        if event.get("is_error") is not True:
             continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") != "tool_result":
-                continue
-            if block.get("is_error") is not True:
-                continue
-            tool_use_id = block.get("tool_use_id")
-            if isinstance(tool_use_id, str):
-                out.add(tool_use_id)
+        call_id = event.get("tool_call_id")
+        if isinstance(call_id, str):
+            out.add(call_id)
     return out
+
+
+def _skill_input_name(call: dict[str, Any]) -> str | None:
+    """Extract ``input.skill`` from a Skill tool call's input_preview, or None."""
+    parsed = _parse_input_preview(call.get("input_preview"))
+    if parsed is None:
+        return None
+    skill = parsed.get("skill")
+    return skill if isinstance(skill, str) else None
+
+
+def _bash_input_matches_git_commit(call: dict[str, Any]) -> bool:
+    """True iff a Bash tool call invokes ``git commit``.
+
+    Prefers parsing the input_preview JSON and checking the ``command``
+    field exactly (avoids false positives from words like 'commit' in the
+    description). If JSON parsing fails -- usually because the preview
+    was truncated -- falls back to substring matching on the raw preview,
+    which is conservative but rarely false-positives in practice.
+    """
+    preview = call.get("input_preview")
+    parsed = _parse_input_preview(preview)
+    if parsed is not None:
+        command = parsed.get("command")
+        if isinstance(command, str):
+            return bool(_GIT_COMMIT_PATTERN.search(command))
+    if isinstance(preview, str):
+        return bool(_GIT_COMMIT_PATTERN.search(preview))
+    return False
 
 
 def _find_successful_crystallized_skill_call(
@@ -182,22 +259,21 @@ def _find_successful_crystallized_skill_call(
 ) -> bool:
     """True if any Skill tool call in the turn targeted a crystallized skill and did not error."""
     skill_calls: dict[str, str] = {}
-    for block in _iter_assistant_tool_uses(events):
-        if block.get("name") != "Skill":
+    for call in _iter_tool_calls(events):
+        if call.get("tool_name") != "Skill":
             continue
-        block_id = block.get("id")
-        tool_input = block.get("input")
-        if not isinstance(block_id, str) or not isinstance(tool_input, dict):
+        call_id = call.get("tool_call_id")
+        if not isinstance(call_id, str):
             continue
-        skill_name = tool_input.get("skill")
-        if isinstance(skill_name, str):
-            skill_calls[block_id] = skill_name
+        skill_name = _skill_input_name(call)
+        if skill_name is not None:
+            skill_calls[call_id] = skill_name
     if not skill_calls:
         return False
 
-    errored_ids = _errored_tool_use_ids(events)
-    for block_id, skill_name in skill_calls.items():
-        if block_id in errored_ids:
+    errored = _errored_tool_call_ids(events)
+    for call_id, skill_name in skill_calls.items():
+        if call_id in errored:
             continue
         # Strip any plugin prefix (e.g. "foo:bar") -- plugin-namespaced skills
         # still resolve to a <name>/SKILL.md directory.
@@ -213,42 +289,28 @@ def _last_lifecycle_invocation_index(events: list[dict[str, Any]]) -> int | None
 
     Detects two invocation forms:
 
-    - Programmatic: an assistant ``tool_use`` block with ``name: "Skill"`` and
-      ``input.skill`` set to a lifecycle skill name. Plugin prefixes
-      (``"plugin:do-something-new"``) are stripped before matching.
-    - Slash command: a user message whose ``content`` string contains a
-      ``<command-name>/<skill></command-name>`` marker.
+    - Programmatic: an ``assistant_message`` event whose ``tool_calls``
+      includes a ``Skill`` call resolving to a lifecycle skill name
+      (plugin prefixes stripped).
+    - Slash command: a ``user_message`` event whose ``content`` string
+      contains a ``<command-name>/<skill></command-name>`` marker.
     """
     last: int | None = None
     for index, event in enumerate(events):
-        event_type = event.get("type")
-        if event_type == "assistant":
-            message = event.get("message")
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
+        ev_type = event.get("type")
+        if ev_type == "assistant_message":
+            for call in event.get("tool_calls") or ():
+                if not isinstance(call, dict) or call.get("tool_name") != "Skill":
                     continue
-                if block.get("type") != "tool_use" or block.get("name") != "Skill":
-                    continue
-                tool_input = block.get("input")
-                if not isinstance(tool_input, dict):
-                    continue
-                skill_name = tool_input.get("skill")
-                if not isinstance(skill_name, str):
+                skill_name = _skill_input_name(call)
+                if skill_name is None:
                     continue
                 bare = skill_name.split(":", 1)[-1]
                 if bare in LIFECYCLE_SKILL_NAMES:
                     last = index
                     break
-        elif event_type == "user":
-            message = event.get("message")
-            if not isinstance(message, dict):
-                continue
-            content = message.get("content")
+        elif ev_type == "user_message":
+            content = event.get("content")
             if not isinstance(content, str):
                 continue
             for match in _COMMAND_NAME_PATTERN.finditer(content):
@@ -259,37 +321,25 @@ def _last_lifecycle_invocation_index(events: list[dict[str, Any]]) -> int | None
 
 
 def _successful_commit_indices(events: list[dict[str, Any]]) -> list[int]:
-    """Indices of assistant events containing a successful ``git commit`` Bash call.
+    """Indices of assistant_message events containing a successful ``git commit`` Bash call.
 
-    A commit counts as successful when its tool_result is not flagged as an
-    error. Multiple commits in a single assistant event collapse to one
-    index; we only need the count and the position relative to skill
-    invocations.
+    A commit counts as successful when its tool_result is not flagged as
+    an error. Multiple commits in a single assistant event collapse to
+    one index; we only need the count and the position relative to
+    skill invocations.
     """
-    errored = _errored_tool_use_ids(events)
+    errored = _errored_tool_call_ids(events)
     indices: list[int] = []
     for index, event in enumerate(events):
-        if event.get("type") != "assistant":
+        if event.get("type") != "assistant_message":
             continue
-        message = event.get("message")
-        if not isinstance(message, dict):
-            continue
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict):
+        for call in event.get("tool_calls") or ():
+            if not isinstance(call, dict) or call.get("tool_name") != "Bash":
                 continue
-            if block.get("type") != "tool_use" or block.get("name") != "Bash":
+            call_id = call.get("tool_call_id")
+            if not isinstance(call_id, str) or call_id in errored:
                 continue
-            block_id = block.get("id")
-            if not isinstance(block_id, str) or block_id in errored:
-                continue
-            tool_input = block.get("input")
-            if not isinstance(tool_input, dict):
-                continue
-            command = tool_input.get("command")
-            if isinstance(command, str) and _GIT_COMMIT_PATTERN.search(command):
+            if _bash_input_matches_git_commit(call):
                 indices.append(index)
                 break
     return indices
@@ -302,12 +352,12 @@ def _read_nudge_state(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _write_nudge_state(path: Path, transcript_path: str, commit_count: int) -> None:
+def _write_nudge_state(path: Path, transcript_id: str, commit_count: int) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(
-                {"transcript_path": transcript_path, "commit_count": commit_count}
+                {"transcript_id": transcript_id, "commit_count": commit_count}
             ),
             encoding="utf-8",
         )
@@ -320,44 +370,51 @@ def _write_nudge_state(path: Path, transcript_path: str, commit_count: int) -> N
 def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
     """Index of the event that prompted the agent's most recent response.
 
-    This is the most recent ``type: user`` event that is NOT a tool_result
-    carrier. ``isMeta: true`` events (e.g. Stop-hook re-injections) are
-    deliberately included: those also prompt a fresh assistant response, so
-    the tool-use count for "the turn that just finished" should reset at them.
+    Either:
+    - A ``user_message`` (a real user input), or
+    - A ``tool_result`` event with ``tool_name == "meta"`` (Claude Code's
+      Stop-hook re-injections, which the common-transcript converter
+      reclassifies from isMeta user events). Both kinds prompt a fresh
+      assistant response, so the tool-call count for "the turn that just
+      finished" should reset at them.
     """
     for index in range(len(events) - 1, -1, -1):
         event = events[index]
-        if event.get("type") != "user":
-            continue
-        if is_user_tool_result_carrier(event):
-            continue
-        return index
+        ev_type = event.get("type")
+        if ev_type == "user_message":
+            return index
+        if ev_type == "tool_result" and event.get("tool_name") == "meta":
+            return index
     return None
 
 
 def evaluate(
-    payload: dict[str, Any], skills_root: Path, workdir: Path
+    events: list[dict[str, Any]],
+    skills_root: Path,
+    workdir: Path,
+    transcript_id: str,
 ) -> tuple[bool, str]:
     """Detection entry point.
 
-    Returns ``(should_warn, message)``. ``should_warn == False`` means the
-    caller should stay silent; ``message`` is meaningful only when the first
-    element is True.
+    Returns ``(should_warn, message)``. ``should_warn == False`` means
+    the caller should stay silent; ``message`` is meaningful only when
+    the first element is True.
 
     "The turn that just finished" is the agent's most recent response --
-    everything after the most recent non-tool-result user event (including
-    Stop-hook meta injections). If the agent replied without tools, the
-    count is zero and the hook stays silent, which is what we want when the
-    Stop hook re-fires after a tool-free acknowledgement.
+    everything after the most recent ``user_message`` or
+    ``tool_result(tool_name="meta")`` event. If the agent replied
+    without tools, the count is zero and the hook stays silent, which
+    is what we want when the Stop hook re-fires after a tool-free
+    acknowledgement.
+
+    ``transcript_id`` is the stable identifier under which we persist
+    the nudge state -- typically the agent's state dir. When it changes
+    (a different agent / wiped state) the suppression cache is treated
+    as stale and the nudge re-arms.
     """
-    transcript_path_str = payload.get("transcript_path")
-    if not isinstance(transcript_path_str, str):
-        return False, ""
-    transcript_path = Path(transcript_path_str)
-    if not transcript_path.is_file():
+    if not events:
         return False, ""
 
-    events = iter_transcript(transcript_path)
     boundary = _latest_response_boundary(events)
     turn_events = events if boundary is None else events[boundary + 1 :]
     if not turn_events:
@@ -366,7 +423,7 @@ def evaluate(
     if _find_successful_crystallized_skill_call(turn_events, skills_root):
         return False, ""
 
-    count = _count_qualifying(_iter_assistant_tool_uses(turn_events))
+    count = _count_qualifying(_iter_tool_calls(turn_events))
     if count < QUALIFYING_CALL_THRESHOLD:
         return False, ""
 
@@ -387,13 +444,13 @@ def evaluate(
     nudge_state = _read_nudge_state(nudge_state_path)
     last_commit_count = nudge_state.get("commit_count")
     if (
-        nudge_state.get("transcript_path") == transcript_path_str
+        nudge_state.get("transcript_id") == transcript_id
         and isinstance(last_commit_count, int)
         and len(commit_indices) <= last_commit_count
     ):
         return False, ""
 
-    _write_nudge_state(nudge_state_path, transcript_path_str, len(commit_indices))
+    _write_nudge_state(nudge_state_path, transcript_id, len(commit_indices))
     return True, REMINDER_MESSAGE.format(count=count)
 
 
@@ -408,22 +465,38 @@ def _skills_root() -> Path:
     return _workspace_root() / ".agents" / "skills"
 
 
+def _state_dir() -> Path | None:
+    """Resolve the current agent's state dir, or None outside mngr."""
+    state = os.environ.get("MNGR_AGENT_STATE_DIR")
+    return Path(state) if state else None
+
+
 def main() -> int:
     if os.environ.get("MNGR_AGENT_ROLE") == "worker":
         # Workers run their own crystallization lifecycle; don't nudge them.
         return 0
 
     raw = sys.stdin.read()
-    if not raw.strip():
+    if raw.strip():
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError:
+            return 0
+
+    state_dir = _state_dir()
+    if state_dir is None:
+        # Standalone Claude (no mngr) -- no common transcript to read.
         return 0
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return 0
-    if not isinstance(payload, dict):
+    events_path = state_dir / _COMMON_TRANSCRIPT_EVENTS_REL
+    if not events_path.is_file():
         return 0
 
-    should_warn, message = evaluate(payload, _skills_root(), _workspace_root())
+    _flush_common_transcript(state_dir)
+    events = _read_common_transcript(events_path)
+
+    should_warn, message = evaluate(
+        events, _skills_root(), _workspace_root(), str(state_dir)
+    )
     if not should_warn:
         return 0
     print(message, file=sys.stderr)

@@ -19,12 +19,22 @@ export interface ToolCall {
   subagent_metadata?: SubagentMetadata;
 }
 
+/**
+ * Status vocabulary mirrored from the tk ticket tracker:
+ *   - "open"        -> rendered as "pending" in the chat progress UI
+ *   - "in_progress" -> rendered as "active"
+ *   - "closed"      -> rendered as "done"
+ * There is no failed state by design (every ticket terminates as closed
+ * with a summary; see CLAUDE.md "Task management" in the FCT side).
+ */
+export type TaskEventStatus = "open" | "in_progress" | "closed";
+
 export interface TranscriptEvent {
   timestamp: string;
-  type: "user_message" | "assistant_message" | "tool_result";
+  type: "user_message" | "assistant_message" | "tool_result" | "task_event";
   event_id: string;
   source: string;
-  message_uuid: string;
+  message_uuid?: string;
   session_id?: string;
 
   // user_message fields
@@ -43,11 +53,34 @@ export interface TranscriptEvent {
     cache_write_tokens?: number | null;
   } | null;
 
+  // assistant_message: true when the text matches a known Claude auth-error pattern
+  is_auth_error?: boolean;
+
   // tool_result fields
   tool_call_id?: string;
   tool_name?: string;
   output?: string;
   is_error?: boolean;
+
+  // task_event fields (emitted by the tickets_watcher; one event per
+  // (ticket_id, status) tuple, three at most per ticket lifetime).
+  ticket_id?: string;
+  title?: string;
+  status?: TaskEventStatus;
+  created_at?: string;
+  summary?: string | null;
+  summary_at?: string | null;
+  // True iff the ticket is a turn-bound progress record ("step"), as
+  // opposed to a regular tk ticket. Step records nest under their
+  // parent ticket in the progress view; standalone steps render flat.
+  step?: boolean;
+  // The id of the ticket this one is nested under, if any.
+  parent_id?: string;
+  // The agent currently assigned to the ticket -- the load-bearing
+  // "this is now my work" signal for regular tickets (used by
+  // turn-grouping to attribute a picked-up ticket to the picker's
+  // first turn rather than the originator's creation turn).
+  assignee?: string;
 }
 
 // For hook compatibility
@@ -171,6 +204,14 @@ export async function sendMessage(agentId: string, message: string): Promise<voi
     url: apiUrl("/api/agents/:agentId/message"),
     params: { agentId },
     body: { message: message.trim() },
+  });
+}
+
+export async function interruptAgent(agentId: string): Promise<void> {
+  await m.request({
+    method: "POST",
+    url: apiUrl("/api/agents/:agentId/interrupt"),
+    params: { agentId },
   });
 }
 

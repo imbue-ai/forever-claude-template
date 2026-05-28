@@ -16,15 +16,23 @@ import {
   getFirstEventId,
   isConversationNotFound,
   isBackfillComplete,
-  type TranscriptEvent,
 } from "../models/Response";
-import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
+import { connectToStream, disconnectFromStream, subscribeToAuthErrors } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
+import {
+  renderUserMessage,
+  renderAssistantMessage,
+  computeAuthErrorHiddenEventIds,
+  buildToolResultsWithSkillExpansions,
+} from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
+import { ClaudeLoginModal } from "./ClaudeLoginModal";
+import { buildTurns, selectFinalMessages } from "./turn-grouping";
+import { ProgressBlock } from "./ProgressBlock";
+import { ActivityIndicator } from "./ActivityIndicator";
 
 function getAgentTerminalUrl(agentId: string): string {
   const baseUrl = getTerminalUrl();
@@ -69,6 +77,46 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let userScrolledUp = false;
   let previousScrollTop = 0;
   let backfillStarted = false;
+
+  // Claude login modal state. The modal opens only when the agent's SSE
+  // stream emits an `is_auth_error` event, and closes only when the user
+  // dismisses it (either after a successful sign-in or by clicking the
+  // close affordance). If the user closes it without signing in, the
+  // next auth-error event will reopen it.
+  let loginModalOpen = false;
+  let unsubscribeAuthError: (() => void) | null = null;
+
+  function handleAuthErrorEvent(eventAgentId: string): void {
+    if (eventAgentId !== currentAgentId) return;
+    if (loginModalOpen) return;
+    loginModalOpen = true;
+    m.redraw();
+  }
+
+  function closeLoginModal(): void {
+    loginModalOpen = false;
+    m.redraw();
+  }
+
+  // Snapshot-load path: SSE only carries events emitted after subscription,
+  // so an auth-error that happened before the user opened the panel (e.g.
+  // the auto-`/welcome` failing during fresh mind creation) wouldn't pop
+  // the modal otherwise. Walking back to the last assistant_message means
+  // an already-recovered agent (whose history contains old auth errors
+  // but has since produced healthy replies) does not pop on reload --
+  // only an agent whose current state is broken does.
+  function checkLatestAssistantForAuthError(agentId: string): void {
+    const events = getEventsForAgent(agentId);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.type === "assistant_message") {
+        if (event.is_auth_error === true) {
+          handleAuthErrorEvent(agentId);
+        }
+        return;
+      }
+    }
+  }
 
   // Screen capture state (shown when agent has no conversation)
   let screenContent: string | null = null;
@@ -198,6 +246,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       if (agentId === currentAgentId) {
         loading = false;
         loadingError = null;
+        checkLatestAssistantForAuthError(agentId);
       }
     } catch (error) {
       if (agentId === currentAgentId) {
@@ -364,22 +413,94 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     startBackfill(agentId);
 
-    const toolResults = new Map<string, TranscriptEvent>();
-    for (const event of events) {
-      if (event.type === "tool_result" && event.tool_call_id) {
-        toolResults.set(event.tool_call_id, event);
+    const toolResults = buildToolResultsWithSkillExpansions(events);
+
+    // Drop the pre-login auth-error prefix once login has recovered. Tool
+    // results are still built from the full event list above so nothing
+    // dangles; only the rendered turns are filtered.
+    const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
+    const visibleEvents = hiddenEventIds.size > 0 ? events.filter((e) => !hiddenEventIds.has(e.event_id)) : events;
+
+    // Group events into turns and decide per turn whether to render the
+    // tk-driven progress view or the plain (legacy) chat view. A turn is
+    // a "progress turn" iff it has at least one task attributed to it;
+    // turns with no tasks render exactly as today (assistant text +
+    // inline tool blocks). Sessions that predate the tk integration have
+    // zero task_events, so every turn is plain -- backwards-compatible.
+    const turns = buildTurns(visibleEvents);
+
+    const messageNodes: m.Children[] = [];
+
+    // Fallback: if no turns were derived (no user_message exists yet, e.g.
+    // a stalled agent that emitted assistant text before any user input),
+    // render every event in order so that content is never silently
+    // dropped. Matches the pre-progress-view rendering behavior. buildTurns
+    // returns [] only when there are no user_messages, so we render only
+    // assistant_messages here -- a user_message branch would be unreachable.
+    if (turns.length === 0) {
+      for (const event of visibleEvents) {
+        if (event.type === "assistant_message") {
+          messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
+        }
       }
+      return m("div", { class: "message-list-wrapper" }, [
+        m(
+          "div",
+          { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
+          messageNodes,
+        ),
+      ]);
     }
 
-    const messageNodes: m.Vnode[] = [];
-    for (const event of events) {
-      if (event.type === "user_message") {
-        const userNode = renderUserMessage(event);
-        if (userNode !== null) {
-          messageNodes.push(userNode);
+    for (const turn of turns) {
+      const userNode = renderUserMessage(turn.user_event);
+      if (userNode !== null) {
+        messageNodes.push(userNode);
+      }
+      // Non-boundary user_messages (stop-hook feedback, skill expansions,
+      // etc.) fall inside the turn's window. Skill expansions are folded
+      // into the matching Skill tool call's output by
+      // buildToolResultsWithSkillExpansions and are hidden here (their
+      // renderUserMessage returns null). Anything still visible -- mostly
+      // stop-hook feedback chips -- is pushed above the progress block so
+      // it brackets the work rather than splitting the timeline.
+      const nonBoundaryUserEvents = turn.body_events.filter((e) => e.type === "user_message");
+      if (turn.tasks.length > 0) {
+        const finalMessages = selectFinalMessages(turn.body_events, turn.tasks);
+        for (const ev of nonBoundaryUserEvents) {
+          const chipNode = renderUserMessage(ev);
+          if (chipNode !== null) {
+            messageNodes.push(chipNode);
+          }
         }
-      } else if (event.type === "assistant_message") {
-        messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
+        // ProgressBlock must carry a key: messageNodes is a homogeneous
+        // keyed fragment (renderUserMessage and renderAssistantMessage both
+        // attach `key: event.event_id` to their root vnodes), and Mithril 2
+        // throws if a fragment mixes keyed and unkeyed children. Deriving
+        // the key from the turn's user_event.event_id keeps it stable
+        // across redraws -- which also preserves the per-turn expand state
+        // that lives in ProgressBlock's component closure.
+        messageNodes.push(
+          m(ProgressBlock, {
+            key: `progress-${turn.user_event.event_id}`,
+            tasks: turn.tasks,
+            body_events: turn.body_events,
+            toolResults,
+            final_messages: finalMessages,
+            agentId,
+          }),
+        );
+      } else {
+        for (const ev of turn.body_events) {
+          if (ev.type === "assistant_message") {
+            messageNodes.push(renderAssistantMessage(ev, toolResults, agentId));
+          } else if (ev.type === "user_message") {
+            const chipNode = renderUserMessage(ev);
+            if (chipNode !== null) {
+              messageNodes.push(chipNode);
+            }
+          }
+        }
       }
     }
 
@@ -393,17 +514,29 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   }
 
   return {
+    oncreate() {
+      unsubscribeAuthError = subscribeToAuthErrors((eventAgentId: string) => {
+        handleAuthErrorEvent(eventAgentId);
+      });
+    },
+
     onremove() {
       disconnectLogWs();
       if (currentAgentId !== null) {
         disconnectFromStream(currentAgentId);
+      }
+      if (unsubscribeAuthError !== null) {
+        unsubscribeAuthError();
+        unsubscribeAuthError = null;
       }
     },
 
     view(vnode) {
       const agentId = vnode.attrs.agentId;
 
-      return m("div", { class: "chat-panel flex flex-col h-full" }, [
+      const chatAgentName = getAgentById(agentId)?.name ?? null;
+
+      return m("div", { class: "chat-panel flex flex-col h-full relative" }, [
         m(
           "main",
           {
@@ -423,6 +556,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           ? null
           : m("footer", { class: "app-footer" }, [
               m(EmptySlot, { name: "conversation-before-input" }),
+              isConversationNotFound(agentId)
+                ? null
+                : m(ActivityIndicator, { agentId, events: getEventsForAgent(agentId) }),
               m(MessageInput, { agentId }),
               m("div", { class: "chat-agent-terminal-link" }, [
                 m(
@@ -435,6 +571,12 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
                 ),
               ]),
             ]),
+        loginModalOpen
+          ? m(ClaudeLoginModal, {
+              chatAgentName,
+              onDismiss: closeLoginModal,
+            })
+          : null,
       ]);
     },
   };

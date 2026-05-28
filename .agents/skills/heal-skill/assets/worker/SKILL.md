@@ -1,6 +1,6 @@
 ---
 name: heal-skill-worker
-description: Repair a failing skill. Invoke when your task file asks you to heal a specific skill by pointing at its incident transcript.
+description: Repair a failing skill. Invoke when your task file asks you to heal a specific skill, providing an incident description plus verbatim quote anchors that locate the failure in the lead's transcript.
 metadata:
   role: worker-sub-skill
 ---

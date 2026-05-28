@@ -1,4 +1,11 @@
-"""Tests for the Stop-hook crystallization detector."""
+"""Tests for the Stop-hook crystallization detector.
+
+Event shapes are the common-transcript format emitted by mngr_claude's
+``common_transcript.sh`` -- ``assistant_message`` / ``user_message`` /
+``tool_result`` envelopes with ``tool_calls`` arrays and JSON-encoded
+``input_preview`` strings. See ``vendor/mngr/libs/mngr_claude/...
+/common_transcript.sh`` for the canonical schema.
+"""
 
 from __future__ import annotations
 
@@ -14,54 +21,64 @@ detect = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(detect)
 
 
+_AGENT_ID = "agent-abc"
+
+
 def _user(text: str) -> dict[str, Any]:
-    return {"type": "user", "message": {"content": [{"type": "text", "text": text}]}}
+    return {"type": "user_message", "content": text}
 
 
 def _user_command(command_name: str) -> dict[str, Any]:
     """User message that invokes a slash command (e.g. ``/do-something-new``)."""
     return {
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": (
-                f"<command-message>{command_name}</command-message>\n"
-                f"<command-name>/{command_name}</command-name>"
-            ),
-        },
+        "type": "user_message",
+        "content": (
+            f"<command-message>{command_name}</command-message>\n"
+            f"<command-name>/{command_name}</command-name>"
+        ),
     }
 
 
-def _tool_use(name: str, block_id: str = "use-id", **input_kwargs: Any) -> dict[str, Any]:
-    return {"type": "tool_use", "id": block_id, "name": name, "input": dict(input_kwargs)}
-
-
-def _assistant_with_tool_uses(*tool_uses: dict[str, Any]) -> dict[str, Any]:
-    return {"type": "assistant", "message": {"content": list(tool_uses)}}
-
-
-def _tool_result(tool_use_id: str, *, is_error: bool = False) -> dict[str, Any]:
+def _tool_call(name: str, call_id: str = "call-id", **input_kwargs: Any) -> dict[str, Any]:
+    """A single tool_calls[] entry inside an assistant_message event."""
     return {
-        "type": "user",
-        "message": {
-            "content": [
-                {"type": "tool_result", "tool_use_id": tool_use_id, "is_error": is_error}
-            ]
-        },
+        "tool_call_id": call_id,
+        "tool_name": name,
+        "input_preview": json.dumps(dict(input_kwargs), separators=(",", ":")),
     }
 
 
-def _commit_assistant(block_id: str = "commit-id") -> dict[str, Any]:
+def _assistant(*tool_calls: dict[str, Any], text: str = "") -> dict[str, Any]:
+    return {
+        "type": "assistant_message",
+        "text": text,
+        "tool_calls": list(tool_calls),
+    }
+
+
+def _tool_result(call_id: str, *, is_error: bool = False) -> dict[str, Any]:
+    return {
+        "type": "tool_result",
+        "tool_call_id": call_id,
+        "is_error": is_error,
+    }
+
+
+def _meta_injection(text: str = "Stop hook feedback: ...") -> dict[str, Any]:
+    """Common-format equivalent of an isMeta user event: a tool_result
+    labeled ``tool_name: meta`` by the converter."""
+    return {
+        "type": "tool_result",
+        "tool_call_id": "meta-fake-uuid",
+        "tool_name": "meta",
+        "output": text,
+        "is_error": False,
+    }
+
+
+def _commit_assistant(call_id: str = "commit-id") -> dict[str, Any]:
     """Assistant turn containing a single ``git commit`` Bash call."""
-    return _assistant_with_tool_uses(
-        _tool_use("Bash", block_id, command="git commit -m 'msg'")
-    )
-
-
-def _write_transcript(tmp_path: Path, events: list[dict[str, Any]]) -> Path:
-    path = tmp_path / "transcript.jsonl"
-    path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
-    return path
+    return _assistant(_tool_call("Bash", call_id, command="git commit -m 'msg'"))
 
 
 def _empty_skills_root(tmp_path: Path) -> Path:
@@ -79,15 +96,10 @@ def _workdir(tmp_path: Path) -> Path:
 def test_evaluate_below_threshold_stays_silent(tmp_path: Path) -> None:
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(
-            _tool_use("Bash", "u1"), _tool_use("Bash", "u2"), _tool_use("Bash", "u3")
-        ),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(3))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
@@ -95,13 +107,10 @@ def test_evaluate_below_threshold_stays_silent(tmp_path: Path) -> None:
 def test_evaluate_at_threshold_warns_with_count(tmp_path: Path) -> None:
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
@@ -110,18 +119,15 @@ def test_evaluate_at_threshold_warns_with_count(tmp_path: Path) -> None:
 def test_evaluate_excludes_read_only_tools(tmp_path: Path) -> None:
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(
-            *(_tool_use("Read", f"r{i}") for i in range(10)),
-            *(_tool_use("Grep", f"g{i}") for i in range(10)),
-            *(_tool_use("Glob", f"l{i}") for i in range(10)),
-            _tool_use("Bash", "b1"),
+        _assistant(
+            *(_tool_call("Read", f"r{i}") for i in range(10)),
+            *(_tool_call("Grep", f"g{i}") for i in range(10)),
+            *(_tool_call("Glob", f"l{i}") for i in range(10)),
+            _tool_call("Bash", "b1"),
         ),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
@@ -130,32 +136,26 @@ def test_evaluate_only_counts_last_turn(tmp_path: Path) -> None:
     """Earlier turns must not bleed into the count for the latest turn."""
     events = [
         _user("first turn"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(20))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(20))),
         _user("second turn"),
-        _assistant_with_tool_uses(_tool_use("Bash", "u-new")),
+        _assistant(_tool_call("Bash", "u-new")),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
 
-def test_evaluate_ignores_tool_result_carriers_when_finding_turn_boundary(tmp_path: Path) -> None:
-    """tool_result-carrying user events must not be treated as a turn boundary."""
+def test_evaluate_ignores_tool_results_when_finding_turn_boundary(tmp_path: Path) -> None:
+    """Standalone tool_result events must not be treated as a turn boundary."""
     events = [
         _user("real user message"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
         _tool_result("u0"),
         _tool_result("u1"),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
@@ -172,15 +172,14 @@ def test_evaluate_silenced_by_successful_crystallized_skill(tmp_path: Path) -> N
     )
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(
-            *(_tool_use("Bash", f"u{i}") for i in range(10)),
-            _tool_use("Skill", "skill-id", skill="my-skill"),
+        _assistant(
+            *(_tool_call("Bash", f"u{i}") for i in range(10)),
+            _tool_call("Skill", "skill-id", skill="my-skill"),
         ),
         _tool_result("skill-id"),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, skills, _workdir(tmp_path)
+        events, skills, _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
@@ -196,15 +195,14 @@ def test_evaluate_not_silenced_when_crystallized_skill_errored(tmp_path: Path) -
     )
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(
-            *(_tool_use("Bash", f"u{i}") for i in range(10)),
-            _tool_use("Skill", "skill-id", skill="my-skill"),
+        _assistant(
+            *(_tool_call("Bash", f"u{i}") for i in range(10)),
+            _tool_call("Skill", "skill-id", skill="my-skill"),
         ),
         _tool_result("skill-id", is_error=True),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, skills, _workdir(tmp_path)
+        events, skills, _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is True
 
@@ -220,15 +218,14 @@ def test_evaluate_not_silenced_by_non_crystallized_skill(tmp_path: Path) -> None
     )
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(
-            *(_tool_use("Bash", f"u{i}") for i in range(10)),
-            _tool_use("Skill", "skill-id", skill="my-skill"),
+        _assistant(
+            *(_tool_call("Bash", f"u{i}") for i in range(10)),
+            _tool_call("Skill", "skill-id", skill="my-skill"),
         ),
         _tool_result("skill-id"),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, skills, _workdir(tmp_path)
+        events, skills, _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is True
 
@@ -244,68 +241,38 @@ def test_evaluate_strips_plugin_prefix_from_skill_name(tmp_path: Path) -> None:
     )
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(
-            *(_tool_use("Bash", f"u{i}") for i in range(10)),
-            _tool_use("Skill", "skill-id", skill="foo:bar"),
+        _assistant(
+            *(_tool_call("Bash", f"u{i}") for i in range(10)),
+            _tool_call("Skill", "skill-id", skill="foo:bar"),
         ),
         _tool_result("skill-id"),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, skills, _workdir(tmp_path)
+        events, skills, _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
 
-def test_evaluate_returns_silent_when_transcript_path_missing(tmp_path: Path) -> None:
+def test_evaluate_returns_silent_for_empty_events(tmp_path: Path) -> None:
     should_warn, _ = detect.evaluate(
-        {}, _empty_skills_root(tmp_path), _workdir(tmp_path)
-    )
-    assert should_warn is False
-
-
-def test_evaluate_returns_silent_when_transcript_file_missing(tmp_path: Path) -> None:
-    should_warn, _ = detect.evaluate(
-        {"transcript_path": str(tmp_path / "no-such-file.jsonl")},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
-    )
-    assert should_warn is False
-
-
-def test_evaluate_returns_silent_for_empty_transcript(tmp_path: Path) -> None:
-    transcript = tmp_path / "empty.jsonl"
-    transcript.write_text("", encoding="utf-8")
-    should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        [], _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
 
 def test_evaluate_meta_injection_resets_tool_count(tmp_path: Path) -> None:
-    """After a Stop-hook re-injection, the "turn" restarts: if the agent's next
-    response has no tools, the hook must stay silent."""
+    """After a Stop-hook re-injection (tool_result with tool_name=meta),
+    the "turn" restarts: if the agent's next response has no tools, the
+    hook must stay silent."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
-        # Stop-hook fires exit=2 and Claude Code re-injects the stderr as an
-        # isMeta user event. Prior tool calls are now on the far side of a
-        # fresh agent-response boundary.
-        {
-            "type": "user",
-            "isMeta": True,
-            "message": {"content": [{"type": "text", "text": "Stop hook feedback: ..."}]},
-        },
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
+        _meta_injection("Stop hook feedback: ..."),
         # Agent replies without tools.
-        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Ignoring"}]}},
+        _assistant(text="Ignoring"),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
@@ -315,37 +282,27 @@ def test_evaluate_refires_if_agent_keeps_using_tools_after_meta(tmp_path: Path) 
     threshold, that is a new qualifying turn and the hook should fire again."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
-        {
-            "type": "user",
-            "isMeta": True,
-            "message": {"content": [{"type": "text", "text": "Stop hook feedback: ..."}]},
-        },
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"v{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
+        _meta_injection(),
+        _assistant(*(_tool_call("Bash", f"v{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
 
 
 def test_evaluate_tool_results_do_not_reset_count(tmp_path: Path) -> None:
-    """Tool-result-carrying user events must not be treated as a response boundary."""
+    """Standalone tool_result events (non-meta) must not be treated as a response boundary."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
         _tool_result("u0"),
         _tool_result("u1"),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, message = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
@@ -385,16 +342,13 @@ def test_lifecycle_skill_invocation_suppresses_until_commit(tmp_path: Path) -> N
     """do-something-new invoked, no commit yet -> stay silent even past threshold."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(_tool_use("Skill", "skill-id", skill="do-something-new")),
+        _assistant(_tool_call("Skill", "skill-id", skill="do-something-new")),
         _tool_result("skill-id"),
         _user("ok keep going"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
@@ -403,19 +357,16 @@ def test_lifecycle_skill_then_commit_re_arms_nudge(tmp_path: Path) -> None:
     """After do-something-new + a successful commit, the nudge is allowed to fire."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(_tool_use("Skill", "skill-id", skill="do-something-new")),
+        _assistant(_tool_call("Skill", "skill-id", skill="do-something-new")),
         _tool_result("skill-id"),
         _user("now commit"),
         _commit_assistant("commit-id"),
         _tool_result("commit-id"),
         _user("now do more work"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is True
 
@@ -424,13 +375,10 @@ def test_slash_command_invocation_also_suppresses(tmp_path: Path) -> None:
     """User typing /do-something-new is recognized as a lifecycle invocation."""
     events = [
         _user_command("do-something-new"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
@@ -439,18 +387,13 @@ def test_plugin_namespaced_lifecycle_skill_recognized(tmp_path: Path) -> None:
     """`foo:do-something-new` strips the prefix and still suppresses."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(
-            _tool_use("Skill", "skill-id", skill="foo:do-something-new"),
-        ),
+        _assistant(_tool_call("Skill", "skill-id", skill="foo:do-something-new")),
         _tool_result("skill-id"),
         _user("continue"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
@@ -459,19 +402,16 @@ def test_errored_commit_does_not_re_arm_nudge(tmp_path: Path) -> None:
     """A failed git commit should not satisfy the commit gate after a lifecycle skill."""
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(_tool_use("Skill", "skill-id", skill="do-something-new")),
+        _assistant(_tool_call("Skill", "skill-id", skill="do-something-new")),
         _tool_result("skill-id"),
         _user("commit"),
         _commit_assistant("commit-id"),
         _tool_result("commit-id", is_error=True),
         _user("more work"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)},
-        _empty_skills_root(tmp_path),
-        _workdir(tmp_path),
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
     )
     assert should_warn is False
 
@@ -486,15 +426,14 @@ def test_already_nudged_for_current_commit_window_suppresses(tmp_path: Path) -> 
         _commit_assistant("commit-id"),
         _tool_result("commit-id"),
         _user("more work"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     state_path.write_text(
-        json.dumps({"transcript_path": str(transcript), "commit_count": 1}),
+        json.dumps({"transcript_id": _AGENT_ID, "commit_count": 1}),
         encoding="utf-8",
     )
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path), work
+        events, _empty_skills_root(tmp_path), work, _AGENT_ID
     )
     assert should_warn is False
 
@@ -512,15 +451,14 @@ def test_new_commit_after_nudge_re_arms(tmp_path: Path) -> None:
         _commit_assistant("c2"),
         _tool_result("c2"),
         _user("now do work"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     state_path.write_text(
-        json.dumps({"transcript_path": str(transcript), "commit_count": 1}),
+        json.dumps({"transcript_id": _AGENT_ID, "commit_count": 1}),
         encoding="utf-8",
     )
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path), work
+        events, _empty_skills_root(tmp_path), work, _AGENT_ID
     )
     assert should_warn is True
 
@@ -531,16 +469,15 @@ def test_state_file_for_different_transcript_does_not_suppress(tmp_path: Path) -
     state_path = work / detect.NUDGE_STATE_REL_PATH
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
-        json.dumps({"transcript_path": "/some/other/transcript.jsonl", "commit_count": 5}),
+        json.dumps({"transcript_id": "different-agent", "commit_count": 5}),
         encoding="utf-8",
     )
     events = [
         _user("hi"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path), work
+        events, _empty_skills_root(tmp_path), work, _AGENT_ID
     )
     assert should_warn is True
 
@@ -553,12 +490,78 @@ def test_nudge_persists_state_after_firing(tmp_path: Path) -> None:
         _commit_assistant("c1"),
         _tool_result("c1"),
         _user("more"),
-        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(8))),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(8))),
     ]
-    transcript = _write_transcript(tmp_path, events)
     should_warn, _ = detect.evaluate(
-        {"transcript_path": str(transcript)}, _empty_skills_root(tmp_path), work
+        events, _empty_skills_root(tmp_path), work, _AGENT_ID
     )
     assert should_warn is True
     state = json.loads((work / detect.NUDGE_STATE_REL_PATH).read_text())
-    assert state == {"transcript_path": str(transcript), "commit_count": 1}
+    assert state == {"transcript_id": _AGENT_ID, "commit_count": 1}
+
+
+# ---------------------------------------------------------------------------
+# Input-preview parsing edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_bash_commit_detected_when_input_preview_truncated(tmp_path: Path) -> None:
+    """Long Bash commands get an ``...``-truncated input_preview that fails
+    JSON parsing; the substring fallback must still recognize ``git commit``."""
+    # Build a preview that starts with `{"command":"git commit -m '` followed
+    # by a long string and the literal ``...`` marker the converter appends.
+    long_msg = "x" * 300
+    truncated_preview = '{"command":"git commit -m \'' + long_msg + "..."
+    bash_call = {
+        "tool_call_id": "long-commit",
+        "tool_name": "Bash",
+        "input_preview": truncated_preview,
+    }
+    assistant_event = {
+        "type": "assistant_message",
+        "text": "",
+        "tool_calls": [bash_call],
+    }
+    events = [_user("hi"), assistant_event, _tool_result("long-commit")]
+    assert detect._successful_commit_indices(events) == [1]
+
+
+def test_bash_git_commit_tree_does_not_count_as_commit(tmp_path: Path) -> None:
+    """``git commit-tree`` is a plumbing subcommand, not a commit. The
+    regex must not match it -- a bare ``\\b`` would, which is why the
+    pattern uses a negative lookahead."""
+    bash_call = {
+        "tool_call_id": "plumbing",
+        "tool_name": "Bash",
+        "input_preview": json.dumps(
+            {"command": "git commit-tree abc123 -m 'msg'"},
+            separators=(",", ":"),
+        ),
+    }
+    assistant_event = {
+        "type": "assistant_message",
+        "text": "",
+        "tool_calls": [bash_call],
+    }
+    events = [_user("hi"), assistant_event, _tool_result("plumbing")]
+    assert detect._successful_commit_indices(events) == []
+
+
+def test_bash_description_mentioning_commit_does_not_false_positive(tmp_path: Path) -> None:
+    """When input_preview parses cleanly, the description field must NOT
+    trigger a commit match -- only the command field counts."""
+    bash_call = {
+        "tool_call_id": "not-a-commit",
+        "tool_name": "Bash",
+        "input_preview": json.dumps(
+            {"command": "git status", "description": "Stage files before a git commit later"},
+            separators=(",", ":"),
+        ),
+    }
+    assistant_event = {
+        "type": "assistant_message",
+        "text": "",
+        "tool_calls": [bash_call],
+    }
+    events = [_user("hi"), assistant_event, _tool_result("not-a-commit")]
+    assert detect._successful_commit_indices(events) == []

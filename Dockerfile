@@ -120,9 +120,10 @@ COPY apps/system_interface/pyproject.toml /code/apps/system_interface/pyproject.
 # vendor/mngr path-dependency manifests. The root pyproject.toml's
 # [tool.uv.sources] points imbue-common, imbue-mngr, imbue-mngr-claude,
 # resource-guards, and concurrency-group at vendor/mngr/libs/<pkg>; uv
-# needs each pyproject.toml present to resolve the workspace. The two
-# additional tool installs below (mngr_modal, mngr_wait) ride here too
-# so their transitive deps land in the warmed cache.
+# needs each pyproject.toml present to resolve the workspace. mngr_modal
+# and mngr_wait are also workspace members whose transitive deps benefit
+# from pre-warming even though only mngr_wait is registered post-COPY
+# (as a mngr plugin, not a tool install).
 COPY vendor/mngr/libs/imbue_common/pyproject.toml /code/vendor/mngr/libs/imbue_common/pyproject.toml
 COPY vendor/mngr/libs/mngr/pyproject.toml /code/vendor/mngr/libs/mngr/pyproject.toml
 COPY vendor/mngr/libs/mngr_claude/pyproject.toml /code/vendor/mngr/libs/mngr_claude/pyproject.toml
@@ -155,6 +156,9 @@ COPY . /code/
 # make an extra directory for future worktrees
 RUN mkdir -p /worktree
 
+RUN ln -sf /code/vendor/tk/ticket /usr/local/bin/tk && \
+    ln -sf /code/vendor/tk/ticket /usr/local/bin/ticket
+
 # Mark /code/ as a git safe.directory so commands run inside the container
 # don't refuse on ownership mismatch. No chown is needed: COPY already
 # lands files as root:root by default.
@@ -179,12 +183,6 @@ RUN uv tool install -e /code/vendor/mngr/libs/mngr && \
 # Sync the workspace venv. --frozen asserts the lockfile is canonical so
 # the pre-warm cache layer is never bypassed by a silent re-resolve.
 RUN uv sync --all-packages --frozen
-
-# Expose the vendored tk ticket tracker on PATH. `tk` is a portable bash
-# script at vendor/tk/ticket; a symlink into /root/.local/bin/ (already on
-# PATH) makes it invocable without bundling an additional install mechanism.
-# Tickets themselves live under .tickets/ (gitignored) at the repo root.
-RUN mkdir -p /root/.local/bin && ln -sf /code/vendor/tk/ticket /root/.local/bin/tk
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.

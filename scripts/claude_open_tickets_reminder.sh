@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# UserPromptSubmit hook: if any tk tickets are still open or in_progress when
-# a new user message arrives, inject a system reminder so the agent knows
-# what's outstanding before deciding what to do. Silent if there are no open
-# tickets or no .tickets/ directory yet.
+# UserPromptSubmit hook: if THIS agent has any tk STEP records (turn-bound
+# progress markers) still open or in_progress when a new user message
+# arrives, inject a system reminder so the agent knows what's outstanding
+# before deciding what to do. Silent if there are no open steps or no
+# .tickets/ directory yet.
+#
+# Step records, not tickets: regular tickets persist cross-agent and the
+# agent is expected to manage them through `tk ls / tk ready / tk show`.
+# Steps are the per-turn progress records that drive the chat progress
+# view, and they are the only thing the carryover reminder is about.
 set -euo pipefail
 
 repo_root="${MNGR_AGENT_WORK_DIR:-$(pwd)}"
@@ -25,11 +31,10 @@ tk_script="${repo_root}/vendor/tk/ticket"
 # parent-walk and potentially land on a random ancestor).
 export TICKETS_DIR="$tickets_dir"
 
-# `tk ready` is a built-in (no plugin-on-PATH needed) that lists every
-# open + in_progress ticket whose deps are resolved. We don't use deps in
-# this project, so for our purposes it lists every unfinished ticket.
-# Output format:  <id>  [Pn][<status>] - <title>
-open_lines=$("$tk_script" ready 2>/dev/null | sed '/^[[:space:]]*$/d' || true)
+# `tk steps` lists only step records (creator-scoped to $MNGR_AGENT_NAME
+# when set, so a sibling agent's steps never leak into this agent's
+# reminder). Output format: <id>  [<status>] - <title>
+open_lines=$("$tk_script" steps 2>/dev/null | sed '/^[[:space:]]*$/d' || true)
 
 [[ -n "$open_lines" ]] || exit 0
 
@@ -37,11 +42,11 @@ cat <<EOF
 
 [Open task reminder from forever-claude-template]
 
-You have task tickets that are not yet closed:
+You have step records that are not yet closed:
 
 $open_lines
 
-For each one, decide before continuing: keep working on it (call \`tk start <id>\` if it's not already in_progress), replace it with a fresh ticket, or close it now. Every started ticket must terminate as closed via \`tk close <id>\` (with \`tk add-note <id> "<summary>"\` first). The summary is a concise one-line description of the *work done* in this step (the caption a non-technical user sees), not the outcome -- the outcome goes in your final assistant message. Tickets are sequential: do not start a new ticket until the previous one is closed.
+For each one, decide before continuing: keep working on it (call \`tk start <id>\` if it's not already in_progress), replace it with a fresh step, or close it now with \`tk close <id> "<summary>"\` (the positional summary is required for steps). The summary is a concise one-line description of the *work done* in this step (the caption a non-technical user sees), not the outcome -- the outcome goes in your final assistant message. Steps are sequential: do not start a new step until the previous one is closed.
 
 See CLAUDE.md > Task management for the full protocol.
 EOF

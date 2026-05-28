@@ -160,10 +160,10 @@ Flow-specific substitutions:
 - Terminal statuses: `type: status, name: done` (merge);
   `type: status, name: stuck` (failure-handling flow).
 
-On successful merge, close the tracking ticket:
+On successful merge, close the tracking ticket with a summary:
 
 ```bash
-tk close "$TICKET_ID"
+tk close "$TICKET_ID" "Healed $TARGET -- worker branch merged."
 ```
 
 ## Gotchas
