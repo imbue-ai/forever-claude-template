@@ -159,7 +159,7 @@ extra_provision_command__extend = [
     # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
     # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
     "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
-    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
+    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs restic ripgrep sqlite3 unison",
     "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
     # Install latchkey CLI globally; pinned to the same version as Dockerfile's
     # LATCHKEY_VERSION ARG. Bump both together.
