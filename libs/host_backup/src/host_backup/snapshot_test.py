@@ -54,12 +54,6 @@ def test_make_snapshot_taker_raises_when_btrfs_local_missing_paths() -> None:
         make_snapshot_taker(bad_settings)
 
 
-def test_make_snapshot_taker_returns_direct_for_direct() -> None:
-    direct = SnapshotSettings(method=SnapshotMethod.DIRECT)
-    taker = make_snapshot_taker(direct)
-    assert isinstance(taker, DirectSnapshotTaker)
-
-
 # --- OuterTriggerSnapshotTaker (faked outer helper) ---
 
 

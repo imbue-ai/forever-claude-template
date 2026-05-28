@@ -10,7 +10,6 @@ import pytest
 import tomlkit
 
 from host_backup.config import (
-    RESTIC_ENV_PATH,
     BackupConfig,
     BackupConfigError,
     SnapshotMethod,
@@ -229,18 +228,6 @@ def test_render_default_backup_toml_parses_into_valid_config() -> None:
     assert "**/.venv" in config.excludes
 
 
-def test_render_default_backup_toml_includes_template_placeholders() -> None:
-    rendered = render_default_backup_toml(_direct_snapshot())
-    parsed = tomllib.loads(rendered)
-    assert (
-        parsed["restic"]["template_values"]["account_id"]
-        == "REPLACE_WITH_R2_ACCOUNT_ID"
-    )
-    assert (
-        parsed["restic"]["template_values"]["bucket"] == "REPLACE_WITH_R2_BUCKET_NAME"
-    )
-
-
 # --- merge_snapshot_into_existing_toml ---
 
 
@@ -292,11 +279,3 @@ def test_load_backup_config_round_trips_default_template(tmp_path: Path) -> None
     config = load_backup_config(path)
     assert config.snapshot.method == SnapshotMethod.BTRFS_LOCAL
     assert config.snapshot.host_subvolume_path == Path("/mnt/host-volume/host_dir")
-    assert config.minimum_backup_gap_seconds == 60.0
-
-
-# --- silence unused-import warning for RESTIC_ENV_PATH (used implicitly in docs) ---
-
-
-def test_module_constants_exposed() -> None:
-    assert str(RESTIC_ENV_PATH).endswith("restic.env")

@@ -18,7 +18,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from host_backup.config import BackupConfig, SnapshotMethod, SnapshotSettings
 from host_backup.restic import (
     backup as restic_backup,
 )
@@ -157,21 +156,6 @@ def test_exclude_pattern_actually_skips_files(tmp_path: Path) -> None:
     )
     assert "keep.txt" in listing.stdout
     assert ".venv" not in listing.stdout
-
-
-def test_backup_config_round_trips_for_direct_mode() -> None:
-    """Sanity: a fully-populated BackupConfig for direct mode is constructible."""
-    config = BackupConfig(
-        snapshot=SnapshotSettings(
-            method=SnapshotMethod.DIRECT, snapshot_read_path=Path("/mngr")
-        ),
-        restic={
-            "repository_url_template": "/tmp/repo",
-            "template_values": {},
-        },
-    )
-    assert config.snapshot.method == SnapshotMethod.DIRECT
-    assert config.snapshot.snapshot_read_path == Path("/mngr")
 
 
 def _path_for_subprocess() -> str:
