@@ -3,7 +3,7 @@
 # See the edit-services skill for details.
 
 [services.system_interface]
-command = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && minds-workspace-server"
+command = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
 restart = "on-failure"
 
 [services.web]

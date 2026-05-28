@@ -204,17 +204,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
 
         uvBin = uvPath;
         args = [
-          // -v lifts INFO-level logs (lifecycle: "mngr observe started",
-          // "observe exited unexpectedly", etc.) into minds.log so user bug
-          // reports contain enough context to debug "Discovering agents..."
-          // hangs. Single v keeps noise manageable; -vv (DEBUG) is dev-only.
           'run', '--project', pyprojectDir,
-          // --active makes uv use VIRTUAL_ENV (~/.minds/.venv) instead of
-          // <project>/.venv, which is inside the signed .app bundle and
-          // read-only on macOS. Without this, `uv run` tries to create
-          // .venv inside the bundle and fails with "Operation not permitted".
-          '--active',
-          'minds', '-v', '--format', 'jsonl',
+          'minds', '--format', 'jsonl',
           '--log-file', path.join(logDir, 'minds-events.jsonl'),
           'run',
           '--host', '127.0.0.1',
@@ -223,20 +214,9 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           ...configFileArgs,
         ];
         cwd = pyprojectDir;
-        // LaunchServices-started apps inherit a minimal PATH without
-        // /opt/homebrew/bin or /usr/local/bin. Prepend the bundled lima
-        // bin dir and the common macOS Homebrew bin dirs so user-installed
-        // tools (and the bundled limactl) are reachable.
-        const systemPath = process.env.PATH || '';
-        const homebrewPaths = ['/opt/homebrew/bin', '/usr/local/bin'].filter(
-          (p) => !systemPath.split(':').includes(p)
-        ).join(':');
-        const augmentedSystemPath = homebrewPaths
-          ? `${systemPath}:${homebrewPaths}`
-          : systemPath;
         env = {
           ...process.env,
-          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${augmentedSystemPath}`,
+          PATH: `${uvBinDir}:${gitBinDir}:${limaBinDir}:${process.env.PATH}`,
           UV_CACHE_DIR: uvCacheDir,
           UV_PYTHON_INSTALL_DIR: uvPythonDir,
           MINDS_ELECTRON: '1',
@@ -247,11 +227,9 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           // Tell the packaged latchkey shim which Electron binary to use as Node.
           MINDS_ELECTRON_EXEC_PATH: process.execPath,
-          // Set VIRTUAL_ENV to the per-user venv so `uv run --active` uses
-          // it. Without this, uv falls back to <project>/.venv which is
-          // inside the signed .app bundle (read-only on macOS).
-          VIRTUAL_ENV: paths.getVenvDir(),
         };
+        // Remove VIRTUAL_ENV to avoid uv warnings about path mismatches
+        delete env.VIRTUAL_ENV;
       }
 
       const child = spawn(uvBin, args, {

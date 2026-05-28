@@ -9,7 +9,7 @@ metadata:
 
 A "web service" here is something the user can click on as a tab in
 the desktop client and see render at `/service/<name>/`, proxied
-through the workspace_server.
+through the system_interface.
 
 There is one canonical path (scaffold a new FastAPI lib) and one
 escape hatch (wrap a pre-existing third-party server). Modify/remove
@@ -26,7 +26,7 @@ flows go through the `edit-services` skill.
   below.
 
 If you would otherwise scaffold a FastAPI lib whose only job is to
-shell out to a third-party tool, do not do that -- the workspace_server
+shell out to a third-party tool, do not do that -- the system_interface
 already proxies `/service/<name>/...` to whatever URL you register.
 Adding a Python proxy in front of the third-party server adds a hop,
 costs an extra process, and complicates WebSocket and streaming
@@ -45,7 +45,7 @@ under `libs/<your-package>/` so they get an isolated tab and prefix.
 - **Pick a free port.** `ss -tln` lists what's bound. The scaffolder
   picks the lowest free port at or above 8081 by parsing
   `services.toml` and `runtime/applications.toml`; if you're choosing
-  manually, avoid `8000` (workspace_server) and `8080` (the example
+  manually, avoid `8000` (system_interface) and `8080` (the example
   `web` service).
 - **Bind to `127.0.0.1`** (not `0.0.0.0`). The forwarder reaches your
   app from inside the same container; binding to all interfaces is
@@ -109,7 +109,7 @@ What gets updated:
 
   The `ROOT_PATH=/service/<name>` prefix is what makes FastAPI emit
   prefix-correct OpenAPI links and absolute redirects when reached
-  through the workspace_server. Standalone `uv run <name>` keeps
+  through the system_interface. Standalone `uv run <name>` keeps
   working at `/` because the env var is unset there.
 
 The bootstrap service manager picks up the new entry automatically

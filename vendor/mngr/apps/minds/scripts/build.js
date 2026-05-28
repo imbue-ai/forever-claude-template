@@ -19,80 +19,6 @@ const RESOURCES_DIR = path.join(ROOT, 'resources');
 const UV_VERSION = '0.7.12';
 const LIMA_VERSION = '2.1.1';
 
-const MONOREPO_ROOT = path.resolve(ROOT, '../..');
-
-/**
- * Workspace packages bundled into the standalone app. Each entry maps the
- * package name (as it appears in `dependencies` / `[tool.uv.sources]`) to its
- * path inside the monorepo.
- *
- * The packaged app only needs the transitive runtime closure of what minds
- * imports; other workspace members (e.g. mngr_vps_docker, mngr_kanpan) are
- * not included.
- *
- * This list is mirrored in electron/env-setup.js, electron/pyproject/
- * pyproject.toml, and scripts/build_test.py. The drift guard
- * `test_workspace_package_lists_are_consistent` in build_test.py fails if any
- * of them disagree, so update all four together.
- */
-const WORKSPACE_PACKAGES = {
-  'minds':                  'apps/minds',
-  'imbue-mngr':             'libs/mngr',
-  'imbue-mngr-claude':      'libs/mngr_claude',
-  'imbue-mngr-forward':     'libs/mngr_forward',
-  'imbue-mngr-imbue-cloud': 'libs/mngr_imbue_cloud',
-  'imbue-mngr-latchkey':    'libs/mngr_latchkey',
-  'imbue-mngr-lima':        'libs/mngr_lima',
-  'imbue-mngr-modal':       'libs/mngr_modal',
-  'imbue-mngr-ovh':         'libs/mngr_ovh',
-  'imbue-mngr-vps-docker':  'libs/mngr_vps_docker',
-  'imbue-common':           'libs/imbue_common',
-  'concurrency-group':      'libs/concurrency_group',
-  'resource-guards':        'libs/resource_guards',
-  'modal-proxy':            'libs/modal_proxy',
-};
-
-/**
- * Build each workspace package as a wheel into `resources/wheels/`.
- *
- * Relies on each package's `pyproject.toml` (and hatchling's
- * `[tool.hatch.build.targets.wheel]` config) to determine what goes into the
- * wheel. In particular, the `exclude = [...]` line in each package's config
- * is what keeps tests out of the wheel.
- *
- * Returns a map of package name → wheel filename, used downstream when
- * rewriting `pyproject.toml` to reference the wheels.
- */
-function buildWorkspaceWheels() {
-  const wheelsDir = path.join(RESOURCES_DIR, 'wheels');
-  fs.mkdirSync(wheelsDir, { recursive: true });
-
-  const wheelByPackage = {};
-  for (const name of Object.keys(WORKSPACE_PACKAGES)) {
-    execSync(`uv build --package ${JSON.stringify(name)} --wheel --out-dir ${JSON.stringify(wheelsDir)}`, {
-      cwd: MONOREPO_ROOT, stdio: 'inherit',
-    });
-    // Wheel filenames follow PEP 427: `{name}-{version}-{py}-{abi}-{platform}.whl`
-    // where `name` has hyphens normalized to underscores. Since we build
-    // serially and clean RESOURCES_DIR at the top of main(), exactly one
-    // wheel per package should exist with the expected prefix.
-    const normalized = name.replace(/-/g, '_');
-    const matches = fs.readdirSync(wheelsDir).filter(
-      (f) => f.endsWith('.whl') && f.startsWith(normalized + '-'),
-    );
-    if (matches.length !== 1) {
-      throw new Error(
-        `Expected exactly one wheel for ${name} (prefix "${normalized}-") in ${wheelsDir}, ` +
-        `found ${matches.length}: ${JSON.stringify(matches)}`,
-      );
-    }
-    wheelByPackage[name] = matches[0];
-    console.log(`Built wheel for ${name}: ${matches[0]}`);
-  }
-  return wheelByPackage;
-}
-
-
 function getPlatformArch() {
   const platform = process.platform;
   const arch = process.arch;
@@ -436,6 +362,22 @@ async function downloadLima({ platform, arch }) {
     binaryPath: path.join(limaDir, 'bin', 'limactl'),
     label: 'Lima',
   });
+
+  // Strip Darwin guest-agents. Each one is a gzipped arm64/x86_64 Mach-O,
+  // and Apple's notarytool unzips it and rejects the inner binary because
+  // we never code-signed it (no Developer ID, no hardened runtime, no
+  // secure timestamp). We run Linux VMs only via Lima, so Darwin guest-
+  // agents are unreachable code and safe to delete.
+  const limaShareDir = path.join(limaDir, 'share', 'lima');
+  if (fs.existsSync(limaShareDir)) {
+    for (const entry of fs.readdirSync(limaShareDir)) {
+      if (entry.startsWith('lima-guestagent.Darwin-') && entry.endsWith('.gz')) {
+        const full = path.join(limaShareDir, entry);
+        fs.rmSync(full);
+        console.log(`Stripped Darwin guest-agent (unsignable inside .gz): ${full}`);
+      }
+    }
+  }
 }
 
 async function downloadGit() {
@@ -454,6 +396,34 @@ async function downloadGit() {
   fs.chmodSync(destGit, 0o755);
   console.log(`git binary copied to ${destGit}`);
 }
+
+function copyPyproject() {
+  const srcDir = path.join(ROOT, 'electron', 'pyproject');
+  const destDir = path.join(RESOURCES_DIR, 'pyproject');
+  fs.mkdirSync(destDir, { recursive: true });
+
+  // Copy pyproject.toml, stripping any [tool.uv.sources] section that
+  // contains local editable paths (only valid in the monorepo layout)
+  const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
+  if (fs.existsSync(pyprojectSrc)) {
+    let content = fs.readFileSync(pyprojectSrc, 'utf-8');
+    content = content.replace(/\[tool\.uv\.sources\][^\[]*/, '').trimEnd() + '\n';
+    fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
+    console.log(`Copied pyproject.toml to ${destDir} (stripped local sources)`);
+  } else {
+    console.warn(`Warning: ${pyprojectSrc} not found`);
+  }
+
+  // Copy lockfile as-is
+  const lockSrc = path.join(srcDir, 'uv.lock');
+  if (fs.existsSync(lockSrc)) {
+    fs.copyFileSync(lockSrc, path.join(destDir, 'uv.lock'));
+    console.log(`Copied uv.lock to ${destDir}`);
+  } else {
+    console.warn(`Warning: ${lockSrc} not found`);
+  }
+}
+
 /**
  * Bake an explicit client.toml (and the matching MINDS_ROOT_NAME) into
  * _bundled/ so the shipped desktop client passes --config-file
@@ -557,51 +527,6 @@ function bundleClientConfig() {
   console.log(`Bundled MINDS_ROOT_NAME=${rootNameBundle} -> ${bundledRootNameFile}`);
 }
 
-/**
- * Write `resources/pyproject/pyproject.toml` and regenerate `uv.lock`.
- *
- * Starts from `electron/pyproject/pyproject.toml` (the dev-time pyproject),
- * replaces `[tool.uv.sources]` with entries pointing at the bundled wheels,
- * and then runs `uv lock` in-place so the lockfile matches the rewritten
- * pyproject. This re-resolves PyPI deps from scratch, which is fine -- they're
- * the same deps, just locked against the new workspace source definitions.
- */
-function stageRuntimePyproject(wheelByPackage) {
-  const srcDir = path.join(ROOT, 'electron', 'pyproject');
-  const destDir = path.join(RESOURCES_DIR, 'pyproject');
-  fs.mkdirSync(destDir, { recursive: true });
-
-  const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
-  if (!fs.existsSync(pyprojectSrc)) {
-    throw new Error(`Source pyproject.toml not found at ${pyprojectSrc}`);
-  }
-  let content = fs.readFileSync(pyprojectSrc, 'utf-8');
-
-  const sourceLines = ['[tool.uv.sources]'];
-  for (const [name, whlFile] of Object.entries(wheelByPackage)) {
-    sourceLines.push(`${name} = { path = "../wheels/${whlFile}" }`);
-  }
-  const newSources = sourceLines.join('\n') + '\n';
-
-  // Anchor at start-of-line so the literal "[tool.uv.sources]" substring
-  // inside the file-level docstring (a comment that names the section) is
-  // not mistaken for the section header itself.
-  const sectionRe = /^\[tool\.uv\.sources\][^\[]*/m;
-  if (sectionRe.test(content)) {
-    content = content.replace(sectionRe, newSources);
-  } else {
-    content = content.trimEnd() + '\n\n' + newSources;
-  }
-  fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
-  console.log(`Staged pyproject.toml at ${destDir}`);
-
-  // Regenerate the lockfile against the rewritten pyproject. This is simpler
-  // and more robust than string-surgery on the dev-time uv.lock: uv emits the
-  // exact right shape for wheel-path sources itself.
-  execSync('uv lock', { cwd: destDir, stdio: 'inherit' });
-  console.log(`Regenerated uv.lock at ${destDir}`);
-}
-
 async function main() {
   console.log('Building Minds desktop app...\n');
 
@@ -622,8 +547,7 @@ async function main() {
   ]);
 
   bundleLatchkey();
-  const wheelByPackage = buildWorkspaceWheels();
-  stageRuntimePyproject(wheelByPackage);
+  copyPyproject();
   bundleClientConfig();
 
   console.log('\nBuild complete!');

@@ -4,13 +4,13 @@ Run both checks. `curl` confirms the proxy reaches your backend;
 Playwright catches iframe-rendering bugs that `curl` misses (the
 "duplicated dockview tab bar" symptom is one).
 
-## Step 1: curl through the workspace_server
+## Step 1: curl through the system_interface
 
 ```bash
 curl -sf http://127.0.0.1:8000/service/<name>/ -o /dev/null -w "%{http_code}\n"
 ```
 
-Port 8000 is the workspace_server; it proxies `/service/<name>/...`
+Port 8000 is the system_interface; it proxies `/service/<name>/...`
 to the URL registered in `runtime/applications.toml`. Expected: `200`.
 
 Common failures:
@@ -18,11 +18,11 @@ Common failures:
 - **502** -- backend not reachable. Either the app crashed (check
   `tmux capture-pane -t svc-<name> -p`) or it's bound to the wrong
   host. See cross-flow-gotchas.md.
-- **404 from workspace_server** -- the service name is not in
+- **404 from system_interface** -- the service name is not in
   `runtime/applications.toml`. Either `forward_port.py` was not run,
   or it was passed the wrong `--name`.
 - **200 but the rendered page is the agent chat with a duplicated
-  dockview tab bar** -- the workspace_server could not reach your
+  dockview tab bar** -- the system_interface could not reach your
   backend and is falling back to the top-level UI. See
   cross-flow-gotchas.md.
 

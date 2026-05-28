@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--connect]
+mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect]
 ```
 
 Start stopped agent(s).
@@ -17,6 +17,9 @@ session.
 
 If multiple agents share a host, they will all be started together when
 the host starts.
+
+Use --restart to stop any running agents first, ensuring a clean start.
+Use --no-resume to skip sending the resume message after starting.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -44,6 +47,8 @@ mngr start [OPTIONS] [AGENTS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--restart` | boolean | Stop the agent first if it is already running, ensuring a clean start. | `False` |
+| `--no-resume` | boolean | Skip sending the resume message after starting. | `False` |
 | `--connect`, `--no-connect` | boolean | Connect to the agent after starting (only valid for single agent) | `False` |
 | `--connect-command` | text | Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set. | None |
 
@@ -60,7 +65,7 @@ mngr start [OPTIONS] [AGENTS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also
@@ -81,6 +86,12 @@ $ mngr start my-agent
 
 ```bash
 $ mngr start agent1 agent2
+```
+
+**Restart a running agent cleanly**
+
+```bash
+$ mngr start my-agent --restart
 ```
 
 **Start and connect**

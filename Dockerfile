@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unison \
     wget \
     xxd \
+    xmlstarlet \
     && rm -rf /var/lib/apt/lists/*
 
 # Install ttyd binary from GitHub releases (not available via apt)
@@ -86,7 +87,7 @@ RUN mkdir -p /root/.ssh && \
 # LATCHKEY_GATEWAY URL is injected at `mngr create` time by the outside
 # caller (see .mngr/settings.toml's pass_env), so we do not hardcode it here.
 #
-ARG LATCHKEY_VERSION=2.11.1
+ARG LATCHKEY_VERSION=2.11.3
 RUN npm install -g "latchkey@${LATCHKEY_VERSION}"
 
 # install python dependencies
@@ -162,7 +163,7 @@ RUN git config --global --add safe.directory /code/
 # Build the system_interface frontend (deps already installed pre-COPY).
 RUN cd /code/apps/system_interface/frontend && npm run build
 
-# add mngr and minds-workspace-server as tools (both need the plugin packages
+# add mngr and system-interface as tools (both need the plugin packages
 # so they can parse plugin-specific config fields like auto_dismiss_dialogs).
 # mngr_modal is intentionally NOT installed/registered here because the FCT
 # .mngr/settings.toml sets providers.modal.is_enabled = false; without it,
