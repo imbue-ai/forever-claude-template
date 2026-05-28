@@ -2,7 +2,7 @@
 # Auto-push the active branch after every commit, gated on GH_TOKEN being set.
 #
 # Installed for every checkout in the container via:
-#   git config --global core.hooksPath /code/scripts/git_hooks
+#   git config --global core.hooksPath /mngr/code/scripts/git_hooks
 # (set up by the git_auth_setup extra_window in .mngr/settings.toml).
 #
 # Skips silently in three cases that are normal, not errors:

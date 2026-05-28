@@ -28,10 +28,10 @@ dev = [
     # used by test_mngr_template_stacking.py to verify .mngr/settings.toml
     # composes correctly with vendor/mngr's apply_create_template logic
     "imbue-mngr",
-    # imbue-mngr-claude isn't imported by any /code/ python -- it's here so
-    # `uv sync --all-packages` registers it in /code/.venv. Without it,
+    # imbue-mngr-claude isn't imported by any /mngr/code/ python -- it's here so
+    # `uv sync --all-packages` registers it in /mngr/code/.venv. Without it,
     # `uv run mngr ...` (e.g. from the bootstrap window) resolves to
-    # /code/.venv/bin/mngr but pluggy can't discover the claude plugin via
+    # /mngr/code/.venv/bin/mngr but pluggy can't discover the claude plugin via
     # entry points, so settings.toml fields like `use_env_config_dir`,
     # `auto_allow_permissions`, etc. fail to parse as "Unknown fields".
     # Keeping the venv's mngr in lockstep with the tool-installed mngr

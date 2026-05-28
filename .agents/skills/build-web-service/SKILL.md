@@ -151,7 +151,7 @@ Two cases, two patterns:
 - **Runtime state files** (caches, cursors, last-visit timestamps,
   JSON snapshots written and read across runs): use cwd-relative
   paths like `Path("runtime/<name>/...")`. The bootstrap-managed
-  services run from `/code` (repo root), so this resolves
+  services run from `/mngr/code` (repo root), so this resolves
   consistently. Do NOT use `Path(__file__)`-based paths for runtime
   state.
 - **Static assets shipped alongside the .py file** (templates,
