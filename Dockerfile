@@ -196,35 +196,27 @@ RUN mkdir -p /root/.local/bin && ln -sf /mngr/code/vendor/tk/ticket /root/.local
 # Move the baked workspace off the volume mount path so the shipped image
 # has /mngr/code/ EMPTY. At runtime, /mngr/ is a persistent volume mount;
 # any image-layer content sitting at /mngr/code/ would be shadowed by the
-# mount. /docker_build_code holds the workspace until first boot, where the
-# CMD below atomically relocates it onto the volume.
+# mount. /docker_build_code holds the workspace until first boot, where
+# fct_entrypoint.sh (invoked via CMD below) atomically relocates it onto
+# the volume.
 RUN mv /mngr/code /docker_build_code
 
-# Run idly forever while being responsive to SIGTERM, AFTER seeding the
-# workspace onto the /mngr/ volume on first boot.
+# Install the first-boot entrypoint at a stable image-layer path. It has
+# to live OUTSIDE /mngr/ (the volume mount path) so the runtime mount
+# does not shadow it, and OUTSIDE /docker_build_code (which gets cleaned
+# up by the entrypoint itself after seeding). /usr/local/bin/ is on PATH,
+# is image-layer, and survives the bake-and-relocate dance.
 #
-# First-boot seeding (atomic two-step move):
-#   - If /mngr/code already exists: the volume is already seeded; no-op.
-#   - Else if /mngr/code.moving exists: a prior seed was interrupted before
-#     the atomic rename; wipe it and re-stage.
-#   - Else: require /docker_build_code to exist; if missing, log an error
-#     and exit non-zero so the broken-volume case surfaces in mngr/docker
-#     logs rather than silently sleeping forever.
-#   - Stage: cp -a /docker_build_code -> /mngr/code.moving (cross-filesystem
-#     copy that lands on the volume, preserving mode/owner/timestamps).
-#   - Commit: atomic rename /mngr/code.moving -> /mngr/code (same FS, so
-#     this is a single inode-level rename and either fully succeeds or
-#     doesn't happen at all).
-#   - Clean up /docker_build_code so it doesn't keep occupying overlay
-#     space on the running container.
-#
-# /mngr/worktree/ is mkdir -p'd unconditionally on every boot so the
-# /worktree -> /mngr/worktree safety-net symlink always resolves, even
-# before any worktree has been created.
-#
-# After seeding, run the original idle-forever wait loop:
-#   PID 1 must explicitly install signal handlers in order to respect
-#   signals. `tail -f /dev/null` does not do this. Since `docker stop`
-#   issues a `SIGTERM`, we use an explicit `trap`. In practice, this
-#   appears to enable rapid interactions using `docker stop`.
-CMD ["sh", "-c", "set -e; if [ ! -e /mngr/code ]; then if [ -e /mngr/code.moving ]; then echo 'fct-seed: wiping stale /mngr/code.moving from a prior interrupted seed'; rm -rf /mngr/code.moving; fi; if [ ! -e /docker_build_code ]; then echo 'fct-seed: ERROR: /mngr/code missing AND /docker_build_code missing -- volume is in a broken state and cannot be seeded' >&2; exit 1; fi; echo 'fct-seed: staging /docker_build_code -> /mngr/code.moving'; cp -a /docker_build_code /mngr/code.moving; echo 'fct-seed: atomic-renaming /mngr/code.moving -> /mngr/code'; mv /mngr/code.moving /mngr/code; fi; if [ -e /docker_build_code ]; then echo 'fct-seed: cleaning up /docker_build_code'; rm -rf /docker_build_code; fi; mkdir -p /mngr/worktree; set +e; trap 'exit 0' TERM; tail -f /dev/null & wait"]
+# Sourced from scripts/fct_entrypoint.sh in the repo so the script is
+# editable + reviewable like any other file (rather than buried as an
+# inline CMD string). Source-tree mode bits are already +x; chmod is
+# defensive in case the file is checked out without exec bits (e.g. on
+# filesystems that drop them).
+COPY scripts/fct_entrypoint.sh /usr/local/bin/fct-entrypoint.sh
+RUN chmod +x /usr/local/bin/fct-entrypoint.sh
+
+# Run the first-boot seed-and-wait entrypoint. See
+# scripts/fct_entrypoint.sh for the full per-step rationale (seed dance,
+# stale-staging recovery, broken-volume failure, /mngr/worktree mkdir,
+# PID-1 SIGTERM trap).
+CMD ["/usr/local/bin/fct-entrypoint.sh"]
