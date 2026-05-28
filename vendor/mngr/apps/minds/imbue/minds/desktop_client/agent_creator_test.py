@@ -34,6 +34,8 @@ from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.system_interface_health import AgentHealth
+from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
@@ -83,8 +85,8 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
     new host's env file once and every agent that ever runs on the host
     inherits the same gateway URL / password / JWT.
     """
-    command, _ = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
         latchkey_env={
             "LATCHKEY_GATEWAY": "http://127.0.0.1:1989",
@@ -114,11 +116,36 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             )
 
 
+def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
+    """The per-agent ``MINDS_API_KEY`` is gone.
+
+    There is now exactly one ``MINDS_API_KEY`` per minds installation;
+    the latchkey gateway's ``minds-api-proxy`` extension adds it as
+    ``Authorization: Bearer <key>`` on every forwarded request, and the
+    agent itself never sees the value. ``_build_mngr_create_command``
+    must therefore neither generate nor reference it -- whether via
+    ``--env`` or ``--host-env``.
+    """
+    for mode, account in (
+        (LaunchMode.DOCKER, None),
+        (LaunchMode.LIMA, None),
+        (LaunchMode.CLOUD, None),
+        (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
+    ):
+        command = _build_mngr_create_command(
+            launch_mode=mode,
+            host_name=HostName("hello"),
+            imbue_cloud_account=account,
+        )
+        joined = " ".join(command)
+        assert "MINDS_API_KEY" not in joined, f"{mode}: command must not mention MINDS_API_KEY"
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
-        command, _ = _build_mngr_create_command(
-            launch_mode=LaunchMode.LOCAL,
+        command = _build_mngr_create_command(
+            launch_mode=LaunchMode.DOCKER,
             host_name=HostName("hello"),
             latchkey_env=latchkey_env,
         )
@@ -128,8 +155,8 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
 
 
 def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
-    command, api_key = _build_mngr_create_command(
-        launch_mode=LaunchMode.LOCAL,
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
         host_name=HostName("hello"),
     )
     assert "--template" in command
@@ -137,7 +164,6 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # The /welcome message now lives in forever-claude-template's
     # [create_templates.main] section, so the explicit --message arg is gone.
     assert "--message" not in command
-    assert api_key
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
@@ -152,7 +178,7 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
 
 
 def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> None:
-    command, api_key = _build_mngr_create_command(
+    command = _build_mngr_create_command(
         launch_mode=LaunchMode.IMBUE_CLOUD,
         host_name=HostName("hello"),
         imbue_cloud_account="alice@imbue.com",
@@ -175,7 +201,6 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "--id" not in command
     assert "--reuse" in command
     assert "--update" not in command
-    assert api_key
     # Lease attributes flow through --build-arg.
     assert "-b" in command
     assert "repo_url=https://github.com/imbue-ai/forever-claude-template" in command
@@ -188,7 +213,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "GH_TOKEN" not in joined
     assert "--pass-host-env" not in command
     # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
-    # shape (mirroring how LOCAL/LIMA/CLOUD use ``--template main --template <provider>``).
+    # shape (mirroring how DOCKER/LIMA/CLOUD use ``--template main --template <provider>``).
     # The provider-specific knobs (idle_mode, pass_host_env) live in the
     # ``imbue_cloud`` template instead of being inlined here.
     assert "--template" in command
@@ -197,19 +222,18 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "imbue_cloud" in template_args
     # ``--idle-mode disabled`` also moved into the template.
     assert "--idle-mode" not in command
-    assert api_key
 
 
 def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     """Secret forwarding lives in FCT, not minds. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
-        (LaunchMode.LOCAL, None),
+        (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
         (LaunchMode.CLOUD, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
-        command, _ = _build_mngr_create_command(
+        command = _build_mngr_create_command(
             launch_mode=mode,
             host_name=HostName("hello"),
             imbue_cloud_account=account,
@@ -236,6 +260,7 @@ def _make_test_creator(
     timeout_seconds: float = 1.0,
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
+    system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
 ) -> AgentCreator:
     paths = WorkspacePaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -249,6 +274,7 @@ def _make_test_creator(
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
+        system_interface_health_tracker=system_interface_health_tracker or SystemInterfaceHealthTracker(),
     )
 
 
@@ -336,8 +362,46 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     drained: list[str] = []
     while not log_q.empty():
         drained.append(log_q.get_nowait())
-    assert any("Waiting for workspace" in line for line in drained)
+    assert any("Waiting for system interface" in line for line in drained)
     assert any("ready" in line.lower() for line in drained)
+
+
+def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> None:
+    """Regression: a successful readiness probe must propagate to the health tracker.
+
+    Without the ``record_success`` call, a HEALTHY->STUCK timer armed by an
+    earlier ``system_interface_backend_failure`` envelope would fire AFTER readiness
+    returned, the chrome SSE would receive ``status=stuck``, and the user
+    would land on the workspace-recovery page seconds after their freshly
+    created agent appeared healthy. See ``system_interface_health.py`` for
+    the timer's lifecycle.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    aid = AgentId.generate()
+    # Pre-arm the STUCK timer the way an in-flight warmup failure would.
+    # The agent stays HEALTHY until the 5s timer fires; we want to verify
+    # ``record_success`` cancels the timer before that.
+    tracker.record_failure(aid)
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    server, _thread, port = _start_scripted_server(not_ready_count=0)
+    try:
+        creator = _make_test_creator(
+            tmp_path,
+            mngr_forward_port=port,
+            preauth_cookie="any-preauth",
+            timeout_seconds=2.0,
+            poll_interval_seconds=0.02,
+            probe_timeout_seconds=0.5,
+            system_interface_health_tracker=tracker,
+        )
+        creator._wait_for_workspace_ready(aid, queue.Queue())
+    finally:
+        server.shutdown()
+    # ``record_success`` cancelled the timer + cleared first_failure_at, so
+    # any subsequent record_failure would arm a fresh timer (i.e. the
+    # tracker is no longer mid-failing-run for this agent).
+    assert tracker.get_health(aid) == AgentHealth.HEALTHY
+    assert aid not in tracker.snapshot_all()
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
@@ -431,6 +495,7 @@ def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> Agen
         root_concurrency_group=cg,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         imbue_cloud_cli=cli,
+        system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
 
 
@@ -458,7 +523,7 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.IMBUE_CLOUD,
         account_email="alice@imbue.com",
     )
@@ -486,7 +551,7 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="sk-ant-user-supplied",
     )
@@ -507,7 +572,7 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.SUBSCRIPTION,
     )
     _wait_until_finished(creator, creation_id)
@@ -527,7 +592,7 @@ def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
         host_name="my-workspace",
-        launch_mode=LaunchMode.LOCAL,
+        launch_mode=LaunchMode.DOCKER,
         ai_provider=AIProvider.API_KEY,
         anthropic_api_key="",
     )

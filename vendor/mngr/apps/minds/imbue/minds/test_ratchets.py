@@ -33,11 +33,24 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Two matches: ``destroying_test.py`` (a real test poll loop) and
+    # Six matches: ``destroying_test.py`` (a real test poll loop),
     # ``cli/env.py::_exec_into_recover`` (the 5-second auto-rollback
     # countdown -- a deliberate user-facing pause so the operator can
-    # Ctrl-C if they want to intervene before recover fires).
-    rc.check_time_sleep(_DIR, snapshot(2))
+    # Ctrl-C if they want to intervene before recover fires),
+    # ``deployment_tests/_mailtm.py::MailtmInbox._wait_for_message_body``
+    # (polling the mail.tm HTTP API for an inbound email -- no
+    # event-driven alternative without standing up an IMAP listener),
+    # ``deployment_tests/helpers.py::_wait_for_url_alive`` (polling
+    # the connector / litellm-proxy healthcheck URLs with cold-boot
+    # tolerance, mirroring what ``envs/health_check.py`` does
+    # deploy-side), ``deployment_tests/test_deploy_new_version.py::
+    # _poll_for_deploy_id_change`` (polling /version after a redeploy
+    # since Modal can keep routing to the stale container for a short
+    # window after the swap), and ``deployment_tests/test_deploy_rollback.py::
+    # _poll_for_deploy_id`` (polling /version after a forced auto-
+    # rollback to confirm the rolled-back version is the one actually
+    # serving traffic; same Modal swap-window justification).
+    rc.check_time_sleep(_DIR, snapshot(6))
 
 
 def test_prevent_global_keyword() -> None:
@@ -102,10 +115,12 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # Two: app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
-    # for HTTP route handlers; latchkey/permissions.py uses ``run_in_executor`` to run the
-    # blocking grant/deny path off the event loop. Both are intrinsic to FastAPI integration.
-    rc.check_asyncio_import(_DIR, snapshot(2))
+    # Three: app.py uses ``asyncio.get_running_loop()`` and ``asyncio.run_coroutine_threadsafe``
+    # for HTTP route handlers; the two sibling permission handlers under
+    # ``latchkey/handlers/`` (``predefined.py`` and ``file_sharing.py``) both use
+    # ``run_in_executor`` to run the blocking grant/deny path off the event loop. All three
+    # are intrinsic to FastAPI integration.
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:
@@ -269,6 +284,12 @@ def test_prevent_direct_subprocess() -> None:
         # so the destroy survives a minds-backend exit; same justification as
         # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md.
         "*/desktop_client/destroying.py",
+        # ``deployment_tests/helpers.py`` is functionally test-helper code
+        # (only ever called from `*/deployment_tests/test_*.py`); it shells
+        # out to `modal environment list` for a one-shot read-only probe.
+        # Same exception as the ``testing.py`` pattern but lives under a
+        # different filename for the deployment_tests subpackage.
+        "*/deployment_tests/helpers.py",
     )
     # The one allowed match is ``cli/env.py::_exec_into_recover``,
     # which uses ``os.execvp`` to REPLACE the current process with
@@ -278,6 +299,10 @@ def test_prevent_direct_subprocess() -> None:
     # through to the operator's shell as if recover were the original
     # command. ConcurrencyGroup doesn't apply.
     rc.check_direct_subprocess(_DIR, snapshot(1), excluded_patterns=excluded)
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
 # --- AST-based ratchets ---
