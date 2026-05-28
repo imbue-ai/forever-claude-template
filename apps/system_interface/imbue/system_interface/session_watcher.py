@@ -235,7 +235,13 @@ class AgentSessionWatcher:
 
             # Truncation / rotation: the file shrank below what we have already
             # consumed, so our offset is stale. Reset and re-read from the start.
+            # Discard this file's event IDs from the agent-wide dedup set first;
+            # otherwise the re-read would be deduplicated against the stale
+            # pre-truncation IDs and silently drop every record whose ID recurs
+            # (the typical atomic save-rewrite case), leaving the cache empty.
             if current_size < state.byte_offset_consumed:
+                for event in state.events:
+                    self._existing_event_ids.discard(event["event_id"])
                 state.byte_offset_consumed = 0
                 state.events = []
 

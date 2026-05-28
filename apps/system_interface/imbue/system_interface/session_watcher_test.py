@@ -328,6 +328,37 @@ def test_poll_handles_truncation(tmp_path: Path) -> None:
     assert "uuid-1-user" in [e["event_id"] for e in collected]
 
 
+def test_poll_re_reads_truncated_file_with_recurring_event_ids(tmp_path: Path) -> None:
+    """A truncate-then-rewrite that reuses prior event IDs must re-emit them.
+
+    The agent-wide dedup set retains every event ID it has seen. If the
+    truncation reset does not purge the truncated file's IDs, the re-read is
+    deduplicated against the stale IDs and silently drops every recurring
+    record -- the typical atomic save-rewrite case (issue B follow-up).
+    """
+    agent_state_dir, claude_config_dir, session_file = _setup_empty_agent(tmp_path)
+    collected: list[dict[str, Any]] = []
+    watcher = _make_watcher(agent_state_dir, claude_config_dir, collected)
+    watcher._discover_sessions()
+
+    original = (json.dumps(_user_event(0)) + "\n").encode("utf-8") + (
+        json.dumps(_user_event(1)) + "\n"
+    ).encode("utf-8")
+    session_file.write_bytes(original)
+    watcher._poll_for_changes()
+    assert [e["event_id"] for e in collected] == ["uuid-0-user", "uuid-1-user"]
+
+    # Rewrite the file shorter but reusing event 0's ID, then growing again to
+    # the same two records. The first record's ID recurs and must reappear.
+    session_file.write_bytes((json.dumps(_user_event(0)) + "\n").encode("utf-8"))
+    watcher._poll_for_changes()
+    session_file.write_bytes(original)
+    watcher._poll_for_changes()
+
+    final_state = watcher._session_states["test-session"]
+    assert [e["event_id"] for e in final_state.events] == ["uuid-0-user", "uuid-1-user"]
+
+
 def test_get_all_events_caches_parsed_events(tmp_path: Path) -> None:
     """Unchanged files are not re-parsed across calls (issue D)."""
     agent_state_dir, claude_config_dir, _ = _setup_agent(
