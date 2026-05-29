@@ -1636,8 +1636,8 @@ body {
 
 /* Static (settled) narration: an unclosed step that went idle still shows
    its mid-work narration, but without the live shimmer -- muted italic, a
-   neutral left rule instead of the active-accent rule. Shares the markdown
-   child styling below via the shared selectors. */
+   neutral left rule instead of the active-accent rule. The markdown child
+   styling below is shared with .pv-tl-narration via the grouped selectors. */
 .pv-tl-narration--static {
   margin-top: 3px;
   padding-left: 10px;
@@ -1647,19 +1647,16 @@ body {
   color: var(--pv-fg-muted);
   line-height: 1.55;
 }
+.pv-tl-narration p,
 .pv-tl-narration--static p {
   margin: 0 0 0.4em;
 }
+.pv-tl-narration p:last-child,
 .pv-tl-narration--static p:last-child {
   margin-bottom: 0;
 }
-.pv-tl-narration p {
-  margin: 0 0 0.4em;
-}
-.pv-tl-narration p:last-child {
-  margin-bottom: 0;
-}
-.pv-tl-narration code {
+.pv-tl-narration code,
+.pv-tl-narration--static code {
   font-size: 0.9em;
   padding: 0.1em 0.35em;
   background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
@@ -1669,7 +1666,8 @@ body {
   -webkit-background-clip: padding-box;
   background-clip: padding-box;
 }
-.pv-tl-narration pre {
+.pv-tl-narration pre,
+.pv-tl-narration--static pre {
   margin: 0.4em 0;
   padding: 0.5em 0.7em;
   background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
@@ -1681,20 +1679,25 @@ body {
   -webkit-background-clip: padding-box;
   background-clip: padding-box;
 }
-.pv-tl-narration pre code {
+.pv-tl-narration pre code,
+.pv-tl-narration--static pre code {
   padding: 0;
   background: none;
 }
-.pv-tl-narration a {
+.pv-tl-narration a,
+.pv-tl-narration--static a {
   color: var(--pv-fg-muted);
   text-decoration: underline;
 }
 .pv-tl-narration ul,
-.pv-tl-narration ol {
+.pv-tl-narration ol,
+.pv-tl-narration--static ul,
+.pv-tl-narration--static ol {
   margin: 0.3em 0;
   padding-left: 1.5em;
 }
-.pv-tl-narration li {
+.pv-tl-narration li,
+.pv-tl-narration--static li {
   margin-bottom: 0.15em;
 }
 
