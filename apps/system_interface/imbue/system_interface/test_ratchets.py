@@ -59,7 +59,15 @@ def test_prevent_broad_exception_catch() -> None:
     # without that catch-all a bug anywhere inside leaves the client's
     # ChatPanel stuck on "Creating agent..." because proto_agent_completed
     # never fires. Treat this one as load-bearing rather than sloppy.
-    rc.check_broad_exception_catch(_DIR, snapshot(4))
+    #
+    # Bumped by one more for the per-listener isolation in
+    # agent_manager._notify_agent_removed. Agent-removed listeners are arbitrary
+    # callbacks owned by other components and several removal paths run on the
+    # observe-reader background thread; a listener that raises must not abort the
+    # host-destroyed loop, skip the trailing broadcast, or kill observe event
+    # processing. The breadth is required (the callback's failure modes are
+    # unknown) and it logs every failure, honoring the ratchet's intent.
+    rc.check_broad_exception_catch(_DIR, snapshot(5))
 
 
 def test_prevent_base_exception_catch() -> None:

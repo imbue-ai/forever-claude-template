@@ -262,9 +262,23 @@ class AgentManager:
         self._agent_removed_listeners.append(listener)
 
     def _notify_agent_removed(self, agent_id: str) -> None:
-        """Invoke all registered agent-removed listeners for ``agent_id``."""
+        """Invoke all registered agent-removed listeners for ``agent_id``.
+
+        Listeners are best-effort callbacks owned by other components (e.g. the
+        server's resource-eviction closure, which stops the watchdog-backed
+        session watcher). They run on whatever thread performed the removal --
+        including the observe-reader background thread for the observe-driven
+        paths -- so a listener that raises must not skip the remaining
+        listeners, abort the host-destroyed loop, prevent the trailing
+        ``broadcast_agents_updated``, or tear down observe event processing.
+        Each invocation is therefore isolated: failures are logged and the
+        fan-out continues.
+        """
         for listener in list(self._agent_removed_listeners):
-            listener(agent_id)
+            try:
+                listener(agent_id)
+            except Exception as e:
+                _loguru_logger.opt(exception=e).error("agent-removed listener failed for agent {}", agent_id)
 
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from the tracked state and broadcast the update.
