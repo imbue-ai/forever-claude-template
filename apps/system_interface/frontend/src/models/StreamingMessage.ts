@@ -96,18 +96,20 @@ export function disconnectFromStream(agentId: string): void {
 }
 
 /**
- * Tear down and forget all stream state for a destroyed agent. Unlike
- * disconnectFromStream this leaves no tombstone behind: a destroyed agent
- * won't reconnect, and keeping per-agent entries around would leak for the
- * lifetime of the page.
+ * Tear down all stream state for a destroyed agent. Like disconnectFromStream
+ * it records the disconnect intent so that any pending error-triggered
+ * reconnect timeout (scheduled before the agent was destroyed) sees the
+ * tombstone and stays down rather than reconnecting to a destroyed agent and
+ * looping forever. It additionally drops the in-flight snapshot buffer, which a
+ * destroyed agent no longer needs.
  */
 export function evictStream(agentId: string): void {
+  explicitlyDisconnectedAgents.add(agentId);
   const eventSource = activeStreams.get(agentId);
   if (eventSource !== undefined) {
     eventSource.close();
     activeStreams.delete(agentId);
   }
-  explicitlyDisconnectedAgents.delete(agentId);
   inFlightSnapshotBuffersByAgent.delete(agentId);
 }
 
