@@ -284,6 +284,38 @@ def test_broadcast_cancels_registered_handler_task_on_eviction() -> None:
     assert captured_queue.empty()
 
 
+def test_eviction_after_handler_loop_closed_does_not_raise(loguru_records: list[str]) -> None:
+    """Evicting a client whose captured event loop has since closed must not raise.
+
+    ``register`` captures the calling task and its loop so eviction can cancel a
+    wedged handler via ``loop.call_soon_threadsafe(task.cancel)``. If that loop
+    has already closed (e.g. during shutdown), the call raises RuntimeError; the
+    broadcaster must swallow it as a benign termination race rather than letting
+    it escape the broadcast thread. This guards the try/except in
+    ``_disconnect_locked`` against being removed without noticing it is
+    load-bearing.
+    """
+    broadcaster = WebSocketBroadcaster()
+    captured: dict[str, queue.Queue[str | None]] = {}
+
+    async def _register() -> None:
+        # Registering from inside a task captures that task and this loop.
+        captured["q"] = broadcaster.register()
+
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(_register())
+    loop.close()
+
+    # Drive the stuck client past the consecutive-overflow threshold to trigger
+    # eviction, which attempts the cancel on the now-closed loop.
+    for index in range(_BROADCASTS_TO_TRIGGER_DISCONNECT):
+        broadcaster.broadcast({"index": index})
+
+    # The closed-loop branch ran (rather than the cancel succeeding or being
+    # skipped for lack of a captured handler), and nothing propagated.
+    assert any("loop closed" in record for record in loguru_records)
+
+
 def test_shutdown_delivers_sentinel_even_to_full_queue() -> None:
     """Shutdown must signal even clients whose queues happen to be full."""
     broadcaster = WebSocketBroadcaster()

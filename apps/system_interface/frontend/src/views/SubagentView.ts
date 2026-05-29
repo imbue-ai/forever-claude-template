@@ -1,6 +1,7 @@
 import m from "mithril";
 import { apiUrl } from "../base-path";
 import type { TranscriptEvent, SubagentMetadata } from "../models/Response";
+import { parseJsonMessage } from "../models/ws-json";
 import { renderAssistantMessageChildren } from "./message-renderers";
 
 interface SubagentViewAttrs {
@@ -71,7 +72,10 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     eventSource = new EventSource(url);
 
     eventSource.onmessage = (messageEvent: MessageEvent) => {
-      const event = JSON.parse(messageEvent.data) as TranscriptEvent;
+      const event = parseJsonMessage<TranscriptEvent>(messageEvent.data);
+      if (event === null) {
+        return;
+      }
       const existingIds = new Set(events.map((e) => e.event_id));
       if (!existingIds.has(event.event_id)) {
         events = [...events, event];
