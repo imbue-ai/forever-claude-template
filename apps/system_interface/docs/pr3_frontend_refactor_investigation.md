@@ -6,6 +6,35 @@ effects out of Mithril render functions, memoization, and dead-code cleanup.
 Status: investigation complete, **awaiting plan confirmation before
 implementation**. No production code changes yet.
 
+## Re-assessment after stacking on `gabriel/correctness-ob`
+
+This branch is now merged on top of `gabriel/correctness-ob`, which reworked
+the SSE/WS robustness layer (per-agent reconnect backoff, `parseJsonMessage`
+guard, `loadSnapshotWithStream` folding the stream-open into the snapshot
+fetch). Impact on the PR 3 plan:
+
+- None of the PR 3 items were fixed by correctness-ob. The side effects are
+  still in `view()`; `MessageInput` and `markdown.ts` are untouched.
+- **Item A now routes the initial stream-open through
+  `loadSnapshotWithStream`** (called from `loadAgent`), while
+  `manageStreamConnection` still calls `connectToStream` from the view path.
+  `connectToStream` is idempotent, so this is safe, but the lifecycle refactor
+  must preserve both call sites (initial load + not-found disconnect). There is
+  also a simplification opportunity: on initial load the `manageStreamConnection`
+  connect is redundant with `loadSnapshotWithStream`.
+- **Item E (StreamingMessage shims) still holds.** The 8 no-op shims
+  (`getStreamingMessage` ... `markStreamingError`) and the `StreamingMessage`
+  interface remain entirely unreferenced after the merge; the new
+  `StreamingMessage.test.ts` only exercises `loadSnapshotWithStream`. The file
+  is no longer "mostly shims," though -- it is now substantial live code plus a
+  dead shim block at the bottom. Delete only that block.
+- **New low-risk bolt-on (H4):** correctness-ob added `ws-json.ts`
+  `parseJsonMessage` and applied it to the SSE streams and `SubagentView`, but
+  the proto-agent log WebSocket in `ChatPanel.connectLogWs` still uses a raw
+  `JSON.parse(event.data)` that would throw out of the `onmessage` handler on a
+  malformed frame. Route it through `parseJsonMessage` for consistency.
+- Items B, C, D, F, G, H1 are unchanged by the merge.
+
 ## A. Side effects fired from inside `view()` — CONFIRMED (proposed fix partially misguided)
 
 `ChatPanel.ts` `view()` (line ~419) calls `renderMessages(agentId)`, which
