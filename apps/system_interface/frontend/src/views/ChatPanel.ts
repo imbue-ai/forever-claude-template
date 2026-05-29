@@ -37,7 +37,7 @@ import {
   stepActiveInWindow,
   sortSteps,
   attributeNarration,
-  selectFinalMessages,
+  classifyTopLevelMessages,
 } from "./turn-grouping";
 import { isNonBoundaryUserMessage } from "./user-message-classification";
 import { ProgressBlock } from "./ProgressBlock";
@@ -435,14 +435,16 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       attributeNarration(steps, bodyEvents);
 
       if (steps.length > 0) {
-        const finalMessages = selectFinalMessages(bodyEvents, steps);
+        const placed = classifyTopLevelMessages(bodyEvents, steps);
         messageNodes.push(
           m(ProgressBlock, {
             key: `progress-${sectionUserEvent.event_id}`,
             tasks: steps,
             body_events: bodyEvents,
             toolResults,
-            final_messages: finalMessages,
+            leading_messages: placed.leading,
+            interstep_messages: placed.inter_step,
+            trailing_messages: placed.trailing,
             agentId,
           }),
         );

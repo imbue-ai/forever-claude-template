@@ -8,7 +8,7 @@ import {
   sortSteps,
   attributeNarration,
   eventsInTaskWindow,
-  selectFinalMessages,
+  classifyTopLevelMessages,
 } from "./turn-grouping";
 
 function userMsg(ts: string, content: string, eventId: string = `u-${ts}`): TranscriptEvent {
@@ -40,6 +40,35 @@ function toolUse(ts: string, toolName: string, callId: string, input: string = "
     source: "test",
     text: "",
     tool_calls: [{ tool_call_id: callId, tool_name: toolName, input_preview: input }],
+  };
+}
+
+function toolResultEvent(ts: string, callId: string): TranscriptEvent {
+  return {
+    timestamp: ts,
+    type: "tool_result",
+    event_id: `r-${callId}`,
+    source: "test",
+    tool_call_id: callId,
+    output: "ok",
+  };
+}
+
+/** Build a StepView for placement/narration tests. */
+function stepView(overrides: Partial<StepView> & Pick<StepView, "ticket_id" | "status">): StepView {
+  return {
+    title: overrides.title ?? "Step",
+    summary: overrides.summary ?? null,
+    created_at: overrides.created_at ?? overrides.active_window_start ?? "2026-04-28T01:00:00Z",
+    started_at: overrides.started_at ?? overrides.active_window_start ?? null,
+    active_window_start: overrides.active_window_start ?? null,
+    active_window_end: overrides.active_window_end ?? null,
+    is_step: overrides.is_step ?? true,
+    parent_id: overrides.parent_id ?? "",
+    children: overrides.children ?? [],
+    narration: overrides.narration ?? null,
+    is_settled: overrides.is_settled ?? false,
+    ...overrides,
   };
 }
 
@@ -483,15 +512,8 @@ describe("eventsInTaskWindow", () => {
   });
 });
 
-describe("selectFinalMessages", () => {
-  it("returns every text-only assistant_message outside step windows", () => {
-    const a1 = assistantMsg("2026-04-28T01:00:10Z", "Here is the summary table...", "msg-summary");
-    const a2 = assistantMsg("2026-04-28T01:00:20Z", "Waiting on your input.", "msg-waiting");
-    const events = [a1, toolUse("2026-04-28T01:00:15Z", "Bash", "tc-1"), a2];
-    expect(selectFinalMessages(events, []).map((e) => e.event_id)).toEqual(["msg-summary", "msg-waiting"]);
-  });
-
-  it("excludes tool-bearing assistant_messages even when they have text", () => {
+describe("classifyTopLevelMessages", () => {
+  it("excludes tool-bearing and empty-text assistant_messages", () => {
     const withTextAndTools: TranscriptEvent = {
       timestamp: "2026-04-28T01:00:00Z",
       type: "assistant_message",
@@ -500,124 +522,236 @@ describe("selectFinalMessages", () => {
       text: "Calling out to a tool.",
       tool_calls: [{ tool_call_id: "tc-x", tool_name: "Bash", input_preview: "{}" }],
     };
-    expect(selectFinalMessages([withTextAndTools], [])).toEqual([]);
+    const empty = assistantMsg("2026-04-28T01:00:05Z", "", "a-empty");
+    const placed = classifyTopLevelMessages([withTextAndTools, empty], []);
+    expect(placed).toEqual({ leading: [], inter_step: [], trailing: [] });
   });
 
-  it("excludes empty-text assistant_messages", () => {
-    const empty = assistantMsg("2026-04-28T01:00:00Z", "", "a-empty");
-    expect(selectFinalMessages([empty], [])).toEqual([]);
-  });
-
-  it("promotes the last in-window message when its step is done", () => {
-    const doneStep: StepView = {
+  // A2 (close -> speak, the ideal): the post-close reply is trailing.
+  it("promotes a post-close message to the trailing reply (A2)", () => {
+    const doneStep = stepView({
       ticket_id: "t1",
-      title: "Investigate",
       status: "done",
-      summary: "Found root cause, fix is X.",
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:01:00Z",
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    const wrapup = assistantMsg("2026-04-28T01:00:50Z", "Found it -- the OAuth regex was too tight.", "msg-wrapup");
-    expect(selectFinalMessages([wrapup], [doneStep]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+      active_window_end: "2026-04-28T01:00:50Z",
+      summary: "Found the null-check bug and patched it.",
+    });
+    const reply = assistantMsg("2026-04-28T01:00:55Z", "Fixed it -- want a regression test?", "msg-reply");
+    const placed = classifyTopLevelMessages([reply], [doneStep]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
+    expect(placed.leading).toEqual([]);
+    expect(placed.inter_step).toEqual([]);
   });
 
-  it("promotes the last in-window message when its step is settled", () => {
-    const settledStep: StepView = {
+  // A3 (speak -> close): the pre-close message stays in-step, not promoted.
+  it("keeps a pre-close message in-step, not promoted (A3)", () => {
+    const doneStep = stepView({
       ticket_id: "t1",
-      title: "Investigate",
+      status: "done",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:50Z",
+      summary: "Found the null-check bug and patched it.",
+    });
+    const preClose = assistantMsg("2026-04-28T01:00:45Z", "Fixed it -- want a regression test?", "msg-pre");
+    const placed = classifyTopLevelMessages([preClose], [doneStep]);
+    expect(placed).toEqual({ leading: [], inter_step: [], trailing: [] });
+  });
+
+  // A4 (speak -> close -> speak): only the post-close message is promoted.
+  it("promotes only the post-close message when text brackets the close (A4)", () => {
+    const doneStep = stepView({
+      ticket_id: "t1",
+      status: "done",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:50Z",
+    });
+    const pre = assistantMsg("2026-04-28T01:00:45Z", "Patched it.", "msg-pre");
+    const post = assistantMsg("2026-04-28T01:00:55Z", "Want a regression test?", "msg-post");
+    const placed = classifyTopLevelMessages([pre, post], [doneStep]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-post"]);
+    expect(placed.inter_step).toEqual([]);
+    expect(placed.leading).toEqual([]);
+  });
+
+  // B2 (open step, speak after the last tool): reply promotes below.
+  it("promotes a message after the last tool when the step never closed (B2)", () => {
+    const openStep = stepView({
+      ticket_id: "t1",
       status: "active",
-      summary: null,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:00Z",
       active_window_end: null,
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
       is_settled: true,
-    };
-    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Stuck -- need your call.", "msg-trailing");
-    expect(selectFinalMessages([trailing], [settledStep]).map((e) => e.event_id)).toEqual(["msg-trailing"]);
+    });
+    const body = [
+      toolUse("2026-04-28T01:00:10Z", "Edit", "tc-1"),
+      toolResultEvent("2026-04-28T01:00:11Z", "tc-1"),
+      assistantMsg("2026-04-28T01:00:20Z", "Fixed the null-check. Want a test?", "msg-reply"),
+    ];
+    const placed = classifyTopLevelMessages(body, [openStep]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
+    expect(placed.inter_step).toEqual([]);
+    expect(placed.leading).toEqual([]);
   });
 
-  it("does NOT surface a trailing message of an unsettled active step", () => {
-    const openStep: StepView = {
+  // B3 (open, speak, tools, speak): mid-work narration stays in-step; only
+  // the trailing message (after the last tool) is promoted.
+  it("promotes only the trailing message; mid-work narration stays in-step (B3)", () => {
+    const openStep = stepView({
       ticket_id: "t1",
-      title: "Investigate",
       status: "active",
-      summary: null,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:00Z",
       active_window_end: null,
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Stuck -- need your call.", "msg-trailing");
-    expect(selectFinalMessages([trailing], [openStep])).toEqual([]);
+      is_settled: true,
+    });
+    const narration = assistantMsg("2026-04-28T01:00:05Z", "Found the bug -- patching now.", "msg-narr");
+    const reply = assistantMsg("2026-04-28T01:00:30Z", "Done. Want a test?", "msg-reply");
+    const body = [narration, toolUse("2026-04-28T01:00:15Z", "Edit", "tc-1"), reply];
+    const placed = classifyTopLevelMessages(body, [openStep]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
+    expect(placed.leading).toEqual([]);
+    expect(placed.inter_step).toEqual([]);
   });
 
-  it("does NOT swallow a later message into an abandoned still-open step", () => {
-    const abandoned: StepView = {
+  // B4 (first step closed, second open, trailing reply): scan stops at the
+  // second step's tool activity, never reaching the first close.
+  it("promotes the trailing reply across a closed-then-open step pair (B4)", () => {
+    const closed = stepView({
       ticket_id: "step-a",
-      title: "First, never closed",
-      status: "active",
-      summary: null,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: null,
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    const properlyClosed: StepView = {
-      ticket_id: "step-b",
-      title: "Second, closed cleanly",
       status: "done",
-      summary: "Did the second step.",
-      created_at: "2026-04-28T01:00:10Z",
-      started_at: "2026-04-28T01:00:10Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:30Z",
+    });
+    const open = stepView({
+      ticket_id: "step-b",
+      status: "active",
+      active_window_start: "2026-04-28T01:00:40Z",
+      active_window_end: null,
+      is_settled: true,
+    });
+    const body = [
+      toolUse("2026-04-28T01:00:50Z", "Bash", "tc-1"),
+      assistantMsg("2026-04-28T01:01:00Z", "Started the tests -- pytest or unittest?", "msg-reply"),
+    ];
+    const placed = classifyTopLevelMessages(body, [closed, open]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
+    expect(placed.inter_step).toEqual([]);
+    expect(placed.leading).toEqual([]);
+  });
+
+  // C1 (leading): prose before the first step renders above the timeline.
+  it("classifies prose before the first step as leading", () => {
+    const step = stepView({
+      ticket_id: "t1",
+      status: "done",
+      active_window_start: "2026-04-28T01:00:10Z",
+      active_window_end: "2026-04-28T01:00:50Z",
+    });
+    const lead = assistantMsg("2026-04-28T01:00:05Z", "Sure -- tracing the auth path first.", "msg-lead");
+    const placed = classifyTopLevelMessages([lead], [step]);
+    expect(placed.leading.map((e) => e.event_id)).toEqual(["msg-lead"]);
+    expect(placed.trailing).toEqual([]);
+    expect(placed.inter_step).toEqual([]);
+  });
+
+  // C2 (full composite): leading + inter-step + trailing in one section.
+  it("classifies leading, inter-step, and trailing prose together (C2)", () => {
+    const step1 = stepView({
+      ticket_id: "step-1",
+      status: "done",
       active_window_start: "2026-04-28T01:00:10Z",
       active_window_end: "2026-04-28T01:00:30Z",
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    const wrapup = assistantMsg("2026-04-28T01:00:40Z", "Both done -- here is the wrap-up.", "msg-wrapup");
-    expect(selectFinalMessages([wrapup], [abandoned, properlyClosed]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+    });
+    const step2 = stepView({
+      ticket_id: "step-2",
+      status: "done",
+      active_window_start: "2026-04-28T01:00:50Z",
+      active_window_end: "2026-04-28T01:01:10Z",
+    });
+    const lead = assistantMsg("2026-04-28T01:00:05Z", "On it -- tracing the auth path.", "msg-lead");
+    const inter = assistantMsg("2026-04-28T01:00:40Z", "Refresh path has the same flaw -- next.", "msg-inter");
+    const trail = assistantMsg("2026-04-28T01:01:20Z", "Both paths fixed. Want tests?", "msg-trail");
+    const placed = classifyTopLevelMessages([lead, inter, trail], [step1, step2]);
+    expect(placed.leading.map((e) => e.event_id)).toEqual(["msg-lead"]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-trail"]);
+    expect(placed.inter_step).toHaveLength(1);
+    expect(placed.inter_step[0].event.event_id).toBe("msg-inter");
+    expect(placed.inter_step[0].before_step_id).toBe("step-2");
+  });
+
+  // A1 (close, silent): nothing trailing.
+  it("returns nothing when the agent closes and stays silent (A1)", () => {
+    const doneStep = stepView({
+      ticket_id: "t1",
+      status: "done",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:50Z",
+      summary: "Found the null-check bug and patched it.",
+    });
+    expect(classifyTopLevelMessages([], [doneStep])).toEqual({ leading: [], inter_step: [], trailing: [] });
+  });
+
+  it("promotes a multi-message trailing reply run as a single trailing block", () => {
+    const doneStep = stepView({
+      ticket_id: "t1",
+      status: "done",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: "2026-04-28T01:00:30Z",
+    });
+    const r1 = assistantMsg("2026-04-28T01:00:40Z", "Here's the summary.", "msg-1");
+    const r2 = assistantMsg("2026-04-28T01:00:45Z", "And one caveat.", "msg-2");
+    const placed = classifyTopLevelMessages([r1, r2], [doneStep]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-1", "msg-2"]);
   });
 });
 
 describe("narration attribution", () => {
-  it("populates narration with the latest text-only message inside an active step's window", () => {
+  it("uses the latest in-window text-only message that is FOLLOWED by tool activity", () => {
     const events: TranscriptEvent[] = [
       taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
     ];
     const body = [
       assistantMsg("2026-04-28T01:00:10Z", "Trying approach A.", "a1"),
+      toolUse("2026-04-28T01:00:12Z", "Read", "tc-1"),
       assistantMsg("2026-04-28T01:00:20Z", "Approach A failed, trying B.", "a2"),
+      toolUse("2026-04-28T01:00:22Z", "Edit", "tc-2"),
     ];
     const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
     attributeNarration(steps, body);
     expect(steps).toHaveLength(1);
     expect(steps[0].narration).toBe("Approach A failed, trying B.");
+  });
+
+  it("does NOT use a trailing message that is not followed by tool activity (it is the reply)", () => {
+    const events: TranscriptEvent[] = [
+      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
+    ];
+    const body = [
+      assistantMsg("2026-04-28T01:00:10Z", "Mid-work narration.", "a1"),
+      toolUse("2026-04-28T01:00:12Z", "Read", "tc-1"),
+      assistantMsg("2026-04-28T01:00:30Z", "All done -- this is the reply.", "a2"),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    attributeNarration(steps, body);
+    // The narration is the FIRST message (followed by a tool), not the
+    // trailing reply (which has no tool after it).
+    expect(steps[0].narration).toBe("Mid-work narration.");
+  });
+
+  it("still surfaces narration on a settled (idle, unclosed) step -- decoupled from is_settled", () => {
+    const events: TranscriptEvent[] = [
+      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Investigate", step: true }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
+    ];
+    const body = [
+      assistantMsg("2026-04-28T01:00:10Z", "Found the bug -- patching now.", "a1"),
+      toolUse("2026-04-28T01:00:15Z", "Edit", "tc-1"),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T02:00:00Z", true);
+    attributeNarration(steps, body);
+    expect(steps[0].is_settled).toBe(true);
+    expect(steps[0].narration).toBe("Found the bug -- patching now.");
   });
 
   it("leaves narration null on a closed step -- the summary owns the slot", () => {
@@ -626,27 +760,14 @@ describe("narration attribution", () => {
       taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
       taskEvent("t1", "closed", "2026-04-28T01:00:30Z", { summary: "Did the thing.", step: true }),
     ];
-    const body = [assistantMsg("2026-04-28T01:00:10Z", "Mid-task narration.", "a1")];
+    const body = [
+      assistantMsg("2026-04-28T01:00:10Z", "Mid-task narration.", "a1"),
+      toolUse("2026-04-28T01:00:12Z", "Read", "tc-1"),
+    ];
     const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
     attributeNarration(steps, body);
     expect(steps[0].status).toBe("done");
     expect(steps[0].summary).toBe("Did the thing.");
-    expect(steps[0].narration).toBeNull();
-  });
-
-  it("leaves narration null on a settled step -- the message is promoted to final instead", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Investigate", step: true }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
-    ];
-    const body = [
-      assistantMsg("2026-04-28T01:00:10Z", "Looking into it.", "a1"),
-      assistantMsg("2026-04-28T01:00:20Z", "Stuck -- need your input.", "a2"),
-    ];
-    // Settled = past partition or agent idle
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T02:00:00Z", true);
-    attributeNarration(steps, body);
-    expect(steps[0].is_settled).toBe(true);
     expect(steps[0].narration).toBeNull();
   });
 });

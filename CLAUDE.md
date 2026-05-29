@@ -110,7 +110,7 @@ After all your steps for the turn are closed, write your final user-facing assis
 
 **Steps and prose:**
 - Text emitted while a step is `in_progress` shows as a live caption under the step, replaced by each new message.
-- On `tk close`, the close summary becomes the caption and your last pre-close text becomes a prominent top-level reply. So write the wrap-up naturally, then close.
+- **Close your final step *before* writing your user-facing wrap-up reply.** The progress view detects your reply by scanning backward from the end of the turn and stopping at the first closed step, so prose written *after* the last close is promoted to a top-level reply below the timeline, while prose written *before* it stays buried inside the step (reachable only by expanding it). This is best-effort, not a hard rule — the view renders sensibly either way, and if you do speak before closing you'll get a reminder to re-output user-facing text after the close.
 - Steps may stay open across turns. Close when work is done; leave open if work continues.
 
 ## Working with regular tickets

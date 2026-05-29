@@ -172,20 +172,51 @@ export function sortSteps(steps: StepView[], records: Map<string, TaskRecord>, p
   return [...carry, ...own];
 }
 
-/** Attribute narration to steps from body events. Latest text-only
- *  assistant_message in each step's window wins. Skips done steps
- *  (summary owns the slot) and settled steps (their text is promoted
- *  to final messages instead). */
+/** True when `e` is a text-only assistant message (prose, no tool calls). */
+function isTextOnlyAssistant(e: TranscriptEvent): boolean {
+  return e.type === "assistant_message" && !!e.text && !(e.tool_calls && e.tool_calls.length > 0);
+}
+
+/** True when `e` represents tool activity: an assistant message that issues
+ *  one or more tool calls, or a tool_result coming back. */
+function isToolActivity(e: TranscriptEvent): boolean {
+  if (e.type === "tool_result") return true;
+  return e.type === "assistant_message" && !!(e.tool_calls && e.tool_calls.length > 0);
+}
+
+/** Whether tool activity occurs later in the same step's window as `ts`. */
+function hasLaterToolActivityInStep(
+  ts: string,
+  step: StepView,
+  body_events: TranscriptEvent[],
+  steps: StepView[],
+): boolean {
+  for (const e of body_events) {
+    if (e.timestamp <= ts) continue;
+    if (!isToolActivity(e)) continue;
+    if (findContainingStep(e.timestamp, steps) === step) return true;
+  }
+  return false;
+}
+
+/** Attribute mid-work narration to steps. A step's narration is the latest
+ *  text-only assistant message in its window that was *followed by tool
+ *  activity* within the same window -- i.e. the agent spoke and then kept
+ *  working, so the text is progress narration rather than a wrap-up reply.
+ *
+ *  This is decoupled from `is_settled`: an unclosed step that goes idle
+ *  still surfaces its mid-work narration (rendered static, not shimmering).
+ *  Done steps are skipped -- their close summary owns the caption slot. A
+ *  trailing message not followed by any tool activity is left for the
+ *  reply-detection / positional logic, never absorbed here. */
 export function attributeNarration(steps: StepView[], body_events: TranscriptEvent[]): void {
   for (const e of body_events) {
-    if (e.type !== "assistant_message") continue;
-    if (!e.text) continue;
-    if (e.tool_calls && e.tool_calls.length > 0) continue;
+    if (!isTextOnlyAssistant(e)) continue;
     const containing = findContainingStep(e.timestamp, steps);
     if (containing === null) continue;
     if (containing.status === "done") continue;
-    if (containing.is_settled) continue;
-    containing.narration = e.text;
+    if (!hasLaterToolActivityInStep(e.timestamp, containing, body_events, steps)) continue;
+    containing.narration = e.text ?? null;
   }
 }
 
@@ -266,33 +297,112 @@ export function eventsInTaskWindow(
   return [...inWindow, ...trailingResults].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }
 
+/** Where a top-level (promoted) text message sits relative to the timeline. */
+export type MessagePosition = "leading" | "inter_step" | "trailing";
+
+/** An inter-step message plus the id of the step it interrupts before. */
+export interface InterStepMessage {
+  event: TranscriptEvent;
+  /** ticket_id of the step whose node renders immediately after this block. */
+  before_step_id: string;
+}
+
+/** Positionally-classified top-level messages for a section. */
+export interface PlacedMessages {
+  /** Prose emitted before the first step started -> above the timeline. */
+  leading: TranscriptEvent[];
+  /** Prose in a gap between a closed step and the next step's start ->
+   *  interrupts the timeline inline at that point. */
+  inter_step: InterStepMessage[];
+  /** The user-facing reply (backward-scan run) -> below the timeline. */
+  trailing: TranscriptEvent[];
+}
+
+/** Top-level steps that have an active window, sorted by window start. */
+function sortedWindowedSteps(steps: StepView[]): StepView[] {
+  return steps
+    .filter((s) => s.active_window_start !== null)
+    .slice()
+    .sort((a, b) => (a.active_window_start ?? "").localeCompare(b.active_window_start ?? ""));
+}
+
+/** Timestamp of the last "stop boundary" for the backward reply scan: the
+ *  latest tool activity OR step close in the section. Text strictly after
+ *  this is the trailing reply run. Null when the section has neither. */
+function lastReplyBoundary(body_events: TranscriptEvent[], steps: StepView[]): string | null {
+  let last: string | null = null;
+  const bump = (ts: string | null): void => {
+    if (ts !== null && (last === null || ts > last)) last = ts;
+  };
+  for (const e of body_events) {
+    if (isToolActivity(e)) bump(e.timestamp);
+  }
+  for (const s of steps) {
+    if (s.status === "done") bump(s.active_window_end);
+  }
+  return last;
+}
+
+type Located = { kind: "in_step" } | { kind: "gap"; before_step_id: string };
+
+/** Locate a (non-leading, non-trailing) timestamp against the sorted step
+ *  windows: inside a step's window, or in an inter-step gap (after a closed
+ *  step, before the next step starts). */
+function locate(ts: string, sorted: StepView[]): Located {
+  for (let i = 0; i < sorted.length; i++) {
+    const start = sorted[i].active_window_start!;
+    if (ts < start) continue;
+    const nextStart = i + 1 < sorted.length ? sorted[i + 1].active_window_start : null;
+    // done step -> window ends at its close; open step -> extends to the
+    // next step's start (an abandoned step) or stays open to the end.
+    const end = sorted[i].active_window_end ?? nextStart;
+    if (end === null || ts < end) return { kind: "in_step" };
+    if (nextStart !== null && ts < nextStart) return { kind: "gap", before_step_id: sorted[i + 1].ticket_id };
+  }
+  // Past the last step's end with no successor: not a gap, leave in-step
+  // (it would already be the trailing reply if it were after the boundary).
+  return { kind: "in_step" };
+}
+
 /**
- * Text-only assistant_messages that should render at the top level
- * rather than being absorbed into a step's narration slot.
+ * Classify the section's text-only assistant messages into top-level
+ * placements, never hiding any under a step:
  *
- *   - Outside every step's window -> always top level
- *   - Last text-only message when its step is done or settled -> promoted
+ *   - **trailing**: the backward-scan reply -- text strictly after the last
+ *     tool activity or step close. Rendered below the timeline.
+ *   - **leading**: text before the first step started. Rendered above.
+ *   - **inter_step**: text in a gap between a closed step and the next
+ *     step's start. Interrupts the timeline inline before that next step.
+ *
+ * Text that falls inside a step's window and is *not* trailing stays in
+ * the step (as narration / expandable body) and is not returned here.
  */
-export function selectFinalMessages(body_events: TranscriptEvent[], steps: StepView[]): TranscriptEvent[] {
-  const textOnly = body_events.filter(
-    (ev) => ev.type === "assistant_message" && !!ev.text && !(ev.tool_calls && ev.tool_calls.length > 0),
-  );
-  if (textOnly.length === 0) return [];
-  const result: TranscriptEvent[] = [];
+export function classifyTopLevelMessages(body_events: TranscriptEvent[], steps: StepView[]): PlacedMessages {
+  const result: PlacedMessages = { leading: [], inter_step: [], trailing: [] };
+  const textOnly = body_events.filter(isTextOnlyAssistant);
+  if (textOnly.length === 0) return result;
+
+  const sorted = sortedWindowedSteps(steps);
+  const firstStart = sorted.length > 0 ? sorted[0].active_window_start : null;
+  const boundary = lastReplyBoundary(body_events, steps);
+  const isTrailing = (ts: string): boolean =>
+    boundary !== null ? ts > boundary : firstStart !== null && ts >= firstStart;
+
   for (const ev of textOnly) {
-    if (findContainingStep(ev.timestamp, steps) === null) {
-      result.push(ev);
+    const ts = ev.timestamp;
+    if (isTrailing(ts)) {
+      result.trailing.push(ev);
+      continue;
     }
+    if (firstStart === null || ts < firstStart) {
+      result.leading.push(ev);
+      continue;
+    }
+    const located = locate(ts, sorted);
+    if (located.kind === "gap") {
+      result.inter_step.push({ event: ev, before_step_id: located.before_step_id });
+    }
+    // kind === "in_step": stays in the step, not promoted.
   }
-  const lastMsg = textOnly[textOnly.length - 1];
-  const lastContaining = findContainingStep(lastMsg.timestamp, steps);
-  if (
-    lastContaining !== null &&
-    (lastContaining.status === "done" || lastContaining.is_settled) &&
-    !result.includes(lastMsg)
-  ) {
-    result.push(lastMsg);
-  }
-  result.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   return result;
 }

@@ -11,7 +11,7 @@ import m from "mithril";
 import { MarkdownContent, renderMarkdown } from "../markdown";
 import type { TranscriptEvent } from "../models/Response";
 import { renderAssistantMessageChildren } from "./message-renderers";
-import type { StepView, TaskUiStatus } from "./turn-grouping";
+import type { InterStepMessage, StepView, TaskUiStatus } from "./turn-grouping";
 import { eventsInTaskWindow } from "./turn-grouping";
 
 interface ProgressBlockAttrs {
@@ -24,17 +24,16 @@ interface ProgressBlockAttrs {
    *  per-task O(n log n) rebuild of the same map. Lookups by id work
    *  fine even though only a subset of events is in this turn. */
   toolResults: Map<string, TranscriptEvent>;
-  /** Text-only assistant messages from this turn (in chronological order)
-   *  that should appear at the top level rather than buried inside a
-   *  task's expanded panel. ChatPanel selects assistant_messages with
-   *  non-empty text and no tool_calls; together they cover both:
-   *    - the agent's "between tasks" or "after all tasks" prose, and
-   *    - the agent's final reply when a task was left open at turn end
-   *      (which would otherwise land inside the open task's window and
-   *      be hidden in its dropdown).
-   *  Rendered as separate blocks below the Timeline in arrival order so
-   *  no substantive text gets dropped. */
-  final_messages: TranscriptEvent[];
+  /** Top-level prose placed by chronological position so nothing is hidden
+   *  under a step (see classifyTopLevelMessages in turn-grouping):
+   *    - leading: emitted before the first step -> rendered above the timeline.
+   *    - inter_step: emitted in a gap between a closed step and the next
+   *      step's start -> interrupts the timeline inline before that step.
+   *    - trailing: the user-facing reply (backward-scan run) -> below the
+   *      timeline. */
+  leading_messages: TranscriptEvent[];
+  interstep_messages: InterStepMessage[];
+  trailing_messages: TranscriptEvent[];
   agentId: string;
 }
 
@@ -75,7 +74,9 @@ function statusIcon(status: TaskUiStatus, is_settled: boolean): m.Vnode {
  *   - done + summary    -> render the close summary (even when expanded)
  *   - done + no summary -> render nothing (clean final state)
  *   - active + expanded -> hide narration (the expanded panel already shows it)
- *   - active            -> render the latest in-window narration, if any
+ *   - active            -> render the latest in-window narration, if any.
+ *                          Shimmering while genuinely active; static + muted
+ *                          once settled (was in progress, agent stopped).
  *   - pending           -> render nothing (no window yet)
  */
 function renderTaskCaption(task: StepView, isExpanded: boolean): m.Vnode | null {
@@ -83,7 +84,9 @@ function renderTaskCaption(task: StepView, isExpanded: boolean): m.Vnode | null 
     return task.summary ? m("div.pv-tl-summary", task.summary) : null;
   }
   if (isExpanded) return null;
-  return task.narration ? m("div.pv-tl-narration.markdown-content", m.trust(renderMarkdown(task.narration))) : null;
+  if (!task.narration) return null;
+  const captionClass = task.is_settled ? "pv-tl-narration--static" : "pv-tl-narration";
+  return m(`div.${captionClass}.markdown-content`, m.trust(renderMarkdown(task.narration)));
 }
 
 function renderExpandedTaskBody(
@@ -187,9 +190,6 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
               ? m("span.pv-tl-id-badge", { title: `Ticket ${task.ticket_id}` }, `[${task.ticket_id}]`)
               : null,
             task.title,
-            task.is_settled && task.status !== "done"
-              ? m("span.pv-carryover-tag", { title: "This step is no longer actively being worked on" }, "settled")
-              : null,
             canExpand
               ? m("span", { class: `pv-chev ${isExpanded ? "pv-chev--open" : ""}` }, m.trust("&rsaquo;"))
               : null,
@@ -219,7 +219,8 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
   return {
     view(vnode) {
-      const { tasks, body_events, toolResults, final_messages, agentId } = vnode.attrs;
+      const { tasks, body_events, toolResults, leading_messages, interstep_messages, trailing_messages, agentId } =
+        vnode.attrs;
       if (tasks.length === 0) {
         // Defensive: callers should not mount ProgressBlock when there
         // are no tasks. Fall back to no-op.
@@ -228,28 +229,51 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
       // Mithril 2 enforces that all children of a fragment are either all
       // keyed or all unkeyed; the timeline-thread div is unkeyed while
-      // the task nodes carry per-ticket keys for stable expand state.
-      // Putting the keyed task vnodes inside their own container keeps
-      // them a homogeneous (all-keyed) fragment and lets the unkeyed
-      // thread sit next to them without violating the rule.
-      const taskNodes = tasks.map((task, idx) =>
-        renderTaskNode(task, {
-          is_last: idx === tasks.length - 1,
-          is_child: false,
-          body_events,
-          toolResults,
-          agentId,
-          tasks,
-        }),
-      );
+      // the timeline content carries per-element keys for stable state.
+      // Putting the keyed children inside their own container keeps them a
+      // homogeneous (all-keyed) fragment and lets the unkeyed thread sit
+      // next to them without violating the rule.
+      //
+      // Inter-step messages interrupt the timeline before the step whose
+      // node they precede (Variant C: broken-thread, full-width prose). We
+      // weave each one in immediately before its `before_step_id` node so
+      // the timeline reads top-to-bottom in chronological order.
+      const timelineNodes: m.Children[] = [];
+      for (let idx = 0; idx < tasks.length; idx++) {
+        const task = tasks[idx];
+        for (const placed of interstep_messages) {
+          if (placed.before_step_id === task.ticket_id) {
+            timelineNodes.push(
+              m(
+                "div.pv-interstep",
+                { key: `interstep-${placed.event.event_id}` },
+                m(MarkdownContent, { content: placed.event.text ?? "" }),
+              ),
+            );
+          }
+        }
+        timelineNodes.push(
+          renderTaskNode(task, {
+            is_last: idx === tasks.length - 1,
+            is_child: false,
+            body_events,
+            toolResults,
+            agentId,
+            tasks,
+          }),
+        );
+      }
 
       return m("div.progress-block", [
+        leading_messages.length > 0
+          ? leading_messages.map((ev) => m("div.pv-lead", m(MarkdownContent, { content: ev.text ?? "" })))
+          : null,
         m("div.pv.pv--timeline", [
           m("div.pv-timeline-thread", { "aria-hidden": "true" }),
-          m("div.pv-timeline-nodes", taskNodes),
+          m("div.pv-timeline-nodes", timelineNodes),
         ]),
-        final_messages.length > 0
-          ? final_messages.map((ev) => m("div.pv-final", m(MarkdownContent, { content: ev.text ?? "" })))
+        trailing_messages.length > 0
+          ? trailing_messages.map((ev) => m("div.pv-final", m(MarkdownContent, { content: ev.text ?? "" })))
           : null,
       ]);
     },
