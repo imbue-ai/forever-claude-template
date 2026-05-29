@@ -29,6 +29,13 @@ class _StoppableWatcher:
     def stop(self) -> None:
         self.was_stopped = True
 
+
+class _RaisingWatcher:
+    """Stand-in whose stop() raises the kind of error a watchdog teardown can."""
+
+    def stop(self) -> None:
+        raise OSError("inotify teardown failed")
+
 # Placeholder client-side port used by the refresh-service broadcast tests.
 # Only the host portion of the TestClient ``client`` tuple is inspected by the
 # endpoint (it enforces loopback), so any fixed value works here.
@@ -398,6 +405,29 @@ def test_agent_removal_stops_watcher_and_evicts_queue(app: FastAPI) -> None:
         agent_manager.remove_agent(agent_id)
 
         assert watcher.was_stopped is True
+        assert agent_id not in app.state.watchers
+        assert subscriber.get_nowait() is None
+
+
+def test_agent_removal_tolerates_watcher_stop_failure(app: FastAPI) -> None:
+    """A watcher.stop() failure is contained: the queue is still evicted.
+
+    Stopping the watchdog-backed watcher can raise OSError/RuntimeError during
+    teardown. The eviction listener must catch that, log it, and still evict the
+    event queues -- and must not let the error escape onto the observe thread
+    that drives observe-driven removals.
+    """
+    with TestClient(app):
+        agent_manager: AgentManager = app.state.agent_manager
+        event_queues: AgentEventQueues = app.state.event_queues
+
+        agent_id = "agent-bad-watcher"
+        app.state.watchers[agent_id] = _RaisingWatcher()
+        subscriber = event_queues.register(agent_id)
+
+        # Must not raise even though watcher.stop() does.
+        agent_manager.remove_agent(agent_id)
+
         assert agent_id not in app.state.watchers
         assert subscriber.get_nowait() is None
 

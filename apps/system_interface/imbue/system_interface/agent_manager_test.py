@@ -750,28 +750,6 @@ def test_handle_host_destroyed_notifies_removed_listener_per_agent(agent_manager
     assert removed == [str(agent_id_1), str(agent_id_2)]
 
 
-def test_notify_agent_removed_isolates_failing_listener(agent_manager: AgentManager) -> None:
-    """A listener that raises must not prevent later listeners from running.
-
-    Agent-removed listeners are arbitrary callbacks (e.g. one stops a
-    watchdog-backed session watcher, which can raise). Several removal paths run
-    on the observe-reader background thread, so a single failing listener must
-    not abort the fan-out or the trailing agents-updated broadcast.
-    """
-    survived: list[str] = []
-
-    def _raises(_agent_id: str) -> None:
-        raise RuntimeError("listener boom")
-
-    agent_manager.add_agent_removed_listener(_raises)
-    agent_manager.add_agent_removed_listener(survived.append)
-
-    # Must not propagate; the second listener must still fire.
-    agent_manager.remove_agent("agent-xyz")
-
-    assert survived == ["agent-xyz"]
-
-
 def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroadcaster) -> None:
     """The ``mngr_binary`` argument to ``build()`` overrides the default binary path."""
     manager = AgentManager.build(broadcaster, mngr_binary="/path/to/custom-mngr")

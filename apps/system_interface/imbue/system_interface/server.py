@@ -97,9 +97,22 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         # Fires for every agent-removal path (REST destroy plus observe-driven
         # destroy / host-destroy), mirroring the lifespan-local closure pattern
         # already used by _graceful_shutdown_handler below.
+        #
+        # This is an agent-removed listener, and the observe-driven paths invoke
+        # it on the observe-reader background thread (see
+        # AgentManager._notify_agent_removed). Stopping the watchdog-backed
+        # session watcher tears down its inotify emitter and joins its thread,
+        # which can raise OSError (emitter teardown) or RuntimeError (observer /
+        # thread state). We catch exactly those so a teardown hiccup neither
+        # kills the observe thread nor skips the queue eviction below -- while a
+        # programming error in the watcher (e.g. AttributeError) still surfaces
+        # rather than being silently swallowed.
         watcher = application.state.watchers.pop(agent_id, None)
         if watcher is not None:
-            watcher.stop()
+            try:
+                watcher.stop()
+            except (OSError, RuntimeError) as e:
+                logger.opt(exception=e).error("Failed to stop session watcher for agent {}", agent_id)
         event_queues.evict(agent_id)
 
     agent_manager.add_agent_removed_listener(_evict_agent_resources)

@@ -264,21 +264,20 @@ class AgentManager:
     def _notify_agent_removed(self, agent_id: str) -> None:
         """Invoke all registered agent-removed listeners for ``agent_id``.
 
-        Listeners are best-effort callbacks owned by other components (e.g. the
-        server's resource-eviction closure, which stops the watchdog-backed
-        session watcher). They run on whatever thread performed the removal --
-        including the observe-reader background thread for the observe-driven
-        paths -- so a listener that raises must not skip the remaining
-        listeners, abort the host-destroyed loop, prevent the trailing
-        ``broadcast_agents_updated``, or tear down observe event processing.
-        Each invocation is therefore isolated: failures are logged and the
-        fan-out continues.
+        Several removal paths (``_handle_agent_destroyed`` /
+        ``_handle_host_destroyed``) run on the observe-reader background thread,
+        where an exception escaping this fan-out would skip later listeners,
+        abort the host-destroyed loop, prevent the trailing
+        ``broadcast_agents_updated``, and tear down observe event processing.
+        Listeners are therefore required to be self-contained: each must handle
+        its own expected operational failures (the server's resource-eviction
+        listener, for example, catches the errors its watchdog teardown can
+        raise). This method deliberately does not wrap listeners in a blanket
+        ``except`` -- doing so would silently swallow genuine programming errors
+        in a listener; those should surface.
         """
         for listener in list(self._agent_removed_listeners):
-            try:
-                listener(agent_id)
-            except Exception as e:
-                _loguru_logger.opt(exception=e).error("agent-removed listener failed for agent {}", agent_id)
+            listener(agent_id)
 
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from the tracked state and broadcast the update.
