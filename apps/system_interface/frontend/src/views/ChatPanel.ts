@@ -10,20 +10,22 @@
 import m from "mithril";
 import { isSlotClaimed } from "../slots";
 import {
-  fetchEvents,
   fetchBackfillEvents,
   getEventsForAgent,
-  getFirstEventId,
+  getEventCount,
+  evictOldEvents,
+  hasMoreToBackfill,
   isConversationNotFound,
-  isBackfillComplete,
+  MAX_HELD_EVENTS,
   type TranscriptEvent,
 } from "../models/Response";
-import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
+import { computeVisibleWindow } from "../models/virtualWindow";
+import { connectToStream, disconnectFromStream, loadSnapshotWithStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
+import { renderUserMessage, renderAssistantMessage, isHiddenUserMessage } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
 
 function getAgentTerminalUrl(agentId: string): string {
@@ -50,6 +52,24 @@ function openAgentTerminalTab(agentId: string): void {
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
 
+// Pixels rendered above/below the viewport so scrolling does not flash blank
+// before the next redraw fills the window.
+const OVERSCAN_PX = 800;
+// Scroll-up backfill fires when the viewport top is within this many pixels of
+// the top of the held content (and the server reports more history).
+const BACKFILL_TRIGGER_PX = 600;
+// Per-type fallback row heights, used until a row has been measured. Rough is
+// fine: they only affect spacer sizing for off-screen rows, which is corrected
+// as rows scroll into view and are measured.
+const ESTIMATED_USER_HEIGHT_PX = 90;
+const ESTIMATED_ASSISTANT_HEIGHT_PX = 240;
+
+interface RowDescriptor {
+  key: string;
+  estimate: number;
+  render: () => m.Vnode;
+}
+
 function isNearBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
 }
@@ -62,13 +82,64 @@ function isProtoAgent(agentId: string): boolean {
   return getProtoAgents().some((p) => p.agent_id === agentId);
 }
 
+/**
+ * Build the renderable row list (user + assistant messages) from the held
+ * events. tool_result events are not rows -- they are folded into the assistant
+ * message that issued the call -- and hidden user messages are dropped. Render
+ * closures are invoked lazily so only windowed rows actually build their vnodes.
+ */
+function buildRows(agentId: string, events: TranscriptEvent[]): RowDescriptor[] {
+  const toolResults = new Map<string, TranscriptEvent>();
+  for (const event of events) {
+    if (event.type === "tool_result" && event.tool_call_id) {
+      toolResults.set(event.tool_call_id, event);
+    }
+  }
+
+  const rows: RowDescriptor[] = [];
+  for (const event of events) {
+    if (event.type === "user_message") {
+      if (isHiddenUserMessage(event.content || "")) {
+        continue;
+      }
+      rows.push({
+        key: event.event_id,
+        estimate: ESTIMATED_USER_HEIGHT_PX,
+        render: () => renderUserMessage(event) as m.Vnode,
+      });
+    } else if (event.type === "assistant_message") {
+      rows.push({
+        key: event.event_id,
+        estimate: ESTIMATED_ASSISTANT_HEIGHT_PX,
+        render: () => renderAssistantMessage(event, toolResults, agentId),
+      });
+    }
+  }
+  return rows;
+}
+
 export function ChatPanel(): m.Component<{ agentId: string }> {
   let loading = false;
   let loadingError: string | null = null;
   let currentAgentId: string | null = null;
   let userScrolledUp = false;
   let previousScrollTop = 0;
-  let backfillStarted = false;
+
+  // Virtualization state.
+  let scrollEl: HTMLElement | null = null;
+  let viewportHeight = 0;
+  let scrollTop = 0;
+  let rowHeights = new Map<string, number>();
+  let viewportResizeObserver: ResizeObserver | null = null;
+  let measureScheduled = false;
+  // Backfill (scroll-up paging) state.
+  let backfillInFlight = false;
+  // After a backfill prepend, compensate scrollTop by the height the content
+  // grew so the user's viewport stays anchored instead of jumping. The pending
+  // flag is only raised once the backfill resolves, so unrelated redraws in the
+  // meantime do not consume (and discard) the captured pre-prepend height.
+  let scrollHeightBeforePrepend = 0;
+  let prependCompensationPending = false;
 
   // Screen capture state (shown when agent has no conversation)
   let screenContent: string | null = null;
@@ -194,7 +265,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     loadingError = null;
 
     try {
-      await fetchEvents(agentId);
+      // Buffer SSE deltas arriving during the snapshot fetch so the wholesale
+      // snapshot replace in fetchEvents cannot drop a live event on first load.
+      await loadSnapshotWithStream(agentId);
       if (agentId === currentAgentId) {
         loading = false;
         loadingError = null;
@@ -222,51 +295,57 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     currentAgentId = agentId;
     previousScrollTop = 0;
+    scrollTop = 0;
     userScrolledUp = false;
-    backfillStarted = false;
+    backfillInFlight = false;
+    scrollHeightBeforePrepend = 0;
+    prependCompensationPending = false;
+    rowHeights = new Map<string, number>();
     loadAgent(agentId);
   }
 
-  async function runBackfillLoop(agentId: string): Promise<void> {
-    const MAX_STALLED_RETRIES = 5;
-    const BACKOFF_BASE_MS = 1000;
-    const BACKOFF_CAP_MS = 30000;
-    let stalledCount = 0;
-
-    while (!isBackfillComplete(agentId) && agentId === currentAgentId) {
-      const firstIdBefore = getFirstEventId(agentId);
-      await fetchBackfillEvents(agentId);
-      m.redraw();
-
-      if (isBackfillComplete(agentId)) {
-        break;
-      }
-
-      const firstIdAfter = getFirstEventId(agentId);
-      if (firstIdAfter === firstIdBefore) {
-        stalledCount++;
-        if (stalledCount >= MAX_STALLED_RETRIES) {
-          break;
-        }
-        const delayMs = Math.min(BACKOFF_BASE_MS * 2 ** (stalledCount - 1), BACKOFF_CAP_MS);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      } else {
-        stalledCount = 0;
-      }
-    }
-  }
-
-  function startBackfill(agentId: string): void {
-    if (backfillStarted || isBackfillComplete(agentId)) {
+  /**
+   * Fetch one older page when the user scrolls near the top and the server has
+   * more history. Replaces the old drain-to-completion loop: history is paged in
+   * on demand, one viewport-worth at a time, so opening a long transcript no
+   * longer pulls the entire backlog to the client.
+   */
+  function maybeBackfill(agentId: string, element: HTMLElement): void {
+    if (backfillInFlight || !hasMoreToBackfill(agentId)) {
       return;
     }
-    backfillStarted = true;
-    runBackfillLoop(agentId);
+    if (element.scrollTop > BACKFILL_TRIGGER_PX) {
+      return;
+    }
+    backfillInFlight = true;
+    scrollHeightBeforePrepend = element.scrollHeight;
+    fetchBackfillEvents(agentId).finally(() => {
+      backfillInFlight = false;
+      // Only now (older events prepended) is compensation due; raising the flag
+      // here keeps interim redraws from consuming the captured height early.
+      prependCompensationPending = true;
+      m.redraw();
+    });
   }
 
   function applyScrollPosition(element: HTMLElement): void {
+    // Compensate for content prepended by a just-completed backfill so the
+    // viewport stays anchored on what the user was reading rather than jumping
+    // to the new top. Done before the scroll-to-bottom check below; the two are
+    // mutually exclusive in practice (a prepend only happens while scrolled up).
+    if (prependCompensationPending) {
+      prependCompensationPending = false;
+      const delta = element.scrollHeight - scrollHeightBeforePrepend;
+      if (delta > 0) {
+        element.scrollTop += delta;
+        scrollTop = element.scrollTop;
+        previousScrollTop = element.scrollTop;
+      }
+    }
+
     if (!userScrolledUp) {
       scrollToBottom(element);
+      scrollTop = element.scrollTop;
       previousScrollTop = element.scrollTop;
     }
   }
@@ -277,14 +356,73 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     const didScrollUp = currentScrollTop < previousScrollTop;
 
     previousScrollTop = currentScrollTop;
+    scrollTop = currentScrollTop;
 
     if (didScrollUp) {
       userScrolledUp = true;
+      if (currentAgentId !== null) {
+        maybeBackfill(currentAgentId, element);
+      }
       return;
     }
 
     if (isNearBottom(element)) {
       userScrolledUp = false;
+    }
+  }
+
+  // Read each rendered row's height from the DOM and cache it by event id, so
+  // the window math and spacer sizes converge on real heights. Returns whether
+  // any height changed (so the caller can schedule one more redraw to settle
+  // the spacers). Also refreshes the viewport height.
+  function measureRows(): boolean {
+    if (scrollEl === null) {
+      return false;
+    }
+    viewportHeight = scrollEl.clientHeight;
+    const list = scrollEl.querySelector(".message-list");
+    if (list === null) {
+      return false;
+    }
+    let changed = false;
+    for (const child of Array.from(list.children)) {
+      const element = child as HTMLElement;
+      const key = element.id;
+      if (key === "") {
+        continue; // spacer
+      }
+      const height = element.offsetHeight;
+      if (height > 0 && rowHeights.get(key) !== height) {
+        rowHeights.set(key, height);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  function scheduleMeasure(): void {
+    if (measureScheduled) {
+      return;
+    }
+    measureScheduled = true;
+    requestAnimationFrame(() => {
+      measureScheduled = false;
+      if (measureRows()) {
+        m.redraw();
+      }
+    });
+  }
+
+  // Keep the height cache from growing without bound as rows are evicted: drop
+  // entries for keys no longer present once it drifts well past the row count.
+  function pruneHeights(keys: Set<string>): void {
+    if (rowHeights.size <= keys.size + 256) {
+      return;
+    }
+    for (const key of rowHeights.keys()) {
+      if (!keys.has(key)) {
+        rowHeights.delete(key);
+      }
     }
   }
 
@@ -352,6 +490,15 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       );
     }
 
+    // Bound client memory while following the live tail: trim the oldest held
+    // events once well over the cap. Only when at the bottom, so a scrolled-up
+    // reader's rendered history is never yanked out from under them; the dropped
+    // history is re-fetched via backfill on scroll-up (evictOldEvents sets
+    // has_more). Re-pinned to the bottom by applyScrollPosition afterwards.
+    if (!userScrolledUp && getEventCount(agentId) > MAX_HELD_EVENTS) {
+      evictOldEvents(agentId);
+    }
+
     const events = getEventsForAgent(agentId);
 
     if (events.length === 0) {
@@ -362,32 +509,33 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       );
     }
 
-    startBackfill(agentId);
+    const rows = buildRows(agentId, events);
+    pruneHeights(new Set(rows.map((row) => row.key)));
 
-    const toolResults = new Map<string, TranscriptEvent>();
-    for (const event of events) {
-      if (event.type === "tool_result" && event.tool_call_id) {
-        toolResults.set(event.tool_call_id, event);
-      }
-    }
+    const getHeight = (index: number): number => rowHeights.get(rows[index].key) ?? rows[index].estimate;
+    const windowResult = computeVisibleWindow({
+      count: rows.length,
+      getHeight,
+      scrollTop,
+      // Before the first measure viewportHeight is 0; fall back to the live
+      // clientHeight (or a large value) so the initial render is not a 1-row
+      // sliver that the post-mount measure then has to expand.
+      viewportHeight: viewportHeight > 0 ? viewportHeight : (scrollEl?.clientHeight ?? 2000),
+      overscanPx: OVERSCAN_PX,
+    });
 
-    const messageNodes: m.Vnode[] = [];
-    for (const event of events) {
-      if (event.type === "user_message") {
-        const userNode = renderUserMessage(event);
-        if (userNode !== null) {
-          messageNodes.push(userNode);
-        }
-      } else if (event.type === "assistant_message") {
-        messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
-      }
+    const visibleRows: m.Vnode[] = [];
+    visibleRows.push(m("div", { key: "__spacer_top", style: `height: ${windowResult.topPad}px` }));
+    for (let i = windowResult.startIndex; i < windowResult.endIndex; i++) {
+      visibleRows.push(rows[i].render());
     }
+    visibleRows.push(m("div", { key: "__spacer_bottom", style: `height: ${windowResult.bottomPad}px` }));
 
     return m("div", { class: "message-list-wrapper" }, [
       m(
         "div",
         { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
-        messageNodes,
+        visibleRows,
       ),
     ]);
   }
@@ -395,6 +543,11 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   return {
     onremove() {
       disconnectLogWs();
+      if (viewportResizeObserver !== null) {
+        viewportResizeObserver.disconnect();
+        viewportResizeObserver = null;
+      }
+      scrollEl = null;
       if (currentAgentId !== null) {
         disconnectFromStream(currentAgentId);
       }
@@ -410,10 +563,24 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
             class: "app-content flex-1 overflow-y-auto px-8 py-6",
             onscroll: handleScrollEvent,
             oncreate: (mainVnode: m.VnodeDOM) => {
-              applyScrollPosition(mainVnode.dom as HTMLElement);
+              scrollEl = mainVnode.dom as HTMLElement;
+              viewportHeight = scrollEl.clientHeight;
+              // Recompute the window when the panel itself resizes (dockview
+              // splits, window resize) since that changes the visible range.
+              viewportResizeObserver = new ResizeObserver(() => {
+                if (scrollEl !== null && scrollEl.clientHeight !== viewportHeight) {
+                  viewportHeight = scrollEl.clientHeight;
+                  m.redraw();
+                }
+              });
+              viewportResizeObserver.observe(scrollEl);
+              applyScrollPosition(scrollEl);
+              scheduleMeasure();
             },
             onupdate: (mainVnode: m.VnodeDOM) => {
-              applyScrollPosition(mainVnode.dom as HTMLElement);
+              scrollEl = mainVnode.dom as HTMLElement;
+              applyScrollPosition(scrollEl);
+              scheduleMeasure();
             },
           },
           isSlotClaimed("conversation-content") ? null : renderMessages(agentId),

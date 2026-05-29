@@ -11,6 +11,10 @@ import json
 import re
 from typing import Any
 
+from loguru import logger as _loguru_logger
+
+logger = _loguru_logger
+
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
@@ -141,7 +145,8 @@ def parse_session_lines(
             continue
         try:
             raw = json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.debug("Skipping malformed JSONL line: {}", e)
             continue
 
         event_type: str = raw.get("type", "")
