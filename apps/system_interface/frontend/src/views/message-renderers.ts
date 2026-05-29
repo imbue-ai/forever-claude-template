@@ -8,6 +8,28 @@ import { MarkdownContent } from "../markdown";
 import type { TranscriptEvent, ToolCall } from "../models/Response";
 import { openSubagentTab } from "./DockviewWorkspace";
 
+// Memoize the tool-call-id -> tool_result map against the identity of the
+// events array. The event stores (Response.eventsByAgent, SubagentView.events)
+// replace the array by reference only when events actually change, so an
+// unchanged array yields the cached map instead of rebuilding it on every
+// redraw.
+const toolResultsCache = new WeakMap<TranscriptEvent[], Map<string, TranscriptEvent>>();
+
+export function buildToolResultsMap(events: TranscriptEvent[]): Map<string, TranscriptEvent> {
+  const cached = toolResultsCache.get(events);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const toolResults = new Map<string, TranscriptEvent>();
+  for (const event of events) {
+    if (event.type === "tool_result" && event.tool_call_id) {
+      toolResults.set(event.tool_call_id, event);
+    }
+  }
+  toolResultsCache.set(events, toolResults);
+  return toolResults;
+}
+
 export function isCollapsibleUserMessage(content: string): { label: string } | null {
   if (content.startsWith("Stop hook feedback:\n")) {
     return { label: "Stop hook feedback" };

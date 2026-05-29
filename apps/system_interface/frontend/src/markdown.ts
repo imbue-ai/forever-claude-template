@@ -74,18 +74,31 @@ function restoreExpandedState(container: HTMLElement, expanded: Set<number>): vo
   });
 }
 
+// Last rendered source per element. MarkdownContent is a single shared
+// component object reused across every instance, so the cache must key on the
+// DOM node rather than module/component scope. Lets onupdate skip the
+// marked.parse + DOMPurify.sanitize round trip (and the DOM rewrite) when the
+// content is unchanged, which also leaves the user's expanded tool-call blocks
+// untouched.
+const lastRenderedContent = new WeakMap<HTMLElement, string>();
+
 export const MarkdownContent: m.Component<{ content: string }> = {
   oncreate(vnode) {
     const element = vnode.dom as HTMLElement;
     element.innerHTML = renderMarkdown(vnode.attrs.content);
     wrapToolCallBlocks(element);
+    lastRenderedContent.set(element, vnode.attrs.content);
   },
   onupdate(vnode) {
     const element = vnode.dom as HTMLElement;
+    if (lastRenderedContent.get(element) === vnode.attrs.content) {
+      return;
+    }
     const expanded = saveExpandedState(element);
     element.innerHTML = renderMarkdown(vnode.attrs.content);
     wrapToolCallBlocks(element);
     restoreExpandedState(element, expanded);
+    lastRenderedContent.set(element, vnode.attrs.content);
   },
   view() {
     return m("div", { class: "message-content markdown-content" });

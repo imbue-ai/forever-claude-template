@@ -22,6 +22,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
   let messageText = "";
   let currentAgentId: string | null = null;
   let messageTextareaElement: HTMLTextAreaElement | null = null;
+  let sendError: string | null = null;
 
   function focusMessageTextarea(): void {
     messageTextareaElement?.focus();
@@ -47,13 +48,21 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
 
         const text = messageText;
         messageText = "";
+        sendError = null;
         localStorage.removeItem(messageTextKey(agentId));
         m.redraw();
 
         try {
           await sendMessage(agentId, text);
-        } catch {
-          // Fire-and-forget: response comes via SSE
+        } catch (error) {
+          // Restore what the user typed (the textarea was already cleared
+          // optimistically) and surface the failure, instead of silently
+          // discarding the message. The success path's response still arrives
+          // via SSE.
+          messageText = text;
+          localStorage.setItem(messageTextKey(agentId), text);
+          sendError = (error as Error).message ?? "Failed to send message";
+          m.redraw();
         }
 
         requestAnimationFrame(() => {
@@ -92,13 +101,18 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
             oninput: (event: Event) => {
               const textarea = event.target as HTMLTextAreaElement;
               messageText = textarea.value;
+              sendError = null;
               localStorage.setItem(messageTextKey(agentId), messageText);
               autoResizeTextarea(textarea);
             },
             onkeydown: handleKeydown,
           }),
           m("div", { class: "message-input-toolbar" }, [
-            m("div", { class: "message-input-toolbar-left" }),
+            m(
+              "div",
+              { class: "message-input-toolbar-left" },
+              sendError ? m("span", { class: "message-input-error text-sm text-red-500" }, sendError) : null,
+            ),
             hasMessageText
               ? m(
                   "button",

@@ -78,6 +78,10 @@ let showDestroyDialog = false;
 let destroyTargetAgentId: string | null = null;
 let destroyTargetAgentName: string | null = null;
 let destroyTargetPanelId: string | null = null;
+// The dialog stays mounted across the destroy request so a failure can be
+// surfaced inline rather than via a blocking alert().
+let destroyInProgress = false;
+let destroyError: string | null = null;
 
 // Share modal state
 let showShareModal = false;
@@ -221,6 +225,8 @@ function createCustomTab(options: { id: string; name: string }): {
             destroyTargetAgentId = chatAgentId;
             destroyTargetAgentName = agent?.name ?? chatAgentId;
             destroyTargetPanelId = options.id;
+            destroyInProgress = false;
+            destroyError = null;
             showDestroyDialog = true;
             m.redraw();
           },
@@ -948,21 +954,21 @@ function initializeDockview(parentElement: HTMLElement): void {
   });
 }
 
+/**
+ * Destroy the target agent and tear down its panel. Throws on failure so the
+ * caller can surface the error inline in the still-open confirm dialog.
+ */
 async function executeDestroy(agentId: string, panelId: string): Promise<void> {
-  // Destroy the target agent
-  try {
-    const response = await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/destroy`), {
-      method: "POST",
-    });
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      const detail = (data as { detail?: string }).detail ?? "Unknown error";
-      alert(`Failed to destroy agent: ${detail}`);
-      return;
-    }
-  } catch (e) {
-    alert(`Failed to destroy agent: ${(e as Error).message}`);
-    return;
+  const response = await fetch(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/destroy`), {
+    method: "POST",
+  }).catch(() => null);
+  if (response === null) {
+    throw new Error("Failed to destroy agent: could not reach the server");
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const detail = (data as { detail?: string }).detail ?? "Unknown error";
+    throw new Error(`Failed to destroy agent: ${detail}`);
   }
 
   // Remove from local state
@@ -985,17 +991,11 @@ export const DockviewWorkspace: m.Component = {
     initializeDockview(wrapper);
   },
 
-  onupdate(_vnode: m.VnodeDOM) {
-    // Resize the dockview when the container changes
-    if (dockview && dockviewContainer) {
-      requestAnimationFrame(() => {
-        if (dockviewContainer) {
-          const rect = dockviewContainer.getBoundingClientRect();
-          dockview!.layout(rect.width, rect.height);
-        }
-      });
-    }
-  },
+  // No onupdate-driven layout: DockviewComponent installs its own
+  // ResizeObserver on the container (disableAutoResizing defaults to false), so
+  // it already re-lays-out when the container changes size. Calling layout() on
+  // every Mithril redraw (this component re-renders on every global redraw, as
+  // its view only hosts modals) was redundant work.
 
   view() {
     return m(
@@ -1034,17 +1034,35 @@ export const DockviewWorkspace: m.Component = {
         showDestroyDialog && destroyTargetAgentId && destroyTargetAgentName
           ? m(DestroyConfirmDialog, {
               agentName: destroyTargetAgentName,
-              onConfirm() {
-                showDestroyDialog = false;
+              busy: destroyInProgress,
+              error: destroyError,
+              async onConfirm() {
+                if (destroyInProgress) return;
                 const targetId = destroyTargetAgentId!;
                 const panelId = destroyTargetPanelId!;
+                destroyInProgress = true;
+                destroyError = null;
+                m.redraw();
+                try {
+                  await executeDestroy(targetId, panelId);
+                } catch (e) {
+                  // Keep the dialog open and show the error inline so the user
+                  // can retry or cancel.
+                  destroyInProgress = false;
+                  destroyError = (e as Error).message;
+                  m.redraw();
+                  return;
+                }
+                showDestroyDialog = false;
+                destroyInProgress = false;
                 destroyTargetAgentId = null;
                 destroyTargetAgentName = null;
                 destroyTargetPanelId = null;
-                executeDestroy(targetId, panelId);
               },
               onCancel() {
+                if (destroyInProgress) return;
                 showDestroyDialog = false;
+                destroyError = null;
                 destroyTargetAgentId = null;
                 destroyTargetAgentName = null;
                 destroyTargetPanelId = null;

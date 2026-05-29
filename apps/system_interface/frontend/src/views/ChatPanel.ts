@@ -15,14 +15,14 @@ import {
   getFirstEventId,
   isConversationNotFound,
   isBackfillComplete,
-  type TranscriptEvent,
 } from "../models/Response";
 import { connectToStream, disconnectFromStream, loadSnapshotWithStream } from "../models/StreamingMessage";
+import { parseJsonMessage } from "../models/ws-json";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
+import { renderUserMessage, renderAssistantMessage, buildToolResultsMap } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
 
 function getAgentTerminalUrl(agentId: string): string {
@@ -48,6 +48,11 @@ function openAgentTerminalTab(agentId: string): void {
 }
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
+
+// Cap on retained proto-agent build-log lines. The log streams unbounded over
+// the WebSocket and each retained line is a DOM node, so keep only the most
+// recent slice -- the tail is what matters for following creation progress.
+const MAX_LOG_LINES = 1000;
 
 function isNearBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
@@ -130,12 +135,18 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     logWs = new WebSocket(url);
 
     logWs.onmessage = (event: MessageEvent) => {
-      const data = JSON.parse(event.data as string) as
-        | { line: string }
-        | { done: true; success: boolean; error: string | null };
+      const data = parseJsonMessage<{ line: string } | { done: true; success: boolean; error: string | null }>(
+        event.data as string,
+      );
+      if (data === null) {
+        return;
+      }
 
       if ("line" in data) {
         logLines.push(data.line);
+        if (logLines.length > MAX_LOG_LINES) {
+          logLines = logLines.slice(-MAX_LOG_LINES);
+        }
       } else if ("done" in data) {
         logDone = true;
         logSuccess = data.success;
@@ -161,11 +172,8 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     logAgentId = null;
   }
 
-  function renderBuildLog(agentId: string): m.Vnode {
-    if (logAgentId !== agentId) {
-      connectLogWs(agentId);
-    }
-
+  // Pure: the log WebSocket is (dis)connected from syncSideEffects, not here.
+  function renderBuildLog(): m.Vnode {
     return m("div", { style: "display: flex; flex-direction: column; height: 100%; padding: 16px;" }, [
       m(
         "div",
@@ -289,24 +297,36 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     }
   }
 
-  function renderMessages(agentId: string): m.Vnode {
-    // If this agent is still being created, show the build log
+  // All side effects for the chat panel live here, driven from the component's
+  // oninit/onupdate hooks rather than from view(). Mithril views must be pure:
+  // these helpers open WebSockets/EventSources, kick off fetches, and call
+  // m.redraw(), which is undefined behavior on a view-rooted path. The
+  // currentAgentId / backfillStarted / logAgentId / screenAgentId guards inside
+  // the callees make repeated invocations idempotent, so running this on every
+  // update is safe.
+  function syncSideEffects(agentId: string): void {
+    // When a plugin has claimed the conversation content slot it owns the data
+    // flow; mirror the old behavior of not driving any of our own connections.
+    if (isSlotClaimed("conversation-content")) {
+      return;
+    }
+
+    // Still being created: keep the build-log WebSocket connected.
     if (isProtoAgent(agentId)) {
-      return renderBuildLog(agentId);
+      if (logAgentId !== agentId) {
+        connectLogWs(agentId);
+      }
+      return;
     }
 
-    // Creation completed but failed -- keep the build log visible so the
-    // user can read the error and the last few log lines. Without this the
-    // build-log view transitions to the empty-chat / "no conversation data"
-    // screen the instant proto_agent_completed arrives and the error flashes
-    // by unreadably. The agent will never be added to getAgents() on
-    // failure, so nothing else in the UI would surface the error either.
+    // Creation completed but failed -- leave the log connection in place so the
+    // failed build log (rendered by renderMessages) stays visible.
     if (logAgentId === agentId && logDone && !logSuccess) {
-      return renderBuildLog(agentId);
+      return;
     }
 
-    // Agent finished creating successfully -- disconnect log WebSocket and
-    // force reload
+    // Creation finished successfully -- tear down the log WebSocket and force a
+    // reload by clearing currentAgentId so ensureAgentLoaded fetches events.
     if (logAgentId === agentId) {
       disconnectLogWs();
       currentAgentId = null;
@@ -317,6 +337,45 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     if (isConversationNotFound(agentId)) {
       fetchScreenCapture(agentId);
+      return;
+    }
+
+    if (getEventsForAgent(agentId).length > 0) {
+      startBackfill(agentId);
+    }
+  }
+
+  // Pure render of the conversation content for the given agent. Reads state
+  // only; all connection/fetch side effects are handled by syncSideEffects.
+  function renderMessages(agentId: string): m.Vnode {
+    // If this agent is still being created, show the build log.
+    if (isProtoAgent(agentId)) {
+      return renderBuildLog();
+    }
+
+    // Creation completed but failed -- keep the build log visible so the
+    // user can read the error and the last few log lines. Without this the
+    // build-log view transitions to the empty-chat / "no conversation data"
+    // screen the instant proto_agent_completed arrives and the error flashes
+    // by unreadably. The agent will never be added to getAgents() on
+    // failure, so nothing else in the UI would surface the error either.
+    if (logAgentId === agentId && logDone && !logSuccess) {
+      return renderBuildLog();
+    }
+
+    // Side effects (which run in oninit/onupdate, after this render on a
+    // redraw) have not yet kicked off the load for this agent -- e.g. the
+    // initial mount or the moment a proto-agent finishes. Show the loading
+    // state until ensureAgentLoaded sets currentAgentId and the fetch lands.
+    if (currentAgentId !== agentId) {
+      return m(
+        "div",
+        { class: "message-list-loading flex items-center justify-center h-full" },
+        m("p", { class: "text-text-secondary" }, "Loading events..."),
+      );
+    }
+
+    if (isConversationNotFound(agentId)) {
       return m("div", { class: "message-list-not-found flex flex-col items-center justify-center h-full gap-4 p-8" }, [
         m("p", { class: "text-lg font-semibold text-text-primary" }, "No conversation data"),
         m("p", { class: "text-text-secondary" }, "This agent has no Claude session. It may have crashed on startup."),
@@ -363,14 +422,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       );
     }
 
-    startBackfill(agentId);
-
-    const toolResults = new Map<string, TranscriptEvent>();
-    for (const event of events) {
-      if (event.type === "tool_result" && event.tool_call_id) {
-        toolResults.set(event.tool_call_id, event);
-      }
-    }
+    const toolResults = buildToolResultsMap(events);
 
     const messageNodes: m.Vnode[] = [];
     for (const event of events) {
@@ -394,6 +446,14 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   }
 
   return {
+    oninit(vnode) {
+      syncSideEffects(vnode.attrs.agentId);
+    },
+
+    onupdate(vnode) {
+      syncSideEffects(vnode.attrs.agentId);
+    },
+
     onremove() {
       disconnectLogWs();
       if (currentAgentId !== null) {

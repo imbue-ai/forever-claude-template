@@ -174,30 +174,9 @@ export async function sendMessage(agentId: string, message: string): Promise<voi
   });
 }
 
-// Compatibility shims
-export class ConversationNotFoundError extends Error {
-  constructor(agentId: string) {
-    super(`Agent not found: ${agentId}`);
-    this.name = "ConversationNotFoundError";
-  }
-}
-
-export function getResponsesForConversation(_agentId: string): ResponseItem[] {
-  return [];
-}
-
+// Compatibility shims retained for the plugin API (llm-api.ts) surface.
 export function getAllResponses(): Record<string, ResponseItem[]> {
   return {};
 }
 
-export function getLastResponseModel(_agentId: string): string | null {
-  return null;
-}
-
-export function appendSyntheticResponse(): void {}
-
 export async function insertResponseItem(): Promise<void> {}
-
-export function fetchResponses(agentId: string): Promise<ResponseItem[]> {
-  return fetchEvents(agentId).then(() => []);
-}
