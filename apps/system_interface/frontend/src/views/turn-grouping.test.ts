@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEvent } from "../models/Response";
-import type { TaskInTurn } from "./turn-grouping";
-import { buildTaskRecords, buildTurns, eventsInTaskWindow, selectFinalMessages } from "./turn-grouping";
+import type { StepView } from "./turn-grouping";
+import {
+  buildTaskRecords,
+  makeStepView,
+  stepActiveInWindow,
+  sortSteps,
+  attributeNarration,
+  eventsInTaskWindow,
+  selectFinalMessages,
+} from "./turn-grouping";
 
 function userMsg(ts: string, content: string, eventId: string = `u-${ts}`): TranscriptEvent {
   return {
@@ -52,13 +60,35 @@ function taskEvent(
     created_at: extras.created_at ?? ts,
     summary: extras.summary ?? null,
     summary_at: extras.summary_at ?? null,
-    // Default to step: true because the progress view renders steps
-    // only; regular tickets are filtered out by buildTurns. Tests that
-    // specifically exercise regular-ticket behaviour pass step: false.
     step: extras.step ?? true,
     parent_id: extras.parent_id,
     assignee: extras.assignee,
   };
+}
+
+/** Helper: build steps active in a window from events, mirroring what
+ *  ChatPanel does inline. */
+function stepsForWindow(events: TranscriptEvent[], start_ts: string, end_ts: string, is_settled: boolean): StepView[] {
+  const records = buildTaskRecords(events);
+  const steps: StepView[] = [];
+  for (const r of records.values()) {
+    if (!r.step) continue;
+    if (!stepActiveInWindow(r, start_ts, end_ts)) continue;
+    steps.push(makeStepView(r, is_settled && r.final_status !== "closed"));
+  }
+  return sortSteps(steps, records, start_ts);
+}
+
+/** Helper: collect body events in a window from the full event list. */
+function bodyEventsInWindow(events: TranscriptEvent[], start_ts: string, end_ts: string): TranscriptEvent[] {
+  return events
+    .filter((e) => {
+      if (e.type !== "assistant_message" && e.type !== "tool_result") return false;
+      if (e.timestamp < start_ts) return false;
+      if (end_ts !== "" && e.timestamp >= end_ts) return false;
+      return true;
+    })
+    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 }
 
 describe("buildTaskRecords", () => {
@@ -88,42 +118,56 @@ describe("buildTaskRecords", () => {
   });
 
   it("falls back to the event timestamp when created_at is an empty string", () => {
-    // Malformed ticket missing the `created:` frontmatter line: the watcher
-    // emits an empty created_at. Without the `||` fallback, the resulting
-    // TaskRecord has created_at="" and the task gets silently dropped from
-    // every turn in buildTurns (empty string fails the window check).
     const events = [taskEvent("t1", "open", "2026-04-28T01:00:00Z", { created_at: "" })];
     const records = buildTaskRecords(events);
     expect(records.get("t1")?.created_at).toBe("2026-04-28T01:00:00Z");
   });
 });
 
-describe("buildTurns", () => {
-  it("returns no turns when there are no user messages", () => {
-    const events = [assistantMsg("2026-04-28T01:00:00Z", "stray reply")];
-    expect(buildTurns(events)).toEqual([]);
+describe("stepActiveInWindow", () => {
+  it("includes a step first observed inside the window", () => {
+    const events = [taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" })];
+    const record = buildTaskRecords(events).get("t1")!;
+    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z")).toBe(true);
   });
 
-  it("groups assistant messages and tool_results into the right turn", () => {
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "first"),
-      assistantMsg("2026-04-28T01:00:30Z", "first reply"),
-      userMsg("2026-04-28T01:01:00Z", "second"),
-      assistantMsg("2026-04-28T01:01:30Z", "second reply"),
+  it("includes a step that started before the window and is still open", () => {
+    const events = [
+      taskEvent("t1", "open", "2026-04-28T00:50:00Z", { created_at: "2026-04-28T00:50:00Z" }),
+      taskEvent("t1", "in_progress", "2026-04-28T00:55:00Z"),
     ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(2);
-    expect(turns[0].body_events.map((e) => e.event_id)).toEqual(["a-2026-04-28T01:00:30Z"]);
-    expect(turns[1].body_events.map((e) => e.event_id)).toEqual(["a-2026-04-28T01:01:30Z"]);
+    const record = buildTaskRecords(events).get("t1")!;
+    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z")).toBe(true);
   });
 
-  it("plain turn (no task_events) has empty tasks array", () => {
-    const events = [userMsg("2026-04-28T01:00:00Z", "hi"), assistantMsg("2026-04-28T01:00:01Z", "hello")];
-    const turns = buildTurns(events);
-    expect(turns[0].tasks).toEqual([]);
+  it("excludes a step that closed before the window started", () => {
+    const events = [
+      taskEvent("t1", "open", "2026-04-28T00:50:00Z", { created_at: "2026-04-28T00:50:00Z" }),
+      taskEvent("t1", "closed", "2026-04-28T00:55:00Z"),
+    ];
+    const record = buildTaskRecords(events).get("t1")!;
+    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z")).toBe(false);
   });
 
-  it("attributes a task to the turn it was created in", () => {
+  it("includes a step that started before and closed during the window", () => {
+    const events = [
+      taskEvent("t1", "open", "2026-04-28T00:50:00Z", { created_at: "2026-04-28T00:50:00Z" }),
+      taskEvent("t1", "in_progress", "2026-04-28T00:55:00Z"),
+      taskEvent("t1", "closed", "2026-04-28T01:00:30Z"),
+    ];
+    const record = buildTaskRecords(events).get("t1")!;
+    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z")).toBe(true);
+  });
+
+  it("works with open-ended window (tail partition)", () => {
+    const events = [taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" })];
+    const record = buildTaskRecords(events).get("t1")!;
+    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "")).toBe(true);
+  });
+});
+
+describe("step rendering in partitions", () => {
+  it("attributes a step to the partition it was created in", () => {
     const events: TranscriptEvent[] = [
       userMsg("2026-04-28T01:00:00Z", "fix the thing"),
       taskEvent("t1", "open", "2026-04-28T01:00:10Z", {
@@ -137,245 +181,202 @@ describe("buildTurns", () => {
       }),
       assistantMsg("2026-04-28T01:00:55Z", "Done."),
     ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(1);
-    expect(turns[0].tasks).toHaveLength(1);
-    expect(turns[0].tasks[0]).toMatchObject({
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({
       ticket_id: "t1",
       title: "Look at the thing",
       status: "done",
       summary: "Found the thing",
-      is_carryover: false,
     });
   });
 
-  it("carries over an unfinished task to the next turn as a fresh entry, leaving the old one frozen", () => {
+  it("shows an unfinished step in both partitions when it spans a user message", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "fix one"),
       taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Step 1" }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      // user message arrives while t1 is still in_progress
-      userMsg("2026-04-28T01:01:00Z", "any update?"),
       taskEvent("t1", "closed", "2026-04-28T01:01:30Z", {
         summary: "Wrapped up step 1",
         summary_at: "2026-04-28T01:01:25Z",
       }),
     ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(2);
-    // First turn: ticket appears as "active" (frozen at end of turn 1).
-    expect(turns[0].tasks).toHaveLength(1);
-    expect(turns[0].tasks[0]).toMatchObject({
-      ticket_id: "t1",
-      status: "active",
-      summary: null,
-      is_carryover: false,
-    });
-    // Second turn: same ticket as a CARRYOVER, now "done".
-    expect(turns[1].tasks).toHaveLength(1);
-    expect(turns[1].tasks[0]).toMatchObject({
-      ticket_id: "t1",
-      status: "done",
-      summary: "Wrapped up step 1",
-      is_carryover: true,
-    });
+    // First partition: 01:00:00 -> 01:01:00
+    const steps1 = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true);
+    expect(steps1).toHaveLength(1);
+    expect(steps1[0]).toMatchObject({ ticket_id: "t1", status: "done" });
+
+    // Second partition: 01:01:00 -> "" (tail)
+    const steps2 = stepsForWindow(events, "2026-04-28T01:01:00Z", "", false);
+    expect(steps2).toHaveLength(1);
+    expect(steps2[0]).toMatchObject({ ticket_id: "t1", status: "done" });
   });
 
-  it("does not carry over a task that was closed before the next turn", () => {
+  it("does not show a step that was closed before the partition", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "fix one"),
       taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Step 1" }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      taskEvent("t1", "closed", "2026-04-28T01:00:50Z", {
-        summary: "Done",
-        summary_at: "2026-04-28T01:00:45Z",
-      }),
-      userMsg("2026-04-28T01:01:00Z", "another thing"),
+      taskEvent("t1", "closed", "2026-04-28T01:00:50Z"),
     ];
-    const turns = buildTurns(events);
-    expect(turns[0].tasks).toHaveLength(1);
-    expect(turns[1].tasks).toHaveLength(0);
+    const steps = stepsForWindow(events, "2026-04-28T01:01:00Z", "", false);
+    expect(steps).toHaveLength(0);
   });
 
-  it("carries a still-open task across multiple subsequent turns", () => {
-    // Scenario: agent opens a ticket in turn 0, user replies twice
-    // (e.g. mid-task permission grant + follow-up) before the task ever
-    // closes. The progress block must stay visible in BOTH replies so
-    // the user can see the ongoing work, not just raw tool calls.
+  it("carries a still-open step across multiple partitions", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "start"),
       taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Long task" }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      userMsg("2026-04-28T01:01:00Z", "grant the permission"),
-      userMsg("2026-04-28T01:02:00Z", "still good?"),
     ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(3);
-    expect(turns[0].tasks).toHaveLength(1);
-    expect(turns[0].tasks[0]).toMatchObject({ ticket_id: "t1", is_carryover: false, status: "active" });
-    expect(turns[1].tasks).toHaveLength(1);
-    expect(turns[1].tasks[0]).toMatchObject({ ticket_id: "t1", is_carryover: true, status: "active" });
-    expect(turns[2].tasks).toHaveLength(1);
-    expect(turns[2].tasks[0]).toMatchObject({ ticket_id: "t1", is_carryover: true, status: "active" });
-  });
-
-  it("stops carrying a task forward once it closes", () => {
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "start"),
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Mid task" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      userMsg("2026-04-28T01:01:00Z", "reply 1"),
-      taskEvent("t1", "closed", "2026-04-28T01:01:30Z", { summary: "Done.", summary_at: "2026-04-28T01:01:25Z" }),
-      userMsg("2026-04-28T01:02:00Z", "reply 2"),
-    ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(3);
-    expect(turns[0].tasks).toHaveLength(1);
-    expect(turns[1].tasks).toHaveLength(1);
-    expect(turns[1].tasks[0]).toMatchObject({ ticket_id: "t1", is_carryover: true, status: "done" });
-    // Turn 2 starts AFTER the close: no more carryover.
-    expect(turns[2].tasks).toHaveLength(0);
-  });
-
-  it("does not split a turn when a skill-expansion user_message arrives mid-turn", () => {
-    // Skill expansions arrive as user_message events whose content starts
-    // with "Base directory for this skill:". They must NOT be treated as
-    // turn boundaries or one logical turn would visibly fracture into
-    // many, scattering its tasks across the fragments.
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "do the thing"),
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "First" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:15Z"),
-      userMsg(
-        "2026-04-28T01:00:20Z",
-        "Base directory for this skill: /home/.claude/skills/build-web-service/\n...",
-        "skill-1",
-      ),
-      taskEvent("t2", "open", "2026-04-28T01:00:30Z", { created_at: "2026-04-28T01:00:30Z", title: "Second" }),
-      taskEvent("t1", "closed", "2026-04-28T01:00:40Z", { summary: "Did it." }),
-    ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(1);
-    expect(turns[0].tasks.map((t) => t.title)).toEqual(["First", "Second"]);
-    // The skill chip is included in body_events so ChatPanel can render it
-    // inline without it acting as a boundary.
-    expect(turns[0].body_events.some((e) => e.event_id === "skill-1")).toBe(true);
-  });
-
-  it("does not split a turn when a stop-hook-feedback user_message arrives mid-turn", () => {
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "go"),
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
-      userMsg("2026-04-28T01:00:20Z", "Stop hook feedback:\n...", "stop-1"),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:25Z"),
-    ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(1);
-    expect(turns[0].tasks).toHaveLength(1);
-    expect(turns[0].body_events.some((e) => e.event_id === "stop-1")).toBe(true);
+    // Partition 1: 01:00 -> 01:01
+    expect(stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true)).toHaveLength(1);
+    // Partition 2: 01:01 -> 01:02
+    expect(stepsForWindow(events, "2026-04-28T01:01:00Z", "2026-04-28T01:02:00Z", true)).toHaveLength(1);
+    // Partition 3: 01:02 -> tail
+    expect(stepsForWindow(events, "2026-04-28T01:02:00Z", "", false)).toHaveLength(1);
   });
 
   it("gives pending tasks no active window so they own no body events", () => {
-    // A pending task that ALSO has an active sibling must not scoop up
-    // the sibling's tool calls when expanded. (Before the fix the
-    // pending task's window defaulted to created_at..end-of-turn.)
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "go"),
       taskEvent("active", "open", "2026-04-28T01:00:05Z", { created_at: "2026-04-28T01:00:05Z", title: "Active" }),
       taskEvent("active", "in_progress", "2026-04-28T01:00:10Z"),
       taskEvent("pending", "open", "2026-04-28T01:00:12Z", { created_at: "2026-04-28T01:00:12Z", title: "Pending" }),
       toolUse("2026-04-28T01:00:20Z", "Read", "tc-active"),
     ];
-    const turns = buildTurns(events);
-    const pendingTask = turns[0].tasks.find((t) => t.ticket_id === "pending");
-    expect(pendingTask).toBeDefined();
-    expect(pendingTask?.status).toBe("pending");
-    expect(pendingTask?.active_window_start).toBeNull();
-    expect(eventsInTaskWindow(pendingTask!, turns[0].body_events)).toEqual([]);
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    const pendingStep = steps.find((s) => s.ticket_id === "pending");
+    expect(pendingStep).toBeDefined();
+    expect(pendingStep?.status).toBe("pending");
+    expect(pendingStep?.active_window_start).toBeNull();
+    const body = bodyEventsInWindow(events, "2026-04-28T01:00:00Z", "");
+    expect(eventsInTaskWindow(pendingStep!, body)).toEqual([]);
   });
 
-  it("orders carryover tasks above own tasks in a turn", () => {
+  it("orders carryover steps above own steps", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "first"),
       taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Carryover" }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      userMsg("2026-04-28T01:01:00Z", "second"),
       taskEvent("t2", "open", "2026-04-28T01:01:10Z", { created_at: "2026-04-28T01:01:10Z", title: "Fresh" }),
     ];
-    const turns = buildTurns(events);
-    expect(turns[1].tasks.map((t) => t.title)).toEqual(["Carryover", "Fresh"]);
-    expect(turns[1].tasks[0].is_carryover).toBe(true);
-    expect(turns[1].tasks[1].is_carryover).toBe(false);
+    // Second partition: 01:01 -> tail. t1 is carryover, t2 is new.
+    const steps = stepsForWindow(events, "2026-04-28T01:01:00Z", "", false);
+    expect(steps.map((s) => s.title)).toEqual(["Carryover", "Fresh"]);
   });
 
-  it("orders own tasks by started_at, not created_at, when the agent starts them out of order", () => {
-    // Agent plans two tickets up-front (t1 then t2), then starts t2
-    // FIRST and t1 SECOND. The end-of-turn order must reflect what the
-    // agent actually did (t2 above t1), not the order they were planned.
+  it("orders own steps by started_at, not created_at, when started out of order", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "do it"),
       taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "First planned" }),
       taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Second planned" }),
       taskEvent("t2", "in_progress", "2026-04-28T01:00:30Z"),
       taskEvent("t2", "closed", "2026-04-28T01:00:40Z", { summary: "Did t2 first." }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:50Z"),
     ];
-    const turns = buildTurns(events);
-    expect(turns[0].tasks.map((t) => t.title)).toEqual(["Second planned", "First planned"]);
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    expect(steps.map((s) => s.title)).toEqual(["Second planned", "First planned"]);
   });
 
-  it("sorts not-yet-started tasks by created_at after started ones", () => {
-    // t1 and t2 are planned and t1 is started; t3 is planned later and
-    // never started this turn. Started t1 sorts by its started_at;
-    // pending t2 and t3 fall back to created_at.
+  it("sorts not-yet-started steps by created_at after started ones", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "go"),
       taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Alpha" }),
       taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Bravo" }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:25Z"),
       taskEvent("t3", "open", "2026-04-28T01:00:30Z", { created_at: "2026-04-28T01:00:30Z", title: "Charlie" }),
     ];
-    const turns = buildTurns(events);
-    expect(turns[0].tasks.map((t) => t.title)).toEqual(["Alpha", "Bravo", "Charlie"]);
-    expect(turns[0].tasks.map((t) => t.status)).toEqual(["active", "pending", "pending"]);
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    expect(steps.map((s) => s.title)).toEqual(["Alpha", "Bravo", "Charlie"]);
+    expect(steps.map((s) => s.status)).toEqual(["active", "pending", "pending"]);
   });
 
-  it("orders multiple carryover tasks by started_at, not by reverse insertion", () => {
-    // Repro of the chat-progress bug: a clarifying-question turn plans
-    // two tickets up-front; the next turn starts the FIRST one. Both are
-    // carryovers in the second turn, and the earlier-created (active) one
-    // must render above the later-created (still pending) one.
+  it("drops regular tickets -- only step records appear", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "plan it"),
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Pull emails" }),
-      taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Sort sample" }),
-      userMsg("2026-04-28T01:01:00Z", "go"),
-      taskEvent("t1", "in_progress", "2026-04-28T01:01:05Z"),
+      taskEvent("auth-1", "in_progress", "2026-04-28T01:00:05Z", {
+        title: "Refactor auth middleware",
+        step: false,
+      }),
+      taskEvent("step-1", "open", "2026-04-28T01:00:10Z", {
+        title: "Read the middleware",
+        parent_id: "auth-1",
+      }),
     ];
-    const turns = buildTurns(events);
-    expect(turns[1].tasks.map((t) => t.title)).toEqual(["Pull emails", "Sort sample"]);
-    expect(turns[1].tasks.map((t) => t.status)).toEqual(["active", "pending"]);
-    expect(turns[1].tasks.every((t) => t.is_carryover)).toBe(true);
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    expect(steps.map((s) => s.ticket_id)).toEqual(["step-1"]);
+    expect(steps[0].is_step).toBe(true);
+  });
+});
+
+describe("is_settled", () => {
+  it("is false for active steps in the tail partition when agent is not idle", () => {
+    const events: TranscriptEvent[] = [
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    expect(steps[0].is_settled).toBe(false);
+  });
+
+  it("is true for active steps in the tail partition when agent is idle", () => {
+    const events: TranscriptEvent[] = [
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", true);
+    expect(steps[0].is_settled).toBe(true);
+  });
+
+  it("is true for active steps in a past partition (has a successor)", () => {
+    const events: TranscriptEvent[] = [
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true);
+    expect(steps[0].is_settled).toBe(true);
+  });
+
+  it("is false for done steps (is_settled only applies to active steps)", () => {
+    const events: TranscriptEvent[] = [
+      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
+      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
+      taskEvent("t1", "closed", "2026-04-28T01:00:50Z", { summary: "Done." }),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true);
+    expect(steps[0].status).toBe("done");
+    expect(steps[0].is_settled).toBe(false);
+  });
+});
+
+describe("picked-up-ticket attribution", () => {
+  it("attributes a ticket to the window containing its earliest observed event", () => {
+    const events: TranscriptEvent[] = [
+      taskEvent("auth-1", "in_progress", "2026-04-28T03:00:30Z", {
+        title: "Auth refactor",
+        assignee: "agent-B",
+        created_at: "2026-04-27T10:00:00Z",
+      }),
+    ];
+    // Window 1: 02:00 -> 03:00 -- the ticket's created_at is way before
+    // both windows, but first_observed_at is in window 2.
+    const steps1 = stepsForWindow(events, "2026-04-28T02:00:00Z", "2026-04-28T03:00:00Z", true);
+    expect(steps1).toEqual([]);
+    // Window 2: 03:00 -> tail
+    const steps2 = stepsForWindow(events, "2026-04-28T03:00:00Z", "", false);
+    expect(steps2.map((s) => s.ticket_id)).toEqual(["auth-1"]);
   });
 });
 
 describe("eventsInTaskWindow", () => {
-  it("returns only events between a task's started_at and closed_at", () => {
-    const tasksByTime = {
+  it("returns only events between a step's started_at and closed_at", () => {
+    const step: StepView = {
       ticket_id: "t1",
       title: "Step 1",
-      status: "done" as const,
+      status: "done",
       summary: "Did it",
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
       started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
-      is_step: false,
+      is_step: true,
       parent_id: "",
       children: [],
       narration: null,
+      is_settled: false,
     };
     const body = [
       assistantMsg("2026-04-28T01:00:15Z", "before start"),
@@ -383,50 +384,45 @@ describe("eventsInTaskWindow", () => {
       toolUse("2026-04-28T01:00:45Z", "Edit", "tc2"),
       assistantMsg("2026-04-28T01:00:55Z", "after end"),
     ];
-    const result = eventsInTaskWindow(tasksByTime, body);
+    const result = eventsInTaskWindow(step, body);
     expect(result.map((e) => e.event_id)).toEqual(["a-tc1", "a-tc2"]);
   });
 
-  it("returns events through end of turn when active_window_end is null", () => {
-    const task = {
+  it("returns events through end when active_window_end is null", () => {
+    const step: StepView = {
       ticket_id: "t1",
       title: "Active",
-      status: "active" as const,
+      status: "active",
       summary: null,
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
       started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: null,
-      is_step: false,
+      is_step: true,
       parent_id: "",
       children: [],
       narration: null,
+      is_settled: false,
     };
     const body = [toolUse("2026-04-28T01:00:25Z", "Read", "tc1"), toolUse("2026-04-28T01:00:45Z", "Edit", "tc2")];
-    expect(eventsInTaskWindow(task, body)).toHaveLength(2);
+    expect(eventsInTaskWindow(step, body)).toHaveLength(2);
   });
 
   it("pulls in a trailing tool_result whose tool_use was in window", () => {
-    // The tool_use lands inside the window; its tool_result arrives a few
-    // ms after closed_at. Without the trailing-result fallback the
-    // expanded panel would render the tool call as unresolved.
-    const task = {
+    const step: StepView = {
       ticket_id: "t1",
       title: "Step 1",
-      status: "done" as const,
+      status: "done",
       summary: "Did it",
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
       started_at: "2026-04-28T01:00:20Z",
       active_window_start: "2026-04-28T01:00:20Z",
       active_window_end: "2026-04-28T01:00:50Z",
-      is_step: false,
+      is_step: true,
       parent_id: "",
       children: [],
       narration: null,
+      is_settled: false,
     };
     function toolResult(ts: string, callId: string): TranscriptEvent {
       return {
@@ -438,30 +434,17 @@ describe("eventsInTaskWindow", () => {
         output: "ok",
       };
     }
-    const body = [
-      toolUse("2026-04-28T01:00:45Z", "Read", "tc-late"),
-      // Result timestamp is 1 second past closed_at -- still belongs to
-      // this task's expanded panel.
-      toolResult("2026-04-28T01:00:51Z", "tc-late"),
-    ];
-    const result = eventsInTaskWindow(task, body);
+    const body = [toolUse("2026-04-28T01:00:45Z", "Read", "tc-late"), toolResult("2026-04-28T01:00:51Z", "tc-late")];
+    const result = eventsInTaskWindow(step, body);
     expect(result.map((e) => e.event_id)).toEqual(["a-tc-late", "r-tc-late"]);
   });
 
-  it("caps an abandoned step's window at the next step's start when tasks are provided", () => {
-    // Regression: an abandoned step (never closed, active_window_end=null)
-    // whose expanded panel was showing tool calls that actually belonged to
-    // the next step. The serial-step invariant says only one step is
-    // in_progress at a time; eventsInTaskWindow must cap the abandoned
-    // step's effective end at the next step's start, matching
-    // findContainingTask's behavior.
-    const abandoned: TaskInTurn = {
+  it("caps an abandoned step's window at the next step's start when steps are provided", () => {
+    const abandoned: StepView = {
       ticket_id: "step-a",
       title: "First, never closed",
       status: "active",
       summary: null,
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
       started_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:00Z",
@@ -470,14 +453,13 @@ describe("eventsInTaskWindow", () => {
       parent_id: "",
       children: [],
       narration: null,
+      is_settled: false,
     };
-    const properlyClosed: TaskInTurn = {
+    const properlyClosed: StepView = {
       ticket_id: "step-b",
       title: "Second, closed cleanly",
       status: "done",
       summary: "Did the second step.",
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:10Z",
       started_at: "2026-04-28T01:00:10Z",
       active_window_start: "2026-04-28T01:00:10Z",
@@ -486,32 +468,23 @@ describe("eventsInTaskWindow", () => {
       parent_id: "",
       children: [],
       narration: null,
+      is_settled: false,
     };
-    const tasks = [abandoned, properlyClosed];
+    const steps = [abandoned, properlyClosed];
     const body = [
       toolUse("2026-04-28T01:00:05Z", "Read", "tc-a"),
       toolUse("2026-04-28T01:00:15Z", "Edit", "tc-b"),
       toolUse("2026-04-28T01:00:25Z", "Bash", "tc-c"),
     ];
-    // Without the tasks parameter, the abandoned step's null end means
-    // all three events would be included. With tasks, its effective end
-    // is capped at step-b's start (01:00:10), so only tc-a (01:00:05)
-    // falls inside the window.
-    const withTasks = eventsInTaskWindow(abandoned, body, tasks);
-    expect(withTasks.map((e) => e.event_id)).toEqual(["a-tc-a"]);
-    // Without tasks, the old behavior returns everything.
-    const withoutTasks = eventsInTaskWindow(abandoned, body);
-    expect(withoutTasks).toHaveLength(3);
+    const withSteps = eventsInTaskWindow(abandoned, body, steps);
+    expect(withSteps.map((e) => e.event_id)).toEqual(["a-tc-a"]);
+    const withoutSteps = eventsInTaskWindow(abandoned, body);
+    expect(withoutSteps).toHaveLength(3);
   });
 });
 
 describe("selectFinalMessages", () => {
-  it("returns every text-only assistant_message in chronological order", () => {
-    // Regression: the previous "last non-empty assistant_message" heuristic
-    // dropped earlier prose. With multiple separate text-only messages in
-    // a single turn (e.g. a summary table followed by a "waiting on your
-    // input" line) the user only saw the second one. Now both must come
-    // back, in arrival order.
+  it("returns every text-only assistant_message outside step windows", () => {
     const a1 = assistantMsg("2026-04-28T01:00:10Z", "Here is the summary table...", "msg-summary");
     const a2 = assistantMsg("2026-04-28T01:00:20Z", "Waiting on your input.", "msg-waiting");
     const events = [a1, toolUse("2026-04-28T01:00:15Z", "Bash", "tc-1"), a2];
@@ -519,9 +492,6 @@ describe("selectFinalMessages", () => {
   });
 
   it("excludes tool-bearing assistant_messages even when they have text", () => {
-    // Tool-bearing messages live inside the task's expanded panel where
-    // their tool_calls render. Pulling them up would orphan the tool
-    // calls.
     const withTextAndTools: TranscriptEvent = {
       timestamp: "2026-04-28T01:00:00Z",
       type: "assistant_message",
@@ -534,134 +504,16 @@ describe("selectFinalMessages", () => {
   });
 
   it("excludes empty-text assistant_messages", () => {
-    // Streaming/partial messages and pure tool_use events both serialize
-    // with text="". They aren't substantive prose and should not surface
-    // as top-level final blocks.
     const empty = assistantMsg("2026-04-28T01:00:00Z", "", "a-empty");
     expect(selectFinalMessages([empty], [])).toEqual([]);
   });
 
-  it("ignores non-assistant events", () => {
-    const events = [
-      userMsg("2026-04-28T01:00:00Z", "hello"),
-      taskEvent("t1", "open", "2026-04-28T01:00:01Z"),
-      assistantMsg("2026-04-28T01:00:02Z", "hi back", "a-hi"),
-    ];
-    expect(selectFinalMessages(events, []).map((e) => e.event_id)).toEqual(["a-hi"]);
-  });
-
-  it("drops an earlier in-window message of a closed task when a later text exists in the same window", () => {
-    // Promote-on-close only surfaces the LAST text-only of the turn.
-    // Earlier in-window prose was just intermediate thinking that lived
-    // briefly as narration and got overwritten -- it doesn't deserve a
-    // permanent top-level slot.
-    const doneTask: TaskInTurn = {
-      ticket_id: "t1",
-      title: "Pull headlines",
-      status: "done",
-      summary: "Pulled headline + summary + link from each newsletter.",
-      is_carryover: false,
-      continues_forward: false,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:01:00Z",
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-    };
-    const early = assistantMsg("2026-04-28T01:00:10Z", "Halfway through.", "msg-early");
-    const wrapup = assistantMsg("2026-04-28T01:00:50Z", "All extracted -- here are the headlines.", "msg-wrapup");
-    expect(selectFinalMessages([early, wrapup], [doneTask]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
-  });
-
-  it("keeps a text-only message that falls outside every task window", () => {
-    // Prose between tasks (after one task closed, before the next
-    // started) has no task to attach to -- it must render at top level
-    // or the user would never see it.
-    const earlier: TaskInTurn = {
-      ticket_id: "t1",
-      title: "Setup",
-      status: "done",
-      summary: "Set things up.",
-      is_carryover: false,
-      continues_forward: false,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:30Z",
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-    };
-    const between = assistantMsg("2026-04-28T01:00:40Z", "Quick check-in before next step.", "msg-between");
-    expect(selectFinalMessages([between], [earlier]).map((e) => e.event_id)).toEqual(["msg-between"]);
-  });
-
-  it("does NOT surface a trailing message of an unclosed task in the live turn", () => {
-    // In the live (last) turn, continues_forward is false. Promoting
-    // would fire transiently for every mid-task message and duplicate
-    // with the narration, so trailing prose stays in the narration slot.
-    const openTask: TaskInTurn = {
-      ticket_id: "t1",
-      title: "Investigate",
-      status: "active",
-      summary: null,
-      is_carryover: false,
-      continues_forward: false,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: null,
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-    };
-    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Stuck -- need your call.", "msg-trailing");
-    expect(selectFinalMessages([trailing], [openTask])).toEqual([]);
-  });
-
-  it("promotes the last in-window message when its containing task continues forward (frozen turn)", () => {
-    // Promote-on-freeze: the turn ended with the task still open (user
-    // sent a new message). The narration slot on a frozen task is a
-    // muted caption the user is unlikely to notice -- promote it to a
-    // full top-level message instead.
-    const frozenTask: TaskInTurn = {
-      ticket_id: "t1",
-      title: "Investigate",
-      status: "active",
-      summary: null,
-      is_carryover: false,
-      continues_forward: true,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: null,
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-    };
-    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Stuck -- need your call.", "msg-trailing");
-    expect(selectFinalMessages([trailing], [frozenTask]).map((e) => e.event_id)).toEqual(["msg-trailing"]);
-  });
-
-  it("promotes the last in-window message to top level when its containing task closed in the turn", () => {
-    // Promote-on-close: the close summary overwrites the task's caption
-    // (the narration slot). Without promotion the agent's last pre-close
-    // prose would vanish. The check is restricted to the LAST text-only
-    // of the turn so mid-turn closures don't keep flushing earlier
-    // intermediate thinking to top level.
-    const doneTask: TaskInTurn = {
+  it("promotes the last in-window message when its step is done", () => {
+    const doneStep: StepView = {
       ticket_id: "t1",
       title: "Investigate",
       status: "done",
       summary: "Found root cause, fix is X.",
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
       started_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:00Z",
@@ -670,97 +522,58 @@ describe("selectFinalMessages", () => {
       parent_id: "",
       children: [],
       narration: null,
+      is_settled: false,
     };
     const wrapup = assistantMsg("2026-04-28T01:00:50Z", "Found it -- the OAuth regex was too tight.", "msg-wrapup");
-    expect(selectFinalMessages([wrapup], [doneTask]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+    expect(selectFinalMessages([wrapup], [doneStep]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
   });
 
-  it("does NOT promote an earlier in-window message when a later text-only landed outside any window", () => {
-    // The promote-on-close rule only inspects the LAST text-only of the
-    // turn. If later prose landed outside all windows, that later prose
-    // is already at top level via the outside-window rule -- we don't
-    // also reach back and pull an earlier closed-task message up.
-    const doneTask: TaskInTurn = {
+  it("promotes the last in-window message when its step is settled", () => {
+    const settledStep: StepView = {
       ticket_id: "t1",
       title: "Investigate",
-      status: "done",
-      summary: "Done.",
-      is_carryover: false,
-      continues_forward: false,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:30Z",
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-    };
-    const inWindow = assistantMsg("2026-04-28T01:00:20Z", "Looking into thing A.", "msg-inwindow");
-    const afterClose = assistantMsg("2026-04-28T01:00:40Z", "Wrap-up notes after closing.", "msg-after");
-    expect(selectFinalMessages([inWindow, afterClose], [doneTask]).map((e) => e.event_id)).toEqual(["msg-after"]);
-  });
-
-  it("surfaces a wrap-up at top level when the only enclosing task is a still-open regular ticket", () => {
-    // An agent often picks up a regular ticket as the umbrella for the
-    // turn's work and files step records beneath it. The ticket can stay
-    // in_progress across many turns. Text-only prose between or after
-    // the steps should NOT be swallowed by the ticket's window -- it's
-    // a wrap-up bounded by the steps, not by the umbrella ticket.
-    const parentTicket: TaskInTurn = {
-      ticket_id: "ticket-1",
-      title: "Crystallize email-inbox",
       status: "active",
       summary: null,
-      is_carryover: true,
-      continues_forward: true,
-      created_at: "2026-04-28T00:50:00Z",
-      started_at: "2026-04-28T00:50:00Z",
-      active_window_start: "2026-04-28T00:50:00Z",
-      active_window_end: null,
-      is_step: false,
-      parent_id: "",
-      children: [],
-      narration: null,
-    };
-    const closedStep: TaskInTurn = {
-      ticket_id: "step-1",
-      title: "Ask you whether the digest should auto-refresh",
-      status: "done",
-      summary: "Asked the schedule question.",
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
       started_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:30Z",
+      active_window_end: null,
       is_step: true,
-      parent_id: "ticket-1",
+      parent_id: "",
       children: [],
       narration: null,
+      is_settled: true,
     };
-    parentTicket.children.push(closedStep);
-    const wrapup = assistantMsg(
-      "2026-04-28T01:00:40Z",
-      "No selection registered -- happy to wait, or go with the default.",
-      "msg-wrapup",
-    );
-    expect(selectFinalMessages([wrapup], [parentTicket]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
+    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Stuck -- need your call.", "msg-trailing");
+    expect(selectFinalMessages([trailing], [settledStep]).map((e) => e.event_id)).toEqual(["msg-trailing"]);
+  });
+
+  it("does NOT surface a trailing message of an unsettled active step", () => {
+    const openStep: StepView = {
+      ticket_id: "t1",
+      title: "Investigate",
+      status: "active",
+      summary: null,
+      created_at: "2026-04-28T01:00:00Z",
+      started_at: "2026-04-28T01:00:00Z",
+      active_window_start: "2026-04-28T01:00:00Z",
+      active_window_end: null,
+      is_step: true,
+      parent_id: "",
+      children: [],
+      narration: null,
+      is_settled: false,
+    };
+    const trailing = assistantMsg("2026-04-28T01:00:50Z", "Stuck -- need your call.", "msg-trailing");
+    expect(selectFinalMessages([trailing], [openStep])).toEqual([]);
   });
 
   it("does NOT swallow a later message into an abandoned still-open step", () => {
-    // Serial-step invariant: only one step should be in_progress at a
-    // time. If the agent forgets to close step A before starting (and
-    // closing) step B, A's stored window stretches indefinitely. The
-    // renderer caps A's effective end at B's start so any message after
-    // B finished lands outside every step's effective window.
-    const abandoned: TaskInTurn = {
+    const abandoned: StepView = {
       ticket_id: "step-a",
       title: "First, never closed",
       status: "active",
       summary: null,
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:00Z",
       started_at: "2026-04-28T01:00:00Z",
       active_window_start: "2026-04-28T01:00:00Z",
@@ -769,14 +582,13 @@ describe("selectFinalMessages", () => {
       parent_id: "",
       children: [],
       narration: null,
+      is_settled: false,
     };
-    const properlyClosed: TaskInTurn = {
+    const properlyClosed: StepView = {
       ticket_id: "step-b",
       title: "Second, closed cleanly",
       status: "done",
       summary: "Did the second step.",
-      is_carryover: false,
-      continues_forward: false,
       created_at: "2026-04-28T01:00:10Z",
       started_at: "2026-04-28T01:00:10Z",
       active_window_start: "2026-04-28T01:00:10Z",
@@ -785,203 +597,56 @@ describe("selectFinalMessages", () => {
       parent_id: "",
       children: [],
       narration: null,
+      is_settled: false,
     };
     const wrapup = assistantMsg("2026-04-28T01:00:40Z", "Both done -- here is the wrap-up.", "msg-wrapup");
-    // 01:00:40 is after step-b closed; step-a's stored window has no
-    // end, but its effective end is capped at step-b's start
-    // (01:00:10), so step-a doesn't contain 01:00:40 either. Outside
-    // every window -> top level.
     expect(selectFinalMessages([wrapup], [abandoned, properlyClosed]).map((e) => e.event_id)).toEqual(["msg-wrapup"]);
   });
 });
 
 describe("narration attribution", () => {
-  it("populates narration with the latest text-only message inside an active task's window", () => {
+  it("populates narration with the latest text-only message inside an active step's window", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "go"),
       taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
+    ];
+    const body = [
       assistantMsg("2026-04-28T01:00:10Z", "Trying approach A.", "a1"),
       assistantMsg("2026-04-28T01:00:20Z", "Approach A failed, trying B.", "a2"),
     ];
-    const [turn] = buildTurns(events);
-    expect(turn.tasks).toHaveLength(1);
-    expect(turn.tasks[0].narration).toBe("Approach A failed, trying B.");
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    attributeNarration(steps, body);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].narration).toBe("Approach A failed, trying B.");
   });
 
-  it("leaves narration null on a closed task -- the summary owns the slot", () => {
+  it("leaves narration null on a closed step -- the summary owns the slot", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "go"),
       taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
-      assistantMsg("2026-04-28T01:00:10Z", "Mid-task narration.", "a1"),
       taskEvent("t1", "closed", "2026-04-28T01:00:30Z", { summary: "Did the thing.", step: true }),
     ];
-    const [turn] = buildTurns(events);
-    expect(turn.tasks[0].status).toBe("done");
-    expect(turn.tasks[0].summary).toBe("Did the thing.");
-    expect(turn.tasks[0].narration).toBeNull();
+    const body = [assistantMsg("2026-04-28T01:00:10Z", "Mid-task narration.", "a1")];
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
+    attributeNarration(steps, body);
+    expect(steps[0].status).toBe("done");
+    expect(steps[0].summary).toBe("Did the thing.");
+    expect(steps[0].narration).toBeNull();
   });
 
-  it("leaves narration null on a continues_forward task -- the message is promoted to final instead", () => {
-    // Two turns: the first has an open step with trailing text, then the
-    // user sends a second message. The step in turn 1 gets
-    // continues_forward = true, so its narration should be suppressed
-    // (the text is promoted to a final message by selectFinalMessages).
+  it("leaves narration null on a settled step -- the message is promoted to final instead", () => {
     const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "go"),
       taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Investigate", step: true }),
       taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
+    ];
+    const body = [
       assistantMsg("2026-04-28T01:00:10Z", "Looking into it.", "a1"),
       assistantMsg("2026-04-28T01:00:20Z", "Stuck -- need your input.", "a2"),
-      userMsg("2026-04-28T02:00:00Z", "ok here is more context"),
     ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(2);
-    const firstTurnTask = turns[0].tasks[0];
-    expect(firstTurnTask.continues_forward).toBe(true);
-    expect(firstTurnTask.narration).toBeNull();
-  });
-});
-
-describe("step-only filtering", () => {
-  it("drops the parent ticket and renders its child steps flat at the top level", () => {
-    // Agent picks up a ticket and files two step records beneath it.
-    // The progress view shows only steps -- the parent ticket is
-    // filtered out, and its child steps render flat in arrival order.
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "do the auth refactor"),
-      taskEvent("auth-1", "in_progress", "2026-04-28T01:00:05Z", {
-        title: "Refactor auth middleware",
-        assignee: "agent-A",
-        step: false,
-      }),
-      taskEvent("step-1", "open", "2026-04-28T01:00:10Z", {
-        title: "Read the middleware",
-        parent_id: "auth-1",
-      }),
-      taskEvent("step-2", "open", "2026-04-28T01:00:20Z", {
-        title: "Edit it",
-        parent_id: "auth-1",
-      }),
-    ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(1);
-    const tasks = turns[0].tasks;
-    expect(tasks.map((t) => t.ticket_id)).toEqual(["step-1", "step-2"]);
-    expect(tasks.every((t) => t.is_step)).toBe(true);
-    // No nesting: steps render flat regardless of their parent_id.
-    expect(tasks.every((t) => t.children.length === 0)).toBe(true);
-  });
-
-  it("leaves a standalone step (no parent) at the top level", () => {
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "quick lookup"),
-      taskEvent("step-x", "open", "2026-04-28T01:00:05Z", {
-        title: "Read the README",
-        step: true,
-        parent_id: "",
-      }),
-    ];
-    const turns = buildTurns(events);
-    expect(turns[0].tasks).toHaveLength(1);
-    expect(turns[0].tasks[0].is_step).toBe(true);
-    expect(turns[0].tasks[0].children).toEqual([]);
-  });
-
-  it("drops a turn with only a regular ticket (no steps) -- progress block won't render", () => {
-    // A turn that contains only a regular ticket and no step records
-    // ends up with an empty task list after filtering. ChatPanel's
-    // `turn.tasks.length > 0` gate then falls back to plain rendering.
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "pick up the auth refactor"),
-      taskEvent("auth-1", "in_progress", "2026-04-28T01:00:05Z", { title: "Refactor auth middleware", step: false }),
-    ];
-    const turns = buildTurns(events);
-    expect(turns[0].tasks).toEqual([]);
-  });
-});
-
-describe("picked-up-ticket attribution", () => {
-  it("attributes a ticket to the turn containing its earliest observed event, not its created_at", () => {
-    // The ticket was originally created long before the current agent
-    // saw it (e.g. by agent-A). Agent-B's watcher only starts emitting
-    // events once B becomes the assignee, so the earliest event in B's
-    // stream is the in_progress one. That timestamp -- not created_at --
-    // is what should attribute the ticket to a turn.
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T02:00:00Z", "turn 1 prompt"),
-      userMsg("2026-04-28T03:00:00Z", "pick up the auth ticket"),
-      // The ticket frontmatter says it was created on day 1, well before
-      // either turn began. But B's watcher only saw it transition to
-      // in_progress (with assignee=B) at 03:00:30, inside turn 2.
-      taskEvent("auth-1", "in_progress", "2026-04-28T03:00:30Z", {
-        title: "Auth refactor",
-        assignee: "agent-B",
-        created_at: "2026-04-27T10:00:00Z",
-      }),
-    ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(2);
-    // The ticket lands in the picker's turn (turn 2), not the originator's.
-    expect(turns[0].tasks).toEqual([]);
-    expect(turns[1].tasks.map((t) => t.ticket_id)).toEqual(["auth-1"]);
-  });
-
-  it("falls back to created_at when the record has no first_observed_at signal", () => {
-    // Sanity: regular own-ticket flow still works. The agent created the
-    // ticket in this turn, so first_observed_at == created_at and the
-    // attribution behaves identically to the legacy rule.
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "plan it"),
-      taskEvent("own-1", "open", "2026-04-28T01:00:05Z", {
-        title: "Plan step",
-        step: true,
-        created_at: "2026-04-28T01:00:05Z",
-      }),
-    ];
-    const turns = buildTurns(events);
-    expect(turns[0].tasks.map((t) => t.ticket_id)).toEqual(["own-1"]);
-  });
-});
-
-describe("parent + children carryover", () => {
-  it("carries the parent ticket forward and nests new T2 child steps under it", () => {
-    // Plan scenario: B picks up auth-1 in T1, files step-1, closes it.
-    // In T2 B files step-2 under the same (still-in_progress) ticket.
-    // T2's progress block re-renders the parent + the newly added step.
-    // The closed step from T1 does NOT re-render in T2 -- standard
-    // carryover only propagates tasks that are still unfinished.
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "do the refactor"),
-      taskEvent("auth-1", "in_progress", "2026-04-28T01:00:05Z", {
-        title: "Auth refactor",
-        assignee: "agent-A",
-        step: false,
-      }),
-      taskEvent("step-1", "open", "2026-04-28T01:00:10Z", {
-        title: "Read it",
-        parent_id: "auth-1",
-      }),
-      taskEvent("step-1", "closed", "2026-04-28T01:00:30Z", {
-        title: "Read it",
-        parent_id: "auth-1",
-        summary: "Read the middleware end-to-end.",
-        summary_at: "2026-04-28T01:00:30Z",
-      }),
-      userMsg("2026-04-28T02:00:00Z", "continue"),
-      taskEvent("step-2", "open", "2026-04-28T02:00:05Z", {
-        title: "Patch it",
-        parent_id: "auth-1",
-      }),
-    ];
-    const turns = buildTurns(events);
-    expect(turns).toHaveLength(2);
-    // Turn 1: parent ticket is filtered out, step-1 renders flat.
-    expect(turns[0].tasks.map((t) => t.ticket_id)).toEqual(["step-1"]);
-    expect(turns[0].tasks[0].is_step).toBe(true);
-    // Turn 2: ticket still filtered out; step-2 renders flat. step-1
-    // closed in turn 1 and does not carry over.
-    expect(turns[1].tasks.map((t) => t.ticket_id)).toEqual(["step-2"]);
+    // Settled = past partition or agent idle
+    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T02:00:00Z", true);
+    attributeNarration(steps, body);
+    expect(steps[0].is_settled).toBe(true);
+    expect(steps[0].narration).toBeNull();
   });
 });

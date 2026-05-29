@@ -1,12 +1,10 @@
 /**
- * Per-turn progress block: Timeline-variant rendering of the agent's
- * tk-tracked task list for a single user turn. Each task is a node on
- * a vertical thread, with status icon + title + (when done) summary.
+ * Progress block: Timeline rendering of the agent's tk-tracked steps.
+ * Each step is a node on a vertical thread, with status icon + title +
+ * (when done) summary.
  *
- * Each task can be expanded via its chevron to reveal the raw assistant
- * text + tool_call_blocks that occurred during the task's active window.
- * The expanded panel reuses the existing `tool-call-block` chrome so the
- * raw view matches the rest of the chat.
+ * Each step can be expanded via its chevron to reveal the raw assistant
+ * text + tool_call_blocks that occurred during the step's active window.
  */
 
 import m from "mithril";
@@ -40,7 +38,7 @@ interface ProgressBlockAttrs {
   agentId: string;
 }
 
-function statusIcon(status: TaskUiStatus, continues_forward: boolean): m.Vnode {
+function statusIcon(status: TaskUiStatus, is_settled: boolean): m.Vnode {
   if (status === "done") {
     return m(
       "svg.pv-icon.pv-icon--done",
@@ -51,10 +49,10 @@ function statusIcon(status: TaskUiStatus, continues_forward: boolean): m.Vnode {
     );
   }
   if (status === "active") {
-    // Frozen "in flight" variant when the task is still going but this
-    // turn has already ended: no animation, just a static partial ring
-    // visually echoing the spinner's shape.
-    if (continues_forward) {
+    // Settled variant: the step is no longer actively being worked on
+    // (either in a past partition or the agent is idle). Static partial
+    // ring instead of a spinner.
+    if (is_settled) {
       return m(
         "svg.pv-icon.pv-icon--in-flight",
         { width: 16, height: 16, viewBox: "0 0 16 16", fill: "none" },
@@ -169,62 +167,54 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
       .filter(Boolean)
       .join(" ");
 
-    return m(
-      "div",
-      { class: nodeClasses, key: task.ticket_id + (task.is_carryover ? "-carry" : "") + (is_child ? "-c" : "") },
-      [
-        m("div.pv-tl-bullet", statusIcon(task.status, task.continues_forward)),
-        m("div.pv-tl-body", [
-          m(
-            "button",
-            {
-              type: "button",
-              class: "pv-tl-title",
-              disabled: !canExpand,
-              onclick: canExpand ? () => toggle(task.ticket_id) : undefined,
-            },
-            [
-              // Id badge for regular tickets only -- gives the user a
-              // visible handle on which tk ticket this row corresponds
-              // to (matches the `tk show <id>` partial-id lookup). Steps
-              // are agent-private and don't need it.
-              !task.is_step
-                ? m("span.pv-tl-id-badge", { title: `Ticket ${task.ticket_id}` }, `[${task.ticket_id}]`)
-                : null,
-              task.title,
-              task.continues_forward
-                ? m(
-                    "span.pv-carryover-tag",
-                    { title: "This task continues in the next turn" },
-                    "continued in next turn",
-                  )
-                : null,
-              canExpand
-                ? m("span", { class: `pv-chev ${isExpanded ? "pv-chev--open" : ""}` }, m.trust("&rsaquo;"))
-                : null,
-            ],
-          ),
-          renderTaskCaption(task, isExpanded),
-          isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, toolResults, agentId)) : null,
-          // Nested step children (only for parent tickets in practice).
-          task.children.length > 0
-            ? m(
-                "div.pv-tl-children",
-                task.children.map((child, ci) =>
-                  renderTaskNode(child, {
-                    is_last: ci === task.children.length - 1,
-                    is_child: true,
-                    body_events,
-                    toolResults,
-                    agentId,
-                    tasks,
-                  }),
-                ),
-              )
-            : null,
-        ]),
-      ],
-    );
+    return m("div", { class: nodeClasses, key: task.ticket_id + (is_child ? "-c" : "") }, [
+      m("div.pv-tl-bullet", statusIcon(task.status, task.is_settled)),
+      m("div.pv-tl-body", [
+        m(
+          "button",
+          {
+            type: "button",
+            class: "pv-tl-title",
+            disabled: !canExpand,
+            onclick: canExpand ? () => toggle(task.ticket_id) : undefined,
+          },
+          [
+            // Id badge for regular tickets only -- gives the user a
+            // visible handle on which tk ticket this row corresponds
+            // to (matches the `tk show <id>` partial-id lookup). Steps
+            // are agent-private and don't need it.
+            !task.is_step
+              ? m("span.pv-tl-id-badge", { title: `Ticket ${task.ticket_id}` }, `[${task.ticket_id}]`)
+              : null,
+            task.title,
+            task.is_settled && task.status !== "done"
+              ? m("span.pv-carryover-tag", { title: "This step is no longer actively being worked on" }, "settled")
+              : null,
+            canExpand
+              ? m("span", { class: `pv-chev ${isExpanded ? "pv-chev--open" : ""}` }, m.trust("&rsaquo;"))
+              : null,
+          ],
+        ),
+        renderTaskCaption(task, isExpanded),
+        isExpanded ? m("div.pv-tl-expanded", renderExpandedTaskBody(taskEvents, toolResults, agentId)) : null,
+        // Nested step children (only for parent tickets in practice).
+        task.children.length > 0
+          ? m(
+              "div.pv-tl-children",
+              task.children.map((child, ci) =>
+                renderTaskNode(child, {
+                  is_last: ci === task.children.length - 1,
+                  is_child: true,
+                  body_events,
+                  toolResults,
+                  agentId,
+                  tasks,
+                }),
+              ),
+            )
+          : null,
+      ]),
+    ]);
   }
 
   return {

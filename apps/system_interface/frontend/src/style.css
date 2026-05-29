@@ -1634,12 +1634,7 @@ body {
   font-style: italic;
   color: var(--pv-fg-muted);
   line-height: 1.55;
-  background: linear-gradient(
-    90deg,
-    var(--pv-fg-muted) 0%,
-    var(--pv-fg-faint) 40%,
-    var(--pv-fg-muted) 80%
-  );
+  background: linear-gradient(90deg, var(--pv-fg-muted) 0%, var(--pv-fg-faint) 40%, var(--pv-fg-muted) 80%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -1647,8 +1642,12 @@ body {
   animation: pv-narration-shimmer 2.5s ease-in-out infinite;
 }
 @keyframes pv-narration-shimmer {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
 }
 .pv-tl-narration p {
   margin: 0 0 0.4em;

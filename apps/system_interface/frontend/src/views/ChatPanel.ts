@@ -9,6 +9,7 @@
 
 import m from "mithril";
 import { isSlotClaimed } from "../slots";
+import type { TranscriptEvent } from "../models/Response";
 import {
   fetchEvents,
   fetchBackfillEvents,
@@ -23,9 +24,22 @@ import { openLoginModal } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import { renderUserMessage, renderAssistantMessage, buildToolResultsWithSkillExpansions, computeAuthErrorHiddenEventIds } from "./message-renderers";
+import {
+  renderUserMessage,
+  renderAssistantMessage,
+  buildToolResultsWithSkillExpansions,
+  computeAuthErrorHiddenEventIds,
+} from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import { buildTurns, selectFinalMessages } from "./turn-grouping";
+import {
+  buildTaskRecords,
+  makeStepView,
+  stepActiveInWindow,
+  sortSteps,
+  attributeNarration,
+  selectFinalMessages,
+} from "./turn-grouping";
+import { isNonBoundaryUserMessage } from "./user-message-classification";
 import { ProgressBlock } from "./ProgressBlock";
 import { UngroupedWorkBlock } from "./UngroupedWorkBlock";
 import { ActivityIndicator } from "./ActivityIndicator";
@@ -396,23 +410,18 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
     const visibleEvents = events.filter((e) => !hiddenEventIds.has(e.event_id));
 
-    // Group events into turns and decide per turn whether to render the
-    // tk-driven progress view or the plain (legacy) chat view. A turn is
-    // a "progress turn" iff it has at least one task attributed to it;
-    // turns with no tasks render exactly as today (assistant text +
-    // inline tool blocks). Sessions that predate the tk integration have
-    // zero task_events, so every turn is plain -- backwards-compatible.
-    const turns = buildTurns(visibleEvents);
+    const taskRecords = buildTaskRecords(visibleEvents);
+    const agent = getAgentById(agentId);
+    const agentIsIdle = agent?.activity_state === "IDLE";
+
+    // Find user-message boundaries to partition the stream.
+    const userMessages = visibleEvents
+      .filter((e) => e.type === "user_message" && !isNonBoundaryUserMessage(e.content ?? ""))
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
     const messageNodes: m.Children[] = [];
 
-    // Fallback: if no turns were derived (no user_message exists yet, e.g.
-    // a stalled agent that emitted assistant text before any user input),
-    // render every event in order so that content is never silently
-    // dropped. Matches the pre-progress-view rendering behavior. buildTurns
-    // returns [] only when there are no user_messages, so we render only
-    // assistant_messages here -- a user_message branch would be unreachable.
-    if (turns.length === 0) {
+    if (userMessages.length === 0) {
       for (const event of visibleEvents) {
         if (event.type === "assistant_message") {
           messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
@@ -427,55 +436,68 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       ]);
     }
 
-    for (const turn of turns) {
-      const userNode = renderUserMessage(turn.user_event);
+    // Walk the event stream, partitioned by user-message boundaries.
+    for (let i = 0; i < userMessages.length; i++) {
+      const userEvent = userMessages[i];
+      const start_ts = userEvent.timestamp;
+      const end_ts = i + 1 < userMessages.length ? userMessages[i + 1].timestamp : "";
+      const isTail = end_ts === "";
+
+      const userNode = renderUserMessage(userEvent);
       if (userNode !== null) {
         messageNodes.push(userNode);
       }
-      // Non-boundary user_messages (stop-hook feedback, skill expansions,
-      // etc.) fall inside the turn's window. Skill expansions are folded
-      // into the matching Skill tool call's output by
-      // buildToolResultsWithSkillExpansions and are hidden here (their
-      // renderUserMessage returns null). Anything still visible -- mostly
-      // stop-hook feedback chips -- is pushed above the progress block so
-      // it brackets the work rather than splitting the timeline.
-      const nonBoundaryUserEvents = turn.body_events.filter((e) => e.type === "user_message");
-      if (turn.tasks.length > 0) {
-        const finalMessages = selectFinalMessages(turn.body_events, turn.tasks);
-        for (const ev of nonBoundaryUserEvents) {
-          const chipNode = renderUserMessage(ev);
-          if (chipNode !== null) {
-            messageNodes.push(chipNode);
-          }
+
+      // Collect body events (assistant messages, tool results, non-boundary
+      // user messages) that fall in this partition's window.
+      const body_events: TranscriptEvent[] = [];
+      for (const e of visibleEvents) {
+        if (e === userEvent) continue;
+        const isNonBoundary = e.type === "user_message" && isNonBoundaryUserMessage(e.content ?? "");
+        if (e.type !== "assistant_message" && e.type !== "tool_result" && !isNonBoundary) continue;
+        if (e.timestamp < start_ts) continue;
+        if (end_ts !== "" && e.timestamp >= end_ts) continue;
+        body_events.push(e);
+      }
+      body_events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+      // Non-boundary user messages render as chips above the progress block.
+      const nonBoundaryUserEvents = body_events.filter((e) => e.type === "user_message");
+      for (const ev of nonBoundaryUserEvents) {
+        const chipNode = renderUserMessage(ev);
+        if (chipNode !== null) {
+          messageNodes.push(chipNode);
         }
-        // ProgressBlock must carry a key: messageNodes is a homogeneous
-        // keyed fragment (renderUserMessage and renderAssistantMessage both
-        // attach `key: event.event_id` to their root vnodes), and Mithril 2
-        // throws if a fragment mixes keyed and unkeyed children. Deriving
-        // the key from the turn's user_event.event_id keeps it stable
-        // across redraws -- which also preserves the per-turn expand state
-        // that lives in ProgressBlock's component closure.
+      }
+
+      // Find steps active during this partition.
+      const isSettled = !isTail || agentIsIdle;
+      const steps = sortSteps(
+        Array.from(taskRecords.values())
+          .filter((r) => r.step && stepActiveInWindow(r, start_ts, end_ts))
+          .map((r) => makeStepView(r, isSettled && r.final_status !== "closed")),
+        taskRecords,
+        start_ts,
+      );
+      attributeNarration(steps, body_events);
+
+      if (steps.length > 0) {
+        const finalMessages = selectFinalMessages(body_events, steps);
         messageNodes.push(
           m(ProgressBlock, {
-            key: `progress-${turn.user_event.event_id}`,
-            tasks: turn.tasks,
-            body_events: turn.body_events,
+            key: `progress-${userEvent.event_id}`,
+            tasks: steps,
+            body_events,
             toolResults,
             final_messages: finalMessages,
             agentId,
           }),
         );
       } else {
-        for (const ev of nonBoundaryUserEvents) {
-          const chipNode = renderUserMessage(ev);
-          if (chipNode !== null) {
-            messageNodes.push(chipNode);
-          }
-        }
         messageNodes.push(
           m(UngroupedWorkBlock, {
-            key: `ungrouped-${turn.user_event.event_id}`,
-            body_events: turn.body_events,
+            key: `ungrouped-${userEvent.event_id}`,
+            body_events,
             toolResults,
             agentId,
           }),
