@@ -124,7 +124,7 @@ content drawn from your conversation -- do not leave the placeholders.
 ## Step 3: Launch the worker
 
 ```bash
-uv run .agents/skills/launch-task/scripts/dispatch.py \
+uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name heal-$TARGET \
     --template crystallize-worker \
     --runtime-dir runtime/heal/$TARGET/ \
@@ -143,7 +143,8 @@ Flow-specific substitutions:
 
 - Worker name: `heal-$TARGET`
 - Branch: `mngr/heal-$TARGET`
-- Poll path: `runtime/heal/$TARGET/reports/report.md`
+- Runtime dir (pass to `create_worker.py await --runtime-dir`): `runtime/heal/$TARGET/`
+- Poll path (derived): `runtime/heal/$TARGET/reports/report.md`
 - Consumed path: `runtime/heal/$TARGET/reports/consumed/`
 - The only user-approval gate is `type: gate, name: final-artifact`.
   A heal has no outline gate.

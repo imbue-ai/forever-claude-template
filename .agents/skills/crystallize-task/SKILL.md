@@ -199,18 +199,18 @@ source_artifacts_dir: runtime/<calling-skill>/<slug>/
 Step 4 then pushes that directory to the worker alongside the standard
 crystallize runtime dir.
 
-## Step 4: Dispatch the worker
+## Step 4: Launch the worker
 
 ```bash
-uv run .agents/skills/launch-task/scripts/dispatch.py \
+uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name crystallize-$NAME \
     --template crystallize-worker \
     --runtime-dir runtime/crystallize/$NAME/ \
     --task-file runtime/crystallize/$NAME/task.md
 ```
 
-If the task frontmatter sets `source_artifacts_dir`, `dispatch.py` pushes
-that directory to the worker too -- no extra flag needed.
+If the task frontmatter sets `source_artifacts_dir`, `create_worker.py launch`
+pushes that directory to the worker too -- no extra flag needed.
 
 ## Step 5: Background-poll for worker reports (concurrent with other work)
 
@@ -222,10 +222,9 @@ blocking on the poll.
 
 ```bash
 # Run with Bash run_in_background: true. Substitute $NAME with the slug.
-timeout 90m bash -c '
-  while [ ! -f runtime/crystallize/'"$NAME"'/reports/report.md ]; do sleep 10; done
-  cat runtime/crystallize/'"$NAME"'/reports/report.md
-'
+uv run .agents/skills/launch-task/scripts/create_worker.py await \
+    --runtime-dir runtime/crystallize/$NAME/ \
+    --timeout 90m
 ```
 
 You still own this poll even if you reached this step from another skill

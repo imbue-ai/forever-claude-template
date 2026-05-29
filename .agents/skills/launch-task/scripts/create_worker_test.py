@@ -1,16 +1,19 @@
-"""Tests for ``dispatch.py``.
+"""Tests for ``create_worker.py``.
 
-Run via: ``uv run pytest .agents/skills/launch-task/scripts/dispatch_test.py``
+Run via: ``uv run pytest .agents/skills/launch-task/scripts/create_worker_test.py``
 
-The tests inject a recording ``Runner`` so no real ``mngr`` processes are
-spawned. We assert on (a) the exact argv lists dispatch.py hands to
+The ``launch`` tests inject a recording ``Runner`` so no real ``mngr``
+processes are spawned. We assert on (a) the exact argv lists launch hands to
 subprocess (so the lifecycle contract with ``mngr`` cannot drift silently)
-and (b) pre-flight validation.
+and (b) pre-flight validation. The ``await`` tests inject a fake clock and
+sleeper so the poll loop runs without real time.
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import io
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,11 +21,11 @@ from typing import Any, Sequence
 
 import pytest
 
-_SCRIPT = Path(__file__).parent / "dispatch.py"
-_spec = importlib.util.spec_from_file_location("dispatch", _SCRIPT)
+_SCRIPT = Path(__file__).parent / "create_worker.py"
+_spec = importlib.util.spec_from_file_location("create_worker", _SCRIPT)
 assert _spec is not None and _spec.loader is not None
-dispatch_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(dispatch_mod)
+create_worker_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(create_worker_mod)
 
 
 @dataclass
@@ -41,7 +44,7 @@ class _StubResult:
 
 
 @dataclass
-class _RecordingRunner(dispatch_mod.Runner):
+class _RecordingRunner(create_worker_mod.Runner):
     """Records every ``run`` call; returns canned results keyed by argv prefix."""
 
     calls: list[_RecordedCall] = field(default_factory=list)
@@ -88,7 +91,7 @@ def test_happy_path_no_artifacts(tmp_path: Path) -> None:
     runtime, task, _ = _make_layout(tmp_path)
     runner = _RecordingRunner()
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -119,7 +122,7 @@ def test_source_artifacts_dir_pushed_after_runtime(tmp_path: Path) -> None:
     _write_task(task, str(artifacts))
     runner = _RecordingRunner()
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -158,7 +161,7 @@ def test_source_artifacts_dir_missing_is_fatal(
     _write_task(task, str(tmp_path / "no-such-dir"))
     runner = _RecordingRunner()
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -182,7 +185,7 @@ def test_source_artifacts_dir_non_string_is_fatal(
     )
     runner = _RecordingRunner()
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -196,14 +199,14 @@ def test_source_artifacts_dir_non_string_is_fatal(
     assert "source_artifacts_dir" in capsys.readouterr().err
 
 
-def test_malformed_frontmatter_does_not_abort_dispatch(tmp_path: Path) -> None:
-    """A task file with no/broken frontmatter dispatches normally with no artifacts
-    push -- frontmatter schema validation is the worker's job, not dispatch's."""
+def test_malformed_frontmatter_does_not_abort_launch(tmp_path: Path) -> None:
+    """A task file with no/broken frontmatter launches normally with no artifacts
+    push -- frontmatter schema validation is the worker's job, not launch's."""
     runtime, task, _ = _make_layout(tmp_path)
     task.write_text("no frontmatter here, just a body\n")
     runner = _RecordingRunner()
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -231,7 +234,7 @@ def test_runtime_dir_must_exist(
 ) -> None:
     _, task, _ = _make_layout(tmp_path)
     runner = _RecordingRunner()
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=tmp_path / "missing",
@@ -249,7 +252,7 @@ def test_task_file_must_exist(
 ) -> None:
     runtime, _, _ = _make_layout(tmp_path)
     runner = _RecordingRunner()
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -270,7 +273,7 @@ def test_mngr_failure_is_fatal(tmp_path: Path) -> None:
         subprocess.CalledProcessError(returncode=1, cmd=["mngr"]),
     )
     with pytest.raises(subprocess.CalledProcessError):
-        dispatch_mod.dispatch(
+        create_worker_mod.launch(
             name="demo-worker",
             template="worker",
             runtime_dir=runtime,
@@ -280,8 +283,9 @@ def test_mngr_failure_is_fatal(tmp_path: Path) -> None:
         )
 
 
-def _main_argv(runtime: Path, task: Path) -> list[str]:
+def _launch_argv(runtime: Path, task: Path) -> list[str]:
     return [
+        "launch",
         "--name",
         "x",
         "--template",
@@ -301,7 +305,7 @@ def test_main_uses_workspace_env(
     runner = _RecordingRunner()
     monkeypatch.setenv("MINDS_WORKSPACE_NAME", "alpha")
 
-    rc = dispatch_mod.main(_main_argv(runtime, task), runner=runner)
+    rc = create_worker_mod.main(_launch_argv(runtime, task), runner=runner)
 
     assert rc == 0
     create_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "create"]]
@@ -317,7 +321,7 @@ def test_main_workspace_defaults_when_env_unset(
     runner = _RecordingRunner()
     monkeypatch.delenv("MINDS_WORKSPACE_NAME", raising=False)
 
-    rc = dispatch_mod.main(_main_argv(runtime, task), runner=runner)
+    rc = create_worker_mod.main(_launch_argv(runtime, task), runner=runner)
 
     assert rc == 0
     create_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "create"]]
@@ -334,12 +338,12 @@ def _make_state_dir_with_converter(tmp_path: Path) -> Path:
 
 
 def test_common_transcript_flushed_before_message_send(tmp_path: Path) -> None:
-    """When state_dir has the converter, dispatch flushes it right before the message."""
+    """When state_dir has the converter, launch flushes it right before the message."""
     runtime, task, _ = _make_layout(tmp_path)
     state_dir = _make_state_dir_with_converter(tmp_path)
     runner = _RecordingRunner()
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -372,7 +376,7 @@ def test_common_transcript_skipped_when_state_dir_is_none(tmp_path: Path) -> Non
     runtime, task, _ = _make_layout(tmp_path)
     runner = _RecordingRunner()
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -395,7 +399,7 @@ def test_common_transcript_skipped_when_script_missing(tmp_path: Path) -> None:
     state_dir.mkdir()
     runner = _RecordingRunner()
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -411,18 +415,18 @@ def test_common_transcript_skipped_when_script_missing(tmp_path: Path) -> None:
     )
 
 
-def test_common_transcript_failure_does_not_abort_dispatch(
+def test_common_transcript_failure_does_not_abort_launch(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A non-zero converter exit must NOT abort dispatch (worker is mid-launch)."""
+    """A non-zero converter exit must NOT abort launch (worker is mid-launch)."""
     runtime, task, _ = _make_layout(tmp_path)
     state_dir = _make_state_dir_with_converter(tmp_path)
     runner = _RecordingRunner()
     expected_script = str(state_dir / "commands" / "common_transcript.sh")
     runner.respond((expected_script, "--single-pass"), _StubResult(returncode=2))
 
-    rc = dispatch_mod.dispatch(
+    rc = create_worker_mod.launch(
         name="demo-worker",
         template="worker",
         runtime_dir=runtime,
@@ -450,13 +454,13 @@ def test_main_picks_up_state_dir_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """main() reads MNGR_AGENT_STATE_DIR and threads it into dispatch."""
+    """main() reads MNGR_AGENT_STATE_DIR and threads it into launch."""
     runtime, task, _ = _make_layout(tmp_path)
     state_dir = _make_state_dir_with_converter(tmp_path)
     runner = _RecordingRunner()
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
 
-    rc = dispatch_mod.main(_main_argv(runtime, task), runner=runner)
+    rc = create_worker_mod.main(_launch_argv(runtime, task), runner=runner)
 
     assert rc == 0
     expected_script = str(state_dir / "commands" / "common_transcript.sh")
@@ -464,3 +468,171 @@ def test_main_picks_up_state_dir_env(
         c.argv for c in runner.calls if c.argv == [expected_script, "--single-pass"]
     ]
     assert len(flush_calls) == 1
+
+
+# --- await subcommand -----------------------------------------------------
+
+
+class _FakeClock:
+    """Monotonic clock that advances by a fixed step on every read.
+
+    Lets ``await_report`` reach its deadline deterministically without real
+    sleeping: each ``clock()`` read inside the poll loop moves time forward.
+    """
+
+    def __init__(self, step: float) -> None:
+        self._now = 0.0
+        self._step = step
+
+    def __call__(self) -> float:
+        now = self._now
+        self._now += self._step
+        return now
+
+
+def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+def test_await_returns_report_immediately_when_present(tmp_path: Path) -> None:
+    """A report already on disk is printed at once, before any sleep."""
+    runtime = tmp_path / "runtime" / "launch-task" / "demo"
+    reports = runtime / "reports"
+    reports.mkdir(parents=True)
+    (reports / "report.md").write_text(
+        "---\ntype: status\nname: done\n---\n\nall good\n"
+    )
+    out = io.StringIO()
+
+    def _boom(_seconds: float) -> None:
+        raise AssertionError("await must not sleep when the report already exists")
+
+    rc = create_worker_mod.await_report(
+        runtime_dir=runtime,
+        timeout_seconds=1800,
+        poll_interval_seconds=5,
+        sleeper=_boom,
+        clock=lambda: 0.0,
+        out=out,
+    )
+
+    assert rc == 0
+    assert "name: done" in out.getvalue()
+    assert "all good" in out.getvalue()
+
+
+def test_await_polls_until_report_appears(tmp_path: Path) -> None:
+    """await loops, sleeping, until the report shows up, then prints it."""
+    runtime = tmp_path / "runtime" / "launch-task" / "demo"
+    reports = runtime / "reports"
+    reports.mkdir(parents=True)
+    report = reports / "report.md"
+    out = io.StringIO()
+
+    sleeps: list[float] = []
+
+    def _sleeper_that_creates_report(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            report.write_text("---\ntype: gate\nname: question\n---\n\nwhich one?\n")
+
+    rc = create_worker_mod.await_report(
+        runtime_dir=runtime,
+        timeout_seconds=1800,
+        poll_interval_seconds=5,
+        sleeper=_sleeper_that_creates_report,
+        clock=lambda: 0.0,
+        out=out,
+    )
+
+    assert rc == 0
+    assert sleeps == [5, 5, 5]
+    assert "name: question" in out.getvalue()
+
+
+def test_await_times_out_when_report_never_appears(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When the deadline passes with no report, await returns the timeout code."""
+    runtime = tmp_path / "runtime" / "launch-task" / "demo"
+    (runtime / "reports").mkdir(parents=True)
+    out = io.StringIO()
+
+    rc = create_worker_mod.await_report(
+        runtime_dir=runtime,
+        timeout_seconds=30,
+        poll_interval_seconds=5,
+        sleeper=_no_sleep,
+        clock=_FakeClock(step=20),
+        out=out,
+    )
+
+    assert rc == create_worker_mod._AWAIT_TIMEOUT_RC
+    assert out.getvalue() == ""
+    assert "timed out" in capsys.readouterr().err
+
+
+def test_await_derives_report_path_under_runtime_dir(tmp_path: Path) -> None:
+    """await reads reports/report.md relative to --runtime-dir, nothing else."""
+    runtime = tmp_path / "runtime" / "crystallize" / "demo"
+    nested = runtime / "reports"
+    nested.mkdir(parents=True)
+    (nested / "report.md").write_text("body\n")
+    # A report.md directly under runtime (wrong place) must be ignored.
+    (runtime / "report.md").write_text("WRONG\n")
+    out = io.StringIO()
+
+    rc = create_worker_mod.await_report(
+        runtime_dir=runtime,
+        timeout_seconds=10,
+        poll_interval_seconds=1,
+        sleeper=_no_sleep,
+        clock=lambda: 0.0,
+        out=out,
+    )
+
+    assert rc == 0
+    assert out.getvalue() == "body\n"
+
+
+def _await_argv(runtime: Path, extra: Sequence[str] = ()) -> list[str]:
+    return ["await", "--runtime-dir", str(runtime), *extra]
+
+
+def test_main_await_prints_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The await subcommand parses, routes through main(), and prints the report.
+
+    The report exists up front, so main()'s real ``time.sleep`` is never
+    reached and the loop returns immediately.
+    """
+    runtime = tmp_path / "runtime" / "launch-task" / "demo"
+    reports = runtime / "reports"
+    reports.mkdir(parents=True)
+    (reports / "report.md").write_text("hello from worker\n")
+
+    rc = create_worker_mod.main(_await_argv(runtime))
+
+    assert rc == 0
+    assert capsys.readouterr().out == "hello from worker\n"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("30m", 1800.0),
+        ("90s", 90.0),
+        ("1h", 3600.0),
+        ("45", 45.0),
+        ("2.5m", 150.0),
+    ],
+)
+def test_parse_duration_accepts_suffixes(text: str, expected: float) -> None:
+    assert create_worker_mod._parse_duration(text) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "-5m", "0s", "m"])
+def test_parse_duration_rejects_invalid(bad: str) -> None:
+    with pytest.raises(argparse.ArgumentTypeError):
+        create_worker_mod._parse_duration(bad)

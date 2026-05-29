@@ -104,7 +104,7 @@ The `runtime/update/$TARGET/` push carries `task.md`, `commit.log`, and
 `commit.diff` into the worker's worktree.
 
 ```bash
-uv run .agents/skills/launch-task/scripts/dispatch.py \
+uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name update-$TARGET \
     --template crystallize-worker \
     --runtime-dir runtime/update/$TARGET/ \

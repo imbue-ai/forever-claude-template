@@ -70,13 +70,14 @@ BODY_EOF
 } > runtime/launch-task/$NAME/task.md
 ```
 
-## 2. Dispatch the worker
+## 2. Launch the worker
 
-`scripts/dispatch.py` runs the worker lifecycle: `mngr create`, the
-runtime-dir push, and the task message.
+`scripts/create_worker.py launch` runs the worker lifecycle: `mngr create`,
+the runtime-dir push, and the task message. Run it in the foreground so a
+failed launch surfaces immediately.
 
 ```bash
-uv run .agents/skills/launch-task/scripts/dispatch.py \
+uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name $NAME \
     --template worker \
     --runtime-dir runtime/launch-task/$NAME/ \
@@ -84,22 +85,21 @@ uv run .agents/skills/launch-task/scripts/dispatch.py \
 ```
 
 If the task references gitignored files outside the runtime dir, set
-`source_artifacts_dir: <dir>` in the task frontmatter; `dispatch.py`
+`source_artifacts_dir: <dir>` in the task frontmatter; `launch`
 pushes that directory into the worker's worktree automatically.
 
 ## 3. Background-poll for the worker's report
 
-Launch the poll as a background task (`run_in_background: true`) and
-continue with whatever else you were doing. The report file appears at
-`runtime/launch-task/$NAME/reports/report.md` once the worker pushes
-back.
+Poll with `create_worker.py await` as a background task
+(`run_in_background: true`) and continue with whatever else you were doing. It
+derives the report path (`runtime/launch-task/$NAME/reports/report.md`) from
+the same `--runtime-dir`, blocks until the worker pushes back, then prints the
+report.
 
 ```bash
 # Run with Bash run_in_background: true
-timeout 30m bash -c '
-  while [ ! -f runtime/launch-task/'"$NAME"'/reports/report.md ]; do sleep 5; done
-  cat runtime/launch-task/'"$NAME"'/reports/report.md
-'
+uv run .agents/skills/launch-task/scripts/create_worker.py await \
+    --runtime-dir runtime/launch-task/$NAME/
 ```
 
 You own this poll for the lifetime of the dispatch. Without it, gate
@@ -121,7 +121,8 @@ Flow-specific substitutions when reading `lead-proxy.md`:
 
 - Worker name: `$NAME`
 - Branch: `mngr/$NAME`
-- Reports dir: `runtime/launch-task/$NAME/reports/`
+- Runtime dir (pass to `create_worker.py await --runtime-dir`): `runtime/launch-task/$NAME/`
+- Reports dir (derived): `runtime/launch-task/$NAME/reports/`
 - Consumed dir: `runtime/launch-task/$NAME/reports/consumed/`
 - Gate names: `question` (mid-flight; default-escalate to the user
   unless you can answer from context).
@@ -144,4 +145,4 @@ Flow-specific substitutions when reading `lead-proxy.md`:
   manual salvage fallback when restart isn't viable.
 - If the task references gitignored files outside the runtime dir,
   declare them with `source_artifacts_dir: <dir>` in the task
-  frontmatter -- `dispatch.py` pushes that directory automatically.
+  frontmatter -- `create_worker.py launch` pushes that directory automatically.

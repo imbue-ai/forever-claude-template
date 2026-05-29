@@ -6,20 +6,22 @@ name, branch, runtime path, which gate names and terminal statuses apply).
 
 ## Polling for the next report
 
-Start a background poll for the report file. Bash's `run_in_background: true`
-returns the instant the file appears.
+Start a background poll for the report file with `create_worker.py await`. It
+blocks until `<RUNTIME_DIR>/reports/report.md` appears, prints its contents, and
+exits 0; on timeout it exits non-zero (code 124). Run it with Bash's
+`run_in_background: true` so it returns the instant the report lands.
 
 ```bash
 # Run with Bash run_in_background: true
-timeout 30m bash -c '
-  while [ ! -f <REPORTS_DIR>/report.md ]; do sleep 5; done
-  cat <REPORTS_DIR>/report.md
-'
+uv run .agents/skills/launch-task/scripts/create_worker.py await \
+    --runtime-dir <RUNTIME_DIR>/
 ```
 
-The tool output is the report contents: YAML frontmatter (`type`, `name`) plus a
-body. If the timeout trips without the file appearing, do *not* immediately
-treat it as a terminal failure -- see "Diagnose worker liveness" below.
+`--timeout` defaults to `30m`; pass e.g. `--timeout 60m` to re-arm with a longer
+wait. The tool output is the report contents: YAML frontmatter (`type`, `name`)
+plus a body. If await exits non-zero (timeout) without printing a report, do
+*not* immediately treat it as a terminal failure -- see "Diagnose worker
+liveness" below.
 
 ## Diagnose worker liveness before invoking failure flow
 

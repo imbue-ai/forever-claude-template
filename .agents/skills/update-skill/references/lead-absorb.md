@@ -83,7 +83,7 @@ content drawn from your conversation -- do not leave the placeholders.
 ## 2b: Launch the worker
 
 ```bash
-uv run .agents/skills/launch-task/scripts/dispatch.py \
+uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name update-$TARGET \
     --template crystallize-worker \
     --runtime-dir runtime/update/$TARGET/ \

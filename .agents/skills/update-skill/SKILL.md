@@ -88,7 +88,8 @@ Flow-specific substitutions:
 
 - Worker name: `update-$TARGET`
 - Branch: `mngr/update-$TARGET`
-- Poll path: `runtime/update/$TARGET/reports/report.md`
+- Runtime dir (pass to `create_worker.py await --runtime-dir`): `runtime/update/$TARGET/`
+- Poll path (derived): `runtime/update/$TARGET/reports/report.md`
 - Consumed path: `runtime/update/$TARGET/reports/consumed/`
 - User-approval gates:
   - **absorb:** `type: gate, name: outline-approval` (Gate 1, where the
