@@ -159,14 +159,24 @@ extra_provision_command__extend = [
     # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
     # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
     "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
-    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
+    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison xmlstarlet",
     "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
     # Install latchkey CLI globally; pinned to the same version as Dockerfile's
     # LATCHKEY_VERSION ARG. Bump both together.
-    "sudo npm install -g latchkey@2.7.2",
-    "curl -LsSf https://astral.sh/uv/install.sh | sh",
+    "sudo npm install -g latchkey@2.11.3",
+    # Pin uv to the same version as the Dockerfile's UV_VERSION ARG so the
+    # workspace venv resolves identically on Lima and Docker.
+    "curl -LsSf https://astral.sh/uv/0.11.7/install.sh | sh",
     "ARCH=$(uname -m) && sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && sudo chmod +x /usr/local/bin/ttyd",
+    # Install cloudflared so the [services.cloudflared] runner in services.toml
+    # can start the agent's Cloudflare tunnel. Pinned to the same version as
+    # the Dockerfile's CLOUDFLARED_VERSION ARG.
+    "ARCH=$(dpkg --print-architecture) && sudo curl -fsSL https://github.com/cloudflare/cloudflared/releases/download/2026.3.0/cloudflared-linux-${ARCH} -o /usr/local/bin/cloudflared && sudo chmod +x /usr/local/bin/cloudflared",
     "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh",
+    # Pre-seed github.com SSH host key so unattended git operations (claude
+    # plugin installs etc.) don't block on host-key confirmation. Mirrors the
+    # Dockerfile's RUN ssh-keyscan -t rsa,ecdsa,ed25519 github.com block.
+    "mkdir -p $HOME/.ssh && chmod 700 $HOME/.ssh && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> $HOME/.ssh/known_hosts && chmod 600 $HOME/.ssh/known_hosts",
     "cd apps/system_interface/frontend && npm ci && npm run build",
     "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
     "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
