@@ -180,12 +180,20 @@ implementation tuning knob, not a separate decision.)
   backfill over evicted history, disk-reads-bounded-independent-of-N, and
   body-cache-capacity-respected-while-paging.
 - **4b (frontend): scroll-triggered backfill + in-house virtualization +
-  persistent dedup Set.** Kills the eager `runBackfillLoop`, windows the DOM,
-  fixes the O(N^2) `appendEvents`/`prependEvents`. (Absorbs the former
-  4b-pre.)
+  persistent dedup Set.** DONE. The eager `runBackfillLoop` is gone; history
+  pages in one viewport at a time when the user scrolls near the top and the
+  server reports `has_more`, with scroll-position compensation on prepend. The
+  message list is virtualized via a pure, unit-tested `computeVisibleWindow`
+  (`virtualWindow.ts`): only the viewport + overscan rows mount to the DOM,
+  heights measured from the DOM with per-type estimates and top/bottom spacers
+  for the rest, integrated with scroll-to-bottom / `userScrolledUp`.
+  `Response.ts` keeps a persistent per-agent id Set so append/prepend dedup is
+  O(1) per event. Applied to both `ChatPanel` and `SubagentView`.
 - **4c (frontend): client-side eviction** of far-offscreen events from
-  `eventsByAgent`, re-fetching via 4a's bounded backfill on scroll-back. Now
-  in scope (decision 4).
+  `eventsByAgent`. DONE. `evictOldEvents` trims the oldest events past a cap
+  (only while following the live tail, so a scrolled-up reader is never
+  disrupted) and flags `has_more` so scroll-up re-fetches via 4a's bounded
+  backfill. Bounds client JS memory for an arbitrarily long live conversation.
 
 Acceptance criteria to encode as tests:
 - Backend: backfill of *evicted* history does a bounded number of disk-read
