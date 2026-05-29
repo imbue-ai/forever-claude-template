@@ -32,15 +32,6 @@ function getBackoff(agentId: string): ReconnectBackoff {
 // eventsByAgent[agentId] does not drop them.
 const inFlightSnapshotBuffersByAgent = new Map<string, TranscriptEvent[]>();
 
-export interface StreamingMessage {
-  conversationId: string;
-  userPrompt: string;
-  model: string | null;
-  assistantContent: string;
-  finalized: boolean;
-  error: string | null;
-}
-
 export function connectToStream(agentId: string): void {
   if (activeStreams.has(agentId)) {
     return;
@@ -137,23 +128,3 @@ export function disconnectFromStream(agentId: string): void {
     activeStreams.delete(agentId);
   }
 }
-
-// Compatibility shims
-export function getStreamingMessage(_agentId: string): StreamingMessage | null {
-  return null;
-}
-
-export function isStreaming(): boolean {
-  return false;
-}
-
-export function clearStreamingMessage(): void {}
-
-export function consumeLastFinalizedMessage(): StreamingMessage | null {
-  return null;
-}
-
-export function startStreamingMessage(): void {}
-export function appendStreamingDelta(): void {}
-export function finalizeStreamingMessage(): void {}
-export function markStreamingError(): void {}

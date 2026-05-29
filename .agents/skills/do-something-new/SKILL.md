@@ -55,8 +55,15 @@ running any `latchkey` command), then run:
 
 ```bash
 latchkey services list --viable
-latchkey services info <svc>   # for any obviously-involved service
+latchkey services info <svc>   # REQUIRED for each obviously-involved service
 ```
+
+Running `info` on the involved service(s) is essential -- `list --viable`
+only shows services that *could* be authenticated (either credentials exist
+*or* a browser auth flow is available); it does not tell you whether the
+specific service the user needs is already set up. You must run `info` on
+each involved service to see the actual current credential state (and to
+know whether you'll need to trigger an auth flow in Step 4).
 
 For services not covered by latchkey, do 1-2 web/docs searches. Stop as soon
 as you have enough to propose a plausible plan.
@@ -97,6 +104,15 @@ latency without de-risking. If no, validate it now.
 
 For multi-service asks, validate each uncontrolled dependency independently
 *first*, then the combined operation.
+
+**If latchkey is involved in any component of the task, authenticate and test
+it first -- before anything else.** Even if the latchkey-backed piece is a
+small part of a larger pipeline, get it working end-to-end (auth flow
+completed, a real API call succeeds) before building any other component.
+Latchkey auth is the single most common source of late-stage failure in this
+flow; failing fast on it avoids wasted work on downstream components that
+would have to be discarded if auth turns out to be unavailable for that
+service.
 
 - Latchkey setup is part of the normal flow, NOT a failure. Follow the
   `latchkey` skill for auth/permission handling -- load it if you haven't
