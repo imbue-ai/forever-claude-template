@@ -11,6 +11,8 @@ import json
 import re
 from typing import Any
 
+from imbue.system_interface.claude_auth_patterns import is_auth_error_text
+
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
@@ -225,6 +227,7 @@ def _parse_assistant_message(
             "cache_write_tokens": usage_raw.get("cache_creation_input_tokens"),
         }
 
+    joined_text = "\n".join(text_parts)
     event: dict[str, Any] = {
         "timestamp": timestamp,
         "type": "assistant_message",
@@ -232,11 +235,12 @@ def _parse_assistant_message(
         "source": _SOURCE,
         "role": "assistant",
         "model": model,
-        "text": "\n".join(text_parts),
+        "text": joined_text,
         "tool_calls": tool_calls,
         "stop_reason": stop_reason,
         "usage": usage,
         "message_uuid": uuid,
+        "is_auth_error": is_auth_error_text(joined_text),
     }
     if session_id is not None:
         event["session_id"] = session_id

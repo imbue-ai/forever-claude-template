@@ -19,6 +19,49 @@ export function isCollapsibleUserMessage(content: string): { label: string } | n
   return null;
 }
 
+/**
+ * Hide auth-error turns from the pre-login prefix once login has recovered.
+ *
+ * A fresh chat with no Claude credentials produces a run of "Not logged in"
+ * assistant messages before the user authenticates. Once login succeeds and
+ * /welcome is resent, the first visible turn should be the friendly greeting,
+ * not the prior failed attempts.
+ *
+ * Restricted to the PREFIX of the transcript (turns that occurred before any
+ * successful assistant message). A mid-session token expiration -- where the
+ * user has already had successful exchanges before the auth error -- is left
+ * intact, since the user may want to scroll back to see what they were doing.
+ */
+export function computeAuthErrorHiddenEventIds(events: TranscriptEvent[]): Set<string> {
+  const hidden = new Set<string>();
+
+  let firstSuccessIdx = -1;
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    if (ev.type === "assistant_message" && ev.is_auth_error !== true) {
+      firstSuccessIdx = i;
+      break;
+    }
+  }
+  if (firstSuccessIdx === -1) return hidden;
+
+  for (let i = 0; i < firstSuccessIdx; i++) {
+    const ev = events[i];
+    if (ev.type !== "assistant_message" || ev.is_auth_error !== true) continue;
+    hidden.add(ev.event_id);
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = events[j];
+      if (prev.type === "user_message") {
+        hidden.add(prev.event_id);
+        break;
+      }
+      if (prev.type === "assistant_message") break;
+    }
+  }
+
+  return hidden;
+}
+
 export function isHiddenUserMessage(content: string): boolean {
   // The minds desktop client seeds every new agent with "/welcome" as its
   // initial message so the welcome skill can produce a friendly greeting.

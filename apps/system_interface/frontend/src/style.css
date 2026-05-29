@@ -1431,3 +1431,563 @@ body {
 }
 
 /* share-modal-btn-create uses the base .share-modal-btn styling (dark button) */
+
+/* === Claude login modal === */
+
+@keyframes claude-login-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes claude-login-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes claude-login-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.claude-login-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(20, 20, 20, 0.45);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  animation: claude-login-overlay-in 150ms ease-out;
+}
+
+.claude-login-modal {
+  position: relative;
+  background: var(--color-surface);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 460px;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.06),
+    0 16px 40px rgba(0, 0, 0, 0.18);
+  animation: claude-login-modal-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.claude-login-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--color-border-faint);
+}
+
+.claude-login-title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0;
+  letter-spacing: -0.005em;
+}
+
+.claude-login-close {
+  background: transparent;
+  border: none;
+  width: 28px;
+  height: 28px;
+  margin: -4px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background 100ms ease,
+    color 100ms ease;
+}
+
+.claude-login-close:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.claude-login-close:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.claude-login-body {
+  padding: 18px 22px 4px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.claude-login-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 22px 18px;
+  border-top: 1px solid var(--color-border-faint);
+}
+
+.claude-login-footer--spread {
+  justify-content: space-between;
+}
+
+/* One-line intro shown above a form's inputs */
+.claude-login-lead {
+  color: var(--color-text-secondary);
+  margin: 0 0 18px;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+/* Provider selection: prominent subscription block + collapsed alternatives */
+.claude-login-select {
+  margin-bottom: 8px;
+}
+
+.claude-login-primary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 4px 4px 2px;
+}
+
+.claude-login-logo {
+  width: 46px;
+  height: 46px;
+  fill: hsl(14.8, 63.1%, 59.6%);
+  margin-bottom: 12px;
+}
+
+.claude-login-primary-headline {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0 0 4px;
+  letter-spacing: -0.005em;
+}
+
+.claude-login-primary-sub {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin: 0 auto 16px;
+  max-width: 320px;
+}
+
+/* "Other ways to sign in" disclosure */
+.claude-login-alts {
+  margin-top: 14px;
+  border-top: 1px solid var(--color-border-faint);
+  padding-top: 12px;
+}
+
+.claude-login-alts-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 auto;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.claude-login-alts-toggle:hover {
+  color: var(--color-text-primary);
+}
+
+.claude-login-alts-toggle:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.claude-login-alts-caret {
+  display: inline-flex;
+  transition: transform 120ms ease;
+}
+
+.claude-login-alts-caret--open {
+  transform: rotate(180deg);
+}
+
+.claude-login-alts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.claude-login-alt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition:
+    border-color 100ms ease,
+    box-shadow 100ms ease;
+}
+
+.claude-login-alt:hover {
+  border-color: var(--color-accent);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+}
+
+.claude-login-alt:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.claude-login-alt-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.claude-login-alt-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.claude-login-alt-desc {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.claude-login-alt-go {
+  display: flex;
+  flex: none;
+  color: var(--color-text-faint);
+  transition: color 100ms ease;
+}
+
+.claude-login-alt:hover .claude-login-alt-go {
+  color: var(--color-accent);
+}
+
+/* Numbered steps (OAuth flow) */
+.claude-login-step {
+  margin-bottom: 16px;
+}
+
+.claude-login-step:last-child {
+  margin-bottom: 0;
+}
+
+.claude-login-step-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 8px;
+}
+
+.claude-login-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+/* "Copy the link" fallback under the Open-sign-in-page button */
+.claude-login-copylink {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+  margin: 9px 0 0;
+}
+
+.claude-login-copylink-action {
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.claude-login-copylink-action:hover {
+  color: var(--color-accent-hover);
+}
+
+.claude-login-copylink-action:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Raw OAuth URL fallback, shown when the clipboard write was rejected. */
+.claude-login-rawurl {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  font-family: var(--font-family-mono);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-text-primary);
+  word-break: break-all;
+  user-select: all;
+}
+
+.claude-login-rawurl:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* Inputs */
+.claude-login-field {
+  display: flex;
+  flex-direction: column;
+}
+
+.claude-login-input-wrap {
+  position: relative;
+  display: flex;
+}
+
+.claude-login-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 0.875rem;
+  color: var(--color-text-primary);
+  background: var(--color-surface);
+  transition:
+    border-color 80ms ease,
+    box-shadow 80ms ease;
+  font-family: inherit;
+}
+
+.claude-login-input--mono {
+  font-family: var(--font-family-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.01em;
+}
+
+.claude-login-input--with-action {
+  padding-right: 64px;
+}
+
+.claude-login-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(47, 107, 79, 0.15);
+}
+
+.claude-login-input-action {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.claude-login-input-action:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+
+.claude-login-helper {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* Buttons */
+.claude-login-button {
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 80ms ease,
+    border-color 80ms ease;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: inherit;
+}
+
+.claude-login-button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.claude-login-button--ghost {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+}
+
+.claude-login-button--ghost:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.claude-login-button--primary {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
+}
+
+.claude-login-button--primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.claude-login-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Full-width button (subscription CTA, "Open sign-in page") */
+.claude-login-button--block {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  padding: 10px 16px;
+}
+
+/* An <a> styled as a button -- strip link decoration */
+.claude-login-button--link {
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
+/* Inline error callout */
+.claude-login-error-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #fdecea;
+  border: 1px solid #f4c7c3;
+  border-radius: 8px;
+  color: #80261f;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  margin-bottom: 14px;
+}
+
+.claude-login-error-callout svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+/* Full-bleed status state (verifying / success / error) */
+.claude-login-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 16px 8px 8px;
+}
+
+.claude-login-status-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+
+.claude-login-status-icon--success {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+}
+
+.claude-login-status-icon--error {
+  background: #fdecea;
+  color: #c5221f;
+}
+
+.claude-login-status-icon--loading {
+  background: transparent;
+  color: var(--color-accent);
+}
+
+.claude-login-status-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 4px;
+}
+
+.claude-login-status-detail {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+  max-width: 320px;
+}
+
+.claude-login-spinner {
+  width: 32px;
+  height: 32px;
+  animation: claude-login-spin 800ms linear infinite;
+}

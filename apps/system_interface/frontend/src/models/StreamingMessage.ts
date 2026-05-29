@@ -8,6 +8,7 @@
 
 import { apiUrl } from "../base-path";
 import { appendEvents, fetchEvents, type TranscriptEvent } from "./Response";
+import { openLoginModal } from "./ClaudeAuth";
 
 const activeStreams = new Map<string, EventSource>();
 // Set so an error-triggered reconnect timeout can tell an intentional close
@@ -16,6 +17,15 @@ const explicitlyDisconnectedAgents = new Set<string>();
 // Holds SSE deltas that arrive while a reconnect-time snapshot fetch is in
 // flight, so fetchEvents replacing eventsByAgent[agentId] does not drop them.
 const inFlightSnapshotBuffersByAgent = new Map<string, TranscriptEvent[]>();
+
+// Claude auth is mind-global, so an auth-error on any agent's stream
+// opens the single shared login modal (see models/ClaudeAuth.ts) -- no
+// per-agent routing needed.
+function openLoginModalIfAuthError(event: TranscriptEvent): void {
+  if (event.type === "assistant_message" && event.is_auth_error === true) {
+    openLoginModal();
+  }
+}
 
 export interface StreamingMessage {
   conversationId: string;
@@ -45,6 +55,7 @@ export function connectToStream(agentId: string): void {
     } else {
       appendEvents(agentId, [event]);
     }
+    openLoginModalIfAuthError(event);
   };
 
   eventSource.onerror = () => {

@@ -20,10 +20,11 @@ import {
 } from "../models/Response";
 import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
+import { openLoginModal } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import { renderUserMessage, renderAssistantMessage } from "./message-renderers";
+import { renderUserMessage, renderAssistantMessage, computeAuthErrorHiddenEventIds } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
 
 function getAgentTerminalUrl(agentId: string): string {
@@ -69,6 +70,28 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let userScrolledUp = false;
   let previousScrollTop = 0;
   let backfillStarted = false;
+
+  // Snapshot-load path: SSE only carries events emitted after subscription,
+  // so an auth-error that happened before the user opened the panel (e.g.
+  // the auto-`/welcome` failing during fresh mind creation) wouldn't open
+  // the modal otherwise. Walking back to the last assistant_message means
+  // an already-recovered agent (whose history contains old auth errors
+  // but has since produced healthy replies) does not open it on reload --
+  // only an agent whose current state is broken does. The modal itself is
+  // a single app-level instance driven by global auth state (see
+  // models/ClaudeAuth.ts), so this just flips that shared flag.
+  function checkLatestAssistantForAuthError(agentId: string): void {
+    const events = getEventsForAgent(agentId);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.type === "assistant_message") {
+        if (event.is_auth_error === true) {
+          openLoginModal();
+        }
+        return;
+      }
+    }
+  }
 
   // Screen capture state (shown when agent has no conversation)
   let screenContent: string | null = null;
@@ -198,6 +221,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       if (agentId === currentAgentId) {
         loading = false;
         loadingError = null;
+        checkLatestAssistantForAuthError(agentId);
       }
     } catch (error) {
       if (agentId === currentAgentId) {
@@ -371,8 +395,10 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       }
     }
 
+    const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
     const messageNodes: m.Vnode[] = [];
     for (const event of events) {
+      if (hiddenEventIds.has(event.event_id)) continue;
       if (event.type === "user_message") {
         const userNode = renderUserMessage(event);
         if (userNode !== null) {
@@ -403,7 +429,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     view(vnode) {
       const agentId = vnode.attrs.agentId;
 
-      return m("div", { class: "chat-panel flex flex-col h-full" }, [
+      return m("div", { class: "chat-panel flex flex-col h-full relative" }, [
         m(
           "main",
           {
