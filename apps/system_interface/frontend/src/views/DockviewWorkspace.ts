@@ -907,15 +907,22 @@ function initializeDockview(parentElement: HTMLElement): void {
         panelParams.clear();
       }
       savedHadAnyPanels = dv.panels.length > 0;
-      // Strip any panels that point at the is_primary services agent.
+      // Strip any chat panels that point at the is_primary services agent.
       // Older saved layouts (or layouts saved by the previous code path
       // that auto-opened the primary agent's chat) may carry a chat-
       // <services-agent-id> panel; we don't want to surface that ever.
+      //
+      // This MUST be limited to chat panels. Iframe tabs (terminals,
+      // applications, custom URLs) opened via openIframeTab() set
+      // `agentId` to the primary agent id as a placeholder owner, so a
+      // bare `agentId === primaryId` check would wrongly strip every
+      // terminal/application/URL tab on each restore.
       const primaryId = getPrimaryAgentId();
       if (primaryId) {
         for (const panel of dv.panels.slice()) {
           const params = panelParams.get(panel.id);
-          const targetId = params?.chatAgentId ?? params?.agentId;
+          if (params?.panelType !== "chat") continue;
+          const targetId = params.chatAgentId ?? params.agentId;
           if (targetId === primaryId) {
             dv.removePanel(panel);
           }

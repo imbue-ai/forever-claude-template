@@ -115,6 +115,15 @@ def _build_stub_backend() -> FastAPI:
         except WebSocketDisconnect:
             connected = False
 
+    @stub.websocket("/ws-server-close")
+    async def ws_server_close(websocket: WebSocket) -> None:
+        # Accept then immediately close from the backend side, without the
+        # client ever sending anything. Exercises the proxy path where the
+        # backend->client direction finishes first while client->backend is
+        # still parked on receive().
+        await websocket.accept()
+        await websocket.close()
+
     return stub
 
 
@@ -277,6 +286,19 @@ def test_websocket_echo_forwards_bidirectionally(workspace_client: TestClient) -
         assert ws.receive_text() == "echo:hello"
         ws.send_text("world")
         assert ws.receive_text() == "echo:world"
+
+
+@pytest.mark.timeout(15)
+def test_websocket_backend_close_propagates_to_client(workspace_client: TestClient) -> None:
+    """When the backend WS closes first, the proxy must cancel the still-parked
+    client->backend direction and close the client socket rather than hanging
+    forever (issue E)."""
+    with pytest.raises(WebSocketDisconnect):
+        with workspace_client.websocket_connect("/service/web/ws-server-close") as ws:
+            # The client never sends; without the survivor-cancel fix the proxy
+            # would stay blocked on the client->backend receive() and this
+            # receive would hang until the test timeout instead of disconnecting.
+            ws.receive_text()
 
 
 def test_websocket_unknown_service_closes_with_4004(workspace_client: TestClient) -> None:
