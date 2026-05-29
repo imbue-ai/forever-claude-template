@@ -26,12 +26,7 @@ from host_backup.config import (
 )
 from host_backup.events import BackupEventType, make_event, write_event
 from host_backup.restic import backup as restic_backup
-from host_backup.restic import (
-    extract_snapshot_id_from_backup_output,
-    init_repo,
-    is_repo_missing_error,
-    probe_repo,
-)
+from host_backup.restic import extract_snapshot_id_from_backup_output
 from host_backup.restic import forget as restic_forget
 from host_backup.restic import prune as restic_prune
 from host_backup.snapshot import SnapshotError, SnapshotResult, make_snapshot_taker
@@ -197,20 +192,14 @@ def _run_one_tick(
         ),
     )
 
-    env = _check_secrets_present(state=state, config=config)
+    env = _check_secrets_present(state=state)
     if env is None:
         return
-    # restic.env is the overlay restic runs with: it carries RESTIC_REPOSITORY
-    # plus every credential restic reads from the environment. No URL is
-    # constructed here -- the repository address comes straight from the file.
+    # restic.env is the overlay restic runs with: RESTIC_REPOSITORY plus every
+    # credential restic reads from the environment. The repository is created
+    # (and keyed) by the minds app, so host_backup just backs up to it -- it
+    # never probes-then-inits the repo itself.
     env_overrides = dict(env)
-    is_insecure_no_password = config.restic.allow_empty_password
-    if not _ensure_repo_exists(
-        state=state,
-        env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
-    ):
-        return
     snapshot_result = _take_snapshot(state=state, config=config)
     if snapshot_result is None:
         return
@@ -220,24 +209,13 @@ def _run_one_tick(
             config=config,
             snapshot=snapshot_result,
             env_overrides=env_overrides,
-            is_insecure_no_password=is_insecure_no_password,
         )
     finally:
         _cleanup_snapshot(state=state, config=config, snapshot=snapshot_result)
     if not backup_succeeded:
         return
-    _run_forget(
-        state=state,
-        config=config,
-        env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
-    )
-    _maybe_run_prune(
-        state=state,
-        config=config,
-        env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
-    )
+    _run_forget(state=state, config=config, env_overrides=env_overrides)
+    _maybe_run_prune(state=state, config=config, env_overrides=env_overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -245,14 +223,10 @@ def _run_one_tick(
 # ---------------------------------------------------------------------------
 
 
-def _check_secrets_present(
-    *, state: _LoopState, config: BackupConfig
-) -> dict[str, str] | None:
+def _check_secrets_present(*, state: _LoopState) -> dict[str, str] | None:
     """Load restic.env and confirm all required keys are non-empty."""
     env = load_restic_env()
-    missing = missing_required_restic_keys(
-        env, allow_empty_password=config.restic.allow_empty_password
-    )
+    missing = missing_required_restic_keys(env)
     if missing:
         write_event(
             state.events_dir,
@@ -265,51 +239,6 @@ def _check_secrets_present(
         logger.warning("Skipping tick: missing required restic.env keys: {}", missing)
         return None
     return env
-
-
-def _ensure_repo_exists(
-    *,
-    state: _LoopState,
-    env_overrides: Mapping[str, str],
-    is_insecure_no_password: bool,
-) -> bool:
-    """Probe the repo; init it if missing. Returns False on any non-missing error."""
-    probe = probe_repo(env_overrides, is_insecure_no_password=is_insecure_no_password)
-    if probe.returncode == 0:
-        return True
-    if not is_repo_missing_error(probe.stderr):
-        logger.warning(
-            "restic cat config failed (rc={}): {}",
-            probe.returncode,
-            probe.stderr.strip(),
-        )
-        return False
-    repo_url = env_overrides.get("RESTIC_REPOSITORY", "")
-    write_event(
-        state.events_dir,
-        make_event(
-            BackupEventType.REPO_INIT_ATTEMPTED,
-            tick_id=state.current_tick_id,
-            repository_url=repo_url,
-        ),
-    )
-    init = init_repo(env_overrides, is_insecure_no_password=is_insecure_no_password)
-    if init.returncode != 0:
-        logger.warning(
-            "restic init failed (rc={}): {}", init.returncode, init.stderr.strip()
-        )
-        return False
-    write_event(
-        state.events_dir,
-        make_event(
-            BackupEventType.REPO_INIT_SUCCEEDED,
-            tick_id=state.current_tick_id,
-            repository_url=repo_url,
-            stdout=init.stdout,
-            stderr=init.stderr,
-        ),
-    )
-    return True
 
 
 def _take_snapshot(*, state: _LoopState, config: BackupConfig) -> SnapshotResult | None:
@@ -375,7 +304,6 @@ def _run_restic_backup(
     config: BackupConfig,
     snapshot: SnapshotResult,
     env_overrides: Mapping[str, str],
-    is_insecure_no_password: bool,
 ) -> bool:
     """Run `restic backup` against the snapshot; emit success or failure event."""
     tag = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -385,7 +313,6 @@ def _run_restic_backup(
         excludes=config.excludes,
         tag=tag,
         env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
     )
     duration = time.monotonic() - start
     if result.returncode != 0:
@@ -426,7 +353,6 @@ def _run_forget(
     state: _LoopState,
     config: BackupConfig,
     env_overrides: Mapping[str, str],
-    is_insecure_no_password: bool,
 ) -> None:
     """Run `restic forget` (no prune); always emit FORGET_COMPLETED."""
     start = time.monotonic()
@@ -436,7 +362,6 @@ def _run_forget(
         keep_weekly=config.retention.keep_weekly,
         keep_monthly=config.retention.keep_monthly,
         env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
     )
     duration = time.monotonic() - start
     write_event(
@@ -461,7 +386,6 @@ def _maybe_run_prune(
     state: _LoopState,
     config: BackupConfig,
     env_overrides: Mapping[str, str],
-    is_insecure_no_password: bool,
 ) -> None:
     """Run `restic prune` iff the gate file is older than prune_interval_hours."""
     interval_seconds = config.retention.prune_interval_hours * 3600.0
@@ -481,9 +405,7 @@ def _maybe_run_prune(
             )
             return
     start = time.monotonic()
-    result = restic_prune(
-        env_overrides, is_insecure_no_password=is_insecure_no_password
-    )
+    result = restic_prune(env_overrides)
     duration = time.monotonic() - start
     write_event(
         state.events_dir,

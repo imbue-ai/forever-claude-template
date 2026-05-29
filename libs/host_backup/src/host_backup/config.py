@@ -97,25 +97,6 @@ class SnapshotSettings(FrozenModel):
     )
 
 
-class ResticSettings(FrozenModel):
-    """Non-secret restic knobs.
-
-    The repository address and every credential live in restic.env, not
-    here: restic reads `RESTIC_REPOSITORY` (and `RESTIC_PASSWORD` plus any
-    backend creds like `AWS_ACCESS_KEY_ID`) straight from the environment.
-    This section only carries non-secret toggles.
-    """
-
-    allow_empty_password: bool = Field(
-        default=False,
-        description=(
-            "When true, restic is invoked with --insecure-no-password so the "
-            "repository can use an empty password (RESTIC_PASSWORD unset). When "
-            "false (the default), restic requires RESTIC_PASSWORD."
-        ),
-    )
-
-
 class RetentionSettings(FrozenModel):
     """Restic forget retention policy."""
 
@@ -156,10 +137,6 @@ class BackupConfig(FrozenModel):
         description="Mtime poll interval for backup.toml + restic.env",
     )
     snapshot: SnapshotSettings = Field(description="Snapshot mechanism + paths")
-    restic: ResticSettings = Field(
-        default_factory=ResticSettings,
-        description="Non-secret restic knobs (repository + creds live in restic.env)",
-    )
     retention: RetentionSettings = Field(default_factory=RetentionSettings)
     excludes: tuple[str, ...] = Field(
         default=(
@@ -229,25 +206,17 @@ def load_restic_env(path: Path = RESTIC_ENV_PATH) -> dict[str, str]:
         raise BackupConfigError(f"Failed to read {path}: {e}") from e
 
 
-def missing_required_restic_keys(
-    env: dict[str, str], *, allow_empty_password: bool
-) -> list[str]:
+def missing_required_restic_keys(env: dict[str, str]) -> list[str]:
     """Return the restic.env keys that must be present before a backup can run.
 
-    `RESTIC_REPOSITORY` is always required (it is the only source of the
-    repository address). `RESTIC_PASSWORD` is required unless
-    `allow_empty_password` is set, in which case restic runs with
-    --insecure-no-password. Backend credentials (e.g. `AWS_*`) are
-    intentionally not required here: which ones are needed depends on the
-    `RESTIC_REPOSITORY` backend, so restic itself reports a clear error if
-    a required one is missing.
+    `RESTIC_REPOSITORY` (the only source of the repository address) and
+    `RESTIC_PASSWORD` are both required -- minds always provisions a
+    per-workspace password, so the repo is never empty-password here. Backend
+    credentials (e.g. `AWS_*`) are intentionally not required: which ones are
+    needed depends on the `RESTIC_REPOSITORY` backend, so restic itself
+    reports a clear error if a required one is missing.
     """
-    missing: list[str] = []
-    if not env.get("RESTIC_REPOSITORY"):
-        missing.append("RESTIC_REPOSITORY")
-    if not allow_empty_password and not env.get("RESTIC_PASSWORD"):
-        missing.append("RESTIC_PASSWORD")
-    return missing
+    return [key for key in ("RESTIC_REPOSITORY", "RESTIC_PASSWORD") if not env.get(key)]
 
 
 def get_events_dir() -> Path | None:
@@ -279,16 +248,16 @@ def write_default_restic_env_template(path: Path = RESTIC_ENV_PATH) -> bool:
 
 _DEFAULT_RESTIC_ENV_TEMPLATE: Final[str] = """# Restic backup repository + secrets.
 #
-# host_backup will not run until RESTIC_REPOSITORY is set (and, unless
-# backup.toml sets restic.allow_empty_password = true, RESTIC_PASSWORD too).
+# In the minds app this whole file is written for you when you pick a backup
+# provider on the create form; you should not need to edit it by hand.
+#
+# host_backup will not run until both RESTIC_REPOSITORY and RESTIC_PASSWORD
+# are set.
 #
 # RESTIC_REPOSITORY is the repository address restic backs up to, e.g.
 # 's3:https://<account>.r2.cloudflarestorage.com/<bucket>' for Cloudflare R2.
 #
-# RESTIC_PASSWORD is your repository encryption passphrase. Pick a long
-# random value and STORE IT SOMEWHERE OUTSIDE THIS WORKSPACE. If you lose
-# it, your backups are unrecoverable. (To use an empty password instead,
-# leave this unset and set restic.allow_empty_password = true in backup.toml.)
+# RESTIC_PASSWORD is this workspace's repository password.
 #
 # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are the credentials for an
 # S3/R2 backend. Other backends read other env vars -- see
@@ -320,19 +289,12 @@ def render_default_backup_toml(snapshot: SnapshotSettings) -> str:
     snapshot_table = _snapshot_to_toml_table(snapshot)
     doc["snapshot"] = snapshot_table
 
-    restic_table = tomlkit.table()
-    restic_table.add(
+    doc.add(
         tomlkit.comment(
-            "Set RESTIC_REPOSITORY (+ RESTIC_PASSWORD and backend creds) in runtime/secrets/restic.env."
+            "Repository + credentials live in runtime/secrets/restic.env (RESTIC_REPOSITORY,"
         )
     )
-    restic_table.add(
-        tomlkit.comment(
-            "allow_empty_password = true runs restic with --insecure-no-password (no RESTIC_PASSWORD)."
-        )
-    )
-    restic_table["allow_empty_password"] = False
-    doc["restic"] = restic_table
+    doc.add(tomlkit.comment("RESTIC_PASSWORD, and any backend creds), not here."))
 
     retention = tomlkit.table()
     retention["keep_hourly"] = 24

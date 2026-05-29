@@ -94,7 +94,7 @@ def test_load_restic_env_reads_existing(tmp_path: Path) -> None:
 
 
 def test_missing_required_restic_keys_reports_repo_and_password_when_empty() -> None:
-    assert sorted(missing_required_restic_keys({}, allow_empty_password=False)) == [
+    assert sorted(missing_required_restic_keys({})) == [
         "RESTIC_PASSWORD",
         "RESTIC_REPOSITORY",
     ]
@@ -107,32 +107,19 @@ def test_missing_required_restic_keys_reports_empty_when_repo_and_password_set()
         "RESTIC_REPOSITORY": "s3:https://acct.r2.cloudflarestorage.com/bucket",
         "RESTIC_PASSWORD": "p",
     }
-    assert missing_required_restic_keys(env, allow_empty_password=False) == []
+    assert missing_required_restic_keys(env) == []
 
 
 def test_missing_required_restic_keys_does_not_require_aws_creds() -> None:
     # Backend creds are not gated here; restic reports its own error if a
     # given backend needs one. Only repo + password are required.
     env = {"RESTIC_REPOSITORY": "s3:host/bucket", "RESTIC_PASSWORD": "p"}
-    assert missing_required_restic_keys(env, allow_empty_password=False) == []
+    assert missing_required_restic_keys(env) == []
 
 
 def test_missing_required_restic_keys_treats_empty_value_as_missing() -> None:
     env = {"RESTIC_REPOSITORY": "", "RESTIC_PASSWORD": "p"}
-    assert missing_required_restic_keys(env, allow_empty_password=False) == [
-        "RESTIC_REPOSITORY",
-    ]
-
-
-def test_missing_required_restic_keys_skips_password_when_empty_allowed() -> None:
-    env = {"RESTIC_REPOSITORY": "s3:host/bucket"}
-    assert missing_required_restic_keys(env, allow_empty_password=True) == []
-
-
-def test_missing_required_restic_keys_still_requires_repo_when_empty_allowed() -> None:
-    assert missing_required_restic_keys({}, allow_empty_password=True) == [
-        "RESTIC_REPOSITORY",
-    ]
+    assert missing_required_restic_keys(env) == ["RESTIC_REPOSITORY"]
 
 
 # --- write_default_restic_env_template ---
@@ -174,22 +161,14 @@ def test_render_default_backup_toml_parses_into_valid_config() -> None:
     assert config.snapshot.trigger_dir == Path("/mngr-snapshot")
     assert config.retention.keep_hourly == 24
     assert "**/.venv" in config.excludes
-    # The repo URL is no longer in backup.toml; only the empty-password knob
-    # lives in [restic], defaulting to false.
-    assert config.restic.allow_empty_password is False
+    # The repository + credentials live in restic.env, not backup.toml; the
+    # default document carries no [restic] section.
+    assert "restic" not in parsed
 
 
-def test_backup_config_allow_empty_password_round_trips() -> None:
-    rendered = render_default_backup_toml(_direct_snapshot())
-    doc = tomlkit.parse(rendered)
-    doc["restic"]["allow_empty_password"] = True
-    config = BackupConfig.model_validate(tomllib.loads(tomlkit.dumps(doc)))
-    assert config.restic.allow_empty_password is True
-
-
-def test_backup_config_defaults_restic_when_section_omitted() -> None:
+def test_backup_config_loads_without_restic_section() -> None:
     config = BackupConfig(snapshot=_direct_snapshot())
-    assert config.restic.allow_empty_password is False
+    assert config.snapshot.method == SnapshotMethod.DIRECT
 
 
 # --- merge_snapshot_into_existing_toml ---
@@ -197,10 +176,9 @@ def test_backup_config_defaults_restic_when_section_omitted() -> None:
 
 def test_merge_snapshot_into_existing_toml_preserves_user_fields() -> None:
     existing = render_default_backup_toml(_direct_snapshot())
-    # User edits retention + the empty-password knob.
+    # User edits retention.
     existing_doc = tomlkit.parse(existing)
     existing_doc["retention"]["keep_hourly"] = 48
-    existing_doc["restic"]["allow_empty_password"] = True
     user_edited = tomlkit.dumps(existing_doc)
 
     merged = merge_snapshot_into_existing_toml(user_edited, _outer_trigger_snapshot())
@@ -210,7 +188,6 @@ def test_merge_snapshot_into_existing_toml_preserves_user_fields() -> None:
     assert parsed["snapshot"]["trigger_dir"] == "/mngr-snapshot"
     # User edits are preserved:
     assert parsed["retention"]["keep_hourly"] == 48
-    assert parsed["restic"]["allow_empty_password"] is True
 
 
 def test_merge_snapshot_into_existing_toml_drops_optional_paths_for_direct() -> None:

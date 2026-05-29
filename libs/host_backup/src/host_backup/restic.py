@@ -31,22 +31,13 @@ def run_restic(
     args: tuple[str, ...],
     *,
     env_overrides: Mapping[str, str],
-    is_insecure_no_password: bool = False,
     timeout_seconds: float = _RESTIC_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
-    """Run `restic <args...>` with `env_overrides` merged onto `os.environ`.
-
-    When `is_insecure_no_password` is set, the global --insecure-no-password
-    flag is inserted before the subcommand so restic operates on a repo with
-    an empty password without prompting.
-    """
+    """Run `restic <args...>` with `env_overrides` merged onto `os.environ`."""
     env = dict(os.environ)
     env.update(env_overrides)
-    global_flags: tuple[str, ...] = (
-        ("--insecure-no-password",) if is_insecure_no_password else ()
-    )
     return subprocess.run(
-        ["restic", *global_flags, *args],
+        ["restic", *args],
         capture_output=True,
         text=True,
         check=False,
@@ -57,30 +48,16 @@ def run_restic(
 
 def probe_repo(
     env_overrides: Mapping[str, str],
-    *,
-    is_insecure_no_password: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """`restic cat config` -- cheap probe; nonzero exit indicates missing repo or bad creds."""
     return run_restic(
-        ("cat", "config"),
-        env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
-        timeout_seconds=60.0,
+        ("cat", "config"), env_overrides=env_overrides, timeout_seconds=60.0
     )
 
 
-def init_repo(
-    env_overrides: Mapping[str, str],
-    *,
-    is_insecure_no_password: bool = False,
-) -> subprocess.CompletedProcess[str]:
+def init_repo(env_overrides: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
     """`restic init` -- create the repo on the remote backend."""
-    return run_restic(
-        ("init",),
-        env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
-        timeout_seconds=120.0,
-    )
+    return run_restic(("init",), env_overrides=env_overrides, timeout_seconds=120.0)
 
 
 def backup(
@@ -88,18 +65,12 @@ def backup(
     excludes: tuple[str, ...],
     tag: str,
     env_overrides: Mapping[str, str],
-    *,
-    is_insecure_no_password: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """`restic backup --json <source> --tag <tag> [--exclude=<glob>...]`."""
     args: list[str] = ["backup", "--json", str(source_path), "--tag", tag]
     for pattern in excludes:
         args.append(f"--exclude={pattern}")
-    return run_restic(
-        tuple(args),
-        env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
-    )
+    return run_restic(tuple(args), env_overrides=env_overrides)
 
 
 def forget(
@@ -109,7 +80,6 @@ def forget(
     keep_weekly: int,
     keep_monthly: int,
     env_overrides: Mapping[str, str],
-    is_insecure_no_password: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """`restic forget --keep-* ...` (does not prune)."""
     args = (
@@ -123,25 +93,12 @@ def forget(
         "--keep-monthly",
         str(keep_monthly),
     )
-    return run_restic(
-        args,
-        env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
-        timeout_seconds=600.0,
-    )
+    return run_restic(args, env_overrides=env_overrides, timeout_seconds=600.0)
 
 
-def prune(
-    env_overrides: Mapping[str, str],
-    *,
-    is_insecure_no_password: bool = False,
-) -> subprocess.CompletedProcess[str]:
+def prune(env_overrides: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
     """`restic prune` -- actually delete data referenced by no remaining snapshot."""
-    return run_restic(
-        ("prune",),
-        env_overrides=env_overrides,
-        is_insecure_no_password=is_insecure_no_password,
-    )
+    return run_restic(("prune",), env_overrides=env_overrides)
 
 
 def extract_snapshot_id_from_backup_output(stdout: str) -> str:
