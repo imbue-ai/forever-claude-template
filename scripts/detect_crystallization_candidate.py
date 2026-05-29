@@ -40,11 +40,9 @@ from typing import Any
 def _load_transcript_parsing() -> Any:
     """Load the shared transcript_parsing module from .agents/shared/scripts/.
 
-    The module lives under ``.agents/shared/scripts/`` so any worker script
-    (e.g. ``extract_turn.py``) can import it as a sibling and any top-level
-    hook can locate it at a fixed shared path. From this top-level hook we
-    load it via importlib because the directory is not on the default import
-    path.
+    The module lives under ``.agents/shared/scripts/`` so it sits at a fixed
+    shared path that this top-level hook can locate. We load it via importlib
+    because the directory is not on the default import path.
     """
     workdir = os.environ.get("MNGR_AGENT_WORK_DIR")
     base = Path(workdir) if workdir else Path(__file__).resolve().parent.parent
@@ -323,10 +321,9 @@ def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
     """Index of the event that prompted the agent's most recent response.
 
     This is the most recent ``type: user`` event that is NOT a tool_result
-    carrier. Unlike ``last_user_message_index`` in ``transcript_parsing``,
-    this deliberately includes ``isMeta: true`` events (e.g. Stop-hook
-    re-injections): those also prompt a fresh assistant response, so the
-    tool-use count for "the turn that just finished" should reset at them.
+    carrier. ``isMeta: true`` events (e.g. Stop-hook re-injections) are
+    deliberately included: those also prompt a fresh assistant response, so
+    the tool-use count for "the turn that just finished" should reset at them.
     """
     for index in range(len(events) - 1, -1, -1):
         event = events[index]

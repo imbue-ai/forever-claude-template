@@ -6,10 +6,12 @@ enum of allowed `name:` values.
 
 ## Task-file inputs
 
-Your task file has been synced to your worktree alongside the replay artifact
-(`turn.jsonl` for `absorb`, `crystallize`, and `heal` flows; `commit.diff` for
-the `verify` flow) at `<RUNTIME_DIR>/task.md`. At the start of your run,
-validate its frontmatter and extract the three required fields with:
+Your task file has been synced to your worktree at `<RUNTIME_DIR>/task.md`.
+The `verify` flow also stages `commit.diff` / `commit.log` alongside it; the
+`absorb`, `crystallize`, and `heal` flows expect you to read the lead's
+transcript directly via `mngr transcript <lead_agent>` (see each worker
+SKILL.md for the locate-the-incident procedure). At the start of your run,
+validate the task-file frontmatter and extract the required fields with:
 
 ```bash
 uv run .agents/shared/scripts/parse_task_frontmatter.py '<TASK_FILE_GLOB>'
@@ -18,13 +20,14 @@ uv run .agents/shared/scripts/parse_task_frontmatter.py '<TASK_FILE_GLOB>'
 Quote the glob pattern so the shell passes the literal to the helper; the
 helper expands it internally and fails loudly if zero or more than one task
 file matches (each worker handles a single task -- either condition means the
-runtime layout drifted). On success it prints three shell-evalable `KEY=value`
-lines on stdout: `LEAD_AGENT=`, `LEAD_REPORT_DIR=`, `TRANSCRIPT_PATH=`. It
-exits non-zero with a stderr message on any failure, including a missing or
-misspelled field or a non-string / empty value.
+runtime layout drifted). On success it prints two shell-evalable `KEY=value`
+lines on stdout: `LEAD_AGENT=` and `LEAD_REPORT_DIR=`. It exits non-zero with
+a stderr message on any failure, including a missing or misspelled field or a
+non-string / empty value.
 
-The first two address reports back to the lead; `transcript_path` is where the
-replay artifact lives.
+Both fields address reports back to the lead: `LEAD_AGENT` is the `mngr`
+agent name you push reports to (and whose transcript you read), and
+`LEAD_REPORT_DIR` is the destination directory on the lead's worktree.
 
 ## Task-file frontmatter schema
 
@@ -32,11 +35,10 @@ replay artifact lives.
 ---
 lead_agent: <main agent name>
 lead_report_dir: runtime/<flow>/<name>/reports/
-transcript_path: runtime/<flow>/<name>/turn.jsonl
 ---
 ```
 
-All three fields are required non-empty strings. `parse_task_frontmatter.py`
+Both fields are required non-empty strings. `parse_task_frontmatter.py`
 enforces this.
 
 ## Reporting procedure

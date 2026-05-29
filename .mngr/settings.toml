@@ -51,7 +51,7 @@ include__extend = ["""has(labels.workspace)"""]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode"""
-settings_overrides__extend = {model = "opus[1m]", fastMode = false}
+settings_overrides = {model = "opus[1m]", fastMode = false}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
@@ -63,15 +63,17 @@ version = "2.1.141"
 # the per-agent config dir that everyone else points at.
 use_env_config_dir = true
 
-# The "main" (services) agent type -- inherits everything from claude, then
-# disables every path that pulls user-local content into the workspace. The
-# repo at the requested git ref is the canonical workspace definition;
-# nothing from the invoking user's ~/.claude/ or ~/.mngr/ should leak in.
+# The "main" (services) agent type. The repo at the requested git ref is the
+# canonical workspace definition, so the bulky user-local sync paths stay
+# off -- large ~/.claude skill/plugin trees and ~/.claude.json make
+# provisioning slow and flaky. Claude credentials are the deliberate
+# exception: sync_claude_credentials is on so a workspace is authenticated
+# out of the box (on macOS, converted from the host keychain).
 [agent_types.main]
 parent_type = "claude"
 sync_home_settings = false
 sync_claude_json = false
-sync_claude_credentials = false
+sync_claude_credentials = true
 sync_credentials_on_login = false
 # Keep this agent's per-agent CLAUDE_CONFIG_DIR (don't inherit the parent's
 # new shared-mode default). Every other agent in the workspace points at
@@ -98,7 +100,6 @@ is_enabled = false
 
 [providers.docker]
 is_enabled = false
-isolate_host_volumes = true
 
 # --- Create templates ---
 
@@ -162,13 +163,17 @@ extra_provision_command__extend = [
     "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
     "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
     # Install latchkey CLI globally; pinned to the same version as Dockerfile's
-    # LATCHKEY_VERSION ARG. Bump both together.
-    "sudo npm install -g latchkey@2.7.2",
+    # LATCHKEY_VERSION ARG. Bump both together. Also keep this aligned with the
+    # `latchkey` version pinned in `apps/minds/package.json` of the host minds.app
+    # -- the agent-side CLI talks to the host-side gateway over HTTP, and 2.x
+    # versions across that minor (e.g. 2.7.x CLI vs 2.10.x gateway) reject each
+    # other's password-auth wire format with `401 (password)`.
+    "sudo npm install -g latchkey@2.12.2",
     "curl -LsSf https://astral.sh/uv/install.sh | sh",
     "ARCH=$(uname -m) && sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && sudo chmod +x /usr/local/bin/ttyd",
     "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh",
     "cd apps/system_interface/frontend && npm ci && npm run build",
-    "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
+    "export PATH=$HOME/.local/bin:$PATH && uv tool install -e vendor/mngr/libs/mngr && uv tool install -e apps/system_interface --with-editable vendor/mngr/libs/mngr_claude --with-editable vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
     "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
     # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
     # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH

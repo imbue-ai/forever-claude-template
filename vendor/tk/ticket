@@ -204,6 +204,11 @@ cmd_create() {
         echo "type: $issue_type"
         echo "priority: $priority"
         [[ -n "$assignee" ]] && echo "assignee: $assignee"
+        # Stamp the creating mngr agent's name when running inside an
+        # mngr-managed agent, so consumers (e.g. the minds workspace
+        # server's progress view) can attribute each ticket to its source
+        # agent. Absent when not in an mngr context -- no-op upstream.
+        [[ -n "${MNGR_AGENT_NAME:-}" ]] && echo "agent: $MNGR_AGENT_NAME"
         [[ -n "$external_ref" ]] && echo "external-ref: $external_ref"
         [[ -n "$parent" ]] && echo "parent: $parent"
         if [[ -n "$tags" ]]; then

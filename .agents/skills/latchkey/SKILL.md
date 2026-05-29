@@ -18,7 +18,7 @@ Usage:
 2. **Pass through all regular curl arguments** - latchkey is a transparent wrapper.
 3. **Check for `latchkey services list`** to get a list of supported services. Use `--viable` to only show the currently configured ones.
 4. **Use `latchkey services info <service_name>`** to get information about a specific service (auth options, credentials status, API docs links, special requirements, etc.).
-5. **Submit a permission request to the user if necessary** by calling `latchkey curl -XPOST http://latchkey-self.invalid/extensions/permission-requests` (see the "Ask for user permission" example below) when either there are no valid credentials for the given service or the curl requests come back with the "request not permitted by the user" message.
+5. **Submit a permission request to the user if necessary** by calling `latchkey curl -XPOST http://latchkey-self.invalid/permission-requests` (see the "Ask for user permission" example below) when either there are no valid credentials for the given service or the curl requests come back with the "request not permitted by the user" message. (Note: the path is `/permission-requests`, NOT `/extensions/permission-requests`; the `/extensions/*` namespace is admin-only and returns 403 to agents.)
 6. **Look for the newest documentation of the desired public API online.** Avoid bot-only endpoints.
 
 

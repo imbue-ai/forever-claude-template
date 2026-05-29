@@ -6,8 +6,8 @@
 """Parse a worker task file's YAML frontmatter and emit the required fields.
 
 Pins the schema so workers can't silently consume a task file whose
-`lead_agent` / `lead_report_dir` / `transcript_path` was missing,
-misspelled, or the wrong type.
+`lead_agent` / `lead_report_dir` was missing, misspelled, or the wrong
+type.
 
 The positional argument is a path that may contain a shell-style glob
 (e.g. ``runtime/crystallize/*/task.md``). The helper resolves the
@@ -17,13 +17,12 @@ landing in the same tree) cannot silently parse the wrong thing.
 Quote the pattern in the shell (``'runtime/crystallize/*/task.md'``)
 so the literal glob reaches this script.
 
-On success (exit 0) prints three shell-evalable `KEY=value` lines to
+On success (exit 0) prints two shell-evalable `KEY=value` lines to
 stdout (values quoted via ``shlex.quote`` so whitespace and shell
 metacharacters survive):
 
     LEAD_AGENT=crystallize-test
     LEAD_REPORT_DIR=runtime/update/foo/reports/
-    TRANSCRIPT_PATH=runtime/update/foo/turn.jsonl
 
 On any failure -- no glob match, multiple glob matches, file missing,
 no/broken frontmatter, any required field missing, wrong type, or
@@ -44,7 +43,7 @@ from typing import Any
 import yaml
 
 
-_REQUIRED_FIELDS = ("lead_agent", "lead_report_dir", "transcript_path")
+_REQUIRED_FIELDS = ("lead_agent", "lead_report_dir")
 
 
 def resolve(pattern: str) -> Path:
