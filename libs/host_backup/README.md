@@ -13,13 +13,25 @@ an encrypted restic repo on cheaper object storage.
 - Single long-running tick loop in tmux window `svc-host-backup` (started by
   the bootstrap service manager via `[services.host-backup]`). Restart
   policy: `on-failure`.
-- Each tick reads two config files written by `libs/bootstrap`:
-  - `runtime/backup.toml`: backup interval, snapshot method, retention,
-    exclude patterns, repo URL template.
-  - `runtime/secrets/restic.env`: `RESTIC_PASSWORD`, `AWS_ACCESS_KEY_ID`,
-    `AWS_SECRET_ACCESS_KEY`. `restic.env` is gitignored (rides nothing).
-    `backup.toml` is *not* gitignored so it survives container loss via
-    runtime-backup.
+- The repository is created (and keyed) by the minds app, not by
+  host_backup: minds runs `restic init` + `restic key add` from outside the
+  workspace and injects the resulting `restic.env`. host_backup just backs up
+  to the existing repository -- it does not probe-then-init.
+- Each tick reads two config files written by `libs/bootstrap` (and, for
+  `restic.env`, overwritten by minds):
+  - `runtime/backup.toml`: non-secret settings -- backup interval, snapshot
+    method, retention, exclude patterns.
+  - `runtime/secrets/restic.env`: the repository address + all secrets --
+    `RESTIC_REPOSITORY` (the only source of the repo URL), `RESTIC_PASSWORD`
+    (this workspace's repository password), and any backend credentials
+    restic reads from the environment (e.g. `AWS_ACCESS_KEY_ID` /
+    `AWS_SECRET_ACCESS_KEY` for an S3/R2 backend). `restic.env` is gitignored
+    (rides nothing). `backup.toml` is *not* gitignored so it survives
+    container loss via runtime-backup.
+- A tick only runs once both `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` are
+  set in `restic.env`. Backend credentials are not gated by host_backup --
+  restic reports its own error if the chosen backend needs one that is
+  missing.
 - Snapshot method (set by bootstrap from the detected environment):
   - `btrfs_local`: take a `sudo btrfs subvolume snapshot -r` directly into
     `<btrfs-mount>/snapshots/current/` (lima).
@@ -65,7 +77,7 @@ Structured events at `$MNGR_AGENT_STATE_DIR/events/backup/events.jsonl`:
 - `backup_started`, `snapshot_created`, `snapshot_deleted`
 - `restic_backup_succeeded`, `restic_backup_failed`
 - `forget_completed`, `prune_completed`, `prune_skipped`
-- `config_reloaded`, `repo_init_attempted`, `repo_init_succeeded`
+- `config_reloaded`
 - `tick_skipped_due_to_missing_secrets`, `tick_error`
 
 Each restic command's full stdout / stderr is captured into the matching
@@ -73,21 +85,22 @@ Each restic command's full stdout / stderr is captured into the matching
 
 ## First-run setup
 
-1. The user populates `runtime/secrets/restic.env` with their R2 access
-   keys + a chosen `RESTIC_PASSWORD`.
-2. The user fills in the `[restic]` `account_id` / `bucket` fields in
-   `runtime/backup.toml`.
-3. On the next tick, `host-backup` probes the repo with
-   `restic snapshots`; if it gets the "repository does not exist" error,
-   it runs `restic init` and proceeds.
+In the minds app the whole `runtime/secrets/restic.env` is written for you
+when you pick a backup provider on the create form -- minds initializes the
+repository (`restic init` + `restic key add`) from outside the workspace and
+injects the file. To configure backups by hand instead, populate
+`runtime/secrets/restic.env` with `RESTIC_REPOSITORY` (e.g.
+`s3:https://<account>.r2.cloudflarestorage.com/<bucket>`), the backend
+credentials (e.g. R2 access keys), and a `RESTIC_PASSWORD`, and initialize
+the repository yourself (`restic init`) before the first tick -- host_backup
+does not create the repository.
 
 ## Restore
 
 Out of scope for v1. To restore manually:
 
 ```
-source /code/runtime/secrets/restic.env
-export RESTIC_REPOSITORY=s3:https://<account_id>.r2.cloudflarestorage.com/<bucket>/<host_id>
+set -a; source /code/runtime/secrets/restic.env; set +a
 restic snapshots
 restic restore <snapshot_id> --target /tmp/restored
 ```

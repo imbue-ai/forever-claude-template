@@ -23,17 +23,10 @@ from host_backup.config import (
     load_backup_config,
     load_restic_env,
     missing_required_restic_keys,
-    resolve_host_id,
-    resolve_repository_url,
 )
 from host_backup.events import BackupEventType, make_event, write_event
 from host_backup.restic import backup as restic_backup
-from host_backup.restic import (
-    extract_snapshot_id_from_backup_output,
-    init_repo,
-    is_repo_missing_error,
-    probe_repo,
-)
+from host_backup.restic import extract_snapshot_id_from_backup_output
 from host_backup.restic import forget as restic_forget
 from host_backup.restic import prune as restic_prune
 from host_backup.snapshot import SnapshotError, SnapshotResult, make_snapshot_taker
@@ -199,14 +192,14 @@ def _run_one_tick(
         ),
     )
 
-    env = _check_secrets_present(state=state, config=config)
+    env = _check_secrets_present(state=state)
     if env is None:
         return
-    env_overrides = _build_restic_env(env=env, config=config)
-    if env_overrides is None:
-        return
-    if not _ensure_repo_exists(state=state, env_overrides=env_overrides):
-        return
+    # restic.env is the overlay restic runs with: RESTIC_REPOSITORY plus every
+    # credential restic reads from the environment. The repository is created
+    # (and keyed) by the minds app, so host_backup just backs up to it -- it
+    # never probes-then-inits the repo itself.
+    env_overrides = dict(env)
     snapshot_result = _take_snapshot(state=state, config=config)
     if snapshot_result is None:
         return
@@ -230,9 +223,7 @@ def _run_one_tick(
 # ---------------------------------------------------------------------------
 
 
-def _check_secrets_present(
-    *, state: _LoopState, config: BackupConfig
-) -> dict[str, str] | None:
+def _check_secrets_present(*, state: _LoopState) -> dict[str, str] | None:
     """Load restic.env and confirm all required keys are non-empty."""
     env = load_restic_env()
     missing = missing_required_restic_keys(env)
@@ -248,65 +239,6 @@ def _check_secrets_present(
         logger.warning("Skipping tick: missing required restic.env keys: {}", missing)
         return None
     return env
-
-
-def _build_restic_env(
-    *, env: dict[str, str], config: BackupConfig
-) -> dict[str, str] | None:
-    """Compute the env-var overlay to pass to restic (repo URL + secrets)."""
-    try:
-        host_id = resolve_host_id()
-    except BackupConfigError as e:
-        logger.warning("Cannot resolve host_id: {}", e)
-        return None
-    try:
-        repo_url = resolve_repository_url(config.restic, host_id)
-    except BackupConfigError as e:
-        logger.warning("Cannot resolve repository URL: {}", e)
-        return None
-    overlay = dict(env)
-    overlay["RESTIC_REPOSITORY"] = repo_url
-    return overlay
-
-
-def _ensure_repo_exists(*, state: _LoopState, env_overrides: Mapping[str, str]) -> bool:
-    """Probe the repo; init it if missing. Returns False on any non-missing error."""
-    probe = probe_repo(env_overrides)
-    if probe.returncode == 0:
-        return True
-    if not is_repo_missing_error(probe.stderr):
-        logger.warning(
-            "restic cat config failed (rc={}): {}",
-            probe.returncode,
-            probe.stderr.strip(),
-        )
-        return False
-    repo_url = env_overrides.get("RESTIC_REPOSITORY", "")
-    write_event(
-        state.events_dir,
-        make_event(
-            BackupEventType.REPO_INIT_ATTEMPTED,
-            tick_id=state.current_tick_id,
-            repository_url=repo_url,
-        ),
-    )
-    init = init_repo(env_overrides)
-    if init.returncode != 0:
-        logger.warning(
-            "restic init failed (rc={}): {}", init.returncode, init.stderr.strip()
-        )
-        return False
-    write_event(
-        state.events_dir,
-        make_event(
-            BackupEventType.REPO_INIT_SUCCEEDED,
-            tick_id=state.current_tick_id,
-            repository_url=repo_url,
-            stdout=init.stdout,
-            stderr=init.stderr,
-        ),
-    )
-    return True
 
 
 def _take_snapshot(*, state: _LoopState, config: BackupConfig) -> SnapshotResult | None:
