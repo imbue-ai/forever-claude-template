@@ -230,7 +230,7 @@ def _build_create_chat_command(host_name: str, labels: dict[str, str]) -> list[s
         # by the desktop client's `--branch :mngr/<host_name>` at host
         # create) and aborts with "fatal: a branch named 'mngr/<host>'
         # already exists". With --transfer none the chat agent reuses
-        # the services agent's /code/ as its work_dir, which is what we
+        # the services agent's /mngr/code/ as its work_dir, which is what we
         # want (one workspace == one work_dir, shared across all chats).
         "--transfer",
         "none",

@@ -22,10 +22,10 @@ When a worker (sub-agent created via `launch-task`) is in `STOPPED` state -- cla
 
 Only fall back to this path when the default doesn't apply: `mngr start` itself fails to bring the agent back, the worker is wedged in a way that another claude session can't unstick, or the agent has already been destroyed and you're recovering from its leftover worktree. In normal "claude crashed once" cases, restart instead.
 
-1. Locate the worktree at `/worktree/<worker>-<hash>/` and inspect what's there:
+1. Locate the worktree at `/mngr/worktree/<worker>-<hash>/` and inspect what's there:
 
    ```bash
-   cd /worktree/<worker>-<hash>/
+   cd /mngr/worktree/<worker>-<hash>/
    git status
    git diff
    ```

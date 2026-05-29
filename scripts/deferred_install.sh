@@ -18,7 +18,7 @@
 set -euo pipefail
 
 readonly MARKER_DIR=/var/lib/minds/deferred-install
-readonly REPO_ROOT=/code
+readonly REPO_ROOT=/mngr/code
 
 _log() {
     printf '[deferred-install] %s\n' "$*"
