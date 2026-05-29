@@ -17,10 +17,6 @@ def _build_config(
         backup_interval_seconds=backup_interval_seconds,
         minimum_backup_gap_seconds=minimum_backup_gap_seconds,
         snapshot=SnapshotSettings(method=SnapshotMethod.DIRECT),
-        restic={
-            "repository_url_template": "s3:foo/{host_id}",
-            "template_values": {},
-        },
     )
 
 

@@ -23,8 +23,6 @@ from host_backup.config import (
     load_backup_config,
     load_restic_env,
     missing_required_restic_keys,
-    resolve_host_id,
-    resolve_repository_url,
 )
 from host_backup.events import BackupEventType, make_event, write_event
 from host_backup.restic import backup as restic_backup
@@ -202,10 +200,16 @@ def _run_one_tick(
     env = _check_secrets_present(state=state, config=config)
     if env is None:
         return
-    env_overrides = _build_restic_env(env=env, config=config)
-    if env_overrides is None:
-        return
-    if not _ensure_repo_exists(state=state, env_overrides=env_overrides):
+    # restic.env is the overlay restic runs with: it carries RESTIC_REPOSITORY
+    # plus every credential restic reads from the environment. No URL is
+    # constructed here -- the repository address comes straight from the file.
+    env_overrides = dict(env)
+    is_insecure_no_password = config.restic.allow_empty_password
+    if not _ensure_repo_exists(
+        state=state,
+        env_overrides=env_overrides,
+        is_insecure_no_password=is_insecure_no_password,
+    ):
         return
     snapshot_result = _take_snapshot(state=state, config=config)
     if snapshot_result is None:
@@ -216,13 +220,24 @@ def _run_one_tick(
             config=config,
             snapshot=snapshot_result,
             env_overrides=env_overrides,
+            is_insecure_no_password=is_insecure_no_password,
         )
     finally:
         _cleanup_snapshot(state=state, config=config, snapshot=snapshot_result)
     if not backup_succeeded:
         return
-    _run_forget(state=state, config=config, env_overrides=env_overrides)
-    _maybe_run_prune(state=state, config=config, env_overrides=env_overrides)
+    _run_forget(
+        state=state,
+        config=config,
+        env_overrides=env_overrides,
+        is_insecure_no_password=is_insecure_no_password,
+    )
+    _maybe_run_prune(
+        state=state,
+        config=config,
+        env_overrides=env_overrides,
+        is_insecure_no_password=is_insecure_no_password,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +250,9 @@ def _check_secrets_present(
 ) -> dict[str, str] | None:
     """Load restic.env and confirm all required keys are non-empty."""
     env = load_restic_env()
-    missing = missing_required_restic_keys(env)
+    missing = missing_required_restic_keys(
+        env, allow_empty_password=config.restic.allow_empty_password
+    )
     if missing:
         write_event(
             state.events_dir,
@@ -250,28 +267,14 @@ def _check_secrets_present(
     return env
 
 
-def _build_restic_env(
-    *, env: dict[str, str], config: BackupConfig
-) -> dict[str, str] | None:
-    """Compute the env-var overlay to pass to restic (repo URL + secrets)."""
-    try:
-        host_id = resolve_host_id()
-    except BackupConfigError as e:
-        logger.warning("Cannot resolve host_id: {}", e)
-        return None
-    try:
-        repo_url = resolve_repository_url(config.restic, host_id)
-    except BackupConfigError as e:
-        logger.warning("Cannot resolve repository URL: {}", e)
-        return None
-    overlay = dict(env)
-    overlay["RESTIC_REPOSITORY"] = repo_url
-    return overlay
-
-
-def _ensure_repo_exists(*, state: _LoopState, env_overrides: Mapping[str, str]) -> bool:
+def _ensure_repo_exists(
+    *,
+    state: _LoopState,
+    env_overrides: Mapping[str, str],
+    is_insecure_no_password: bool,
+) -> bool:
     """Probe the repo; init it if missing. Returns False on any non-missing error."""
-    probe = probe_repo(env_overrides)
+    probe = probe_repo(env_overrides, is_insecure_no_password=is_insecure_no_password)
     if probe.returncode == 0:
         return True
     if not is_repo_missing_error(probe.stderr):
@@ -290,7 +293,7 @@ def _ensure_repo_exists(*, state: _LoopState, env_overrides: Mapping[str, str]) 
             repository_url=repo_url,
         ),
     )
-    init = init_repo(env_overrides)
+    init = init_repo(env_overrides, is_insecure_no_password=is_insecure_no_password)
     if init.returncode != 0:
         logger.warning(
             "restic init failed (rc={}): {}", init.returncode, init.stderr.strip()
@@ -372,6 +375,7 @@ def _run_restic_backup(
     config: BackupConfig,
     snapshot: SnapshotResult,
     env_overrides: Mapping[str, str],
+    is_insecure_no_password: bool,
 ) -> bool:
     """Run `restic backup` against the snapshot; emit success or failure event."""
     tag = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -381,6 +385,7 @@ def _run_restic_backup(
         excludes=config.excludes,
         tag=tag,
         env_overrides=env_overrides,
+        is_insecure_no_password=is_insecure_no_password,
     )
     duration = time.monotonic() - start
     if result.returncode != 0:
@@ -421,6 +426,7 @@ def _run_forget(
     state: _LoopState,
     config: BackupConfig,
     env_overrides: Mapping[str, str],
+    is_insecure_no_password: bool,
 ) -> None:
     """Run `restic forget` (no prune); always emit FORGET_COMPLETED."""
     start = time.monotonic()
@@ -430,6 +436,7 @@ def _run_forget(
         keep_weekly=config.retention.keep_weekly,
         keep_monthly=config.retention.keep_monthly,
         env_overrides=env_overrides,
+        is_insecure_no_password=is_insecure_no_password,
     )
     duration = time.monotonic() - start
     write_event(
@@ -454,6 +461,7 @@ def _maybe_run_prune(
     state: _LoopState,
     config: BackupConfig,
     env_overrides: Mapping[str, str],
+    is_insecure_no_password: bool,
 ) -> None:
     """Run `restic prune` iff the gate file is older than prune_interval_hours."""
     interval_seconds = config.retention.prune_interval_hours * 3600.0
@@ -473,7 +481,9 @@ def _maybe_run_prune(
             )
             return
     start = time.monotonic()
-    result = restic_prune(env_overrides)
+    result = restic_prune(
+        env_overrides, is_insecure_no_password=is_insecure_no_password
+    )
     duration = time.monotonic() - start
     write_event(
         state.events_dir,

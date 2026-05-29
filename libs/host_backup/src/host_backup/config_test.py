@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tomllib
 from pathlib import Path
 
@@ -20,8 +19,6 @@ from host_backup.config import (
     missing_required_restic_keys,
     parse_restic_env_file,
     render_default_backup_toml,
-    resolve_host_id,
-    resolve_repository_url,
     write_default_restic_env_template,
 )
 
@@ -96,95 +93,46 @@ def test_load_restic_env_reads_existing(tmp_path: Path) -> None:
 # --- missing_required_restic_keys ---
 
 
-def test_missing_required_restic_keys_reports_all_missing() -> None:
-    assert sorted(missing_required_restic_keys({})) == [
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
+def test_missing_required_restic_keys_reports_repo_and_password_when_empty() -> None:
+    assert sorted(missing_required_restic_keys({}, allow_empty_password=False)) == [
         "RESTIC_PASSWORD",
+        "RESTIC_REPOSITORY",
     ]
 
 
-def test_missing_required_restic_keys_reports_empty_when_all_set() -> None:
+def test_missing_required_restic_keys_reports_empty_when_repo_and_password_set() -> (
+    None
+):
     env = {
+        "RESTIC_REPOSITORY": "s3:https://acct.r2.cloudflarestorage.com/bucket",
         "RESTIC_PASSWORD": "p",
-        "AWS_ACCESS_KEY_ID": "k",
-        "AWS_SECRET_ACCESS_KEY": "s",
     }
-    assert missing_required_restic_keys(env) == []
+    assert missing_required_restic_keys(env, allow_empty_password=False) == []
+
+
+def test_missing_required_restic_keys_does_not_require_aws_creds() -> None:
+    # Backend creds are not gated here; restic reports its own error if a
+    # given backend needs one. Only repo + password are required.
+    env = {"RESTIC_REPOSITORY": "s3:host/bucket", "RESTIC_PASSWORD": "p"}
+    assert missing_required_restic_keys(env, allow_empty_password=False) == []
 
 
 def test_missing_required_restic_keys_treats_empty_value_as_missing() -> None:
-    env = {
-        "RESTIC_PASSWORD": "p",
-        "AWS_ACCESS_KEY_ID": "",
-        "AWS_SECRET_ACCESS_KEY": "s",
-    }
-    assert missing_required_restic_keys(env) == ["AWS_ACCESS_KEY_ID"]
+    env = {"RESTIC_REPOSITORY": "", "RESTIC_PASSWORD": "p"}
+    assert missing_required_restic_keys(env, allow_empty_password=False) == [
+        "RESTIC_REPOSITORY",
+    ]
 
 
-# --- resolve_repository_url ---
+def test_missing_required_restic_keys_skips_password_when_empty_allowed() -> None:
+    env = {"RESTIC_REPOSITORY": "s3:host/bucket"}
+    assert missing_required_restic_keys(env, allow_empty_password=True) == []
 
 
-def test_resolve_repository_url_substitutes_host_id_and_values() -> None:
-    config = BackupConfig(
-        snapshot=_direct_snapshot(),
-        restic={
-            "repository_url_template": (
-                "s3:https://{account_id}.r2.cloudflarestorage.com/{bucket}/{host_id}"
-            ),
-            "template_values": {"account_id": "ABC", "bucket": "my-bucket"},
-        },
-    )
-    url = resolve_repository_url(config.restic, host_id="agent-123")
-    assert url == "s3:https://ABC.r2.cloudflarestorage.com/my-bucket/agent-123"
-
-
-def test_resolve_repository_url_raises_on_missing_field() -> None:
-    config = BackupConfig(
-        snapshot=_direct_snapshot(),
-        restic={
-            "repository_url_template": "s3:https://{missing_field}/{host_id}",
-            "template_values": {},
-        },
-    )
-    with pytest.raises(BackupConfigError) as excinfo:
-        resolve_repository_url(config.restic, host_id="agent-123")
-    assert "missing_field" in str(excinfo.value)
-
-
-# --- resolve_host_id ---
-
-
-def test_resolve_host_id_prefers_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MNGR_AGENT_ID", "agent-XYZ")
-    assert resolve_host_id() == "agent-XYZ"
-
-
-def test_resolve_host_id_falls_back_to_host_dir_data_json(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
-    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
-    (tmp_path / "data.json").write_text(json.dumps({"host_id": "host-from-data"}))
-    assert resolve_host_id() == "host-from-data"
-
-
-def test_resolve_host_id_raises_when_nothing_available(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
-    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
-    with pytest.raises(BackupConfigError):
-        resolve_host_id()
-
-
-def test_resolve_host_id_rejects_path_separator(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("MNGR_AGENT_ID", "agent/../other")
-    with pytest.raises(BackupConfigError) as excinfo:
-        resolve_host_id()
-    assert "illegal characters" in str(excinfo.value)
+def test_missing_required_restic_keys_still_requires_repo_when_empty_allowed() -> None:
+    assert missing_required_restic_keys({}, allow_empty_password=True) == [
+        "RESTIC_REPOSITORY",
+    ]
 
 
 # --- write_default_restic_env_template ---
@@ -226,6 +174,22 @@ def test_render_default_backup_toml_parses_into_valid_config() -> None:
     assert config.snapshot.trigger_dir == Path("/mngr-snapshot")
     assert config.retention.keep_hourly == 24
     assert "**/.venv" in config.excludes
+    # The repo URL is no longer in backup.toml; only the empty-password knob
+    # lives in [restic], defaulting to false.
+    assert config.restic.allow_empty_password is False
+
+
+def test_backup_config_allow_empty_password_round_trips() -> None:
+    rendered = render_default_backup_toml(_direct_snapshot())
+    doc = tomlkit.parse(rendered)
+    doc["restic"]["allow_empty_password"] = True
+    config = BackupConfig.model_validate(tomllib.loads(tomlkit.dumps(doc)))
+    assert config.restic.allow_empty_password is True
+
+
+def test_backup_config_defaults_restic_when_section_omitted() -> None:
+    config = BackupConfig(snapshot=_direct_snapshot())
+    assert config.restic.allow_empty_password is False
 
 
 # --- merge_snapshot_into_existing_toml ---
@@ -233,10 +197,10 @@ def test_render_default_backup_toml_parses_into_valid_config() -> None:
 
 def test_merge_snapshot_into_existing_toml_preserves_user_fields() -> None:
     existing = render_default_backup_toml(_direct_snapshot())
-    # User edits retention + excludes + repo URL.
+    # User edits retention + the empty-password knob.
     existing_doc = tomlkit.parse(existing)
     existing_doc["retention"]["keep_hourly"] = 48
-    existing_doc["restic"]["template_values"]["bucket"] = "user-bucket"
+    existing_doc["restic"]["allow_empty_password"] = True
     user_edited = tomlkit.dumps(existing_doc)
 
     merged = merge_snapshot_into_existing_toml(user_edited, _outer_trigger_snapshot())
@@ -246,7 +210,7 @@ def test_merge_snapshot_into_existing_toml_preserves_user_fields() -> None:
     assert parsed["snapshot"]["trigger_dir"] == "/mngr-snapshot"
     # User edits are preserved:
     assert parsed["retention"]["keep_hourly"] == 48
-    assert parsed["restic"]["template_values"]["bucket"] == "user-bucket"
+    assert parsed["restic"]["allow_empty_password"] is True
 
 
 def test_merge_snapshot_into_existing_toml_drops_optional_paths_for_direct() -> None:

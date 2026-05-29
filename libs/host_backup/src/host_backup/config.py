@@ -3,19 +3,20 @@
 The config lives in two on-disk files written by `libs/bootstrap` on first
 boot:
 
-- `runtime/backup.toml` -- script settings (interval, retention, excludes,
-  snapshot method, repo URL template). Rides the runtime-backup git push.
-- `runtime/secrets/restic.env` -- restic secrets (RESTIC_PASSWORD, R2
-  access keys). Gitignored.
+- `runtime/backup.toml` -- non-secret script settings (interval, retention,
+  excludes, snapshot method, and the `allow_empty_password` restic knob).
+  Rides the runtime-backup git push.
+- `runtime/secrets/restic.env` -- restic's repository address + all secrets
+  (`RESTIC_REPOSITORY`, `RESTIC_PASSWORD`, and any backend credentials restic
+  reads from the environment, e.g. `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` for an S3/R2 backend). Gitignored.
 
 This module defines the frozen `BackupConfig` model and helpers for
 loading both files, including the merge logic that bootstrap uses to
 preserve user-customized fields when re-detecting the environment.
 """
 
-import json
 import os
-import re
 import tomllib
 from enum import auto
 from pathlib import Path
@@ -29,13 +30,6 @@ from pydantic import Field
 BACKUP_TOML_PATH: Final[Path] = Path("runtime/backup.toml")
 RESTIC_ENV_PATH: Final[Path] = Path("runtime/secrets/restic.env")
 PRUNE_TIMESTAMP_PATH: Final[Path] = Path("runtime/last-restic-prune")
-
-# Required env vars in restic.env before the script will actually back up.
-REQUIRED_RESTIC_ENV_KEYS: Final[tuple[str, ...]] = (
-    "RESTIC_PASSWORD",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-)
 
 
 class BackupConfigError(ValueError):
@@ -104,26 +98,20 @@ class SnapshotSettings(FrozenModel):
 
 
 class ResticSettings(FrozenModel):
-    """How to address the remote restic repository.
+    """Non-secret restic knobs.
 
-    The full repository URL is computed at runtime by formatting
-    `repository_url_template` with the values in `template_values` plus the
-    runtime-resolved `host_id`. Secrets (access keys, password) come from
-    restic.env, not this section.
+    The repository address and every credential live in restic.env, not
+    here: restic reads `RESTIC_REPOSITORY` (and `RESTIC_PASSWORD` plus any
+    backend creds like `AWS_ACCESS_KEY_ID`) straight from the environment.
+    This section only carries non-secret toggles.
     """
 
-    repository_url_template: str = Field(
+    allow_empty_password: bool = Field(
+        default=False,
         description=(
-            "Restic repository URL template; format-string with named fields, e.g. "
-            "'s3:https://{account_id}.r2.cloudflarestorage.com/{bucket}/{host_id}'"
-        ),
-    )
-    template_values: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Values to substitute into repository_url_template (e.g. account_id, "
-            "bucket). The host_id field is filled in at runtime from "
-            "$MNGR_AGENT_ID / $MNGR_HOST_DIR/data.json."
+            "When true, restic is invoked with --insecure-no-password so the "
+            "repository can use an empty password (RESTIC_PASSWORD unset). When "
+            "false (the default), restic requires RESTIC_PASSWORD."
         ),
     )
 
@@ -168,7 +156,10 @@ class BackupConfig(FrozenModel):
         description="Mtime poll interval for backup.toml + restic.env",
     )
     snapshot: SnapshotSettings = Field(description="Snapshot mechanism + paths")
-    restic: ResticSettings = Field(description="Restic repository address")
+    restic: ResticSettings = Field(
+        default_factory=ResticSettings,
+        description="Non-secret restic knobs (repository + creds live in restic.env)",
+    )
     retention: RetentionSettings = Field(default_factory=RetentionSettings)
     excludes: tuple[str, ...] = Field(
         default=(
@@ -238,66 +229,25 @@ def load_restic_env(path: Path = RESTIC_ENV_PATH) -> dict[str, str]:
         raise BackupConfigError(f"Failed to read {path}: {e}") from e
 
 
-def missing_required_restic_keys(env: dict[str, str]) -> list[str]:
-    """Return the names of REQUIRED_RESTIC_ENV_KEYS that are absent or empty."""
-    return [key for key in REQUIRED_RESTIC_ENV_KEYS if not env.get(key)]
+def missing_required_restic_keys(
+    env: dict[str, str], *, allow_empty_password: bool
+) -> list[str]:
+    """Return the restic.env keys that must be present before a backup can run.
 
-
-def resolve_repository_url(restic: ResticSettings, host_id: str) -> str:
-    """Format `restic.repository_url_template` with template_values + host_id.
-
-    Raises BackupConfigError when a referenced field is missing.
+    `RESTIC_REPOSITORY` is always required (it is the only source of the
+    repository address). `RESTIC_PASSWORD` is required unless
+    `allow_empty_password` is set, in which case restic runs with
+    --insecure-no-password. Backend credentials (e.g. `AWS_*`) are
+    intentionally not required here: which ones are needed depends on the
+    `RESTIC_REPOSITORY` backend, so restic itself reports a clear error if
+    a required one is missing.
     """
-    fields = dict(restic.template_values)
-    fields["host_id"] = host_id
-    try:
-        return restic.repository_url_template.format(**fields)
-    except KeyError as e:
-        raise BackupConfigError(
-            f"Repository URL template references unknown field {e!r}; "
-            f"add it to restic.template_values in backup.toml"
-        ) from e
-
-
-_HOST_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_-]+$")
-
-
-def resolve_host_id() -> str:
-    """Return the host id for use in the restic repo URL.
-
-    Prefers `$MNGR_AGENT_ID` (set in every agent's tmux env). Falls back to
-    reading `host_id` from `$MNGR_HOST_DIR/data.json` so the script also
-    works when invoked outside an agent context. Validates the resulting
-    string to match a restrictive pattern so it cannot inject path
-    separators into the repo URL.
-    """
-    candidate = os.environ.get("MNGR_AGENT_ID", "").strip()
-    if not candidate:
-        host_dir = os.environ.get("MNGR_HOST_DIR", "").strip()
-        if not host_dir:
-            raise BackupConfigError(
-                "Cannot resolve host_id: neither MNGR_AGENT_ID nor MNGR_HOST_DIR is set"
-            )
-        data_path = Path(host_dir) / "data.json"
-        if not data_path.exists():
-            raise BackupConfigError(
-                f"Cannot resolve host_id: {data_path} does not exist"
-            )
-        try:
-            payload = json.loads(data_path.read_text())
-        except (OSError, ValueError) as e:
-            raise BackupConfigError(f"Cannot read host_id from {data_path}: {e}") from e
-        candidate = str(payload.get("host_id", "")).strip()
-        if not candidate:
-            raise BackupConfigError(
-                f"Cannot resolve host_id: no host_id field in {data_path}"
-            )
-    if not _HOST_ID_PATTERN.fullmatch(candidate):
-        raise BackupConfigError(
-            f"Host id {candidate!r} contains illegal characters; expected only "
-            f"alphanumeric, underscore, or hyphen"
-        )
-    return candidate
+    missing: list[str] = []
+    if not env.get("RESTIC_REPOSITORY"):
+        missing.append("RESTIC_REPOSITORY")
+    if not allow_empty_password and not env.get("RESTIC_PASSWORD"):
+        missing.append("RESTIC_PASSWORD")
+    return missing
 
 
 def get_events_dir() -> Path | None:
@@ -327,18 +277,24 @@ def write_default_restic_env_template(path: Path = RESTIC_ENV_PATH) -> bool:
     return True
 
 
-_DEFAULT_RESTIC_ENV_TEMPLATE: Final[str] = """# Restic backup secrets.
+_DEFAULT_RESTIC_ENV_TEMPLATE: Final[str] = """# Restic backup repository + secrets.
 #
-# Populate these three keys before host_backup will actually run.
-# All values must be non-empty.
+# host_backup will not run until RESTIC_REPOSITORY is set (and, unless
+# backup.toml sets restic.allow_empty_password = true, RESTIC_PASSWORD too).
+#
+# RESTIC_REPOSITORY is the repository address restic backs up to, e.g.
+# 's3:https://<account>.r2.cloudflarestorage.com/<bucket>' for Cloudflare R2.
 #
 # RESTIC_PASSWORD is your repository encryption passphrase. Pick a long
 # random value and STORE IT SOMEWHERE OUTSIDE THIS WORKSPACE. If you lose
-# it, your backups are unrecoverable.
+# it, your backups are unrecoverable. (To use an empty password instead,
+# leave this unset and set restic.allow_empty_password = true in backup.toml.)
 #
-# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are the R2 (or S3-compatible)
-# credentials for the bucket named in backup.toml's [restic.template_values].
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are the credentials for an
+# S3/R2 backend. Other backends read other env vars -- see
+# https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables
 
+# RESTIC_REPOSITORY=
 # RESTIC_PASSWORD=
 # AWS_ACCESS_KEY_ID=
 # AWS_SECRET_ACCESS_KEY=
@@ -367,16 +323,15 @@ def render_default_backup_toml(snapshot: SnapshotSettings) -> str:
     restic_table = tomlkit.table()
     restic_table.add(
         tomlkit.comment(
-            "Replace {account_id} and {bucket} below with your real R2 values."
+            "Set RESTIC_REPOSITORY (+ RESTIC_PASSWORD and backend creds) in runtime/secrets/restic.env."
         )
     )
-    restic_table["repository_url_template"] = (
-        "s3:https://{account_id}.r2.cloudflarestorage.com/{bucket}/{host_id}"
+    restic_table.add(
+        tomlkit.comment(
+            "allow_empty_password = true runs restic with --insecure-no-password (no RESTIC_PASSWORD)."
+        )
     )
-    template_values = tomlkit.table()
-    template_values["account_id"] = "REPLACE_WITH_R2_ACCOUNT_ID"
-    template_values["bucket"] = "REPLACE_WITH_R2_BUCKET_NAME"
-    restic_table["template_values"] = template_values
+    restic_table["allow_empty_password"] = False
     doc["restic"] = restic_table
 
     retention = tomlkit.table()
