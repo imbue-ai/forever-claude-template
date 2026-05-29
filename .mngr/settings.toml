@@ -5,8 +5,8 @@
 type = "claude"
 connect = false
 ensure_clean = false
-pass_env = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
-host_env = [
+pass_env__extend = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
+host_env__extend = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
     # might as well use the latest model if we actually do want to try fast mode, sure
@@ -37,12 +37,12 @@ worktree_base_folder = "/worktree/"
 # `mngr-proxy-child` isn't a registered agent type in the resolved mngr).
 # The disable is non-strict (commands.create.disable_plugin path), so this is
 # safe even on installs that don't include the proxy plugin at all.
-disable_plugin = ["recursive", "ttyd", "claude_subagent_proxy"]
+disable_plugin__extend = ["recursive", "ttyd", "claude_subagent_proxy"]
 yes = true
 
 # for the list command -- ensures that we don't see other agents when we're listing, even if we happen to list remote agents
 [commands.list]
-include = ["""has(labels.workspace)"""]
+include__extend = ["""has(labels.workspace)"""]
 
 # --- Agent types ---
 
@@ -112,7 +112,7 @@ type = "main"
 # forever (see `[agent_types.main] command`) and never reaches claude. The
 # bootstrap creates a separate chat agent on first boot and passes
 # `--message /welcome` to it instead.
-env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=0"]
+env__extend = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=0"]
 extra_window = [
     "bootstrap='uv run bootstrap'",
     "telegram='uv run telegram-bot'",
@@ -124,7 +124,7 @@ extra_window = [
 # `extra_provision_command` stacks across templates (see
 # `apply_create_template` in vendor/mngr/.../common_opts.py), so the
 # mode-specific templates (docker/lima/...) keep their own commands.
-extra_provision_command = [
+extra_provision_command__extend = [
     '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' > "$HOME/.tmux.conf"''',
 ]
 
@@ -132,12 +132,12 @@ extra_provision_command = [
 [create_templates.docker]
 provider = "docker"
 target_path = "/code/"
-setting = ["providers.docker.is_enabled=true"]
-build_arg = ["--file=Dockerfile", "."]
+setting__extend = ["providers.docker.is_enabled=true"]
+build_arg__extend = ["--file=Dockerfile", "."]
 # `--cap-add=SYS_PTRACE` is a `docker run` flag (not `docker build`), so it
 # rides on `start_arg` rather than `build_arg`. Lets us attach gdb / strace
 # inside the container for debugging without rebuilding the image.
-start_arg = ["--cap-add=SYS_PTRACE"]
+start_arg__extend = ["--cap-add=SYS_PTRACE"]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
@@ -145,7 +145,7 @@ idle_mode = "disabled"
 # new container's env. The agent process inherits the container env, so
 # this is what gives the agent its ANTHROPIC_API_KEY (etc.) in
 # non-IMBUE_CLOUD compute modes.
-pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # I guess it can pass a volume in too if you want
 
 # template for lima VM provider
@@ -153,10 +153,10 @@ pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 provider = "lima"
 target_path = "/code/"
 idle_mode = "disabled"
-start_arg = ["--cpus=2", "--memory=4", "--disk=20"]
+start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
 # Same forwarding as the docker template; see comment there.
-pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
-extra_provision_command = [
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+extra_provision_command__extend = [
     # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
     # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
     "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
@@ -194,12 +194,12 @@ target_path = "/code/"
 # imbue_cloud-pool create lands in the same place; CLI users who want
 # a different region can still override per-invocation with
 # ``-b --vps-region=<other>``.
-build_arg = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region=sjc", "."]
+build_arg__extend = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region=sjc", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
 # Same forwarding as the docker template; see comment there.
-pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 
 # template for OVH VPS provider (the imbue-cloud pool-bake's default)
 [create_templates.ovh]
@@ -212,12 +212,12 @@ target_path = "/code/"
 # ``OvhProviderConfig.default_plan`` (``vps-2025-model1`` -- 1 vCPU /
 # 8 GB RAM / 80 GB SSD at ~$7.99/mo as of 2025-05). Operators who want
 # a different plan override per-invocation with ``-b --vps-plan=<code>``.
-build_arg = ["--file=Dockerfile", "."]
+build_arg__extend = ["--file=Dockerfile", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
 # Same forwarding as the docker template; see comment there.
-pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 
 # Template for imbue_cloud-leased pool hosts. minds invokes this as
 # `--template main --template imbue_cloud` (mirroring how the other modes
@@ -236,7 +236,7 @@ idle_mode = "disabled"
 # ``mngr create`` (see ``run_mngr_create`` in
 # ``vendor/mngr/apps/minds/imbue/minds/desktop_client/agent_creator.py``)
 # so the host actually has them at the moment ``--pass-host-env`` reads.
-pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX", "GH_TOKEN"]
 
 ## and these templates are for sub-agents created within the sandbox
 
