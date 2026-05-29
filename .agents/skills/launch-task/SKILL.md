@@ -39,37 +39,21 @@ cat << 'BODY_EOF'
 <what "done" looks like -- be specific>
 
 ## Reporting back
-When you reach a terminal state (success or stuck) or have a
-mid-flight question that blocks progress, write your report to the
-file given by the `finish_report_path` frontmatter field above
-(resolved relative to your worktree -- the lead has already pushed
-that directory into your worktree before sending this task; create
-its parent directory yourself with `mkdir -p` if it does not yet
-exist). Frontmatter shape:
+Follow `.agents/shared/references/worker-reporting.md` for the full
+report procedure: it has you parse this task's frontmatter to get
+`LEAD_AGENT` / `FINISH_REPORT_PATH`, then write the report file and push
+its parent directory back to the lead. Substitutions for this task:
 
-    ---
-    type: status   # or `gate` for a mid-flight question
-    name: done     # or `stuck` for a terminal failure; or `question` for a gate
-    ---
+- `<TASK_FILE_GLOB>` -> `runtime/launch-task/*/task.md`
+- `<RUNTIME_REPORTS_DIR>` -> the directory part of `finish_report_path`,
+  i.e. `dirname "$FINISH_REPORT_PATH"` (your worktree path matches the
+  lead's destination for this flow)
+- Valid `name:` values: `question` (mid-flight gate), `done` / `stuck`
+  (terminal).
 
-    <body: address the user directly; one short paragraph for terminal
-    statuses, the question itself for gate reports>
-
-Then push the report's parent directory back to the lead (rsync cannot
-push a single file, so push the directory that contains it). Substitute
-the `lead_agent` value and the directory part of `finish_report_path`
-from the frontmatter above (shown here as `<lead_agent>` and
-`<reports_dir>`):
-
-    mngr push <lead_agent>:<reports_dir>/ \
-        --source <reports_dir>/ \
-        --uncommitted-changes=merge
-
-(The trailing slashes matter, and `--uncommitted-changes=merge` is
-required because the lead's worktree usually has uncommitted state.)
-For a mid-flight gate, stop your turn after pushing -- the lead will
-reply via `mngr message` and you resume. For terminal statuses, the run
-ends.
+For a mid-flight `question` gate, stop your turn after pushing -- the
+lead replies via `mngr message` and you resume. For terminal statuses,
+the run ends.
 BODY_EOF
 } > runtime/launch-task/$NAME/task.md
 ```
