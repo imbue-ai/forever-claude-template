@@ -1447,7 +1447,6 @@ body {
   --pv-active: var(--color-accent);
   --pv-done: #5a564a;
   --pv-pending: #c2bfb6;
-  --pv-summary-fg: #4a473d;
   font-size: 14.5px;
   line-height: 1.55;
   color: var(--pv-fg);
@@ -1496,14 +1495,14 @@ body {
 .pv-chev {
   display: inline-block;
   margin-left: 6px;
-  font-size: 14px;
-  color: var(--pv-fg-faint);
+  font-size: 18px;
+  color: var(--pv-fg-muted);
   transition: transform 0.15s ease;
   font-weight: 400;
 }
 .pv-chev--open {
   transform: rotate(90deg);
-  color: var(--pv-fg-muted);
+  color: var(--pv-fg);
 }
 
 /* Title button reset (timeline variant) */
@@ -1591,17 +1590,37 @@ body {
 }
 
 .pv-tl-summary {
-  margin-top: 4px;
-  font-size: 13.5px;
-  color: var(--pv-summary-fg);
+  margin-top: 3px;
+  padding-left: 10px;
+  border-left: 2px solid var(--pv-line);
+  font-size: 13px;
+  color: var(--pv-fg-muted);
   line-height: 1.55;
 }
 
 .pv-tl-narration {
-  margin-top: 4px;
-  font-size: 13.5px;
+  margin-top: 3px;
+  padding-left: 10px;
+  border-left: 2px solid var(--pv-active);
+  font-size: 13px;
+  font-style: italic;
   color: var(--pv-fg-muted);
   line-height: 1.55;
+  background: linear-gradient(
+    90deg,
+    var(--pv-fg-muted) 0%,
+    var(--pv-fg-faint) 40%,
+    var(--pv-fg-muted) 80%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: pv-narration-shimmer 2.5s ease-in-out infinite;
+}
+@keyframes pv-narration-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 .pv-tl-narration p {
   margin: 0 0 0.4em;
@@ -1614,6 +1633,10 @@ body {
   padding: 0.1em 0.35em;
   background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
   border-radius: 3px;
+  font-style: normal;
+  -webkit-text-fill-color: var(--pv-fg-muted);
+  -webkit-background-clip: padding-box;
+  background-clip: padding-box;
 }
 .pv-tl-narration pre {
   margin: 0.4em 0;
@@ -1622,6 +1645,10 @@ body {
   border-radius: 4px;
   overflow-x: auto;
   font-size: 0.9em;
+  font-style: normal;
+  -webkit-text-fill-color: var(--pv-fg-muted);
+  -webkit-background-clip: padding-box;
+  background-clip: padding-box;
 }
 .pv-tl-narration pre code {
   padding: 0;
