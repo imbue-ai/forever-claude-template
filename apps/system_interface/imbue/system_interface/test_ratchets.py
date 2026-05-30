@@ -225,6 +225,12 @@ def test_prevent_monkeypatch_setattr() -> None:
     # require plumbing a flag through every call site of
     # create_application, which is a much larger blast radius for a
     # test-only workaround.
+    #
+    # The in-UI Claude login modal tests use no `monkeypatch.setattr`:
+    # `ClaudeAuthService` and `WelcomeResender` take their outside-world
+    # dependencies (subprocess runner, pexpect spawner, transcript reader,
+    # message sender, welcome-skill path) as constructor arguments, so
+    # tests construct isolated instances with deterministic fakes.
     rc.check_monkeypatch_setattr(_DIR, snapshot(1))
 
 
