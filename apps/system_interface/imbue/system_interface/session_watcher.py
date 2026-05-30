@@ -395,7 +395,7 @@ class AgentSessionWatcher:
                 time.sleep(_BRIEF_WAIT_SECONDS)
                 file_path = self._find_session_file(session_id)
                 if file_path is None:
-                    logger.debug("Session file not found for %s, will retry on next cycle", session_id)
+                    logger.debug("Session file not found for {}, will retry on next cycle", session_id)
                     continue
 
             with self._lock:
