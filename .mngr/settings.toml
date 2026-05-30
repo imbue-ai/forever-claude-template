@@ -195,17 +195,37 @@ extra_provision_command__extend = [
     "mkdir -p $HOME/.local/bin && ln -sf /mngr/code/vendor/tk/ticket $HOME/.local/bin/tk",
 ]
 
-# template for sbx (Docker Sandboxes) provider. Mirrors the lima template:
-# an sshd-bridged provider with no Dockerfile build. The mngr_sbx provider
-# installs openssh/git/rsync/tmux inside the sandbox during create_host, so
-# (unlike lima) no package-install provision step is needed here; the shared
-# [create_templates.main] tmux-config command still stacks on top.
+# template for sbx (Docker Sandboxes) provider. An sshd-bridged provider with
+# no Dockerfile build, so it provisions like the lima template rather than the
+# docker one. The sbx docker-agent image (Ubuntu 25.10, running as root) already
+# ships node, npm, uv, git, rsync, sshd, tmux, gh and curl, and mngr_sbx installs
+# openssh/git/rsync/tmux/jq at create_host -- so this list drops what lima has to
+# apt-install for those and keeps only what's genuinely missing (build tools,
+# latchkey, ttyd, the system_interface frontend build, the mngr/system_interface
+# tool installs, and playwright). Runs as root, so no `sudo`.
 [create_templates.sbx]
 provider = "sbx"
 target_path = "/mngr/code/"
 idle_mode = "disabled"
 # Same forwarding as the docker/lima templates; see comment on the docker template.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+extra_provision_command__extend = [
+    # Worktree + workspace safety-net symlinks, mirroring the lima template.
+    "mkdir -p /mngr/worktree && ln -sfn /mngr/worktree /worktree",
+    "ln -sfn /mngr/code /code",
+    # Build tools + CLIs the agent stack needs that the image lacks. node, uv,
+    # gh and git are already present in the sbx image, so they are omitted here.
+    "apt-get install -y --no-install-recommends build-essential fd-find git-lfs restic ripgrep sqlite3 unison",
+    # Install latchkey CLI globally; pinned to the same version as the lima
+    # template / Dockerfile LATCHKEY_VERSION. Bump all together.
+    "npm install -g latchkey@2.7.2",
+    "ARCH=$(uname -m) && curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && chmod +x /usr/local/bin/ttyd",
+    "cd apps/system_interface/frontend && npm ci && npm run build",
+    "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
+    "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
+    # Expose the vendored tk ticket tracker on PATH (mirrors the lima template).
+    "mkdir -p $HOME/.local/bin && ln -sf /mngr/code/vendor/tk/ticket $HOME/.local/bin/tk",
+]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]
