@@ -1814,18 +1814,6 @@ body {
   color: var(--pv-fg);
 }
 
-/* Ungrouped work block: turns where the agent did not declare steps.
-   Muted style signals the agent bypassed the step-tracking protocol. */
-.progress-block--ungrouped .pv-tl-node--ungrouped .pv-tl-title {
-  font-weight: 400;
-  font-size: 13.5px;
-  color: var(--pv-fg-muted);
-  font-style: italic;
-}
-.pv-icon--ungrouped {
-  color: var(--pv-pending);
-}
-
 /* ─────────────────────────────────────────────────────────────────────
    ACTIVITY INDICATOR (replaces the generic "Running tool..." strip)
    ─────────────────────────────────────────────────────────────────── */

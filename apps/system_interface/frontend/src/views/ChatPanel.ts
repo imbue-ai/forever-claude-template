@@ -41,7 +41,6 @@ import {
 } from "./turn-grouping";
 import { isNonBoundaryUserMessage } from "./user-message-classification";
 import { ProgressBlock } from "./ProgressBlock";
-import { UngroupedWorkBlock } from "./UngroupedWorkBlock";
 import { ActivityIndicator } from "./ActivityIndicator";
 
 function getAgentTerminalUrl(agentId: string): string {
@@ -449,14 +448,19 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           }),
         );
       } else if (bodyEvents.length > 0) {
-        messageNodes.push(
-          m(UngroupedWorkBlock, {
-            key: `ungrouped-${sectionUserEvent.event_id}`,
-            body_events: bodyEvents,
-            toolResults,
-            agentId,
-          }),
-        );
+        // No step records were declared for this turn. Render the body as
+        // plain chat -- the agent's prose and tool-call blocks inline, the
+        // same way assistant messages render outside a progress section --
+        // rather than wrapping it in a pseudo-progress "ungrouped work"
+        // block. Tool_result events are looked up via the prebuilt
+        // toolResults map by renderAssistantMessage, so only the
+        // assistant_messages need to be emitted here; non-boundary user
+        // messages were already pushed as chips in the main loop.
+        for (const e of bodyEvents) {
+          if (e.type === "assistant_message") {
+            messageNodes.push(renderAssistantMessage(e, toolResults, agentId));
+          }
+        }
       }
     }
 
