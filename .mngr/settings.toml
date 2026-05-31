@@ -171,7 +171,11 @@ extra_provision_command__extend = [
     # ~/.local/share/uv/tools/) so they don't lock against each other.
     # Per-track stderr/stdout goes to /tmp/prov-*.log; on subshell
     # failure we dump the relevant log so the cause is obvious.
-    """
+    # The whole script is piped through `bash -s` because mngr's
+    # execute_idempotent_command runs under sh (dash on Ubuntu) and
+    # dash rejects `set -o pipefail`, plus we want bash's stricter
+    # subshell error propagation.
+    """bash -s <<'PROVISION_SCRIPT'
 set -euo pipefail
 
 # Trivial host-setup work that is effectively free
@@ -233,6 +237,7 @@ wait $UVTOOL_PID   || { echo "[provision] uv tool install failed"; cat /tmp/prov
 export PATH=$HOME/.local/bin:$PATH
 uv sync --all-packages
 sudo env PATH="$PATH" HOME="$HOME" uv run playwright install --with-deps chromium
+PROVISION_SCRIPT
 """,
 ]
 
