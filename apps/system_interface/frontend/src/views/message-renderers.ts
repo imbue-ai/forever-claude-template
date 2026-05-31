@@ -145,6 +145,15 @@ export function countResolvedToolResults(
   return count;
 }
 
+export function countSubagentCards(toolCalls: ToolCall[] | undefined): number {
+  if (!toolCalls) return 0;
+  let count = 0;
+  for (const tc of toolCalls) {
+    if (tc.subagent_metadata) count++;
+  }
+  return count;
+}
+
 export function StableAssistantMessage(): m.Component<{
   event: TranscriptEvent;
   toolResults: Map<string, TranscriptEvent>;
@@ -152,11 +161,21 @@ export function StableAssistantMessage(): m.Component<{
 }> {
   let renderedEventId: string | null = null;
   let renderedToolResultCount = 0;
+  let renderedSubagentCardCount = 0;
   return {
     onbeforeupdate(vnode) {
       const { event, toolResults } = vnode.attrs;
       const currentToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
-      return event.event_id !== renderedEventId || currentToolResultCount !== renderedToolResultCount;
+      // A subagent card can appear after the message was first rendered: the
+      // backend re-broadcasts the parent with subagent_metadata once a running
+      // subagent's linkage lands. Repaint when that count grows so the plain
+      // tool-call block upgrades to the rich card.
+      const currentSubagentCardCount = countSubagentCards(event.tool_calls);
+      return (
+        event.event_id !== renderedEventId ||
+        currentToolResultCount !== renderedToolResultCount ||
+        currentSubagentCardCount !== renderedSubagentCardCount
+      );
     },
     view(vnode) {
       const event = vnode.attrs.event;
@@ -164,6 +183,7 @@ export function StableAssistantMessage(): m.Component<{
       const agentId = vnode.attrs.agentId;
       renderedEventId = event.event_id;
       renderedToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
+      renderedSubagentCardCount = countSubagentCards(event.tool_calls);
 
       return m("div", renderAssistantMessageChildren(event, toolResults, agentId));
     },

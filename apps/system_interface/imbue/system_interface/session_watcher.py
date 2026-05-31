@@ -127,6 +127,12 @@ class AgentSessionWatcher:
         # jsonl's first line. Lets us link a parent Agent tool_use to its subagent the moment
         # the subagent starts writing, before any tool_result lands.
         self._subagent_parent_info: dict[str, dict[str, str]] = {}
+        # message_uuid -> assistant_message event that was streamed with at least one Agent
+        # tool_call still missing its subagent_metadata. A subagent's jsonl (and thus its
+        # parent linkage) can appear after the parent was already broadcast, so we keep the
+        # event around to re-enrich and re-broadcast it once linkage lands (see
+        # _rebroadcast_relinked_parents). Fully-linked parents are never cached.
+        self._unlinked_agent_parent_events: dict[str, dict[str, Any]] = {}
 
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
@@ -215,6 +221,20 @@ class AgentSessionWatcher:
         self._discover_sessions()
         return self._subagent_metadata.get(subagent_session_id)
 
+    def is_main_session_event(self, event: dict[str, Any]) -> bool:
+        """True if an event belongs to a main session rather than a subagent session.
+
+        Events with no ``session_id`` (e.g. plugin-injected application events) are
+        treated as main so they keep reaching the main stream. Subagent-session events
+        are delivered only through the per-subagent stream, so the main stream must
+        drop them -- otherwise a running subagent's own prompt, tool calls, and
+        assistant messages would render inline in the parent thread.
+        """
+        session_id = event.get("session_id")
+        if session_id is None:
+            return True
+        return session_id in self._main_session_ids
+
     def _enrich_subagent_metadata(self, events: list[dict[str, Any]]) -> None:
         """Enrich Agent tool_use events with subagent metadata.
 
@@ -300,6 +320,7 @@ class AgentSessionWatcher:
                 break
 
             self._discover_sessions()
+            self._rebroadcast_relinked_parents()
             self._poll_for_changes()
 
         if self._observer is not None:
@@ -497,4 +518,61 @@ class AgentSessionWatcher:
 
             if new_events:
                 self._enrich_subagent_metadata(new_events)
+                self._cache_unlinked_agent_parents(new_events)
                 self._on_events(self._agent_id, new_events)
+
+    def _cache_unlinked_agent_parents(self, events: list[dict[str, Any]]) -> None:
+        """Remember assistant messages whose Agent tool_calls are not yet linked.
+
+        When an Agent tool_call is broadcast before its subagent's jsonl exists, it
+        goes out without subagent_metadata. We keep the event so a later discovery
+        cycle can re-enrich and re-broadcast it (see _rebroadcast_relinked_parents).
+        Fully-linked parents are skipped -- there is nothing left to resolve.
+        """
+        for event in events:
+            if event.get("type") != "assistant_message":
+                continue
+            agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
+            if not agent_tool_calls:
+                continue
+            if all("subagent_metadata" in tc for tc in agent_tool_calls):
+                continue
+            message_uuid = event.get("message_uuid", "")
+            if message_uuid:
+                self._unlinked_agent_parent_events[message_uuid] = event
+
+    def _rebroadcast_relinked_parents(self) -> None:
+        """Re-emit cached parent events that gained subagent links since broadcast.
+
+        A subagent's jsonl (and thus its parent linkage) can appear after the parent
+        Agent tool_call was already streamed to the frontend. Re-enriching the cached
+        parent and re-broadcasting it lets the frontend upgrade the plain tool-call
+        block into the rich subagent card without a page refresh. Parents whose Agent
+        tool_calls are now all linked are dropped from the cache so memory stays
+        bounded and they are not re-checked every cycle.
+        """
+        relinked: list[dict[str, Any]] = []
+        for message_uuid, event in list(self._unlinked_agent_parent_events.items()):
+            before = self._linked_agent_tool_call_ids(event)
+            self._enrich_subagent_metadata([event])
+            if self._linked_agent_tool_call_ids(event) != before:
+                relinked.append(event)
+            if self._is_fully_linked(event):
+                del self._unlinked_agent_parent_events[message_uuid]
+        if relinked:
+            self._on_events(self._agent_id, relinked)
+
+    @staticmethod
+    def _linked_agent_tool_call_ids(event: dict[str, Any]) -> frozenset[str]:
+        """tool_call_ids of Agent tool_calls in ``event`` that already carry metadata."""
+        return frozenset(
+            tc.get("tool_call_id", "")
+            for tc in event.get("tool_calls", [])
+            if tc.get("tool_name") == "Agent" and "subagent_metadata" in tc
+        )
+
+    @staticmethod
+    def _is_fully_linked(event: dict[str, Any]) -> bool:
+        """True if every Agent tool_call in ``event`` has subagent_metadata."""
+        agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
+        return bool(agent_tool_calls) and all("subagent_metadata" in tc for tc in agent_tool_calls)

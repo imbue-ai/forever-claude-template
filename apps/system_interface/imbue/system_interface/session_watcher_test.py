@@ -410,6 +410,159 @@ def test_falls_back_to_tool_result_linkage_when_subagent_file_absent(tmp_path: P
     assert agent_tc["subagent_metadata"]["description"] == "legacy sub"
 
 
+def _latest_agent_tool_call(
+    collected: list[tuple[str, list[dict[str, Any]]]], parent_uuid: str, tool_use_id: str
+) -> dict[str, Any] | None:
+    """Return the Agent tool_call dict for the given parent/tool_use across all emissions.
+
+    Re-broadcasts mutate the same event object in place, so the latest view of a
+    tool_call reflects whether subagent_metadata has been attached yet.
+    """
+    found: dict[str, Any] | None = None
+    for _agent_id, events in collected:
+        for event in events:
+            if event.get("type") != "assistant_message" or event.get("message_uuid") != parent_uuid:
+                continue
+            for tc in event.get("tool_calls", []):
+                if tc.get("tool_name") == "Agent" and tc.get("tool_call_id") == tool_use_id:
+                    found = tc
+    return found
+
+
+def test_late_subagent_discovery_rebroadcasts_enriched_parent(tmp_path: Path) -> None:
+    """Reproduces the live-streaming gap: a parent Agent tool_call is broadcast
+    before its subagent jsonl exists, so it goes out without subagent_metadata.
+    Once the subagent jsonl appears on a later discovery cycle, the parent must
+    be re-broadcast carrying the rich-card metadata."""
+    parent_assistant_uuid = "assistant-uuid-late"
+    tool_use_id = "toolu_late"
+    parent_event = _make_agent_tool_use_assistant(
+        uuid=parent_assistant_uuid,
+        timestamp="2026-01-01T00:00:01Z",
+        tool_use_id=tool_use_id,
+        description="explore late",
+    )
+
+    # Start with an empty main session so the parent line arrives *after* the
+    # watcher has set its read offset -- exactly the streaming sequence.
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+
+    watcher._discover_sessions()
+    watcher._read_initial_offsets()
+
+    # The main agent writes the assistant message containing the Agent tool_call.
+    with open(parent_session_file, "a") as f:
+        f.write(json.dumps(parent_event) + "\n")
+
+    watcher._poll_for_changes()
+    broadcast_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert broadcast_tc is not None, "parent assistant message should have been broadcast"
+    assert "subagent_metadata" not in broadcast_tc, "no metadata before the subagent exists"
+
+    emissions_before = len(collected)
+
+    # The subagent process now spawns and writes its first jsonl line.
+    _write_subagent_session(
+        parent_session_file,
+        agent_id="latesubid",
+        parent_assistant_uuid=parent_assistant_uuid,
+        first_timestamp="2026-01-01T00:00:02Z",
+        agent_type="Explore",
+        description="explore late",
+    )
+
+    watcher._discover_sessions()
+    watcher._rebroadcast_relinked_parents()
+
+    assert len(collected) == emissions_before + 1, "parent should be re-broadcast once linkage lands"
+    relinked_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert relinked_tc is not None
+    assert relinked_tc["subagent_metadata"]["agent_type"] == "Explore"
+    assert relinked_tc["subagent_metadata"]["description"] == "explore late"
+
+    # Idempotent: a fully-linked parent is not re-broadcast again.
+    emissions_after_relink = len(collected)
+    watcher._rebroadcast_relinked_parents()
+    assert len(collected) == emissions_after_relink
+
+
+def test_inorder_subagent_discovery_does_not_rebroadcast(tmp_path: Path) -> None:
+    """When the subagent jsonl already exists by the time the parent is polled,
+    the parent is broadcast with metadata directly and there is nothing to
+    re-broadcast."""
+    parent_assistant_uuid = "assistant-uuid-inorder"
+    tool_use_id = "toolu_inorder"
+    parent_event = _make_agent_tool_use_assistant(
+        uuid=parent_assistant_uuid,
+        timestamp="2026-01-01T00:00:01Z",
+        tool_use_id=tool_use_id,
+        description="explore inorder",
+    )
+
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+
+    watcher._discover_sessions()
+    watcher._read_initial_offsets()
+
+    # Subagent linkage is known before the parent line is read.
+    _write_subagent_session(
+        parent_session_file,
+        agent_id="inordersubid",
+        parent_assistant_uuid=parent_assistant_uuid,
+        first_timestamp="2026-01-01T00:00:02Z",
+        agent_type="Explore",
+        description="explore inorder",
+    )
+    watcher._discover_sessions()
+
+    with open(parent_session_file, "a") as f:
+        f.write(json.dumps(parent_event) + "\n")
+    watcher._poll_for_changes()
+
+    broadcast_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert broadcast_tc is not None
+    assert "subagent_metadata" in broadcast_tc, "metadata present on first broadcast"
+
+    emissions_before = len(collected)
+    watcher._rebroadcast_relinked_parents()
+    assert len(collected) == emissions_before, "nothing left to re-broadcast"
+
+
+def test_is_main_session_event_excludes_subagent_sessions(tmp_path: Path) -> None:
+    """The predicate that keeps subagent-session events out of the main stream."""
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: None,
+    )
+    watcher._discover_sessions()
+
+    assert watcher.is_main_session_event({"session_id": session_id})
+    assert not watcher.is_main_session_event({"session_id": "agent-some-subagent"})
+    # Events without a session_id (e.g. plugin-injected app events) stay on the main stream.
+    assert watcher.is_main_session_event({"type": "agents_updated"})
+
+
 def test_watcher_handles_missing_session_file(tmp_path: Path) -> None:
     agent_state_dir = tmp_path / "agent_state"
     agent_state_dir.mkdir()

@@ -13,7 +13,9 @@ from fastapi.testclient import TestClient
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
+from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.models import AgentStateItem
+from imbue.system_interface.server import _stream_filtered_events
 from imbue.system_interface.server import create_application
 
 # Placeholder client-side port used by the refresh-service broadcast tests.
@@ -364,6 +366,34 @@ def test_proto_agent_logs_endpoint_streams_messages_until_sentinel(app: FastAPI)
 
     assert first == {"line": "starting"}
     assert second == {"line": "still going"}
+
+
+def test_stream_filtered_events_forwards_only_matching_events() -> None:
+    """The shared stream loop yields only events that pass its predicate.
+
+    This is the wiring behind Bug 2: the main stream forwards main-session
+    events and drops subagent-session events, which share the same per-agent
+    queue. A queued ``None`` ends the stream, keeping the test deterministic.
+    """
+    event_queues = AgentEventQueues()
+    event_queue = event_queues.register("agent-1")
+
+    # Subagent event first so a missing filter would forward it before the main one.
+    event_queue.put({"event_id": "sub-evt", "session_id": "agent-sub"})
+    event_queue.put({"event_id": "main-evt", "session_id": "main-1"})
+    # Plugin/app events have no session_id and must still pass through.
+    event_queue.put({"event_id": "no-session"})
+    event_queue.put(None)
+
+    def is_main_session_event(event: dict[str, object]) -> bool:
+        session_id = event.get("session_id")
+        return session_id is None or session_id == "main-1"
+
+    frames = list(_stream_filtered_events("agent-1", event_queues, event_queue, is_main_session_event))
+    forwarded_ids = [json.loads(frame[len("data: ") :])["event_id"] for frame in frames if frame.startswith("data: ")]
+
+    assert forwarded_ids == ["main-evt", "no-session"]
+    assert "sub-evt" not in forwarded_ids
 
 
 def test_destroy_rejects_is_primary_agent(client: TestClient, app: FastAPI) -> None:
