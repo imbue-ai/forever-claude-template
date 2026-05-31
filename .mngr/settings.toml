@@ -157,37 +157,83 @@ start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 extra_provision_command__extend = [
-    # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
-    # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
-    "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
-    # Add nodesource apt source. The setup_20.x script does its own
-    # apt-get update, so a manual one before this is wasted work.
-    "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -",
-    # Add gh apt source. Run apt-get update once at the end so both
-    # nodesource and gh indexes are visible when the big install runs.
-    "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update",
-    # ONE transaction for every apt package this template needs. Saves
-    # roughly one apt-get update + one resolver pass + several dpkg
-    # trigger runs vs the previous three split installs.
-    "sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison nodejs gh",
-    # Install latchkey CLI globally; pinned to the same version as Dockerfile's
-    # LATCHKEY_VERSION ARG. Bump both together. Also keep this aligned with the
-    # `latchkey` version pinned in `apps/minds/package.json` of the host minds.app
-    # -- the agent-side CLI talks to the host-side gateway over HTTP, and 2.x
-    # versions across that minor (e.g. 2.7.x CLI vs 2.10.x gateway) reject each
-    # other's password-auth wire format with `401 (password)`.
-    "sudo npm install -g latchkey@2.12.2",
-    "curl -LsSf https://astral.sh/uv/install.sh | sh",
-    # (ttyd binary download dropped: `disable_plugin=["ttyd"]` above turns
-    # the ttyd window off, so the binary that used to be downloaded here
-    # was always unused.)
-    "cd apps/system_interface/frontend && npm ci && npm run build",
-    "export PATH=$HOME/.local/bin:$PATH && uv tool install -e vendor/mngr/libs/mngr && uv tool install -e apps/system_interface --with-editable vendor/mngr/libs/mngr_claude --with-editable vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
-    "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
-    # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
-    # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
-    # because the uv installer prepends it.
-    "mkdir -p $HOME/.local/bin && ln -sf /code/vendor/tk/ticket $HOME/.local/bin/tk",
+    # Single bash script with explicit DAG via background subshells +
+    # `wait`. Three phases:
+    #   A) apt sources + big apt install   ||  uv installer
+    #   B) npm latchkey                    ||  frontend npm ci+build  ||  uv tool install (vendor/mngr + system_interface + plugins)
+    #   C) uv sync + playwright install (needs uv tools from B)
+    #
+    # apt holds /var/lib/dpkg/lock so all apt work stays inside ONE
+    # subshell; the uv-installer runs in parallel because it's a
+    # self-contained curl-to-binary download. Phase B's three tracks
+    # touch disjoint package-manager trees (/usr/lib/node_modules vs
+    # apps/system_interface/frontend/node_modules vs
+    # ~/.local/share/uv/tools/) so they don't lock against each other.
+    # Per-track stderr/stdout goes to /tmp/prov-*.log; on subshell
+    # failure we dump the relevant log so the cause is obvious.
+    """
+set -euo pipefail
+
+# Trivial host-setup work that is effectively free
+sudo mkdir -p /worktree && sudo chown $(whoami) /worktree
+mkdir -p $HOME/.local/bin && ln -sf /code/vendor/tk/ticket $HOME/.local/bin/tk
+
+# --- Phase A: apt source setup + big install in parallel with uv installer ---
+(
+  set -e
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+  sudo mkdir -p -m 755 /etc/apt/keyrings
+  wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison nodejs gh
+) > /tmp/prov-apt.log 2>&1 &
+APT_PID=$!
+
+(
+  set -e
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+) > /tmp/prov-uv.log 2>&1 &
+UV_PID=$!
+
+wait $APT_PID || { echo "[provision] apt phase failed"; cat /tmp/prov-apt.log; exit 1; }
+wait $UV_PID  || { echo "[provision] uv installer failed"; cat /tmp/prov-uv.log; exit 1; }
+
+# --- Phase B: latchkey global || frontend build || uv tool install ---
+# Pin latchkey CLI to the Dockerfile/host LATCHKEY_VERSION ARG. The
+# agent-side CLI talks to the host-side gateway over HTTP, and
+# mismatched 2.x minors reject each other's password-auth wire
+# format with 401 (password).
+(
+  set -e
+  sudo npm install -g latchkey@2.12.2
+) > /tmp/prov-latchkey.log 2>&1 &
+LATCHKEY_PID=$!
+
+(
+  set -e
+  cd apps/system_interface/frontend && npm ci && npm run build
+) > /tmp/prov-frontend.log 2>&1 &
+FRONTEND_PID=$!
+
+(
+  set -e
+  export PATH=$HOME/.local/bin:$PATH
+  uv tool install -e vendor/mngr/libs/mngr
+  uv tool install -e apps/system_interface --with-editable vendor/mngr/libs/mngr_claude --with-editable vendor/mngr/libs/mngr_modal
+  PATH="$UV_TOOL_BIN_DIR:$PATH" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude
+) > /tmp/prov-uvtool.log 2>&1 &
+UVTOOL_PID=$!
+
+wait $LATCHKEY_PID || { echo "[provision] latchkey install failed"; cat /tmp/prov-latchkey.log; exit 1; }
+wait $FRONTEND_PID || { echo "[provision] frontend build failed";  cat /tmp/prov-frontend.log; exit 1; }
+wait $UVTOOL_PID   || { echo "[provision] uv tool install failed"; cat /tmp/prov-uvtool.log;   exit 1; }
+
+# --- Phase C: uv sync + playwright install (depends on Phase B's uv tools) ---
+export PATH=$HOME/.local/bin:$PATH
+uv sync --all-packages
+sudo env PATH="$PATH" HOME="$HOME" uv run playwright install --with-deps chromium
+""",
 ]
 
 # template for vultr VPS provider (cloud mode)
