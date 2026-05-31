@@ -247,31 +247,35 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
       // homogeneous (all-keyed) fragment and lets the unkeyed thread sit
       // next to them without violating the rule.
       //
-      // Inter-step messages interrupt the timeline before the step whose
-      // node they precede (Variant C: broken-thread, full-width prose). We
-      // weave each one in immediately before its `before_step_id` node so
-      // the timeline reads top-to-bottom in chronological order.
-      const renderStopHookChip = (chip: PlacedChip): m.Vnode =>
-        m("div.pv-stophook", { key: `stophook-${chip.event.event_id}` }, renderUserMessage(chip.event));
+      // Timeline interrupts -- woven prose (inter-step messages and earlier-
+      // segment replies) and stop-hook chips -- each render as a broken-thread,
+      // full-width block before the step whose node they precede (Variant C),
+      // or at the bottom of the timeline when none follows (`before_step_id`
+      // === ""). Merging both kinds into one timestamp-sorted list means that
+      // when several land at the same position they still read top-to-bottom
+      // in chronological order (e.g. a pre-hook reply above the stop-hook chip).
+      const interrupts: { ts: string; before_step_id: string; node: m.Vnode }[] = [
+        ...interstep_messages.map((placed) => ({
+          ts: placed.event.timestamp,
+          before_step_id: placed.before_step_id,
+          node: m(
+            "div.pv-interstep",
+            { key: `interstep-${placed.event.event_id}` },
+            m(MarkdownContent, { content: placed.event.text ?? "" }),
+          ),
+        })),
+        ...stophook_messages.map((chip) => ({
+          ts: chip.event.timestamp,
+          before_step_id: chip.before_step_id,
+          node: m("div.pv-stophook", { key: `stophook-${chip.event.event_id}` }, renderUserMessage(chip.event)),
+        })),
+      ].sort((a, b) => a.ts.localeCompare(b.ts));
 
       const timelineNodes: m.Children[] = [];
       for (let idx = 0; idx < tasks.length; idx++) {
         const task = tasks[idx];
-        for (const placed of interstep_messages) {
-          if (placed.before_step_id === task.ticket_id) {
-            timelineNodes.push(
-              m(
-                "div.pv-interstep",
-                { key: `interstep-${placed.event.event_id}` },
-                m(MarkdownContent, { content: placed.event.text ?? "" }),
-              ),
-            );
-          }
-        }
-        for (const chip of stophook_messages) {
-          if (chip.before_step_id === task.ticket_id) {
-            timelineNodes.push(renderStopHookChip(chip));
-          }
+        for (const it of interrupts) {
+          if (it.before_step_id === task.ticket_id) timelineNodes.push(it.node);
         }
         timelineNodes.push(
           renderTaskNode(task, {
@@ -284,12 +288,10 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
           }),
         );
       }
-      // Chips that fired after the last step's start render at the bottom of
-      // the timeline (above the trailing reply below the timeline).
-      for (const chip of stophook_messages) {
-        if (chip.before_step_id === "") {
-          timelineNodes.push(renderStopHookChip(chip));
-        }
+      // Interrupts that fall after the last step's start render at the bottom
+      // of the timeline (above the trailing reply, which sits below it).
+      for (const it of interrupts) {
+        if (it.before_step_id === "") timelineNodes.push(it.node);
       }
 
       return m("div.progress-block", [

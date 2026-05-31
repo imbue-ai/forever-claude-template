@@ -493,9 +493,12 @@ function locate(ts: string, sorted: StepView[]): Located {
  * feedback message splits the section into segments. This makes the scan
  * robust to stop hooks: post-hook tool activity can no longer bury the
  * genuine pre-hook wrap-up reply, and a reply the agent writes *in response
- * to* a stop hook surfaces as its own trailing reply rather than collapsing
- * or replacing the pre-hook one. Each segment can contribute a trailing
- * reply; they render below the timeline in chronological order.
+ * to* a stop hook surfaces too rather than collapsing or replacing the
+ * pre-hook one. Only the **final** segment's reply renders below the timeline
+ * (trailing); a reply from an *earlier* segment is woven into the timeline at
+ * its chronological position (inter_step), so the whole turn reads top-to-
+ * bottom in time and the earlier reply stays visible instead of being yanked
+ * to the bottom or collapsed under a step.
  */
 export function classifyTopLevelMessages(body_events: TranscriptEvent[], steps: StepView[]): PlacedMessages {
   const result: PlacedMessages = { leading: [], inter_step: [], trailing: [] };
@@ -505,14 +508,31 @@ export function classifyTopLevelMessages(body_events: TranscriptEvent[], steps: 
   const sorted = sortedWindowedSteps(steps);
   const firstStart = sorted.length > 0 ? sorted[0].active_window_start : null;
   const segmentBounds = replySegmentBoundaries(body_events);
+  // The final reply segment begins at the last stop-hook (or at section start
+  // when there are none). A reply detected before this point belongs to an
+  // earlier segment and is woven in chronologically rather than rendered below.
+  const finalSegmentStart = segmentBounds.length > 0 ? segmentBounds[segmentBounds.length - 1] : "";
+  // Position a woven message before the first step that starts after it (or at
+  // the timeline's end when none do) -- the same rule the stop-hook chip uses.
+  const weaveBeforeStepId = (ts: string): string => {
+    const next = sorted.find((s) => (s.active_window_start ?? "") > ts);
+    return next ? next.ticket_id : "";
+  };
 
   for (const ev of textOnly) {
     const ts = ev.timestamp;
     const segment = segmentFor(ts, segmentBounds);
     const boundary = segmentReplyBoundary(body_events, steps, segment.start, segment.end);
-    const isTrailing = boundary !== null ? ts > boundary : firstStart !== null && ts >= firstStart;
-    if (isTrailing) {
-      result.trailing.push(ev);
+    const isReplyRun = boundary !== null ? ts > boundary : firstStart !== null && ts >= firstStart;
+    if (isReplyRun) {
+      // The final segment's reply renders below the timeline; an earlier
+      // segment's reply is woven in at its chronological spot (never collapsed
+      // -- it was detected as a reply, so it must stay visible).
+      if (ts >= finalSegmentStart) {
+        result.trailing.push(ev);
+      } else {
+        result.inter_step.push({ event: ev, before_step_id: weaveBeforeStepId(ts) });
+      }
       continue;
     }
     if (firstStart === null || ts < firstStart) {

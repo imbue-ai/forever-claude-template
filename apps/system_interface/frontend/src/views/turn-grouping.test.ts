@@ -769,10 +769,10 @@ describe("stop-hook reply segments (issue 3)", () => {
       summary: "Did the work.",
     });
 
-  it("surfaces BOTH the pre-hook wrap-up and the post-hook reply when post-hook tool work follows", () => {
-    // Without segmentation, the post-hook tool call pushes the reply boundary
-    // past the pre-hook reply, collapsing it and promoting the post-hook prose
-    // as the sole headline. With per-segment scanning both surface.
+  it("weaves the pre-hook reply into the timeline and trails only the post-hook reply (tool work follows)", () => {
+    // The pre-hook wrap-up is shown at its chronological position (woven), the
+    // post-hook reply trails below. Neither collapses; the post-hook tool call
+    // no longer buries the pre-hook reply.
     const body = [
       toolUse("2026-04-28T01:00:10Z", "Edit", "tc-pre"),
       assistantMsg("2026-04-28T01:00:30Z", "Done -- here is the summary.", "msg-pre"),
@@ -781,12 +781,16 @@ describe("stop-hook reply segments (issue 3)", () => {
       assistantMsg("2026-04-28T01:01:00Z", "Autofix found nothing; working tree clean.", "msg-post"),
     ];
     const placed = classifyTopLevelMessages(body, [doneStep()]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-pre", "msg-post"]);
+    // pre-hook reply is woven in (shown, not collapsed), positioned after the
+    // last step (no later step to precede -> before_step_id "").
+    expect(placed.inter_step.map((p) => [p.event.event_id, p.before_step_id])).toEqual([["msg-pre", ""]]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-post"]);
     expect(placed.leading).toEqual([]);
-    expect(placed.inter_step).toEqual([]);
   });
 
-  it("surfaces a post-hook reply that has no further tool work, without collapsing the pre-hook reply", () => {
+  it("shows a pre-hook reply (after the last step closed) woven in, with the post-hook reply trailing", () => {
+    // Constraint: a reply written after the last step closed must stay visible,
+    // not collapse under that step. Here it is woven in (before_step_id "").
     const body = [
       toolUse("2026-04-28T01:00:10Z", "Edit", "tc-pre"),
       assistantMsg("2026-04-28T01:00:30Z", "Done -- want a test?", "msg-pre"),
@@ -794,12 +798,14 @@ describe("stop-hook reply segments (issue 3)", () => {
       assistantMsg("2026-04-28T01:00:50Z", "Nothing to change; ready for your go-ahead.", "msg-post"),
     ];
     const placed = classifyTopLevelMessages(body, [doneStep()]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-pre", "msg-post"]);
+    expect(placed.inter_step.map((p) => p.event.event_id)).toEqual(["msg-pre"]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-post"]);
   });
 
-  it("keeps post-hook mid-work narration in-step; only the post-hook trailing reply is promoted", () => {
-    // After the hook the agent narrates, does more tool work, then replies.
-    // The narration (followed by a post-hook tool) is not the segment's reply.
+  it("shows a pre-hook reply that was last while the step stayed open (woven, not collapsed)", () => {
+    // Constraint's second case: the last step never closed and the reply is the
+    // last thing in the pre-hook segment. It must be woven in, never folded
+    // into the open step's expandable body.
     const openStep = stepView({
       ticket_id: "t1",
       status: "active",
@@ -816,9 +822,12 @@ describe("stop-hook reply segments (issue 3)", () => {
       assistantMsg("2026-04-28T01:01:00Z", "All clean.", "msg-post-reply"),
     ];
     const placed = classifyTopLevelMessages(body, [openStep]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-pre", "msg-post-reply"]);
-    // msg-post-narr is mid-work in the post-hook segment, not a reply.
-    expect(placed.trailing.map((e) => e.event_id)).not.toContain("msg-post-narr");
+    // pre-hook reply woven (shown), final reply trails.
+    expect(placed.inter_step.map((p) => p.event.event_id)).toEqual(["msg-pre"]);
+    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-post-reply"]);
+    // msg-post-narr is mid-work in the post-hook segment -> stays in-step.
+    const placedIds = [...placed.inter_step.map((p) => p.event.event_id), ...placed.trailing.map((e) => e.event_id)];
+    expect(placedIds).not.toContain("msg-post-narr");
   });
 });
 
