@@ -10,8 +10,8 @@
 import m from "mithril";
 import { MarkdownContent, renderMarkdown } from "../markdown";
 import type { TranscriptEvent } from "../models/Response";
-import { renderAssistantMessageChildren } from "./message-renderers";
-import type { InterStepMessage, StepView, TaskUiStatus } from "./turn-grouping";
+import { renderAssistantMessageChildren, renderUserMessage } from "./message-renderers";
+import type { InterStepMessage, PlacedChip, StepView, TaskUiStatus } from "./turn-grouping";
 import { eventsInTaskWindow } from "./turn-grouping";
 
 interface ProgressBlockAttrs {
@@ -34,6 +34,11 @@ interface ProgressBlockAttrs {
   leading_messages: TranscriptEvent[];
   interstep_messages: InterStepMessage[];
   trailing_messages: TranscriptEvent[];
+  /** Stop-hook feedback chips, positioned chronologically in the timeline
+   *  (before a given step, or after the last step). Rendered as a
+   *  thread-interrupting band so a stop hook that fired mid-turn shows where
+   *  it actually happened instead of floating above the whole block. */
+  stophook_messages: PlacedChip[];
   agentId: string;
 }
 
@@ -219,8 +224,16 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
   return {
     view(vnode) {
-      const { tasks, body_events, toolResults, leading_messages, interstep_messages, trailing_messages, agentId } =
-        vnode.attrs;
+      const {
+        tasks,
+        body_events,
+        toolResults,
+        leading_messages,
+        interstep_messages,
+        trailing_messages,
+        stophook_messages,
+        agentId,
+      } = vnode.attrs;
       if (tasks.length === 0) {
         // Defensive: callers should not mount ProgressBlock when there
         // are no tasks. Fall back to no-op.
@@ -238,6 +251,9 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
       // node they precede (Variant C: broken-thread, full-width prose). We
       // weave each one in immediately before its `before_step_id` node so
       // the timeline reads top-to-bottom in chronological order.
+      const renderStopHookChip = (chip: PlacedChip): m.Vnode =>
+        m("div.pv-stophook", { key: `stophook-${chip.event.event_id}` }, renderUserMessage(chip.event));
+
       const timelineNodes: m.Children[] = [];
       for (let idx = 0; idx < tasks.length; idx++) {
         const task = tasks[idx];
@@ -252,6 +268,11 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
             );
           }
         }
+        for (const chip of stophook_messages) {
+          if (chip.before_step_id === task.ticket_id) {
+            timelineNodes.push(renderStopHookChip(chip));
+          }
+        }
         timelineNodes.push(
           renderTaskNode(task, {
             is_last: idx === tasks.length - 1,
@@ -262,6 +283,13 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
             tasks,
           }),
         );
+      }
+      // Chips that fired after the last step's start render at the bottom of
+      // the timeline (above the trailing reply below the timeline).
+      for (const chip of stophook_messages) {
+        if (chip.before_step_id === "") {
+          timelineNodes.push(renderStopHookChip(chip));
+        }
       }
 
       return m("div.progress-block", [

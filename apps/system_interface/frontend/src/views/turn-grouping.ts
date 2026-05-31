@@ -527,3 +527,28 @@ export function classifyTopLevelMessages(body_events: TranscriptEvent[], steps: 
   }
   return result;
 }
+
+/** A stop-hook chip plus the id of the step it should render immediately
+ *  before in the timeline. `before_step_id === ""` means render after the
+ *  last step (the hook fired after all step activity in the section). */
+export interface PlacedChip {
+  event: TranscriptEvent;
+  before_step_id: string;
+}
+
+/** Position each stop-hook feedback message at its chronological spot in the
+ *  section's timeline: immediately before the first step that *starts after*
+ *  the hook fired, or after the last step when none do. The chat panel emits
+ *  the chip mid-section but renders the whole section as one progress block,
+ *  so without this the chip floats above the entire turn instead of sitting
+ *  where the hook actually interrupted the work. */
+export function placeStopHookChips(body_events: TranscriptEvent[], steps: StepView[]): PlacedChip[] {
+  const sorted = sortedWindowedSteps(steps);
+  const placed: PlacedChip[] = [];
+  for (const e of body_events) {
+    if (e.type !== "user_message" || !isStopHookFeedback(e.content ?? "")) continue;
+    const next = sorted.find((s) => (s.active_window_start ?? "") > e.timestamp);
+    placed.push({ event: e, before_step_id: next ? next.ticket_id : "" });
+  }
+  return placed;
+}

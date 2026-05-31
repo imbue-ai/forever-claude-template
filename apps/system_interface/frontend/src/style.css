@@ -1814,6 +1814,18 @@ body {
   color: var(--pv-fg);
 }
 
+/* Stop-hook chip woven into the timeline at the point the hook fired. Like
+   the inter-step block it sits above the timeline thread (opaque background +
+   z-index) so the thread doesn't draw through the chip. The chip itself keeps
+   its own collapsible styling; this wrapper only handles positioning and
+   masking the thread. */
+.pv-stophook {
+  position: relative;
+  z-index: 2;
+  margin: 6px 0 14px 0;
+  background: var(--color-bg);
+}
+
 /* ─────────────────────────────────────────────────────────────────────
    ACTIVITY INDICATOR (replaces the generic "Running tool..." strip)
    ─────────────────────────────────────────────────────────────────── */

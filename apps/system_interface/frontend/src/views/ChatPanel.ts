@@ -31,8 +31,14 @@ import {
   computeAuthErrorHiddenEventIds,
 } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import { buildTaskRecords, buildSectionSteps, attributeNarration, classifyTopLevelMessages } from "./turn-grouping";
-import { isNonBoundaryUserMessage } from "./user-message-classification";
+import {
+  buildTaskRecords,
+  buildSectionSteps,
+  attributeNarration,
+  classifyTopLevelMessages,
+  placeStopHookChips,
+} from "./turn-grouping";
+import { isNonBoundaryUserMessage, isStopHookFeedback } from "./user-message-classification";
 import { ProgressBlock } from "./ProgressBlock";
 import { ActivityIndicator } from "./ActivityIndicator";
 
@@ -431,6 +437,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
             leading_messages: placed.leading,
             interstep_messages: placed.inter_step,
             trailing_messages: placed.trailing,
+            stophook_messages: placeStopHookChips(bodyEvents, steps),
             agentId,
           }),
         );
@@ -441,11 +448,14 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
         // rather than wrapping it in a pseudo-progress "ungrouped work"
         // block. Tool_result events are looked up via the prebuilt
         // toolResults map by renderAssistantMessage, so only the
-        // assistant_messages need to be emitted here; non-boundary user
-        // messages were already pushed as chips in the main loop.
+        // assistant_messages need to be emitted here. Stop-hook chips are
+        // interleaved at their chronological position (bodyEvents is ordered).
         for (const e of bodyEvents) {
           if (e.type === "assistant_message") {
             messageNodes.push(renderAssistantMessage(e, toolResults, agentId));
+          } else if (e.type === "user_message" && isStopHookFeedback(e.content ?? "")) {
+            const chipNode = renderUserMessage(e);
+            if (chipNode !== null) messageNodes.push(chipNode);
           }
         }
       }
@@ -454,9 +464,17 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     for (const event of visibleEvents) {
       if (event.type === "user_message") {
         if (isNonBoundaryUserMessage(event.content ?? "")) {
-          const chipNode = renderUserMessage(event);
-          if (chipNode !== null) messageNodes.push(chipNode);
-          bodyEvents.push(event);
+          if (sectionUserEvent === null) {
+            // No section open yet to attach it to -- render at top level.
+            const chipNode = renderUserMessage(event);
+            if (chipNode !== null) messageNodes.push(chipNode);
+          } else {
+            // Defer rendering: flushSection places the chip at its
+            // chronological position inside the section (woven into the
+            // timeline, or interleaved in the no-steps plain-chat fallback)
+            // so it no longer floats above the whole turn.
+            bodyEvents.push(event);
+          }
         } else {
           flushSection(event.timestamp);
           sectionUserEvent = event;

@@ -8,6 +8,7 @@ import {
   attributeNarration,
   eventsInTaskWindow,
   classifyTopLevelMessages,
+  placeStopHookChips,
 } from "./turn-grouping";
 
 function userMsg(ts: string, content: string, eventId: string = `u-${ts}`): TranscriptEvent {
@@ -818,6 +819,51 @@ describe("stop-hook reply segments (issue 3)", () => {
     expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-pre", "msg-post-reply"]);
     // msg-post-narr is mid-work in the post-hook segment, not a reply.
     expect(placed.trailing.map((e) => e.event_id)).not.toContain("msg-post-narr");
+  });
+});
+
+describe("placeStopHookChips", () => {
+  const hookMsg = (ts: string, id: string): TranscriptEvent => userMsg(ts, "Stop hook feedback:\nRun /autofix.", id);
+
+  it("places the chip before the first step that starts after the hook fired", () => {
+    const pre = stepView({ ticket_id: "pre", status: "done", active_window_start: "2026-04-28T01:00:00Z" });
+    const post = stepView({ ticket_id: "post", status: "active", active_window_start: "2026-04-28T01:00:40Z" });
+    const body = [hookMsg("2026-04-28T01:00:30Z", "u-hook")];
+    const placed = placeStopHookChips(body, [pre, post]);
+    expect(placed).toHaveLength(1);
+    expect(placed[0].event.event_id).toBe("u-hook");
+    expect(placed[0].before_step_id).toBe("post");
+  });
+
+  it("places the chip after the last step when no step starts after the hook", () => {
+    const a = stepView({ ticket_id: "a", status: "done", active_window_start: "2026-04-28T01:00:00Z" });
+    const b = stepView({ ticket_id: "b", status: "done", active_window_start: "2026-04-28T01:00:10Z" });
+    const body = [hookMsg("2026-04-28T01:00:50Z", "u-hook")];
+    const placed = placeStopHookChips(body, [a, b]);
+    expect(placed).toHaveLength(1);
+    expect(placed[0].before_step_id).toBe(""); // render at the bottom of the timeline
+  });
+
+  it("ignores non-stop-hook user messages and assistant messages", () => {
+    const step = stepView({ ticket_id: "t1", status: "done", active_window_start: "2026-04-28T01:00:00Z" });
+    const body = [
+      userMsg("2026-04-28T01:00:10Z", "Base directory for this skill: /x/skills/foo/", "u-skill"),
+      assistantMsg("2026-04-28T01:00:20Z", "some prose", "a-1"),
+      userMsg("2026-04-28T01:00:30Z", "a real user prompt", "u-real"),
+    ];
+    expect(placeStopHookChips(body, [step])).toEqual([]);
+  });
+
+  it("places multiple hooks each before their following step", () => {
+    const s1 = stepView({ ticket_id: "s1", status: "done", active_window_start: "2026-04-28T01:00:00Z" });
+    const s2 = stepView({ ticket_id: "s2", status: "done", active_window_start: "2026-04-28T01:00:40Z" });
+    const s3 = stepView({ ticket_id: "s3", status: "active", active_window_start: "2026-04-28T01:01:20Z" });
+    const body = [hookMsg("2026-04-28T01:00:30Z", "u-h1"), hookMsg("2026-04-28T01:01:10Z", "u-h2")];
+    const placed = placeStopHookChips(body, [s1, s2, s3]);
+    expect(placed.map((p) => [p.event.event_id, p.before_step_id])).toEqual([
+      ["u-h1", "s2"],
+      ["u-h2", "s3"],
+    ]);
   });
 });
 
