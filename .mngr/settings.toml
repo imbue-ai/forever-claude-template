@@ -160,8 +160,16 @@ extra_provision_command__extend = [
     # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
     # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
     "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
-    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
-    "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
+    # Add nodesource apt source. The setup_20.x script does its own
+    # apt-get update, so a manual one before this is wasted work.
+    "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -",
+    # Add gh apt source. Run apt-get update once at the end so both
+    # nodesource and gh indexes are visible when the big install runs.
+    "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update",
+    # ONE transaction for every apt package this template needs. Saves
+    # roughly one apt-get update + one resolver pass + several dpkg
+    # trigger runs vs the previous three split installs.
+    "sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison nodejs gh",
     # Install latchkey CLI globally; pinned to the same version as Dockerfile's
     # LATCHKEY_VERSION ARG. Bump both together. Also keep this aligned with the
     # `latchkey` version pinned in `apps/minds/package.json` of the host minds.app
@@ -170,8 +178,9 @@ extra_provision_command__extend = [
     # other's password-auth wire format with `401 (password)`.
     "sudo npm install -g latchkey@2.12.2",
     "curl -LsSf https://astral.sh/uv/install.sh | sh",
-    "ARCH=$(uname -m) && sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && sudo chmod +x /usr/local/bin/ttyd",
-    "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh",
+    # (ttyd binary download dropped: `disable_plugin=["ttyd"]` above turns
+    # the ttyd window off, so the binary that used to be downloaded here
+    # was always unused.)
     "cd apps/system_interface/frontend && npm ci && npm run build",
     "export PATH=$HOME/.local/bin:$PATH && uv tool install -e vendor/mngr/libs/mngr && uv tool install -e apps/system_interface --with-editable vendor/mngr/libs/mngr_claude --with-editable vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
     "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
