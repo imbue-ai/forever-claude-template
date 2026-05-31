@@ -381,7 +381,7 @@ def test_destroy_rejects_is_primary_agent(client: TestClient, app: FastAPI) -> N
         name="system-services",
         state="RUNNING",
         labels={"is_primary": "true", "workspace": "my-ws"},
-        work_dir="/code",
+        work_dir="/mngr/code",
     )
     agent_manager._agents[services_agent.id] = services_agent
 
