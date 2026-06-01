@@ -20,6 +20,13 @@ _SOURCE = "claude/common_transcript"
 
 _AGENT_ID_PATTERN = re.compile(r"agentId:\s*(\S+)")
 
+# Sentinel text Claude writes to the user channel when the user interrupts a
+# turn (e.g. presses Esc mid-tool-use). It is a control marker, not real user
+# input -- emitting it as a ``user_message`` event would pin the activity
+# indicator on "Thinking..." after every interrupt, since the transcript-tail
+# heuristic would treat it as "user just spoke, Claude hasn't replied yet."
+_INTERRUPT_SENTINEL_TEXT = "[Request interrupted by user]"
+
 # Claude Code's resume bookkeeping. Whenever ``claude --resume`` reloads a
 # session whose previous turn did not finish cleanly (the turn was interrupted,
 # or the process was stopped or crashed mid-turn), the framework injects a
@@ -265,8 +272,7 @@ def _parse_user_message(
         event_id = _make_event_id(uuid, "user")
         if event_id not in existing_event_ids:
             text = _extract_text_content(content)
-            # Drop Claude Code's resume bookkeeping -- its own UI hides it, so do we.
-            if text and not _is_resume_continuation_marker(raw):
+            if text and text.strip() != _INTERRUPT_SENTINEL_TEXT and not _is_resume_continuation_marker(raw):
                 event: dict[str, Any] = {
                     "timestamp": timestamp,
                     "type": "user_message",

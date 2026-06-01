@@ -9,6 +9,7 @@
 
 import m from "mithril";
 import { isSlotClaimed } from "../slots";
+import type { TranscriptEvent } from "../models/Response";
 import {
   fetchEvents,
   fetchBackfillEvents,
@@ -16,7 +17,6 @@ import {
   getFirstEventId,
   isConversationNotFound,
   isBackfillComplete,
-  type TranscriptEvent,
 } from "../models/Response";
 import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
@@ -24,8 +24,23 @@ import { openLoginModal } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import { renderUserMessage, renderAssistantMessage, computeAuthErrorHiddenEventIds } from "./message-renderers";
+import {
+  renderUserMessage,
+  renderAssistantMessage,
+  buildToolResultsWithSkillExpansions,
+  computeAuthErrorHiddenEventIds,
+} from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
+import {
+  buildTaskRecords,
+  buildSectionSteps,
+  attributeNarration,
+  classifyTopLevelMessages,
+  placeStopHookChips,
+} from "./turn-grouping";
+import { isNonBoundaryUserMessage, isStopHookFeedback } from "./user-message-classification";
+import { ProgressBlock } from "./ProgressBlock";
+import { ActivityIndicator } from "./ActivityIndicator";
 
 function getAgentTerminalUrl(agentId: string): string {
   const baseUrl = getTerminalUrl();
@@ -388,26 +403,97 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     startBackfill(agentId);
 
-    const toolResults = new Map<string, TranscriptEvent>();
-    for (const event of events) {
-      if (event.type === "tool_result" && event.tool_call_id) {
-        toolResults.set(event.tool_call_id, event);
+    const toolResults = buildToolResultsWithSkillExpansions(events);
+
+    const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
+    const visibleEvents = events.filter((e) => !hiddenEventIds.has(e.event_id));
+
+    const taskRecords = buildTaskRecords(visibleEvents);
+    const agent = getAgentById(agentId);
+    const agentIsIdle = agent?.activity_state === "IDLE";
+
+    const messageNodes: m.Children[] = [];
+    let sectionUserEvent: TranscriptEvent | null = null;
+    let sectionStart = "";
+    let bodyEvents: TranscriptEvent[] = [];
+
+    function flushSection(nextBoundaryTs: string): void {
+      if (sectionUserEvent === null) return;
+      const endTs = nextBoundaryTs;
+      const isTail = endTs === "";
+      const isSettled = !isTail || agentIsIdle;
+
+      const steps = buildSectionSteps(taskRecords, sectionStart, endTs, isSettled);
+      attributeNarration(steps, bodyEvents);
+
+      if (steps.length > 0) {
+        const placed = classifyTopLevelMessages(bodyEvents, steps);
+        messageNodes.push(
+          m(ProgressBlock, {
+            key: `progress-${sectionUserEvent.event_id}`,
+            tasks: steps,
+            body_events: bodyEvents,
+            toolResults,
+            leading_messages: placed.leading,
+            interstep_messages: placed.inter_step,
+            trailing_messages: placed.trailing,
+            stophook_messages: placeStopHookChips(bodyEvents, steps),
+            agentId,
+          }),
+        );
+      } else if (bodyEvents.length > 0) {
+        // No step records were declared for this turn. Render the body as
+        // plain chat -- the agent's prose and tool-call blocks inline, the
+        // same way assistant messages render outside a progress section --
+        // rather than wrapping it in a pseudo-progress "ungrouped work"
+        // block. Tool_result events are looked up via the prebuilt
+        // toolResults map by renderAssistantMessage, so only the
+        // assistant_messages need to be emitted here. Stop-hook chips are
+        // interleaved at their chronological position (bodyEvents is ordered).
+        for (const e of bodyEvents) {
+          if (e.type === "assistant_message") {
+            messageNodes.push(renderAssistantMessage(e, toolResults, agentId));
+          } else if (e.type === "user_message" && isStopHookFeedback(e.content ?? "")) {
+            const chipNode = renderUserMessage(e);
+            if (chipNode !== null) messageNodes.push(chipNode);
+          }
+        }
       }
     }
 
-    const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
-    const messageNodes: m.Vnode[] = [];
-    for (const event of events) {
-      if (hiddenEventIds.has(event.event_id)) continue;
+    for (const event of visibleEvents) {
       if (event.type === "user_message") {
-        const userNode = renderUserMessage(event);
-        if (userNode !== null) {
-          messageNodes.push(userNode);
+        if (isNonBoundaryUserMessage(event.content ?? "")) {
+          if (sectionUserEvent === null) {
+            // No section open yet to attach it to -- render at top level.
+            const chipNode = renderUserMessage(event);
+            if (chipNode !== null) messageNodes.push(chipNode);
+          } else {
+            // Defer rendering: flushSection places the chip at its
+            // chronological position inside the section (woven into the
+            // timeline, or interleaved in the no-steps plain-chat fallback)
+            // so it no longer floats above the whole turn.
+            bodyEvents.push(event);
+          }
+        } else {
+          flushSection(event.timestamp);
+          sectionUserEvent = event;
+          sectionStart = event.timestamp;
+          bodyEvents = [];
+          const userNode = renderUserMessage(event);
+          if (userNode !== null) messageNodes.push(userNode);
         }
       } else if (event.type === "assistant_message") {
-        messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
+        if (sectionUserEvent === null) {
+          messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
+        } else {
+          bodyEvents.push(event);
+        }
+      } else if (event.type === "tool_result") {
+        bodyEvents.push(event);
       }
     }
+    flushSection("");
 
     return m("div", { class: "message-list-wrapper" }, [
       m(
@@ -449,6 +535,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           ? null
           : m("footer", { class: "app-footer" }, [
               m(EmptySlot, { name: "conversation-before-input" }),
+              isConversationNotFound(agentId)
+                ? null
+                : m(ActivityIndicator, { agentId, events: getEventsForAgent(agentId) }),
               m(MessageInput, { agentId }),
               m("div", { class: "chat-agent-terminal-link" }, [
                 m(

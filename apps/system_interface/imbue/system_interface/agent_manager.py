@@ -32,7 +32,13 @@ from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
+from imbue.system_interface.activity_state import ActivityState
+from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
+from imbue.system_interface.activity_state import derive_activity_state
+from imbue.system_interface.activity_state import has_unmatched_tool_use
+from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.agent_discovery import discover_agents
+from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
@@ -172,6 +178,11 @@ class AgentManager:
     _observe_process: RunningProcess | None
     _creation_cg: ConcurrencyGroup
     _mngr_binary: str
+    _host_dir: Path
+    _activity_tracked_agents: set[str]
+    _has_unmatched_tool_use_by_agent: dict[str, bool]
+    _last_event_type_by_agent: dict[str, str | None]
+    _activity_state_by_agent: dict[str, ActivityState]
 
     @classmethod
     def build(cls, broadcaster: WebSocketBroadcaster, mngr_binary: str = _DEFAULT_MNGR_BINARY) -> "AgentManager":
@@ -196,6 +207,11 @@ class AgentManager:
         manager._creation_cg = ConcurrencyGroup(name="agent-creation")
         manager._creation_cg.__enter__()
         manager._mngr_binary = mngr_binary
+        manager._host_dir = get_host_dir()
+        manager._activity_tracked_agents = set()
+        manager._has_unmatched_tool_use_by_agent = {}
+        manager._last_event_type_by_agent = {}
+        manager._activity_state_by_agent = {}
         return manager
 
     def start(self) -> None:
@@ -223,6 +239,12 @@ class AgentManager:
         for observer in self._app_observers.values():
             observer.join(timeout=5)
         self._app_observers.clear()
+
+        with self._lock:
+            self._activity_tracked_agents.clear()
+            self._has_unmatched_tool_use_by_agent.clear()
+            self._last_event_type_by_agent.clear()
+            self._activity_state_by_agent.clear()
 
     @property
     def broadcaster(self) -> WebSocketBroadcaster:
@@ -252,6 +274,7 @@ class AgentManager:
             self._agents.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
+        self._stop_activity_tracking(agent_id)
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def get_applications(self) -> list[ApplicationEntry]:
@@ -287,6 +310,7 @@ class AgentManager:
                     "state": a.state,
                     "labels": a.labels,
                     "work_dir": a.work_dir,
+                    "activity_state": a.activity_state,
                 }
                 for a in self._agents.values()
             ]
@@ -552,6 +576,7 @@ class AgentManager:
         _completion_signal_put(log_queue, None)
 
         if success:
+            self._ensure_activity_tracking(agent_id)
             self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
         self._broadcaster.broadcast_proto_agent_completed(agent_id=agent_id, success=success, error=error)
 
@@ -573,6 +598,7 @@ class AgentManager:
             for agent_info in agents:
                 if agent_info.id == self._own_agent_id and agent_info.work_dir:
                     self._start_app_watcher(agent_info.id, Path(agent_info.work_dir))
+                self._ensure_activity_tracking(agent_info.id)
         except (OSError, ValueError, RuntimeError, BaseMngrError) as e:
             _loguru_logger.opt(exception=e).error("Initial agent discovery failed")
 
@@ -595,11 +621,13 @@ class AgentManager:
                 new_ids = set(new_agents.keys())
                 self._agents = new_agents
 
-            self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
-            removed = old_ids - new_ids
-            for agent_id in removed:
+            for agent_id in new_ids:
+                self._ensure_activity_tracking(agent_id)
+            for agent_id in old_ids - new_ids:
                 self._stop_app_watcher(agent_id)
+                self._stop_activity_tracking(agent_id)
+
+            self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
         except (OSError, ValueError, RuntimeError, BaseMngrError) as e:
             _loguru_logger.opt(exception=e).error("Agent refresh failed")
@@ -774,9 +802,11 @@ class AgentManager:
             agent = new_agents[agent_id]
             if agent_id == self._own_agent_id and agent.work_dir:
                 self._start_app_watcher(agent_id, Path(agent.work_dir))
+            self._ensure_activity_tracking(agent_id)
 
         for agent_id in old_ids - new_ids:
             self._stop_app_watcher(agent_id)
+            self._stop_activity_tracking(agent_id)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
@@ -797,6 +827,7 @@ class AgentManager:
 
         if agent_id == self._own_agent_id and agent_state.work_dir:
             self._start_app_watcher(agent_id, Path(agent_state.work_dir))
+        self._ensure_activity_tracking(agent_id)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
@@ -808,6 +839,7 @@ class AgentManager:
             self._agents.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
+        self._stop_activity_tracking(agent_id)
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
@@ -817,6 +849,7 @@ class AgentManager:
             with self._lock:
                 self._agents.pop(aid, None)
             self._stop_app_watcher(aid)
+            self._stop_activity_tracking(aid)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
@@ -867,6 +900,127 @@ class AgentManager:
         toml_path = Path(work_dir) / _APPLICATIONS_TOML_FILENAME
         self._read_applications(toml_path)
         self._broadcaster.broadcast_applications_updated(self.get_applications_serialized())
+
+    def _get_agent_state_dir(self, agent_id: str) -> Path:
+        """Return the per-agent state directory under the local mngr host dir.
+
+        Mirrors ``server._find_agent`` so the readiness-hook marker files and
+        the activity tracker agree on the same path.
+        """
+        return self._host_dir / "agents" / agent_id
+
+    def _ensure_activity_tracking(self, agent_id: str) -> None:
+        """Start activity tracking for ``agent_id`` if its local state dir exists.
+
+        Skips agents whose state directory is not present on this host -- those
+        are tracked on a remote host and have no local transcript to watch.
+        Idempotent: a second call does not duplicate work. The cached activity
+        state is re-applied to ``_agents`` on every call, which matters because
+        the lifecycle handlers (``_handle_full_snapshot``, ``_refresh_agents``,
+        ``_handle_agent_discovered``) rebuild ``_agents`` entries from raw
+        discovery data with ``activity_state=None`` and rely on this method to
+        repopulate it.
+        """
+        state_dir = self._get_agent_state_dir(agent_id)
+        if not state_dir.exists():
+            return
+        with self._lock:
+            self._activity_tracked_agents.add(agent_id)
+        self._recompute_activity_state(agent_id, broadcast_on_change=False)
+
+    def _stop_activity_tracking(self, agent_id: str) -> None:
+        """Stop activity tracking and clear cached activity state."""
+        with self._lock:
+            self._activity_tracked_agents.discard(agent_id)
+            self._has_unmatched_tool_use_by_agent.pop(agent_id, None)
+            self._last_event_type_by_agent.pop(agent_id, None)
+            self._activity_state_by_agent.pop(agent_id, None)
+
+    def _recompute_activity_state(self, agent_id: str, *, broadcast_on_change: bool) -> None:
+        """Recompute activity state for ``agent_id`` from cached transcript signals.
+
+        If the derived state differs from the previously cached state, the
+        ``_agents`` entry is updated and (when ``broadcast_on_change`` is True)
+        an ``agents_updated`` event is broadcast.
+
+        Quietly does nothing when the agent is not being tracked for activity
+        (e.g. a remote agent) or is no longer in ``_agents``.
+        """
+        with self._lock:
+            if agent_id not in self._activity_tracked_agents:
+                return
+            agent_state = self._agents.get(agent_id)
+            if agent_state is None:
+                return
+            has_pending_tool = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
+            cached_last_event_type = self._last_event_type_by_agent.get(agent_id)
+            new_state = derive_activity_state(
+                is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
+                has_pending_tool_use=has_pending_tool,
+                tail_event_type=cached_last_event_type,
+            )
+            old_state = self._activity_state_by_agent.get(agent_id)
+            if old_state == new_state and agent_state.activity_state == new_state.value:
+                return
+            self._activity_state_by_agent[agent_id] = new_state
+            self._agents[agent_id] = AgentStateItem(
+                id=agent_state.id,
+                name=agent_state.name,
+                state=agent_state.state,
+                labels=agent_state.labels,
+                work_dir=agent_state.work_dir,
+                activity_state=new_state.value,
+            )
+
+        if broadcast_on_change:
+            self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
+
+    def update_session_events(self, agent_id: str, events: list[dict[str, Any]]) -> None:
+        """Recompute transcript-derived activity signals from the full event list.
+
+        Called by ``server._get_or_create_watcher`` whenever the
+        :class:`AgentSessionWatcher` learns of new events. Cheap to call: short
+        circuits when both the unmatched-tool-use boolean and the last event
+        type are unchanged.
+
+        No-op for agents not being tracked for activity (e.g. remote agents, or
+        stale callbacks for an agent that was just destroyed).
+        """
+        new_pending = has_unmatched_tool_use(events)
+        new_last_type = last_event_type(events)
+        with self._lock:
+            if agent_id not in self._activity_tracked_agents:
+                return
+            old_pending = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
+            old_last_type = self._last_event_type_by_agent.get(agent_id)
+            if old_pending == new_pending and old_last_type == new_last_type:
+                return
+            self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
+            self._last_event_type_by_agent[agent_id] = new_last_type
+
+        self._recompute_activity_state(agent_id, broadcast_on_change=True)
+
+    def reset_activity_state(self, agent_id: str) -> None:
+        """Force ``agent_id`` back to IDLE after an interrupt/restart.
+
+        Interrupting an agent restarts its Claude process. The restart abandons
+        the session transcript mid-turn -- the last recorded event is still an
+        unmatched ``tool_use`` or a ``tool_result`` -- so the transcript-derived
+        activity state stays pinned at TOOL_RUNNING / THINKING until the user
+        sends another message. The restart is a backend action that the
+        transcript never records, so the backend must reset the derived signals
+        explicitly: clearing the unmatched-tool-use flag and the cached last
+        event type makes :func:`derive_activity_state` settle on IDLE.
+
+        No-op for agents not being tracked for activity (remote agents, or a
+        callback racing with destruction).
+        """
+        with self._lock:
+            if agent_id not in self._activity_tracked_agents:
+                return
+            self._has_unmatched_tool_use_by_agent[agent_id] = False
+            self._last_event_type_by_agent[agent_id] = None
+        self._recompute_activity_state(agent_id, broadcast_on_change=True)
 
     def _read_applications(self, toml_path: Path) -> None:
         """Read and parse runtime/applications.toml for the primary agent."""

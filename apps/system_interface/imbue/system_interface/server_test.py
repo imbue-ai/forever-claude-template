@@ -10,11 +10,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 # Placeholder client-side port used by the refresh-service broadcast tests.
 # Only the host portion of the TestClient ``client`` tuple is inspected by the
@@ -182,6 +185,108 @@ def test_send_message_success(client: TestClient) -> None:
     mock_send.assert_called_once_with("test-agent", "hello")
 
 
+def test_interrupt_agent_returns_404_for_unknown_agent(client: TestClient) -> None:
+    """Interrupting a nonexistent agent returns 404."""
+    with patch("imbue.system_interface.server._find_agent", return_value=None):
+        response = client.post("/api/agents/nonexistent/interrupt")
+    assert response.status_code == 404
+
+
+def test_interrupt_agent_success(client: TestClient) -> None:
+    """Interrupting an agent restarts it via mngr and returns 200."""
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="claude-agent",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    fake_result = FinishedProcess(
+        returncode=0,
+        stdout="Restarted agent: claude-agent",
+        stderr="",
+        command=("mngr", "start", "claude-agent", "--restart", "--no-resume"),
+        is_output_already_logged=False,
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=agent_info),
+        patch(
+            "imbue.system_interface.server.run_local_command_modern_version",
+            return_value=fake_result,
+        ) as mock_run,
+        patch.object(AgentManager, "reset_activity_state") as mock_reset,
+    ):
+        response = client.post("/api/agents/agent-123/interrupt")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert mock_run.call_args.kwargs["command"] == [
+        "mngr",
+        "start",
+        "claude-agent",
+        "--restart",
+        "--no-resume",
+    ]
+    # After a successful restart the endpoint resets the agent's activity
+    # state so the indicator clears instead of staying pinned at THINKING.
+    mock_reset.assert_called_once_with("agent-123")
+
+
+def test_interrupt_agent_rejects_is_primary_agent(client: TestClient) -> None:
+    """POST /api/agents/<id>/interrupt returns 400 for the services agent.
+
+    Restarting the is_primary agent would stop the workspace services. The
+    frontend hides such agents; this server-side guard protects direct callers.
+    """
+    services_agent = AgentInfo(
+        id="services-1",
+        name="system-services",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+        labels={"is_primary": "true", "workspace": "my-ws"},
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=services_agent),
+        patch("imbue.system_interface.server.run_local_command_modern_version") as mock_run,
+    ):
+        response = client.post("/api/agents/services-1/interrupt")
+
+    assert response.status_code == 400
+    assert "is_primary" in response.json()["detail"]
+    # The guard runs before the restart subprocess, so mngr is never invoked.
+    mock_run.assert_not_called()
+
+
+def test_interrupt_agent_returns_500_on_failure(client: TestClient) -> None:
+    """If the mngr restart command exits non-zero, return 500 with its stderr."""
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="claude-agent",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    fake_result = FinishedProcess(
+        returncode=1,
+        stdout="",
+        stderr="mngr start failed",
+        command=("mngr", "start", "claude-agent", "--restart", "--no-resume"),
+        is_output_already_logged=False,
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=agent_info),
+        patch(
+            "imbue.system_interface.server.run_local_command_modern_version",
+            return_value=fake_result,
+        ),
+    ):
+        response = client.post("/api/agents/agent-123/interrupt")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to interrupt agent 'claude-agent': mngr start failed"
+
+
 def test_get_layout_returns_404_when_no_layout_saved(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,6 +439,84 @@ def test_refresh_service_broadcast_rejects_non_loopback(app: FastAPI) -> None:
     with TestClient(app, client=("10.0.0.1", _TEST_CLIENT_PORT)) as remote_client:
         response = remote_client.post("/api/refresh-service/web/broadcast")
     assert response.status_code == 403
+
+
+def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hitting /api/agents/{id}/events for a Claude session with an unmatched tool_use
+    seeds the AgentManager's transcript-derived signals so the activity indicator
+    reads ``TOOL_RUNNING`` immediately.
+    """
+    agent_id = "agent-pending-tool"
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", agent_id)
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path / "work"))
+
+    state_dir = tmp_path / "agents" / agent_id
+    state_dir.mkdir(parents=True)
+
+    claude_config_dir = tmp_path / "claude_config"
+    projects_dir = claude_config_dir / "projects" / "hash123"
+    projects_dir.mkdir(parents=True)
+    session_id = "test-session-id"
+    session_file = projects_dir / f"{session_id}.jsonl"
+    # An assistant message that includes a tool_use, with no matching tool_result.
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "uuid-1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [
+                        {"type": "text", "text": "running a command"},
+                        {"type": "tool_use", "id": "call_a", "name": "Bash", "input": {"command": "ls"}},
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            }
+        )
+        + "\n"
+    )
+    (state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
+
+    broadcaster = WebSocketBroadcaster()
+    manager = AgentManager.build(broadcaster)
+    with manager._lock:
+        manager._agents[agent_id] = AgentStateItem(
+            id=agent_id,
+            name="seed-agent",
+            state="RUNNING",
+            labels={},
+            work_dir=str(tmp_path / "work"),
+        )
+    manager._ensure_activity_tracking(agent_id)
+
+    app = create_application(agent_manager=manager)
+    agent_info = AgentInfo(
+        id=agent_id,
+        name="seed-agent",
+        state="RUNNING",
+        agent_state_dir=state_dir,
+        claude_config_dir=claude_config_dir,
+    )
+
+    try:
+        with TestClient(app) as test_client:
+            with patch("imbue.system_interface.server._find_agent", return_value=agent_info):
+                response = test_client.get(f"/api/agents/{agent_id}/events")
+            assert response.status_code == 200
+
+        # The watcher creation path seeds transcript-derived state
+        # synchronously. Assert before ``stop()``, which clears these
+        # caches alongside the marker watchers.
+        with manager._lock:
+            assert manager._has_unmatched_tool_use_by_agent[agent_id] is True
+            assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
+    finally:
+        manager.stop()
 
 
 @pytest.mark.timeout(5)

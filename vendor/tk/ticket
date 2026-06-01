@@ -115,7 +115,7 @@ ticket_path() {
 
     # Try partial match (anywhere in filename)
     local matches
-    matches=$(find "$TICKETS_DIR" -maxdepth 1 -name "*${id}*.md" 2>/dev/null | head -2)
+    matches=$(find "$TICKETS_DIR" -maxdepth 1 -name "*${id}*.md" 2>/dev/null)
     local count
     count=$(echo "$matches" | _grep -c . || true)
 
@@ -123,6 +123,24 @@ ticket_path() {
         echo "$matches"
         return 0
     elif [[ "$count" -gt 1 ]]; then
+        # Prefer non-step tickets when the partial match is ambiguous --
+        # step records are agent-private progress markers, so a bare
+        # partial id from a user/agent prompt is virtually always meant
+        # to refer to a regular ticket. If exactly one of the candidates
+        # is a non-step ticket, pick it; otherwise stay ambiguous.
+        local non_step="" non_step_count=0
+        while IFS= read -r m; do
+            [[ -z "$m" ]] && continue
+            if _grep -q "^step: true" "$m"; then
+                continue
+            fi
+            non_step_count=$((non_step_count + 1))
+            non_step="$m"
+        done <<< "$matches"
+        if [[ "$non_step_count" -eq 1 ]]; then
+            echo "$non_step"
+            return 0
+        fi
         echo "Error: ambiguous ID '$id' matches multiple tickets" >&2
         return 1
     else
@@ -147,10 +165,21 @@ update_yaml_field() {
     if _grep -q "^${field}:" "$file"; then
         _sed_i "$file" "s/^${field}:.*/${field}: ${value}/"
     else
-        # Insert after first --- (beginning of frontmatter)
-        _sed_i "$file" "0,/^---$/ { /^---$/a\\
-${field}: ${value}
-}"
+        # Insert immediately after the first `---` (beginning of
+        # frontmatter). Using awk rather than sed because the GNU sed
+        # `0,/pattern/` form silently no-ops on BSD sed -- the equivalent
+        # BSD form (`1,/pattern/`) has different semantics when the first
+        # line itself matches the pattern (which is always the case here:
+        # frontmatter starts on line 1).
+        local tmp="${file}.tmp.$$"
+        awk -v field="$field" -v value="$value" '
+            BEGIN { inserted = 0 }
+            { print }
+            !inserted && NR == 1 && /^---$/ {
+                print field ": " value
+                inserted = 1
+            }
+        ' "$file" > "$tmp" && mv "$tmp" "$file"
     fi
 }
 
@@ -159,9 +188,17 @@ cmd_create() {
 
     local title="" description="" design="" acceptance=""
     local priority=2 issue_type="task" assignee="" external_ref="" parent="" tags=""
+    local is_step=0 no_parent=0
 
-    # Default assignee to git user.name if available
-    assignee=$(git config user.name 2>/dev/null || true)
+    # Default assignee to git user.name if available, BUT only when
+    # running outside an mngr-managed agent. Inside an mngr context the
+    # MNGR_AGENT_NAME is stamped separately as `agent:` (creator) and
+    # `assignee:` is the load-bearing "who is currently working it"
+    # signal -- tickets are unassigned until `tk start` (auto) or
+    # `tk assign` (explicit).
+    if [[ -z "${MNGR_AGENT_NAME:-}" ]]; then
+        assignee=$(git config user.name 2>/dev/null || true)
+    fi
 
     # Parse args
     while [[ $# -gt 0 ]]; do
@@ -174,11 +211,52 @@ cmd_create() {
             -a|--assignee) assignee="$2"; shift 2 ;;
             --external-ref) external_ref="$2"; shift 2 ;;
             --parent) parent="$2"; shift 2 ;;
+            --parent=*) parent="${1#--parent=}"; shift ;;
+            --no-parent) no_parent=1; shift ;;
+            --step) is_step=1; shift ;;
             --tags) tags="$2"; shift 2 ;;
             -*) echo "Unknown option: $1" >&2; return 1 ;;
             *) title="$1"; shift ;;
         esac
     done
+
+    # Auto-nest steps under this agent's exactly-one in_progress ticket.
+    # Only when --step is set, no explicit --parent was given, --no-parent
+    # was not requested, and MNGR_AGENT_NAME is set (no agent context =
+    # no scope to auto-nest within). Zero in_progress tickets -> standalone
+    # step; exactly one -> nest; more than one -> error and demand
+    # disambiguation. We resolve the parent BEFORE the normal
+    # validate-and-resolve pass so it benefits from the same partial-id
+    # normalisation.
+    if [[ "$is_step" -eq 1 && -z "$parent" && "$no_parent" -eq 0 && -n "${MNGR_AGENT_NAME:-}" ]]; then
+        local candidates=()
+        local md
+        for md in "$TICKETS_DIR"/*.md; do
+            [[ -e "$md" ]] || continue
+            # Skip step records and non-in_progress tickets.
+            _grep -q "^step: true" "$md" && continue
+            _grep -q "^status: in_progress" "$md" || continue
+            # Only consider tickets currently assigned to me.
+            local their_assignee=""
+            their_assignee=$(yaml_field "$md" "assignee" || true)
+            [[ "$their_assignee" == "$MNGR_AGENT_NAME" ]] || continue
+            candidates+=("$md")
+        done
+        if [[ ${#candidates[@]} -eq 1 ]]; then
+            parent=$(basename "${candidates[0]}" .md)
+        elif [[ ${#candidates[@]} -gt 1 ]]; then
+            {
+                echo "Error: cannot auto-nest step -- multiple tickets in_progress for $MNGR_AGENT_NAME:"
+                local c their_title
+                for c in "${candidates[@]}"; do
+                    their_title=$(awk '/^# / { print substr($0, 3); exit }' "$c")
+                    echo "  $(basename "$c" .md) — ${their_title:-Untitled}"
+                done
+                echo "Pass --parent=<id> to pick one, or --no-parent for a standalone step."
+            } >&2
+            return 1
+        fi
+    fi
 
     # Validate and resolve parent if specified
     if [[ -n "$parent" ]]; then
@@ -204,6 +282,16 @@ cmd_create() {
         echo "type: $issue_type"
         echo "priority: $priority"
         [[ -n "$assignee" ]] && echo "assignee: $assignee"
+        # Stamp the creating mngr agent's name when running inside an
+        # mngr-managed agent, so consumers (e.g. the minds workspace
+        # server's progress view) can attribute each ticket to its source
+        # agent. Absent when not in an mngr context -- no-op upstream.
+        [[ -n "${MNGR_AGENT_NAME:-}" ]] && echo "agent: $MNGR_AGENT_NAME"
+        # `step: true` marks turn-bound progress records to distinguish
+        # them from regular tickets. Cross-agent surfaces (`tk ready`,
+        # `tk ls`, the open-tickets reminder hook) hide step records by
+        # default; only the creator's progress view shows them.
+        [[ "$is_step" -eq 1 ]] && echo "step: true"
         [[ -n "$external_ref" ]] && echo "external-ref: $external_ref"
         [[ -n "$parent" ]] && echo "parent: $parent"
         if [[ -n "$tags" ]]; then
@@ -269,15 +357,112 @@ cmd_start() {
         echo "Usage: $(basename "$0") start <id>" >&2
         return 1
     fi
-    cmd_status "$1" "in_progress"
+    local id="$1"
+    local file
+    file=$(ticket_path "$id") || return 1
+
+    # Auto-self-assignment only applies to regular tickets, not steps.
+    # Steps are creator-private and don't carry an "owner-who-is-working-it"
+    # signal -- the creator IS the worker by construction. For tickets,
+    # assignment is the load-bearing "this is now my work" signal that
+    # makes the ticket surface in the chat progress view (the watcher's
+    # filter rule).
+    if [[ -n "${MNGR_AGENT_NAME:-}" ]]; then
+        local is_step="" current_assignee=""
+        is_step=$(yaml_field "$file" "step" || true)
+        if [[ "$is_step" != "true" ]]; then
+            current_assignee=$(yaml_field "$file" "assignee" || true)
+            if [[ -z "$current_assignee" ]]; then
+                update_yaml_field "$file" "assignee" "$MNGR_AGENT_NAME"
+            elif [[ "$current_assignee" != "$MNGR_AGENT_NAME" ]]; then
+                echo "Warning: reassigning $(basename "$file" .md) from '$current_assignee' to '$MNGR_AGENT_NAME'" >&2
+                update_yaml_field "$file" "assignee" "$MNGR_AGENT_NAME"
+            fi
+        fi
+    fi
+
+    cmd_status "$id" "in_progress"
 }
 
 cmd_close() {
     if [[ $# -lt 1 ]]; then
-        echo "Usage: $(basename "$0") close <id>" >&2
+        echo "Usage: $(basename "$0") close <id> [summary]" >&2
         return 1
     fi
-    cmd_status "$1" "closed"
+    local id="$1"
+    shift
+    local summary=""
+    if [[ $# -gt 0 ]]; then
+        summary="$*"
+    fi
+
+    local file
+    file=$(ticket_path "$id") || return 1
+
+    # Step records terminate with a one-line work summary that becomes the
+    # caption rendered under the step in the chat progress view. Without
+    # it, the closed step would render as a checkmark with no description,
+    # which defeats the purpose of the step-as-progress-marker pattern.
+    local is_step=""
+    is_step=$(yaml_field "$file" "step" || true)
+    if [[ "$is_step" == "true" && -z "$summary" ]]; then
+        echo "Error: closing a step requires a one-line work summary." >&2
+        echo "Usage: $(basename "$0") close <id> \"<summary>\"" >&2
+        return 1
+    fi
+
+    if [[ -n "$summary" ]]; then
+        # Reuse the same timestamped-note format that cmd_add_note writes,
+        # so the parser's existing "latest note = summary" logic picks it up.
+        local timestamp
+        timestamp=$(_iso_date)
+        if ! _grep -q '^## Notes' "$file"; then
+            printf '\n## Notes\n' >> "$file"
+        fi
+        printf '\n**%s**\n\n%s\n' "$timestamp" "$summary" >> "$file"
+    fi
+
+    cmd_status "$id" "closed"
+}
+
+# Explicit assignment helpers. `tk assign <id>` defaults to the current
+# mngr agent (or git user.name outside an mngr context); pass a second
+# argument to assign to someone else. `tk unassign` clears the field.
+cmd_assign() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: $(basename "$0") assign <id> [<agent>]" >&2
+        return 1
+    fi
+    local id="$1"
+    local who="${2:-}"
+    if [[ -z "$who" ]]; then
+        who="${MNGR_AGENT_NAME:-$(git config user.name 2>/dev/null || true)}"
+    fi
+    if [[ -z "$who" ]]; then
+        echo "Error: no assignee given and none derivable from MNGR_AGENT_NAME / git config" >&2
+        return 1
+    fi
+    local file
+    file=$(ticket_path "$id") || return 1
+    update_yaml_field "$file" "assignee" "$who"
+    echo "Assigned $(basename "$file" .md) -> $who"
+}
+
+cmd_unassign() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: $(basename "$0") unassign <id>" >&2
+        return 1
+    fi
+    local id="$1"
+    local file
+    file=$(ticket_path "$id") || return 1
+    # Clear the value rather than deleting the line so the field stays
+    # legible / greppable in the file. The parser treats an empty value
+    # the same as a missing field.
+    if _grep -q "^assignee:" "$file"; then
+        _sed_i "$file" "s/^assignee:.*/assignee:/"
+    fi
+    echo "Unassigned $(basename "$file" .md)"
 }
 
 cmd_reopen() {
@@ -651,22 +836,24 @@ cmd_dep() {
 }
 
 cmd_ready() {
-    local assignee_filter="" tag_filter=""
+    local assignee_filter="" tag_filter="" step_mode="exclude"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -a) assignee_filter="$2"; shift 2 ;;
             --assignee=*) assignee_filter="${1#--assignee=}"; shift ;;
             -T) tag_filter="$2"; shift 2 ;;
             --tag=*) tag_filter="${1#--tag=}"; shift ;;
+            --include-steps) step_mode="include"; shift ;;
+            --only-steps) step_mode="only"; shift ;;
             *) shift ;;
         esac
     done
 
-    awk -v assignee_filter="$assignee_filter" -v tag_filter="$tag_filter" '
+    awk -v assignee_filter="$assignee_filter" -v tag_filter="$tag_filter" -v step_mode="$step_mode" '
     BEGIN { FS=": "; in_front=0 }
     FNR==1 {
         if (prev_file) store()
-        id=""; status=""; title=""; deps=""; priority=""; assignee=""; tags=""; in_front=0
+        id=""; status=""; title=""; deps=""; priority=""; assignee=""; tags=""; step=""; in_front=0
         prev_file=FILENAME
     }
     /^---$/ { in_front = !in_front; next }
@@ -674,6 +861,7 @@ cmd_ready() {
     in_front && /^status:/ { status = $2 }
     in_front && /^priority:/ { priority = $2 }
     in_front && /^assignee:/ { assignee = $2 }
+    in_front && /^step:/ { step = $2 }
     in_front && /^tags:/ { tags = $2; gsub(/[\[\] ]/, "", tags) }
     in_front && /^deps:/ {
         deps = $2
@@ -693,6 +881,7 @@ cmd_ready() {
             priorities[id] = (priority != "") ? priority : 2
             assignees[id] = assignee
             all_tags[id] = tags
+            steps[id] = step
         }
     }
     END {
@@ -703,6 +892,9 @@ cmd_ready() {
             if (status != "open" && status != "in_progress") continue
             if (assignee_filter != "" && assignees[id] != assignee_filter) continue
             if (tag_filter != "" && !has_tag(all_tags[id], tag_filter)) continue
+            is_step = (steps[id] == "true")
+            if (step_mode == "exclude" && is_step) continue
+            if (step_mode == "only" && !is_step) continue
 
             deps = deps_raw[id]
             ready = 1
@@ -741,7 +933,7 @@ cmd_ready() {
 }
 
 cmd_closed() {
-    local limit=20 assignee_filter="" tag_filter=""
+    local limit=20 assignee_filter="" tag_filter="" step_mode="exclude"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --limit=*) limit="${1#--limit=}"; shift ;;
@@ -749,6 +941,8 @@ cmd_closed() {
             --assignee=*) assignee_filter="${1#--assignee=}"; shift ;;
             -T) tag_filter="$2"; shift 2 ;;
             --tag=*) tag_filter="${1#--tag=}"; shift ;;
+            --include-steps) step_mode="include"; shift ;;
+            --only-steps) step_mode="only"; shift ;;
             *) shift ;;
         esac
     done
@@ -757,17 +951,18 @@ cmd_closed() {
     local files
     files=$(ls -t "$TICKETS_DIR"/*.md 2>/dev/null | head -n 100)
     [[ -z "$files" ]] && return 0
-    echo "$files" | xargs awk -v assignee_filter="$assignee_filter" -v tag_filter="$tag_filter" '
+    echo "$files" | xargs awk -v assignee_filter="$assignee_filter" -v tag_filter="$tag_filter" -v step_mode="$step_mode" '
     BEGIN { FS=": "; in_front=0 }
     FNR==1 {
         if (prev_file) emit()
-        id=""; status=""; title=""; assignee=""; tags=""; in_front=0
+        id=""; status=""; title=""; assignee=""; tags=""; step=""; in_front=0
         prev_file=FILENAME
     }
     /^---$/ { in_front = !in_front; next }
     in_front && /^id:/ { id = $2 }
     in_front && /^status:/ { status = $2 }
     in_front && /^assignee:/ { assignee = $2 }
+    in_front && /^step:/ { step = $2 }
     in_front && /^tags:/ { tags = $2; gsub(/[\[\] ]/, "", tags) }
     !in_front && /^# / && title == "" { title = substr($0, 3) }
     function has_tag(tags_str, tag,    i, n, arr) {
@@ -776,6 +971,9 @@ cmd_closed() {
         return 0
     }
     function emit() {
+        is_step = (step == "true")
+        if (step_mode == "exclude" && is_step) return
+        if (step_mode == "only" && !is_step) return
         if (id != "" && (status == "closed" || status == "done") && (assignee_filter == "" || assignee == assignee_filter) && (tag_filter == "" || has_tag(tags, tag_filter))) {
             output[++count] = sprintf("%-8s [%s] - %s", id, status, title)
         }
@@ -787,23 +985,71 @@ cmd_closed() {
     ' | head -n "$limit"
 }
 
+# List step records belonging to a specific agent (default: current
+# $MNGR_AGENT_NAME). Step records are turn-bound progress markers and
+# are by design creator-private -- this command is the canonical way
+# for the chat-progress reminder hooks and for an agent to see its own
+# outstanding steps. Use `--all-agents` to peek at every agent's steps
+# (debugging / observability).
+cmd_steps() {
+    local agent_filter="${MNGR_AGENT_NAME:-}" status_filter="" all_agents=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --status=*) status_filter="${1#--status=}"; shift ;;
+            --agent=*) agent_filter="${1#--agent=}"; shift ;;
+            --all-agents) all_agents=1; shift ;;
+            *) shift ;;
+        esac
+    done
+    if [[ "$all_agents" -eq 1 ]]; then
+        agent_filter=""
+    fi
+    awk -v status_filter="$status_filter" -v agent_filter="$agent_filter" '
+    BEGIN { FS=": "; in_front=0 }
+    FNR==1 {
+        if (prev_file) emit()
+        id=""; status=""; title=""; agent=""; step=""; in_front=0
+        prev_file=FILENAME
+    }
+    /^---$/ { in_front = !in_front; next }
+    in_front && /^id:/ { id = $2 }
+    in_front && /^status:/ { status = $2 }
+    in_front && /^agent:/ { agent = $2 }
+    in_front && /^step:/ { step = $2 }
+    !in_front && /^# / && title == "" { title = substr($0, 3) }
+    function emit() {
+        if (id == "" || step != "true") return
+        if (agent_filter != "" && agent != agent_filter) return
+        if (status_filter == "") {
+            if (status != "open" && status != "in_progress") return
+        } else if (status != status_filter) {
+            return
+        }
+        printf "%-8s [%s] - %s\n", id, status, title
+    }
+    END { if (prev_file) emit() }
+    ' "$TICKETS_DIR"/*.md 2>/dev/null
+}
+
 cmd_blocked() {
-    local assignee_filter="" tag_filter=""
+    local assignee_filter="" tag_filter="" step_mode="exclude"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -a) assignee_filter="$2"; shift 2 ;;
             --assignee=*) assignee_filter="${1#--assignee=}"; shift ;;
             -T) tag_filter="$2"; shift 2 ;;
             --tag=*) tag_filter="${1#--tag=}"; shift ;;
+            --include-steps) step_mode="include"; shift ;;
+            --only-steps) step_mode="only"; shift ;;
             *) shift ;;
         esac
     done
 
-    awk -v assignee_filter="$assignee_filter" -v tag_filter="$tag_filter" '
+    awk -v assignee_filter="$assignee_filter" -v tag_filter="$tag_filter" -v step_mode="$step_mode" '
     BEGIN { FS=": "; in_front=0 }
     FNR==1 {
         if (prev_file) store()
-        id=""; status=""; title=""; deps=""; priority=""; assignee=""; tags=""; in_front=0
+        id=""; status=""; title=""; deps=""; priority=""; assignee=""; tags=""; step=""; in_front=0
         prev_file=FILENAME
     }
     /^---$/ { in_front = !in_front; next }
@@ -811,6 +1057,7 @@ cmd_blocked() {
     in_front && /^status:/ { status = $2 }
     in_front && /^priority:/ { priority = $2 }
     in_front && /^assignee:/ { assignee = $2 }
+    in_front && /^step:/ { step = $2 }
     in_front && /^tags:/ { tags = $2; gsub(/[\[\] ]/, "", tags) }
     in_front && /^deps:/ {
         deps = $2
@@ -830,6 +1077,7 @@ cmd_blocked() {
             priorities[id] = (priority != "") ? priority : 2
             assignees[id] = assignee
             all_tags[id] = tags
+            steps[id] = step
         }
     }
     END {
@@ -840,6 +1088,9 @@ cmd_blocked() {
             if (status != "open" && status != "in_progress") continue
             if (assignee_filter != "" && assignees[id] != assignee_filter) continue
             if (tag_filter != "" && !has_tag(all_tags[id], tag_filter)) continue
+            is_step = (steps[id] == "true")
+            if (step_mode == "exclude" && is_step) continue
+            if (step_mode == "only" && !is_step) continue
 
             deps = deps_raw[id]
             if (deps == "") continue
@@ -1054,7 +1305,7 @@ cmd_show() {
     # First pass: collect all ticket metadata
     FNR==1 {
         if (prev_file) store()
-        id=""; status=""; title=""; deps=""; links=""; parent=""; in_front=0
+        id=""; status=""; title=""; deps=""; links=""; parent=""; step=""; in_front=0
         prev_file=FILENAME
     }
     /^---$/ { in_front = !in_front; next }
@@ -1063,6 +1314,7 @@ cmd_show() {
     in_front && /^deps:/ { deps = $2; gsub(/[\[\] ]/, "", deps) }
     in_front && /^links:/ { links = $2; gsub(/[\[\] ]/, "", links) }
     in_front && /^parent:/ { parent = $2 }
+    in_front && /^step:/ { step = $2 }
     !in_front && /^# / && title == "" { title = substr($0, 3) }
 
     function store() {
@@ -1072,18 +1324,28 @@ cmd_show() {
             all_deps[id] = deps
             all_links[id] = links
             parents[id] = parent
+            is_step_map[id] = (step == "true")
         }
     }
 
     END {
         if (prev_file) store()
 
-        # Build inverse relationships
+        # Build inverse relationships. Regular-ticket children and step
+        # children go in separate buckets: regular children belong to the
+        # ## Children section, step children to a new ## Steps section.
+        # Splitting them keeps the parentage view legible when a ticket
+        # has both kinds of descendants (the common case once an agent
+        # picks up a ticket and files in-turn step records under it).
         for (id in statuses) {
-            # Children: tickets where parent == target
             if (parents[id] == target) {
-                children_count++
-                children[children_count] = id
+                if (is_step_map[id]) {
+                    step_children_count++
+                    step_children[step_children_count] = id
+                } else {
+                    children_count++
+                    children[children_count] = id
+                }
             }
             # Blocking: tickets where target is in their deps
             deps = all_deps[id]
@@ -1153,7 +1415,8 @@ cmd_show() {
             }
         }
 
-        # Show children
+        # Show children (regular tickets only -- step children render in
+        # the dedicated ## Steps section below).
         if (children_count > 0) {
             print ""
             print "## Children"
@@ -1161,6 +1424,19 @@ cmd_show() {
             for (i = 1; i <= children_count; i++) {
                 c = children[i]
                 printf "- %s [%s] %s\n", c, statuses[c], titles[c]
+            }
+        }
+
+        # Show step children (in-turn progress records nested under this
+        # ticket). Distinct section so a regular ticket with its work
+        # broken into steps doesn'\''t intermingle them with sub-tickets.
+        if (step_children_count > 0) {
+            print ""
+            print "## Steps"
+            print ""
+            for (i = 1; i <= step_children_count; i++) {
+                s = step_children[i]
+                printf "- %s [%s] %s\n", s, statuses[s], titles[s]
             }
         }
 
@@ -1275,20 +1551,29 @@ Commands:
     -a, --assignee         Assignee
     --external-ref         External reference (e.g., gh-123, JIRA-456)
     --parent               Parent ticket ID
+    --no-parent            Disable auto-nest under in_progress ticket (steps only)
+    --step                 Create as a turn-bound progress record (step)
     --tags                 Comma-separated tags (e.g., --tags ui,backend,urgent)
-  start <id>               Set status to in_progress
-  close <id>               Set status to closed
+  start <id>               Set status to in_progress (auto-self-assigns)
+  close <id> [summary]     Set status to closed (summary required for steps)
   reopen <id>              Set status to open
   status <id> <status>     Update status (open|in_progress|closed)
+  assign <id> [agent]      Set assignee (defaults to current agent)
+  unassign <id>            Clear assignee
   dep <id> <dep-id>        Add dependency (id depends on dep-id)
   dep tree [--full] <id>   Show dependency tree (--full disables dedup)
   dep cycle                Find dependency cycles in open tickets
   undep <id> <dep-id>      Remove dependency
   link <id> <id> [id...]   Link tickets together (symmetric)
   unlink <id> <target-id>  Remove link between tickets
-  ready [-a X] [-T X]      List open/in-progress tickets with deps resolved
-  blocked [-a X] [-T X]    List open/in-progress tickets with unresolved deps
-  closed [--limit=N] [-a X] [-T X] List recently closed tickets (default 20, by mtime)
+  ready [-a X] [-T X] [--include-steps|--only-steps]
+                           List open/in-progress tickets with deps resolved
+  steps [--agent=X] [--status=X] [--all-agents]
+                           List this agent's open step records
+  blocked [-a X] [-T X] [--include-steps|--only-steps]
+                           List open/in-progress tickets with unresolved deps
+  closed [--limit=N] [-a X] [-T X] [--include-steps|--only-steps]
+                           List recently closed tickets (default 20, by mtime)
   show <id>                Display ticket
   add-note <id> [text]     Append timestamped note (or pipe via stdin)
   super <cmd> [args]       Bypass plugins, run built-in command directly
@@ -1365,11 +1650,14 @@ case "${1:-help}" in
     close)  shift; cmd_close "$@" ;;
     reopen) shift; cmd_reopen "$@" ;;
     status) shift; cmd_status "$@" ;;
+    assign) shift; cmd_assign "$@" ;;
+    unassign) shift; cmd_unassign "$@" ;;
     dep)    shift; cmd_dep "$@" ;;
     undep)  shift; cmd_undep "$@" ;;
     link)   shift; cmd_link "$@" ;;
     unlink) shift; cmd_unlink "$@" ;;
     ready)  shift; cmd_ready "$@" ;;
+    steps)  shift; cmd_steps "$@" ;;
     blocked) shift; cmd_blocked "$@" ;;
     closed) shift; cmd_closed "$@" ;;
     show)   shift; cmd_show "$@" ;;
