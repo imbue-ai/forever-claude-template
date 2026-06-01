@@ -10,7 +10,6 @@
 import m from "mithril";
 import { isSlotClaimed } from "../slots";
 import {
-  fetchEvents,
   fetchBackfillEvents,
   getEventsForAgent,
   getFirstEventId,
@@ -18,7 +17,7 @@ import {
   isBackfillComplete,
   type TranscriptEvent,
 } from "../models/Response";
-import { connectToStream, disconnectFromStream } from "../models/StreamingMessage";
+import { connectToStream, disconnectFromStream, loadSnapshotWithStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { openLoginModal } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
@@ -217,7 +216,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     loadingError = null;
 
     try {
-      await fetchEvents(agentId);
+      // Buffer SSE deltas arriving during the snapshot fetch so the wholesale
+      // snapshot replace in fetchEvents cannot drop a live event on first load.
+      await loadSnapshotWithStream(agentId);
       if (agentId === currentAgentId) {
         loading = false;
         loadingError = null;

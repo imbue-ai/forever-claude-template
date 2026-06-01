@@ -7,15 +7,30 @@
  */
 
 import { apiUrl } from "../base-path";
+import { ReconnectBackoff } from "./backoff";
 import { appendEvents, fetchEvents, type TranscriptEvent } from "./Response";
+import { parseJsonMessage } from "./ws-json";
 import { openLoginModal } from "./ClaudeAuth";
 
 const activeStreams = new Map<string, EventSource>();
 // Set so an error-triggered reconnect timeout can tell an intentional close
 // from a transient error.
 const explicitlyDisconnectedAgents = new Set<string>();
-// Holds SSE deltas that arrive while a reconnect-time snapshot fetch is in
-// flight, so fetchEvents replacing eventsByAgent[agentId] does not drop them.
+// Per-agent reconnect backoff, so a healthy stream's success does not reset an
+// unhealthy stream's growing delay.
+const backoffByAgent = new Map<string, ReconnectBackoff>();
+
+function getBackoff(agentId: string): ReconnectBackoff {
+  let backoff = backoffByAgent.get(agentId);
+  if (backoff === undefined) {
+    backoff = new ReconnectBackoff();
+    backoffByAgent.set(agentId, backoff);
+  }
+  return backoff;
+}
+// Holds SSE deltas that arrive while a snapshot fetch is in flight (on either
+// the initial mount or a reconnect), so fetchEvents replacing
+// eventsByAgent[agentId] does not drop them.
 const inFlightSnapshotBuffersByAgent = new Map<string, TranscriptEvent[]>();
 
 // Claude auth is mind-global, so an auth-error on any agent's stream
@@ -47,8 +62,16 @@ export function connectToStream(agentId: string): void {
   const eventSource = new EventSource(apiUrl(`/api/agents/${encodeURIComponent(agentId)}/stream`));
   activeStreams.set(agentId, eventSource);
 
+  eventSource.onopen = () => {
+    // A successful (re)connection resets this agent's backoff.
+    getBackoff(agentId).reset();
+  };
+
   eventSource.onmessage = (messageEvent: MessageEvent) => {
-    const event = JSON.parse(messageEvent.data) as TranscriptEvent;
+    const event = parseJsonMessage<TranscriptEvent>(messageEvent.data);
+    if (event === null) {
+      return;
+    }
     const pending = inFlightSnapshotBuffersByAgent.get(agentId);
     if (pending !== undefined) {
       pending.push(event);
@@ -67,24 +90,33 @@ export function connectToStream(agentId: string): void {
         if (!wasExplicitlyDisconnected && !activeStreams.has(agentId)) {
           void reconnectWithSnapshot(agentId);
         }
-      }, 3000);
+      }, getBackoff(agentId).nextDelay());
     }
   };
 }
 
-async function reconnectWithSnapshot(agentId: string): Promise<void> {
+/**
+ * Open the live SSE stream and fetch the snapshot together, buffering any SSE
+ * deltas that arrive while the snapshot fetch is in flight.
+ *
+ * `fetchEvents` replaces `eventsByAgent[agentId]` wholesale with the snapshot,
+ * so a delta that arrives between the stream opening and the snapshot landing
+ * would otherwise be overwritten and lost. Both the initial mount and the
+ * reconnect path go through here so neither can drop events. Re-throws fetch
+ * errors so the caller can surface a load error; buffered deltas are flushed
+ * first regardless.
+ */
+export async function loadSnapshotWithStream(agentId: string): Promise<void> {
   // Subscribe to SSE before the snapshot fetch so deltas that arrive
   // between the snapshot read and the EventSource being registered land in
   // `buffer` instead of being dropped. Hold `buffer` by reference (not via
-  // map lookup in `finally`) so a concurrent reconnect that replaces the
+  // map lookup in `finally`) so a concurrent load that replaces the
   // map slot cannot orphan our buffered events.
   const buffer: TranscriptEvent[] = [];
   inFlightSnapshotBuffersByAgent.set(agentId, buffer);
   connectToStream(agentId);
   try {
     await fetchEvents(agentId);
-  } catch (error) {
-    console.warn(`Snapshot refetch failed for agent ${agentId} during SSE reconnect`, error);
   } finally {
     if (inFlightSnapshotBuffersByAgent.get(agentId) === buffer) {
       inFlightSnapshotBuffersByAgent.delete(agentId);
@@ -95,10 +127,21 @@ async function reconnectWithSnapshot(agentId: string): Promise<void> {
   }
 }
 
+async function reconnectWithSnapshot(agentId: string): Promise<void> {
+  try {
+    await loadSnapshotWithStream(agentId);
+  } catch (error) {
+    console.warn(`Snapshot refetch failed for agent ${agentId} during SSE reconnect`, error);
+  }
+}
+
 export function disconnectFromStream(agentId: string): void {
   // Always record the intent, even with no active stream, so a pending
   // error-triggered reconnect timeout sees the tombstone and stays down.
   explicitlyDisconnectedAgents.add(agentId);
+  // Drop the backoff so a later fresh connectToStream starts from the base
+  // delay rather than inheriting a stale grown delay.
+  backoffByAgent.delete(agentId);
   const eventSource = activeStreams.get(agentId);
   if (eventSource !== undefined) {
     eventSource.close();

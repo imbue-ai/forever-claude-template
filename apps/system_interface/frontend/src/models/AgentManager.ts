@@ -5,6 +5,8 @@
 
 import m from "mithril";
 import { apiUrl } from "../base-path";
+import { ReconnectBackoff } from "./backoff";
+import { parseJsonMessage } from "./ws-json";
 
 export interface AgentState {
   id: string;
@@ -51,7 +53,7 @@ let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let connected = false;
 
-const RECONNECT_DELAY_MS = 3000;
+const reconnectBackoff = new ReconnectBackoff();
 
 function getWsUrl(): string {
   const base = apiUrl("/api/ws");
@@ -73,11 +75,17 @@ function connect(): void {
 
   ws.onopen = () => {
     connected = true;
+    // A successful connection resets the backoff so the next disconnect
+    // starts from the base delay again.
+    reconnectBackoff.reset();
     m.redraw();
   };
 
   ws.onmessage = (event: MessageEvent) => {
-    const data = JSON.parse(event.data as string) as WsEvent;
+    const data = parseJsonMessage<WsEvent>(event.data as string);
+    if (data === null) {
+      return;
+    }
     handleEvent(data);
     m.redraw();
   };
@@ -101,7 +109,7 @@ function scheduleReconnect(): void {
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
-  }, RECONNECT_DELAY_MS);
+  }, reconnectBackoff.nextDelay());
 }
 
 function handleEvent(event: WsEvent): void {
