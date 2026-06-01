@@ -724,6 +724,12 @@ class AgentManager:
 
         stderr lines are surfaced as warnings so startup failures from the
         subprocess (import errors, bad flags, etc.) are not lost.
+
+        This runs on the observe subprocess' output-reader thread. A parse
+        failure (malformed JSON, an evolved discovery schema) must not escape:
+        an exception here kills that thread and silently halts all further
+        agent-lifecycle detection. Such lines are logged and skipped so that
+        subsequent well-formed lines keep being processed.
         """
         stripped = line.strip()
         if not stripped:
@@ -731,13 +737,21 @@ class AgentManager:
         if not is_stdout:
             _loguru_logger.warning("mngr observe stderr: {}", stripped)
             return
-        event = parse_discovery_event_line(stripped)
-        if event is None:
-            # parse_discovery_event_line only returns None for empty/whitespace lines,
-            # which we filtered out above; reaching here indicates an internal contract
-            # violation in the parser.
-            raise BaseMngrError(f"parse_discovery_event_line returned None for non-empty line: {stripped[:200]!r}")
-        self._handle_discovery_event(event)
+        try:
+            event = parse_discovery_event_line(stripped)
+            if event is None:
+                # parse_discovery_event_line only returns None for empty/whitespace
+                # lines, which we filtered out above; reaching here indicates an
+                # internal contract violation in the parser.
+                _loguru_logger.error(
+                    "parse_discovery_event_line returned None for non-empty line: {!r}", stripped[:200]
+                )
+                return
+            self._handle_discovery_event(event)
+        except (json.JSONDecodeError, BaseMngrError) as e:
+            _loguru_logger.opt(exception=e).error(
+                "Failed to process mngr observe output line: {!r}", stripped[:200]
+            )
 
     def _handle_discovery_event(self, event: object) -> None:
         """Handle a discovery event from mngr observe."""

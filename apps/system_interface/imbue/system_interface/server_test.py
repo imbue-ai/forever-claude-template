@@ -232,6 +232,24 @@ def test_save_layout_rejects_invalid_json(client: TestClient, tmp_path: Path, mo
     assert response.status_code == 400
 
 
+def test_save_layout_rejects_oversized_body(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A layout payload larger than the size cap is rejected with 413 and not written."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+    oversized = b'{"x":"' + b"a" * (5 * 1024 * 1024) + b'"}'
+
+    response = client.post(
+        "/api/layout",
+        content=oversized,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 413
+    assert not (tmp_path / "agents" / "agent-123" / "workspace_layout" / "layout.json").exists()
+
+
 def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
     """The index page includes a hostname meta tag."""
     static_dir = tmp_path / "static"

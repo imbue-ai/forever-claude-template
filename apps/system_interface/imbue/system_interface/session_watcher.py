@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -27,7 +26,6 @@ logger = _loguru_logger
 _NON_CHANGE_EVENT_TYPES = frozenset({"opened", "closed", "closed_no_write"})
 
 _POLL_INTERVAL_SECONDS = 1.0
-_BRIEF_WAIT_SECONDS = 0.5
 
 
 class _ChangeHandler(FileSystemEventHandler):
@@ -232,15 +230,14 @@ class AgentSessionWatcher:
             if session_id in self._session_states:
                 continue
 
-            # Try to find the session file
+            # Try to find the session file. A session can be listed in the
+            # history file a moment before its JSONL file appears on disk;
+            # rather than blocking the watcher thread with an inline sleep,
+            # skip it and let the next poll cycle pick it up.
             file_path = self._find_session_file(session_id)
             if file_path is None:
-                # Brief wait then try again
-                time.sleep(_BRIEF_WAIT_SECONDS)
-                file_path = self._find_session_file(session_id)
-                if file_path is None:
-                    logger.debug("Session file not found for %s, will retry on next cycle", session_id)
-                    continue
+                logger.debug("Session file not found for %s, will retry on next cycle", session_id)
+                continue
 
             self._session_states[session_id] = SessionFileState(session_id, file_path)
             self._known_session_ids.append(session_id)

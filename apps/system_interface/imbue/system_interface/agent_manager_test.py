@@ -524,11 +524,37 @@ def test_handle_observe_output_line_empty_is_ignored(agent_manager: AgentManager
     assert agent_manager.get_agents() == []
 
 
-def test_handle_observe_output_line_raises_on_invalid_json(agent_manager: AgentManager) -> None:
-    """Invalid JSON on stdout from mngr observe surfaces as JSONDecodeError so the upstream bug is visible."""
-    with pytest.raises(json.JSONDecodeError):
-        agent_manager._handle_observe_output_line("not json {", True)
+def test_handle_observe_output_line_swallows_invalid_json(
+    agent_manager: AgentManager,
+    loguru_records: list[str],
+) -> None:
+    """A malformed observe line is logged and skipped, not raised.
+
+    The callback runs on the observe subprocess' output-reader thread; an
+    exception escaping it would kill that thread and silently halt all
+    further agent discovery. Subsequent well-formed lines must still be
+    processed.
+    """
+    agent_manager._handle_observe_output_line("not json {", True)
+
+    errors = [r for r in loguru_records if r.startswith("ERROR") and "mngr observe output line" in r]
+    assert errors, f"Expected an error log for the malformed line; got: {loguru_records}"
     assert agent_manager.get_agents() == []
+
+    # A valid line after the malformed one is still dispatched.
+    test_agent_id = MngrAgentId()
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=test_agent_id,
+        agent_name=MngrAgentName("post-error-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    agent_manager._handle_observe_output_line(make_agent_discovery_event(agent).model_dump_json(), True)
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].id == str(test_agent_id)
 
 
 def test_handle_observe_output_line_dispatches_agent_discovered(

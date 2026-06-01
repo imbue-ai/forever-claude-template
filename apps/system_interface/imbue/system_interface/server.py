@@ -414,6 +414,17 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
 
 _LAYOUT_FILENAME = "layout.json"
 
+# Upper bound on an accepted workspace-layout payload. The layout is a small
+# dockview/panel description; anything larger is treated as malformed input
+# rather than buffered into memory.
+_MAX_LAYOUT_BODY_BYTES = 5 * 1024 * 1024
+
+
+def _write_layout_file(layout_dir: Path, layout_file: Path, body: bytes) -> None:
+    """Create the layout directory and write the layout bytes (blocking I/O)."""
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    layout_file.write_bytes(body)
+
 
 def _primary_agent_layout_dir() -> Path | None:
     """Return the workspace layout directory for this workspace's primary agent.
@@ -453,17 +464,25 @@ async def _save_layout(request: Request) -> Response:
         error = ErrorResponse(detail="No primary agent configured for this workspace")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
+    declared_length = request.headers.get("content-length")
+    if declared_length is not None and declared_length.isdigit() and int(declared_length) > _MAX_LAYOUT_BODY_BYTES:
+        error = ErrorResponse(detail="Layout payload too large")
+        return JSONResponse(content=error.model_dump(), status_code=413)
+
+    body = await request.body()
+    if len(body) > _MAX_LAYOUT_BODY_BYTES:
+        error = ErrorResponse(detail="Layout payload too large")
+        return JSONResponse(content=error.model_dump(), status_code=413)
+
     try:
-        body = await request.body()
         # Validate it's valid JSON
         json.loads(body)
     except (json.JSONDecodeError, ValueError):
         error = ErrorResponse(detail="Invalid JSON in request body")
         return JSONResponse(content=error.model_dump(), status_code=400)
 
-    layout_dir.mkdir(parents=True, exist_ok=True)
     layout_file = layout_dir / _LAYOUT_FILENAME
-    layout_file.write_bytes(body)
+    await run_in_threadpool(_write_layout_file, layout_dir, layout_file, body)
 
     return JSONResponse(content={"status": "ok"})
 
@@ -778,7 +797,7 @@ def create_application(
         logger.error("Unhandled exception on {} {}: {}\n{}", request.method, request.url.path, exc, "".join(tb))
         return JSONResponse(
             status_code=500,
-            content={"detail": f"Internal server error: {exc}"},
+            content={"detail": "Internal server error"},
         )
 
     application.state.preconfigured_agent_manager = agent_manager
