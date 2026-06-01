@@ -274,10 +274,17 @@ extra_window = [
 type = "claude"
 
 # Worker template: general purpose sub agent for doing tasks reliably (and ensuring that they are verified)
+#
+# `REVIEWER_FETCH_AND_MERGE_ENABLE=0` disables the stop-hook orchestrator's
+# auto-merge of `origin/<base_branch>` (the lead's branch, e.g.
+# `mngr/installer-test-2`) into the worker's branch. Workers that push to a
+# `submit/<name>` branch rooted at upstream `main` (the `submit-upstream-changes`
+# pattern) need their branch history to stay clean of the lead's ancestry --
+# without this opt-out the auto-merge silently pollutes the PR diff.
 [create_templates.worker]
 type = "worker"
-extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"]
-env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
+extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE $REVIEWER_FETCH_AND_MERGE_ENABLE'"]
+env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "REVIEWER_FETCH_AND_MERGE_ENABLE=0"]
 agent_args = [
     "--dangerously-skip-permissions",
     "--append-system-prompt",
@@ -293,8 +300,8 @@ agent_args = [
 #    under .agents/skills/ that has an assets/worker/ subdir.
 [create_templates.crystallize-worker]
 type = "worker"
-extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]
-env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
+extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE $REVIEWER_FETCH_AND_MERGE_ENABLE'"]
+env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "REVIEWER_FETCH_AND_MERGE_ENABLE=0", "MNGR_AGENT_ROLE=worker"]
 extra_provision_command = [
     "bash .agents/shared/scripts/install_worker_skills.sh .agents/skills",
 ]
