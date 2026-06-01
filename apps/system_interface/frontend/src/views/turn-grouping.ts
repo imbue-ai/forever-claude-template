@@ -15,7 +15,13 @@
  * partition. There is no formalized "turn" or "section" abstraction here.
  */
 
-import type { TranscriptEvent, AssistantMessageEvent, UserMessageEvent, TaskEventStatus } from "../models/Response";
+import type {
+  TranscriptEvent,
+  AssistantMessageEvent,
+  UserMessageEvent,
+  ToolResultEvent,
+  TaskEventStatus,
+} from "../models/Response";
 import { isStopHookFeedback } from "./user-message-classification";
 
 export type TaskUiStatus = "pending" | "active" | "done";
@@ -116,6 +122,56 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
   return records;
 }
 
+/** Detects a `tk create` invocation inside a Bash tool call's input preview
+ *  (the JSON-encoded command). Matches `tk create`, `ticket create`, and the
+ *  plugin-bypassing `tk super create`. */
+const TK_CREATE_RE = /\b(?:tk|ticket)\s+(?:super\s+)?create\b/;
+
+/** A tk ticket id as printed by `tk create`: a short alphanumeric prefix, a
+ *  hyphen, and a 4-character suffix (see `generate_id` in vendor/tk/ticket).
+ *  Global so we can read every id a batched create printed, in order. */
+const TICKET_ID_RE = /\b[a-z0-9]{2,}-[a-z0-9]{4}\b/g;
+
+/** Map each step/ticket id to its **plan position**: the order in which the
+ *  agent issued the `tk create` calls that produced it.
+ *
+ *  This is recovered from the transcript -- the ordered `tool_calls` within
+ *  each assistant message -- rather than from timestamps, because agents
+ *  frequently issue several `tk create` calls as *parallel* tool calls whose
+ *  execution order (and thus the resulting file mtime / `created` timestamp
+ *  order) is nondeterministic. The `tool_calls` array, by contrast, faithfully
+ *  records the order the model chose to create them. Each create call's printed
+ *  id(s) are read from its `tool_result` output (a parallel create runs in its
+ *  own fresh shell, so it must print the id to stdout rather than capture it
+ *  into a variable -- exactly the case this needs to cover).
+ *
+ *  Ids that can't be recovered this way -- e.g. a serial `VAR=$(tk create ...)`
+ *  capture that prints nothing -- are simply absent from the map; the sort
+ *  falls back to the (now sub-second) `created` timestamp for those, which is
+ *  correct precisely because that form runs serially. The walk is global
+ *  across the whole event stream so the ordinal is stable across redraws. */
+export function buildStepPlanOrder(
+  events: TranscriptEvent[],
+  toolResults: Map<string, ToolResultEvent>,
+): Map<string, number> {
+  const order = new Map<string, number>();
+  let next = 0;
+  for (const e of events) {
+    if (e.type !== "assistant_message" || !e.tool_calls) continue;
+    for (const tc of e.tool_calls) {
+      if (!TK_CREATE_RE.test(tc.input_preview)) continue;
+      const result = toolResults.get(tc.tool_call_id);
+      if (result === undefined) continue;
+      const ids = result.output.match(TICKET_ID_RE);
+      if (ids === null) continue;
+      for (const id of ids) {
+        if (!order.has(id)) order.set(id, next++);
+      }
+    }
+  }
+  return order;
+}
+
 /** A step's status *as of* a partition's end boundary.
  *
  *  `buildTaskRecords` folds a ticket's whole history into one record whose
@@ -179,13 +235,45 @@ export function isStepCarryover(record: TaskRecord, partition_start: string): bo
   return attr < partition_start;
 }
 
-/** Sort steps: carryovers first, then by started_at, then created_at. */
-export function sortSteps(steps: StepView[], records: Map<string, TaskRecord>, partition_start: string): StepView[] {
+/** Order two steps by the declared plan: their `plan_order` index when both
+ *  are known, otherwise the (now sub-second) `created` timestamp, finally the
+ *  ticket id for full determinism. A step with a known plan position sorts
+ *  before one without -- a later mid-turn addition that printed no id is the
+ *  realistic "unknown" case and belongs after the up-front plan. */
+function comparePlanOrder(a: StepView, b: StepView, plan_order: Map<string, number>): number {
+  const pa = plan_order.get(a.ticket_id);
+  const pb = plan_order.get(b.ticket_id);
+  if (pa !== undefined && pb !== undefined) return pa - pb;
+  if (pa !== undefined) return -1;
+  if (pb !== undefined) return 1;
+  const byCreated = a.created_at.localeCompare(b.created_at);
+  return byCreated !== 0 ? byCreated : a.ticket_id.localeCompare(b.ticket_id);
+}
+
+/** Sort steps for the timeline. Carryovers (steps that began in an earlier
+ *  partition) render first, then this partition's own steps. Within each group:
+ *  steps that have started sort before not-yet-started ones and are ordered by
+ *  when they actually started (`started_at`) -- so a step the agent starts out
+ *  of plan order moves to its real start position; not-yet-started steps, and
+ *  any tie on start time, fall back to plan order (see `comparePlanOrder`).
+ *  Both keys are reliable: `started_at` is sub-second precise and `plan_order`
+ *  reflects the order the agent created the steps regardless of parallel
+ *  execution -- so this sort no longer depends on the arbitrary tie-breaks
+ *  (id order) that made the old timestamp-only sort unstable. */
+export function sortSteps(
+  steps: StepView[],
+  records: Map<string, TaskRecord>,
+  partition_start: string,
+  plan_order: Map<string, number>,
+): StepView[] {
   const byStart = (a: StepView, b: StepView) => {
-    if (a.started_at !== null && b.started_at !== null) return a.started_at.localeCompare(b.started_at);
+    if (a.started_at !== null && b.started_at !== null) {
+      const byStarted = a.started_at.localeCompare(b.started_at);
+      return byStarted !== 0 ? byStarted : comparePlanOrder(a, b, plan_order);
+    }
     if (a.started_at !== null) return -1;
     if (b.started_at !== null) return 1;
-    return a.created_at.localeCompare(b.created_at);
+    return comparePlanOrder(a, b, plan_order);
   };
   const carry = steps.filter((s) => isStepCarryover(records.get(s.ticket_id)!, partition_start)).sort(byStart);
   const own = steps.filter((s) => !isStepCarryover(records.get(s.ticket_id)!, partition_start)).sort(byStart);
@@ -201,13 +289,16 @@ export function sortSteps(steps: StepView[], records: Map<string, TaskRecord>, p
  *  keep spinning above it. When the frontier is a done step, no in_progress
  *  step matches it, so every lingering open step settles. Returns null when
  *  no step has started yet. */
-function frontierStepId(records: TaskRecord[], partition_end: string): string | null {
+function frontierStepId(records: TaskRecord[], partition_end: string, plan_order: Map<string, number>): string | null {
+  const rank = (r: TaskRecord) => plan_order.get(r.ticket_id) ?? -1;
   let frontier: TaskRecord | null = null;
   let frontierStart = "";
   for (const r of records) {
     if (statusAsOf(r, partition_end) === "open") continue; // not started as of this boundary
     const started = r.started_at ?? r.created_at;
-    if (frontier === null || started > frontierStart) {
+    // Most recently started wins; on a (now rare, sub-second) tie the
+    // later-created step -- higher plan order -- is the frontier.
+    if (frontier === null || started > frontierStart || (started === frontierStart && rank(r) > rank(frontier))) {
       frontier = r;
       frontierStart = started;
     }
@@ -233,11 +324,12 @@ export function buildSectionSteps(
   partition_start: string,
   partition_end: string,
   partition_is_settled: boolean,
+  plan_order: Map<string, number>,
 ): StepView[] {
   const active = Array.from(records.values()).filter(
     (r) => r.step && stepActiveInWindow(r, partition_start, partition_end),
   );
-  const frontier = frontierStepId(active, partition_end);
+  const frontier = frontierStepId(active, partition_end, plan_order);
   const views = active.map((r) => {
     const effective = statusAsOf(r, partition_end);
     // is_settled only governs the active-step icon (spinner vs static ring);
@@ -245,7 +337,7 @@ export function buildSectionSteps(
     const settled = effective !== "in_progress" ? false : partition_is_settled || r.ticket_id !== frontier;
     return makeStepView(r, settled, partition_end);
   });
-  return sortSteps(views, records, partition_start);
+  return sortSteps(views, records, partition_start, plan_order);
 }
 
 /** True when `e` is a text-only assistant message (prose, no tool calls). */

@@ -64,9 +64,21 @@ else
     _grep() { grep "$@"; }
 fi
 
-# Portable ISO date (GNU date supports -Iseconds, BSD date does not)
+# Portable, fixed-width microsecond UTC ISO-8601 timestamp, e.g.
+# 2026-04-28T01:00:00.123456Z. GNU date expands %N (nanoseconds), so %6N
+# yields microseconds; BSD/macOS date does not support %N and leaves the spec
+# literal (an 'N' survives in the output), so detect that and fall back to a
+# zero microsecond suffix. The width is always identical, so a plain
+# lexicographic comparison of two timestamps equals their chronological order
+# -- the invariant every downstream consumer (the tickets watcher, the chat
+# progress view) relies on for ordering steps.
 _iso_date() {
-    date -u +%Y-%m-%dT%H:%M:%SZ
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ 2>/dev/null)
+    if [[ -z "$ts" || "$ts" == *N* ]]; then
+        ts=$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)
+    fi
+    printf '%s\n' "$ts"
 }
 
 # Portable sed -i (BSD requires -i '', GNU uses -i)
@@ -381,6 +393,12 @@ cmd_start() {
         fi
     fi
 
+    # Record the start time so consumers can order steps by when work
+    # actually began (the chat progress view sorts in-progress/done steps by
+    # this, independent of creation order). Re-running start updates it,
+    # matching the restarted active window.
+    update_yaml_field "$file" "started" "$(_iso_date)"
+
     cmd_status "$id" "in_progress"
 }
 
@@ -411,16 +429,23 @@ cmd_close() {
         return 1
     fi
 
+    # Single close timestamp shared by the `closed:` frontmatter field and the
+    # summary note, so they agree to the microsecond.
+    local timestamp
+    timestamp=$(_iso_date)
+
     if [[ -n "$summary" ]]; then
         # Reuse the same timestamped-note format that cmd_add_note writes,
         # so the parser's existing "latest note = summary" logic picks it up.
-        local timestamp
-        timestamp=$(_iso_date)
         if ! _grep -q '^## Notes' "$file"; then
             printf '\n## Notes\n' >> "$file"
         fi
         printf '\n**%s**\n\n%s\n' "$timestamp" "$summary" >> "$file"
     fi
+
+    # Record the close time so consumers can order finished steps by when they
+    # completed, and bound the step's active window.
+    update_yaml_field "$file" "closed" "$timestamp"
 
     cmd_status "$id" "closed"
 }

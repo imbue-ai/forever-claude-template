@@ -27,6 +27,32 @@ assignee: Test User
     assert result.created_at == "2026-04-28T01:17:08Z"
     assert result.summary is None
     assert result.summary_at is None
+    # An open ticket has not started or closed -- those fields are absent.
+    assert result.started_at == ""
+    assert result.closed_at == ""
+
+
+def test_parse_started_and_closed_timestamps() -> None:
+    """`tk start` / `tk close` stamp `started:` / `closed:` into the
+    frontmatter; the parser surfaces them so the watcher can timestamp the
+    in_progress / closed transitions from the file itself."""
+    text = """---
+id: tt-2efd
+status: closed
+deps: []
+links: []
+created: 2026-04-28T01:17:08.000000Z
+started: 2026-04-28T01:18:30.250000Z
+closed: 2026-04-28T01:25:00.750000Z
+type: task
+priority: 2
+---
+# Register the new theme and update the toggle
+"""
+    result = parse_ticket_text(text)
+    assert result is not None
+    assert result.started_at == "2026-04-28T01:18:30.250000Z"
+    assert result.closed_at == "2026-04-28T01:25:00.750000Z"
 
 
 def test_parse_in_progress_ticket() -> None:

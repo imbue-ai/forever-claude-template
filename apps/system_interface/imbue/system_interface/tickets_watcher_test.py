@@ -8,6 +8,9 @@ transitions weren't observed and are not synthesized.
 
 from __future__ import annotations
 
+import os
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +33,8 @@ def _ticket_text(
     *,
     title: str = "Sample task",
     created: str = "2026-04-28T01:00:00Z",
+    started: str | None = None,
+    closed: str | None = None,
     notes: str | None = None,
     agent: str | None = None,
     step: bool = False,
@@ -38,6 +43,8 @@ def _ticket_text(
 ) -> str:
     """Build a tk-shaped ticket body. Centralizes the boilerplate frontmatter
     so individual tests only describe the parts that actually vary."""
+    started_line = f"started: {started}\n" if started is not None else ""
+    closed_line = f"closed: {closed}\n" if closed is not None else ""
     agent_line = f"agent: {agent}\n" if agent is not None else ""
     step_line = "step: true\n" if step else ""
     parent_line = f"parent: {parent}\n" if parent is not None else ""
@@ -48,7 +55,7 @@ status: {status}
 deps: []
 links: []
 created: {created}
-type: task
+{started_line}{closed_line}type: task
 priority: 2
 {assignee_line}{agent_line}{step_line}{parent_line}---
 # {title}
@@ -121,7 +128,9 @@ def test_open_ticket_emits_one_event_with_created_at_timestamp(tmp_path: Path) -
     assert len(events) == 1
     assert events[0]["event_id"] == "tt-aaaa-open"
     assert events[0]["status"] == "open"
-    assert events[0]["timestamp"] == "2026-04-28T01:00:00Z"
+    # The frontmatter `created` (second resolution here) is normalised to the
+    # uniform fixed-width microsecond format every emitted timestamp uses.
+    assert events[0]["timestamp"] == "2026-04-28T01:00:00.000000Z"
     assert events[0]["title"] == "Hello world"
 
 
@@ -136,10 +145,10 @@ def test_replayed_in_progress_ticket_emits_only_current_status(tmp_path: Path) -
     events = watcher.get_all_events()
     assert len(events) == 1
     assert events[0]["event_id"] == "tt-bbbb-in_progress"
-    # created_at field still carries the frontmatter value -- the
-    # frontend uses that for turn attribution and the "ticket existed
-    # since" lower bound.
-    assert events[0]["created_at"] == "2026-04-28T01:00:00Z"
+    # created_at field still carries the frontmatter value (normalised to the
+    # uniform microsecond format) -- the frontend uses that for turn
+    # attribution and the "ticket existed since" lower bound.
+    assert events[0]["created_at"] == "2026-04-28T01:00:00.000000Z"
 
 
 def test_replayed_closed_ticket_emits_only_closed_event_with_summary(tmp_path: Path) -> None:
@@ -161,7 +170,7 @@ def test_replayed_closed_ticket_emits_only_closed_event_with_summary(tmp_path: P
     assert events[0]["event_id"] == "tt-cccc-closed"
     assert events[0]["status"] == "closed"
     assert events[0]["summary"] == "Final summary text for this task."
-    assert events[0]["summary_at"] == "2026-04-28T01:05:00Z"
+    assert events[0]["summary_at"] == "2026-04-28T01:05:00.000000Z"
 
 
 def test_summary_only_on_closed_event(tmp_path: Path) -> None:
@@ -230,6 +239,58 @@ def test_lifecycle_accumulates_one_event_per_observed_transition(tmp_path: Path)
     events3 = watcher.get_all_events()
     assert [e["event_id"] for e in events3] == ["tt-ffff-open", "tt-ffff-in_progress", "tt-ffff-closed"]
     assert events3[-1]["summary"] == "All done."
+
+
+def test_in_progress_event_timestamp_comes_from_started_field(tmp_path: Path) -> None:
+    """When a ticket carries a `started:` frontmatter field (written by
+    `tk start`), the in_progress event is timestamped from it -- truthful even
+    on replay -- rather than from the file's mtime, and normalised to the
+    uniform microsecond format."""
+    tickets_dir = tmp_path / ".tickets"
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    (tickets_dir / "tt-strt.md").write_text(
+        _ticket_text("tt-strt", "in_progress", title="Working", started="2026-04-28T01:02:03.456789Z")
+    )
+    _calls, cb = _capture()
+    watcher = AgentTicketsWatcher("agent-1", "agent-1-name", tickets_dir, cb)
+    events = watcher.get_all_events()
+    assert events[0]["event_id"] == "tt-strt-in_progress"
+    assert events[0]["timestamp"] == "2026-04-28T01:02:03.456789Z"
+
+
+def test_closed_event_timestamp_comes_from_closed_field(tmp_path: Path) -> None:
+    """A `closed:` frontmatter field (written by `tk close`) is the source of
+    the closed event's timestamp."""
+    tickets_dir = tmp_path / ".tickets"
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    (tickets_dir / "tt-clsd.md").write_text(
+        _ticket_text("tt-clsd", "closed", title="Done", closed="2026-04-28T01:09:09.111222Z")
+    )
+    _calls, cb = _capture()
+    watcher = AgentTicketsWatcher("agent-1", "agent-1-name", tickets_dir, cb)
+    events = watcher.get_all_events()
+    assert events[0]["event_id"] == "tt-clsd-closed"
+    assert events[0]["timestamp"] == "2026-04-28T01:09:09.111222Z"
+
+
+def test_transition_timestamp_falls_back_to_mtime_when_field_absent(tmp_path: Path) -> None:
+    """A ticket written by an older tk (no `started:` field) still gets a
+    sensible in_progress timestamp: the watcher falls back to the file's mtime,
+    in the same fixed-width microsecond format. Never an empty string, which
+    would sort to the front of the merged stream."""
+    tickets_dir = tmp_path / ".tickets"
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    path = tickets_dir / "tt-oldd.md"
+    path.write_text(_ticket_text("tt-oldd", "in_progress", title="Legacy in progress"))
+    # Pin the mtime to a known instant so we can assert the fallback exactly.
+    mtime = 1_777_000_000.123456
+    os.utime(path, (mtime, mtime))
+
+    _calls, cb = _capture()
+    watcher = AgentTicketsWatcher("agent-1", "agent-1-name", tickets_dir, cb)
+    events = watcher.get_all_events()
+    expected = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert events[0]["timestamp"] == expected
 
 
 def test_filters_out_tickets_stamped_with_a_different_agent(tmp_path: Path) -> None:

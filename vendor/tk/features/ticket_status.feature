@@ -38,6 +38,16 @@ Feature: Ticket Status Management
     And the output should be "Updated test-0001 -> closed"
     And ticket "test-0001" should have field "status" with value "closed"
 
+  Scenario: Start command stamps a started timestamp
+    When I run "ticket start test-0001"
+    Then the command should succeed
+    And ticket "test-0001" should have a valid "started" timestamp
+
+  Scenario: Close command stamps a closed timestamp
+    When I run "ticket close test-0001"
+    Then the command should succeed
+    And ticket "test-0001" should have a valid "closed" timestamp
+
   Scenario: Reopen command sets status to open
     Given ticket "test-0001" has status "closed"
     When I run "ticket reopen test-0001"

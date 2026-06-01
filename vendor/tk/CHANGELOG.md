@@ -4,8 +4,10 @@
 
 ### Changed
 - Extracted `edit`, `ls`, `query`, and `migrate-beads` commands to plugins (ticket-extras)
+- Timestamps (`created`, note timestamps) now carry microsecond precision where the platform's `date` supports it (GNU `%N`), with a `.000000` fallback elsewhere; the fixed-width format keeps lexicographic order equal to chronological order
 
 ### Added
+- `tk start` stamps a `started:` frontmatter timestamp and `tk close` stamps a `closed:` timestamp, so consumers can order tickets by when work began and completed (used by downstream progress views)
 - Plugin system: executables named `tk-<cmd>` or `ticket-<cmd>` in PATH are invoked automatically
 - `super` command to bypass plugins and run built-in commands directly
 - `TICKETS_DIR` and `TK_SCRIPT` environment variables exported for plugins

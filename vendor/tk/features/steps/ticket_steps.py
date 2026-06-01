@@ -494,6 +494,13 @@ def step_created_ticket_has_field(context, field, value):
     assert actual == value, f"Field '{field}' has value '{actual}', expected '{value}'"
 
 
+# Matches an ISO-8601 UTC timestamp with an optional sub-second fraction, e.g.
+# 2026-04-28T01:00:00Z or 2026-04-28T01:00:00.123456Z. tk emits the
+# microsecond form on platforms whose `date` supports %N (GNU/Linux) and the
+# second form elsewhere, so both must be accepted.
+_ISO_TIMESTAMP = r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z'
+
+
 @then(r'the created ticket should have a valid created timestamp')
 def step_created_ticket_has_timestamp(context):
     """Assert the created ticket has a valid timestamp."""
@@ -501,9 +508,23 @@ def step_created_ticket_has_timestamp(context):
     ticket_path = Path(context.test_dir) / '.tickets' / f'{ticket_id}.md'
     content = ticket_path.read_text()
 
-    pattern = r'^created:\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z'
+    pattern = rf'^created:\s*{_ISO_TIMESTAMP}'
     assert re.search(pattern, content, re.MULTILINE), \
         f"No valid created timestamp found\nContent: {content}"
+
+
+@then(r'ticket "(?P<ticket_id>[^"]+)" should have a valid "(?P<field>[^"]+)" timestamp')
+def step_ticket_has_timestamp_field(context, ticket_id, field):
+    """Assert the ticket's frontmatter has the given field set to a valid
+    ISO-8601 timestamp. Used for the `started`/`closed` fields that tk stamps
+    on `start`/`close`, whose exact value can't be asserted but whose presence
+    and format can."""
+    ticket_path = Path(context.test_dir) / '.tickets' / f'{ticket_id}.md'
+    content = ticket_path.read_text()
+
+    pattern = rf'^{re.escape(field)}:\s*{_ISO_TIMESTAMP}\s*$'
+    assert re.search(pattern, content, re.MULTILINE), \
+        f"No valid '{field}' timestamp found\nContent: {content}"
 
 
 @then(r'ticket "(?P<ticket_id>[^"]+)" should have field "(?P<field>[^"]+)" with value "(?P<value>[^"]+)"')
@@ -581,7 +602,7 @@ def step_ticket_has_timestamp_in_notes(context, ticket_id):
     ticket_path = Path(context.test_dir) / '.tickets' / f'{ticket_id}.md'
     content = ticket_path.read_text()
 
-    pattern = r'\*\*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\*\*'
+    pattern = rf'\*\*{_ISO_TIMESTAMP}\*\*'
     assert re.search(pattern, content), \
         f"No timestamp found in notes\nContent: {content}"
 

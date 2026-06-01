@@ -62,6 +62,14 @@ class TicketState(FrozenModel):
     title: str = Field(description="H1 title from the body")
     status: str = Field(description="open | in_progress | closed")
     created_at: str = Field(description="frontmatter `created` field, ISO-8601")
+    # `tk start` / `tk close` stamp these into the frontmatter so the watcher
+    # can timestamp the in_progress / closed transitions from the ticket file
+    # itself (the source of truth) rather than inferring them from file mtime.
+    # Empty string when absent -- either the status hasn't been reached, or
+    # the ticket was written by an older tk that didn't stamp them (the
+    # watcher then falls back to mtime).
+    started_at: str = Field(description="frontmatter `started` field, ISO-8601, or empty string")
+    closed_at: str = Field(description="frontmatter `closed` field, ISO-8601, or empty string")
     summary: str | None = Field(description="Most recent note text, or None")
     summary_at: str | None = Field(description="Timestamp of the most recent note, or None")
     # The mngr agent that created the ticket, captured from $MNGR_AGENT_NAME
@@ -110,6 +118,8 @@ def parse_ticket_text(text: str) -> TicketState | None:
     ticket_id = fields.get("id", "")
     status = fields.get("status", "")
     created_at = fields.get("created", "")
+    started_at = fields.get("started", "")
+    closed_at = fields.get("closed", "")
     agent = fields.get("agent", "")
     step = fields.get("step", "").lower() == "true"
     parent_id = fields.get("parent", "")
@@ -133,6 +143,8 @@ def parse_ticket_text(text: str) -> TicketState | None:
         title=title,
         status=status,
         created_at=created_at,
+        started_at=started_at,
+        closed_at=closed_at,
         summary=summary,
         summary_at=summary_at,
         agent=agent,

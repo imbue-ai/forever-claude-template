@@ -33,6 +33,7 @@ import {
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
 import {
   buildTaskRecords,
+  buildStepPlanOrder,
   buildSectionSteps,
   attributeNarration,
   classifyTopLevelMessages,
@@ -409,6 +410,11 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     const visibleEvents = events.filter((e) => !hiddenEventIds.has(e.event_id));
 
     const taskRecords = buildTaskRecords(visibleEvents);
+    // Plan order (the sequence in which the agent created its steps) is
+    // recovered from the transcript's tool-call order, robust to steps created
+    // as parallel tool calls. Computed once over the whole stream so the
+    // ordinal is stable; threaded into every section's step sort.
+    const planOrder = buildStepPlanOrder(visibleEvents, toolResults);
     const agent = getAgentById(agentId);
     const agentIsIdle = agent?.activity_state === "IDLE";
 
@@ -423,7 +429,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       const isTail = endTs === "";
       const isSettled = !isTail || agentIsIdle;
 
-      const steps = buildSectionSteps(taskRecords, sectionStart, endTs, isSettled);
+      const steps = buildSectionSteps(taskRecords, sectionStart, endTs, isSettled, planOrder);
       attributeNarration(steps, bodyEvents);
 
       if (steps.length > 0) {

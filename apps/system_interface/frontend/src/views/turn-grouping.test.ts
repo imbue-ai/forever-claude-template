@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { TranscriptEvent, TaskEvent } from "../models/Response";
+import type { TranscriptEvent, TaskEvent, ToolResultEvent } from "../models/Response";
 import type { StepView } from "./turn-grouping";
 import {
   buildTaskRecords,
+  buildStepPlanOrder,
   buildSectionSteps,
   stepActiveInWindow,
   attributeNarration,
@@ -106,10 +107,20 @@ function taskEvent(
   };
 }
 
+/** Plan order recovered from a test event stream, mirroring ChatPanel: build a
+ *  tool_call_id -> tool_result map, then derive the create ordering. */
+function planOrderFor(events: TranscriptEvent[]): Map<string, number> {
+  const toolResults = new Map<string, ToolResultEvent>();
+  for (const e of events) {
+    if (e.type === "tool_result") toolResults.set(e.tool_call_id, e);
+  }
+  return buildStepPlanOrder(events, toolResults);
+}
+
 /** Helper: build steps active in a window from events, mirroring what
  *  ChatPanel does inline. */
 function stepsForWindow(events: TranscriptEvent[], start_ts: string, end_ts: string, is_settled: boolean): StepView[] {
-  return buildSectionSteps(buildTaskRecords(events), start_ts, end_ts, is_settled);
+  return buildSectionSteps(buildTaskRecords(events), start_ts, end_ts, is_settled, planOrderFor(events));
 }
 
 /** Helper: collect body events in a window from the full event list. */
@@ -958,5 +969,130 @@ describe("narration attribution", () => {
     expect(steps[0].status).toBe("done");
     expect(steps[0].summary).toBe("Did the thing.");
     expect(steps[0].narration).toBeNull();
+  });
+});
+
+/** Build an assistant message issuing N parallel `tk create --step` Bash tool
+ *  calls (in the given order) plus each call's tool_result printing the ticket
+ *  id -- the transcript shape the frontend recovers plan order from. */
+function parallelCreateCalls(ts: string, calls: Array<{ callId: string; printedId: string }>): TranscriptEvent[] {
+  const assistant: TranscriptEvent = {
+    timestamp: ts,
+    type: "assistant_message",
+    event_id: `a-create-${ts}`,
+    source: "test",
+    model: "test-model",
+    text: "",
+    tool_calls: calls.map(({ callId }) => ({
+      tool_call_id: callId,
+      tool_name: "Bash",
+      input_preview: `{"command":"tk create --step \\"step\\""}`,
+    })),
+    stop_reason: null,
+    usage: null,
+    is_auth_error: false,
+  };
+  const results: TranscriptEvent[] = calls.map(({ callId, printedId }) => ({
+    timestamp: ts,
+    type: "tool_result",
+    event_id: `r-${callId}`,
+    source: "test",
+    tool_call_id: callId,
+    tool_name: "Bash",
+    output: printedId,
+    is_error: false,
+  }));
+  return [assistant, ...results];
+}
+
+describe("buildStepPlanOrder", () => {
+  it("recovers plan order from parallel create tool calls, not id or timestamp order", () => {
+    // Three creates issued as parallel tool calls. Ids chosen so alphabetical
+    // order (aaa2, mmm3, zzz1) differs from the order the model issued them
+    // (zzz1, aaa2, mmm3) -- the case that used to scramble.
+    const events = parallelCreateCalls("2026-04-28T01:00:00.000000Z", [
+      { callId: "c1", printedId: "cod-zzz1" },
+      { callId: "c2", printedId: "cod-aaa2" },
+      { callId: "c3", printedId: "cod-mmm3" },
+    ]);
+    const order = planOrderFor(events);
+    expect(order.get("cod-zzz1")).toBe(0);
+    expect(order.get("cod-aaa2")).toBe(1);
+    expect(order.get("cod-mmm3")).toBe(2);
+  });
+
+  it("omits ids it cannot recover (a capture that prints nothing)", () => {
+    // `S1=$(tk create ...)` captures the id into a shell var and prints
+    // nothing, so the tool_result has no id to read -- that step is absent and
+    // the sort falls back to its created timestamp instead.
+    const events: TranscriptEvent[] = [
+      {
+        timestamp: "2026-04-28T01:00:00.000000Z",
+        type: "assistant_message",
+        event_id: "a-cap",
+        source: "test",
+        model: "test-model",
+        text: "",
+        tool_calls: [
+          { tool_call_id: "c1", tool_name: "Bash", input_preview: `{"command":"S1=$(tk create --step x)"}` },
+        ],
+        stop_reason: null,
+        usage: null,
+        is_auth_error: false,
+      },
+      toolResultEvent("2026-04-28T01:00:00.000000Z", "c1"), // output "ok" -- no id
+    ];
+    expect(planOrderFor(events).size).toBe(0);
+  });
+});
+
+describe("sortSteps plan order and start time", () => {
+  it("orders not-yet-started steps by plan order even when created in the same instant", () => {
+    // All three created at the same timestamp (parallel) and still pending.
+    // Without plan order this would fall through to arbitrary id order.
+    const ts = "2026-04-28T01:00:00.000000Z";
+    const events: TranscriptEvent[] = [
+      ...parallelCreateCalls(ts, [
+        { callId: "c1", printedId: "cod-zzz1" },
+        { callId: "c2", printedId: "cod-aaa2" },
+        { callId: "c3", printedId: "cod-mmm3" },
+      ]),
+      taskEvent("cod-zzz1", "open", ts, { created_at: ts }),
+      taskEvent("cod-aaa2", "open", ts, { created_at: ts }),
+      taskEvent("cod-mmm3", "open", ts, { created_at: ts }),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T00:59:00.000000Z", "", false);
+    expect(steps.map((s) => s.ticket_id)).toEqual(["cod-zzz1", "cod-aaa2", "cod-mmm3"]);
+  });
+
+  it("re-sorts started steps by start time when the agent starts out of plan order", () => {
+    // Plan order is aaa1 then bbb2, but the agent starts bbb2 first. Started
+    // steps order by when they actually started, so bbb2 sits above aaa1.
+    const createTs = "2026-04-28T01:00:00.000000Z";
+    const events: TranscriptEvent[] = [
+      ...parallelCreateCalls(createTs, [
+        { callId: "c1", printedId: "cod-aaa1" },
+        { callId: "c2", printedId: "cod-bbb2" },
+      ]),
+      taskEvent("cod-aaa1", "open", createTs, { created_at: createTs }),
+      taskEvent("cod-bbb2", "open", createTs, { created_at: createTs }),
+      taskEvent("cod-bbb2", "in_progress", "2026-04-28T01:01:00.000000Z"),
+      taskEvent("cod-aaa1", "in_progress", "2026-04-28T01:02:00.000000Z"),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T00:59:00.000000Z", "", false);
+    expect(steps.map((s) => s.ticket_id)).toEqual(["cod-bbb2", "cod-aaa1"]);
+  });
+
+  it("falls back to the created timestamp when no plan order is available", () => {
+    // No tk-create tool calls (e.g. a server-restart replay with only task
+    // events). Distinct sub-second created timestamps, with ids whose
+    // alphabetical order is the reverse of creation -- ordering by created
+    // time, not id, is what we want.
+    const events: TranscriptEvent[] = [
+      taskEvent("cod-zzz9", "open", "2026-04-28T01:00:00.100000Z", { created_at: "2026-04-28T01:00:00.100000Z" }),
+      taskEvent("cod-aaa0", "open", "2026-04-28T01:00:00.200000Z", { created_at: "2026-04-28T01:00:00.200000Z" }),
+    ];
+    const steps = stepsForWindow(events, "2026-04-28T00:59:00.000000Z", "", false);
+    expect(steps.map((s) => s.ticket_id)).toEqual(["cod-zzz9", "cod-aaa0"]);
   });
 });

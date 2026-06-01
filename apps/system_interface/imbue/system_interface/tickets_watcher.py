@@ -45,12 +45,34 @@ logger = _loguru_logger
 _SOURCE = "tk"
 
 
+# Fixed-width microsecond UTC ISO-8601, e.g. 2026-04-28T01:00:00.123456Z. Every
+# timestamp the watcher emits is normalised to this single format so that a
+# plain lexicographic comparison equals chronological order -- the invariant
+# the frontend's step ordering and window attribution rely on. (tk writes this
+# same format; older tickets and file mtimes get normalised up to it here.)
+_ISO_MICROS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
 def _mtime_iso(mtime: float) -> str:
-    """File mtime formatted as a UTC ISO-8601 timestamp (matches tk's own
-    `created:` field format). Caller passes the already-obtained
-    `stat_result.st_mtime` so we don't re-stat (and risk an OSError if
-    the file was deleted between calls)."""
-    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """File mtime formatted as a fixed-width microsecond UTC ISO-8601 timestamp.
+    Caller passes the already-obtained `stat_result.st_mtime` so we don't
+    re-stat (and risk an OSError if the file was deleted between calls). Used as
+    the fallback transition timestamp when a ticket lacks the corresponding
+    frontmatter field (older tk, or a transition tk didn't stamp)."""
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(_ISO_MICROS_FORMAT)
+
+
+def _normalize_iso(ts: str) -> str:
+    """Reformat an ISO-8601 UTC timestamp to fixed-width microsecond precision.
+    Accepts second- or sub-second-resolution input (tk's `created` / `started`
+    / `closed` fields, which an older tk wrote at second resolution). Returns
+    the input unchanged if it can't be parsed -- an unparseable value is left
+    as-is rather than dropped, so a malformed field never crashes the scan."""
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ts
+    return parsed.astimezone(timezone.utc).strftime(_ISO_MICROS_FORMAT)
 
 
 class AgentTicketsWatcher:
@@ -245,20 +267,18 @@ class AgentTicketsWatcher:
 
                 self._last_status_per_ticket[state.ticket_id] = state.status
 
-                # First-sighting timestamp choice: an `open` ticket should
-                # use its frontmatter `created` field (truthful, matches
-                # when the file appeared); other statuses fall back to the
-                # file's current mtime (the close time on replay; the
-                # transition time live).
-                #
-                # If the frontmatter `created` field is empty (malformed
-                # ticket), fall back to mtime as well -- an empty string
-                # would sort to the very front of the merged event list and
-                # break turn attribution on the frontend.
-                if previous_status is None and state.status == "open" and state.created_at:
-                    ts = state.created_at
-                else:
-                    ts = _mtime_iso(stat.st_mtime)
+                # Timestamp the transition from the ticket file itself -- the
+                # source of truth -- using the frontmatter field that matches
+                # the current status: `created` for open, `started` for
+                # in_progress, `closed` for closed. tk stamps all three, so
+                # this is truthful even on replay (a ticket discovered already
+                # in_progress reports when work actually began, not when the
+                # watcher first saw the file). Fall back to the file's mtime
+                # when the field is absent (older tk, or a transition tk didn't
+                # stamp) -- never to an empty string, which would sort to the
+                # front of the merged stream and break turn attribution. All
+                # values are normalised to one fixed-width microsecond format.
+                ts = self._transition_timestamp(state, stat.st_mtime)
 
                 new_events.append(self._make_event(state, ts))
 
@@ -294,7 +314,21 @@ class AgentTicketsWatcher:
             return state.agent != self._agent_name
         return False
 
+    def _transition_timestamp(self, state: TicketState, mtime: float) -> str:
+        """The timestamp for the event emitted for `state`'s current status,
+        taken from the matching frontmatter field and normalised to the
+        fixed-width microsecond format. Falls back to the file's mtime when the
+        field is missing (older tk / unstamped transition)."""
+        field_by_status = {
+            "open": state.created_at,
+            "in_progress": state.started_at,
+            "closed": state.closed_at,
+        }
+        raw = field_by_status.get(state.status, "")
+        return _normalize_iso(raw) if raw else _mtime_iso(mtime)
+
     def _make_event(self, state: TicketState, ts: str) -> dict[str, Any]:
+        summary_at = state.summary_at if state.status == "closed" else None
         return {
             "type": "task_event",
             "event_id": f"{state.ticket_id}-{state.status}",
@@ -303,9 +337,14 @@ class AgentTicketsWatcher:
             "ticket_id": state.ticket_id,
             "title": state.title,
             "status": state.status,
-            "created_at": state.created_at,
+            # created_at and summary_at are normalised to the same fixed-width
+            # microsecond format as `timestamp` so every timestamp the frontend
+            # receives compares consistently. created_at falls back to the
+            # event timestamp when the frontmatter `created` field is empty (a
+            # malformed ticket) so it is never an empty string.
+            "created_at": _normalize_iso(state.created_at) if state.created_at else ts,
             "summary": state.summary if state.status == "closed" else None,
-            "summary_at": state.summary_at if state.status == "closed" else None,
+            "summary_at": _normalize_iso(summary_at) if summary_at else summary_at,
             # Step / parent_id / assignee thread through to the frontend
             # so turn-grouping can a) group step children under their
             # parent ticket and b) attribute regular tickets to the turn
