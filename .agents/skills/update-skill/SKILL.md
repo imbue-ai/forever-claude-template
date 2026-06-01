@@ -82,7 +82,7 @@ here afterwards.
 
 Follow `.agents/shared/references/lead-proxy.md` for polling, gate
 decisions, the "do not interrupt more recent user work" rule, and `mngr
-push` rationale.
+rsync` rationale.
 
 Flow-specific substitutions:
 
