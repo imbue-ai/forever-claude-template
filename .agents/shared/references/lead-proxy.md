@@ -141,6 +141,4 @@ mngr rsync <SOURCE_DIR>/ <WORKER>:<DEST_DIR>/ \
   sub-skills under `.agents/skills/`), so the default `fail` mode would refuse
   the sync.
 - There is no `mngr file put` subcommand -- `mngr rsync` is the correct
-  mechanism. (It was named `mngr push` in older mngr versions; if your worker
-  container errors with `No such command 'push'`, its mngr is stale and only
-  has `rsync`, or vice versa -- match the command to the installed mngr.)
+  mechanism.
