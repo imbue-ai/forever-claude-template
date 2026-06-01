@@ -258,6 +258,24 @@ def test_local_git_context_git_stash_pop_succeeds(
     assert (temp_git_repo / "README.md").read_text() == "modified"
 
 
+def test_local_git_context_git_stash_excludes_untracked_when_include_untracked_false(
+    temp_git_repo: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    (temp_git_repo / "README.md").write_text("modified")
+    (temp_git_repo / "untracked.txt").write_text("untracked content")
+
+    ctx = LocalGitContext(cg=cg)
+    did_stash = ctx.git_stash(temp_git_repo, include_untracked=False)
+
+    assert did_stash is True
+    # Tracked-file modification was stashed (file reverts to committed content).
+    assert (temp_git_repo / "README.md").read_text() == "Initial content"
+    # Untracked file is still on disk because it was not part of the stash.
+    assert (temp_git_repo / "untracked.txt").exists()
+    assert (temp_git_repo / "untracked.txt").read_text() == "untracked content"
+
+
 def test_local_git_context_git_stash_pop_raises_when_no_stash(
     temp_git_repo: Path,
     cg: ConcurrencyGroup,
@@ -368,6 +386,22 @@ def test_remote_git_context_git_stash_pop_succeeds(
     ctx.git_stash_pop(temp_git_repo)
 
     assert (temp_git_repo / "README.md").read_text() == "modified"
+
+
+def test_remote_git_context_git_stash_excludes_untracked_when_include_untracked_false(
+    temp_git_repo: Path,
+) -> None:
+    (temp_git_repo / "README.md").write_text("modified")
+    (temp_git_repo / "untracked.txt").write_text("untracked content")
+
+    host = cast(OnlineHostInterface, FakeHost())
+    ctx = RemoteGitContext(host=host)
+    did_stash = ctx.git_stash(temp_git_repo, include_untracked=False)
+
+    assert did_stash is True
+    assert (temp_git_repo / "README.md").read_text() == "Initial content"
+    assert (temp_git_repo / "untracked.txt").exists()
+    assert (temp_git_repo / "untracked.txt").read_text() == "untracked content"
 
 
 def test_remote_git_context_git_stash_pop_raises_when_no_stash(
