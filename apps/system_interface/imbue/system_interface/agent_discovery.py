@@ -21,6 +21,16 @@ from imbue.mngr.utils.env_utils import parse_env_file
 logger = _loguru_logger
 
 
+def get_host_dir() -> Path:
+    """Return the mngr host directory from the environment.
+
+    Falls back to ``~/.mngr`` when ``MNGR_HOST_DIR`` is unset. This is the
+    canonical resolver shared by both the API layer (``server._find_agent``)
+    and the activity-state tracker (``AgentManager``).
+    """
+    return Path(os.environ.get("MNGR_HOST_DIR", str(Path.home() / ".mngr")))
+
+
 class AgentInfo(FrozenModel):
     """Lightweight agent info for the web UI."""
 
@@ -101,6 +111,36 @@ def read_claude_config_dir_from_env_file(agent_state_dir: Path) -> Path:
         return conventional
     # 4. User-level fallback
     return Path.home() / ".claude"
+
+
+def read_tickets_dir_from_env_file(agent_state_dir: Path, work_dir: Path) -> Path:
+    """Resolve the TICKETS_DIR for an agent.
+
+    Priority:
+      1. ``TICKETS_DIR`` in the agent's env file at ``<agent_state_dir>/env``.
+      2. ``TICKETS_DIR`` in the system interface's own process environment.
+      3. ``<work_dir>/.tickets`` (tk's default).
+
+    Minds sets ``TICKETS_DIR=/code/runtime/tickets`` via ``host_env`` in
+    ``.mngr/settings.toml`` so tickets ride the runtime-backup branch.
+    ``host_env`` entries are forwarded to the container's process
+    environment but are *not* written into the per-agent env file, so the
+    env-file lookup alone misses them; the os.environ fallback catches
+    that case for the co-located system interface.
+    """
+    env_file = agent_state_dir / "env"
+    if env_file.exists():
+        try:
+            env_vars = parse_env_file(env_file.read_text())
+            tickets_dir = env_vars.get("TICKETS_DIR", "").strip()
+            if tickets_dir:
+                return Path(tickets_dir)
+        except OSError:
+            logger.debug("Failed to read env file: {}", env_file)
+    process_env_value = os.environ.get("TICKETS_DIR", "").strip()
+    if process_env_value:
+        return Path(process_env_value)
+    return work_dir / ".tickets"
 
 
 def discover_agents(

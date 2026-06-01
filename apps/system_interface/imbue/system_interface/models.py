@@ -50,6 +50,14 @@ class AgentStateItem(FrozenModel):
     state: str = Field(description="The agent's lifecycle state")
     labels: dict[str, str] = Field(description="Agent labels (e.g., user_created, chat_parent_id)")
     work_dir: str | None = Field(description="The agent's working directory path")
+    activity_state: str | None = Field(
+        default=None,
+        description=(
+            "Per-agent chat activity state value (THINKING / TOOL_RUNNING / "
+            "IDLE), or None when no activity tracking is available for this "
+            "agent."
+        ),
+    )
 
 
 class ApplicationEntry(FrozenModel):

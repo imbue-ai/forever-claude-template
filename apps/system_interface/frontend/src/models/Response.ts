@@ -19,39 +19,120 @@ export interface ToolCall {
   subagent_metadata?: SubagentMetadata;
 }
 
-export interface TranscriptEvent {
+/**
+ * Status vocabulary mirrored from the tk ticket tracker:
+ *   - "open"        -> rendered as "pending" in the chat progress UI
+ *   - "in_progress" -> rendered as "active"
+ *   - "closed"      -> rendered as "done"
+ * There is no failed state by design (every ticket terminates as closed
+ * with a summary; see CLAUDE.md "Task management" in the FCT side).
+ */
+export type TaskEventStatus = "open" | "in_progress" | "closed";
+
+/**
+ * Fields shared by every event, regardless of `type`. The merged `/events`
+ * stream interleaves two independent sources -- the session transcript
+ * (user/assistant/tool_result) and the tickets watcher (task_event) -- so
+ * the only fields guaranteed on all of them are these transport-level ones.
+ */
+export interface BaseTranscriptEvent {
   timestamp: string;
-  type: "user_message" | "assistant_message" | "tool_result";
   event_id: string;
   source: string;
-  message_uuid: string;
+  // Optional on the base because the two sources disagree: session events
+  // (user/assistant/tool_result) always carry message_uuid, but task_events
+  // never do. session_id is set only when the backend knows which session
+  // file an event came from, so it is conditional on every variant.
+  message_uuid?: string;
   session_id?: string;
+}
 
-  // user_message fields
-  role?: string;
-  content?: string;
+/**
+ * A message from the user (or a hook/system message rendered as one).
+ * session_parser only emits this event when there is real user text, so
+ * `content` is always present and non-empty.
+ */
+export interface UserMessageEvent extends BaseTranscriptEvent {
+  type: "user_message";
+  role: string;
+  content: string;
+}
 
-  // assistant_message fields
-  model?: string;
-  text?: string;
-  tool_calls?: ToolCall[];
-  stop_reason?: string | null;
-  usage?: {
+/**
+ * A model turn: prose text and/or tool calls. Every field below is always
+ * present in the backend's emit (`session_parser._parse_assistant_message`);
+ * `text` may be empty and `tool_calls` may be empty, but the keys are always
+ * there, and `stop_reason` / `usage` are present-but-nullable.
+ */
+export interface AssistantMessageEvent extends BaseTranscriptEvent {
+  type: "assistant_message";
+  model: string;
+  text: string;
+  tool_calls: ToolCall[];
+  stop_reason: string | null;
+  usage: {
     input_tokens: number;
     output_tokens: number;
-    cache_read_tokens?: number | null;
-    cache_write_tokens?: number | null;
+    cache_read_tokens: number | null;
+    cache_write_tokens: number | null;
   } | null;
-
-  // assistant_message: true when the text matches a known Claude auth-error pattern
-  is_auth_error?: boolean;
-
-  // tool_result fields
-  tool_call_id?: string;
-  tool_name?: string;
-  output?: string;
-  is_error?: boolean;
+  // True when the text matches a known Claude auth-error pattern.
+  is_auth_error: boolean;
 }
+
+/**
+ * The result of a single tool call, keyed back by `tool_call_id`.
+ * session_parser skips emitting a tool_result with no tool_use_id, so when
+ * one exists `tool_call_id` is always a non-empty string.
+ */
+export interface ToolResultEvent extends BaseTranscriptEvent {
+  type: "tool_result";
+  tool_call_id: string;
+  tool_name: string;
+  output: string;
+  is_error: boolean;
+}
+
+/**
+ * A tk ticket state transition, emitted by the tickets_watcher (one event
+ * per (ticket_id, status) tuple, three at most per ticket lifetime). Unlike
+ * the other variants this is not a harness-level transcript event: it is
+ * parsed from the agent's `.tickets/*.md` files and merged into the same
+ * timestamp-ordered stream so the progress view can interleave ticket
+ * windows with the transcript.
+ */
+export interface TaskEvent extends BaseTranscriptEvent {
+  // Every field is unconditionally set by the tickets_watcher's
+  // `_make_event`, mirroring the TicketState parsed from the `.tickets`
+  // file. summary / summary_at are present-but-nullable (null unless the
+  // ticket is closed); created_at / parent_id / assignee are always
+  // strings but may be empty.
+  type: "task_event";
+  ticket_id: string;
+  title: string;
+  status: TaskEventStatus;
+  created_at: string;
+  summary: string | null;
+  summary_at: string | null;
+  // True iff the ticket is a turn-bound progress record ("step"), as
+  // opposed to a regular tk ticket. Step records nest under their
+  // parent ticket in the progress view; standalone steps render flat.
+  step: boolean;
+  // The id of the ticket this one is nested under, or "" when none.
+  parent_id: string;
+  // The agent currently assigned to the ticket -- the load-bearing
+  // "this is now my work" signal for regular tickets (used by
+  // turn-grouping to attribute a picked-up ticket to the picker's
+  // first turn rather than the originator's creation turn). "" when
+  // unassigned.
+  assignee: string;
+}
+
+/**
+ * A single entry in the merged event stream, discriminated by `type`.
+ * Narrow on `event.type` before touching variant-specific fields.
+ */
+export type TranscriptEvent = UserMessageEvent | AssistantMessageEvent | ToolResultEvent | TaskEvent;
 
 // For hook compatibility
 export interface ResponseItem {

@@ -1460,6 +1460,420 @@ body {
   }
 }
 
+/* ─────────────────────────────────────────────────────────────────────
+   PROGRESS VIEW (per-turn task timeline rendered from tk tickets)
+   ─────────────────────────────────────────────────────────────────── */
+
+.progress-block {
+  margin: 18px 0 28px;
+  --pv-fg: var(--color-text-primary);
+  --pv-fg-soft: #5a564a;
+  --pv-fg-muted: var(--color-text-secondary);
+  --pv-fg-faint: var(--color-text-faint);
+  --pv-line: var(--color-border);
+  --pv-line-faint: var(--color-border-faint);
+  --pv-active: var(--color-accent);
+  --pv-done: #5a564a;
+  --pv-pending: #c2bfb6;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--pv-fg);
+}
+
+/* Status icons */
+.pv-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.pv-icon--done {
+  color: var(--pv-done);
+}
+.pv-icon--active {
+  color: var(--pv-active);
+  width: 16px;
+  height: 16px;
+}
+.pv-icon--in-flight {
+  color: var(--pv-active);
+  width: 16px;
+  height: 16px;
+}
+.pv-icon--pending {
+  color: var(--pv-pending);
+}
+
+.pv-spinner {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: pv-spin 0.9s linear infinite;
+}
+@keyframes pv-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Chevron */
+.pv-chev {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 18px;
+  color: var(--pv-fg-muted);
+  transition: transform 0.15s ease;
+  font-weight: 400;
+}
+.pv-chev--open {
+  transform: rotate(90deg);
+  color: var(--pv-fg);
+}
+
+/* Title button reset (timeline variant) */
+.pv-tl-title {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--pv-fg);
+  line-height: 1.4;
+  display: inline-flex;
+  align-items: center;
+}
+.pv-tl-title:disabled {
+  cursor: default;
+}
+
+/* Timeline thread + nodes */
+.pv.pv--timeline {
+  position: relative;
+  padding-left: 0;
+}
+.pv-timeline-thread {
+  position: absolute;
+  left: 7.5px;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--pv-line);
+}
+.pv-tl-node {
+  position: relative;
+  display: flex;
+  gap: 14px;
+  padding: 0 0 18px 0;
+  align-items: flex-start;
+}
+.pv-tl-node--last {
+  padding-bottom: 0;
+}
+.pv-tl-bullet {
+  position: relative;
+  z-index: 1;
+  background: var(--color-bg);
+  padding: 1px 0;
+  flex-shrink: 0;
+  width: 16px;
+}
+.pv-tl-body {
+  flex: 1;
+  min-width: 0;
+}
+.pv-tl-node--done .pv-tl-title {
+  color: var(--pv-fg-soft);
+  font-weight: 400;
+}
+.pv-tl-node--pending .pv-tl-title {
+  color: var(--pv-fg-muted);
+  font-weight: 400;
+}
+.pv-tl-node--active .pv-tl-title {
+  color: var(--pv-active);
+  font-weight: 600;
+}
+
+.pv-tl-summary {
+  margin-top: 3px;
+  padding-left: 10px;
+  border-left: 2px solid var(--pv-line);
+  font-size: 13px;
+  color: var(--pv-fg-muted);
+  line-height: 1.55;
+}
+
+.pv-tl-narration {
+  margin-top: 3px;
+  padding-left: 10px;
+  border-left: 2px solid var(--pv-active);
+  font-size: 13px;
+  font-style: italic;
+  color: var(--pv-fg-muted);
+  line-height: 1.55;
+  background: linear-gradient(90deg, var(--pv-fg-muted) 0%, var(--pv-fg-faint) 40%, var(--pv-fg-muted) 80%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: pv-narration-shimmer 2.5s ease-in-out infinite;
+}
+@keyframes pv-narration-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+/* Static (settled) narration: an unclosed step that went idle still shows
+   its mid-work narration, but without the live shimmer -- muted italic, a
+   neutral left rule instead of the active-accent rule. The markdown child
+   styling below is shared with .pv-tl-narration via the grouped selectors. */
+.pv-tl-narration--static {
+  margin-top: 3px;
+  padding-left: 10px;
+  border-left: 2px solid var(--pv-line);
+  font-size: 13px;
+  font-style: italic;
+  color: var(--pv-fg-muted);
+  line-height: 1.55;
+}
+.pv-tl-narration p,
+.pv-tl-narration--static p {
+  margin: 0 0 0.4em;
+}
+.pv-tl-narration p:last-child,
+.pv-tl-narration--static p:last-child {
+  margin-bottom: 0;
+}
+.pv-tl-narration code,
+.pv-tl-narration--static code {
+  font-size: 0.9em;
+  padding: 0.1em 0.35em;
+  background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
+  border-radius: 3px;
+  font-style: normal;
+  -webkit-text-fill-color: var(--pv-fg-muted);
+  -webkit-background-clip: padding-box;
+  background-clip: padding-box;
+}
+.pv-tl-narration pre,
+.pv-tl-narration--static pre {
+  margin: 0.4em 0;
+  padding: 0.5em 0.7em;
+  background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 0.9em;
+  font-style: normal;
+  -webkit-text-fill-color: var(--pv-fg-muted);
+  -webkit-background-clip: padding-box;
+  background-clip: padding-box;
+}
+.pv-tl-narration pre code,
+.pv-tl-narration--static pre code {
+  padding: 0;
+  background: none;
+}
+.pv-tl-narration a,
+.pv-tl-narration--static a {
+  color: var(--pv-fg-muted);
+  text-decoration: underline;
+}
+.pv-tl-narration ul,
+.pv-tl-narration ol,
+.pv-tl-narration--static ul,
+.pv-tl-narration--static ol {
+  margin: 0.3em 0;
+  padding-left: 1.5em;
+}
+.pv-tl-narration li,
+.pv-tl-narration--static li {
+  margin-bottom: 0.15em;
+}
+
+/* Id badge in front of regular-ticket titles. Visually subtle -- the
+   title is the primary thing the user reads; the badge is the secondary
+   "which tk ticket is this" handle for users / agents who care. */
+.pv-tl-id-badge {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 0 6px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--pv-fg-muted);
+  background: var(--pv-line-faint, rgba(127, 127, 127, 0.08));
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+/* Distinct chrome for step records vs. regular tickets. Steps are
+   creator-private progress markers -- they read like sub-items, so we
+   keep the title weight lighter and the typography slightly de-emphasized.
+   Regular tickets carry a heavier title weight (the existing default). */
+.pv-tl-node--step .pv-tl-title {
+  font-weight: 400;
+  font-size: 13.5px;
+  color: var(--pv-fg-soft);
+}
+.pv-tl-node--ticket .pv-tl-title {
+  font-weight: 600;
+}
+.pv-tl-node--ticket.pv-tl-node--done .pv-tl-title {
+  font-weight: 500;
+}
+
+/* Nested step children under their parent ticket. Indent + a thin
+   continuation rail so the hierarchy reads at a glance. Last child
+   drops the rail tail to match the surrounding timeline-thread. */
+.pv-tl-children {
+  margin-top: 8px;
+  margin-left: 4px;
+  padding-left: 18px;
+  border-left: 1px solid var(--pv-line-faint, rgba(127, 127, 127, 0.18));
+  position: relative;
+}
+.pv-tl-node--child {
+  padding-bottom: 10px;
+}
+.pv-tl-node--child.pv-tl-node--last {
+  padding-bottom: 0;
+}
+
+.pv-tl-expanded {
+  margin-top: 6px;
+}
+
+/* Expanded panel: matches the rest of the chat -- interleaved markdown +
+   tool-call-blocks. We just contain it with a subtle indent + left rule
+   so it's visually distinct from the surrounding progress structure. */
+.pv-expanded {
+  margin-top: 10px;
+  padding: 4px 0 4px 14px;
+  border-left: 2px solid var(--pv-line-faint);
+  font-size: 14px;
+}
+.pv-expanded p {
+  margin: 0 0 0.6em;
+  line-height: 1.65;
+  color: var(--pv-fg);
+}
+.pv-expanded p:last-child {
+  margin-bottom: 0;
+}
+.pv-expanded .tool-call-block {
+  margin: 0.5em 0;
+}
+
+/* Final (trailing) assistant reply under the progress timeline */
+.pv-final {
+  margin-top: 16px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--pv-fg);
+}
+
+/* Leading prose: emitted before the first step, rendered ABOVE the timeline
+   as plain chat-style prose. */
+.pv-lead {
+  margin-bottom: 16px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--pv-fg);
+}
+
+/* Inter-step interrupt (Variant C): the agent stepped out of its plan to
+   speak between two steps. The block paints ABOVE the vertical timeline
+   thread (z-index + opaque background matching the page), so the thread is
+   visibly interrupted for the block's height and resumes above/below. Top
+   and bottom hairline rules mark the break; full column width, nothing is
+   drawn across the text. */
+.pv-interstep {
+  position: relative;
+  z-index: 2;
+  margin: 2px 0 18px 0;
+  padding: 13px 0;
+  background: var(--color-bg);
+  border-top: 1px solid var(--pv-line);
+  border-bottom: 1px solid var(--pv-line);
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: var(--pv-fg);
+}
+
+/* Stop-hook chip woven into the timeline at the point the hook fired. Like
+   the inter-step block it sits above the timeline thread (opaque background +
+   z-index) so the thread doesn't draw through the chip. The chip itself keeps
+   its own collapsible styling; this wrapper only handles positioning and
+   masking the thread. */
+.pv-stophook {
+  position: relative;
+  z-index: 2;
+  margin: 6px 0 14px 0;
+  background: var(--color-bg);
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   ACTIVITY INDICATOR (replaces the generic "Running tool..." strip)
+   ─────────────────────────────────────────────────────────────────── */
+
+.agent-activity-indicator {
+  /* `display: flex` (not inline-flex) so the auto side-margins can
+     horizontally center the indicator within the footer; an inline-flex
+     box's auto margins do not center, so on wide screens the indicator
+     would stick to the footer's left edge instead of sitting above the
+     centered input. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto 8px auto;
+  width: 100%;
+  max-width: var(--width-message-column);
+  padding: 0 4px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+
+.agent-activity-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: agent-activity-pulse 1.4s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes agent-activity-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+}
+
+.agent-activity-indicator__label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .claude-login-overlay {
   position: absolute;
   inset: 0;

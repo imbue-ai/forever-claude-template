@@ -98,10 +98,10 @@ Flow-specific substitutions:
   `type: status, name: no-update-needed` (no change -- just close the
   ticket; no merge); `type: status, name: stuck` (failure-handling flow).
 
-On successful merge, close the tracking ticket:
+On successful merge, close the tracking ticket with a summary:
 
 ```bash
-tk close "$TICKET_ID"
+tk close "$TICKET_ID" "Updated $TARGET -- worker branch merged."
 ```
 
 ## Gotchas

@@ -131,9 +131,10 @@ COPY apps/system_interface/pyproject.toml /mngr/code/apps/system_interface/pypro
 # vendor/mngr path-dependency manifests. The root pyproject.toml's
 # [tool.uv.sources] points imbue-common, imbue-mngr, imbue-mngr-claude,
 # resource-guards, and concurrency-group at vendor/mngr/libs/<pkg>; uv
-# needs each pyproject.toml present to resolve the workspace. The two
-# additional tool installs below (mngr_modal, mngr_wait) ride here too
-# so their transitive deps land in the warmed cache.
+# needs each pyproject.toml present to resolve the workspace. mngr_modal
+# and mngr_wait are also workspace members whose transitive deps benefit
+# from pre-warming even though only mngr_wait is registered post-COPY
+# (as a mngr plugin, not a tool install).
 COPY vendor/mngr/libs/imbue_common/pyproject.toml /mngr/code/vendor/mngr/libs/imbue_common/pyproject.toml
 COPY vendor/mngr/libs/mngr/pyproject.toml /mngr/code/vendor/mngr/libs/mngr/pyproject.toml
 COPY vendor/mngr/libs/mngr_claude/pyproject.toml /mngr/code/vendor/mngr/libs/mngr_claude/pyproject.toml
@@ -189,10 +190,12 @@ RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr && \
 RUN uv sync --all-packages --frozen
 
 # Expose the vendored tk ticket tracker on PATH. `tk` is a portable bash
-# script at vendor/tk/ticket; a symlink into /root/.local/bin/ (already on
-# PATH) makes it invocable without bundling an additional install mechanism.
-# Tickets themselves live under .tickets/ (gitignored) at the repo root.
-RUN mkdir -p /root/.local/bin && ln -sf /mngr/code/vendor/tk/ticket /root/.local/bin/tk
+# script at vendor/tk/ticket; symlinks into /usr/local/bin/ (already on PATH)
+# make both `tk` and `ticket` invocable without bundling an additional
+# install mechanism. The target resolves once /mngr/code is seeded onto the
+# runtime volume (see the bake-and-relocate dance below).
+RUN ln -sf /mngr/code/vendor/tk/ticket /usr/local/bin/tk && \
+    ln -sf /mngr/code/vendor/tk/ticket /usr/local/bin/ticket
 
 # Move the baked workspace off the volume mount path so the shipped
 # image has /mngr/code/ EMPTY. At runtime, /mngr/ is a persistent
