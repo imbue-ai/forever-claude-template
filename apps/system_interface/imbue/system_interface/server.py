@@ -47,6 +47,7 @@ from imbue.system_interface.models import ErrorResponse
 from imbue.system_interface.models import RandomNameResponse
 from imbue.system_interface.models import SendMessageRequest
 from imbue.system_interface.models import SendMessageResponse
+from imbue.system_interface.models import StartAgentResponse
 from imbue.system_interface.plugins import get_plugin_manager
 from imbue.system_interface.request_writer import write_refresh_request
 from imbue.system_interface.service_dispatcher import register_service_routes
@@ -720,6 +721,76 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
     return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
 
 
+async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
+    """Start a STOPPED agent so its terminal session becomes attachable.
+
+    Opening an agent's terminal attaches to that agent's tmux session; while
+    the agent is STOPPED that session does not exist, so the attach fails
+    immediately. The frontend calls this endpoint before opening a terminal
+    tab -- both for the chat-page "Open agent terminal" link and for terminal
+    tabs restored from a saved dockview layout.
+
+    If the agent's tmux session already exists it is already attachable, so we
+    skip `mngr start` entirely. This is the common case (opening the terminal
+    of an agent that is already up) and avoids needlessly reinvoking `mngr
+    start`, which reparses the mngr config on every call -- an unrelated
+    config error there would otherwise surface as a spurious "could not start
+    agent" banner over a perfectly healthy, running agent.
+
+    Attachability is tested exactly the way the ttyd dispatch attaches --
+    `tmux has-session -t "=<session>:0"` -- rather than by trusting the
+    agent's cached lifecycle state, which is unreliable here because the mngr
+    observe discovery stream reports every agent as RUNNING regardless of its
+    real state. Only when the session is absent (or its name is unknown) do
+    we fall back to `mngr start`, which filters its targets to STOPPED agents
+    and creates the missing session.
+    """
+    agent_manager: AgentManager = request.app.state.agent_manager
+    agent_state = agent_manager.get_agent_by_id(agent_id)
+    if agent_state is None:
+        error = ErrorResponse(detail=f"Agent '{agent_id}' not found")
+        return JSONResponse(content=error.model_dump(), status_code=404)
+
+    agent_name = agent_state.name
+    # Derive the tmux session name exactly as the ttyd dispatch and the
+    # screen-capture endpoint do: "<MNGR_PREFIX><name>" (default prefix
+    # "mngr-"). See ``ttyd_agent.sh`` and ``_get_screen_capture`` above.
+    prefix = os.environ.get("MNGR_PREFIX", "mngr-")
+    session_name = f"{prefix}{agent_name}"
+
+    def _is_attachable() -> bool:
+        # Mirror the ttyd dispatch's exact-match target (leading "=", window
+        # 0) so prefix-overlapping session names can't yield a false positive.
+        result = run_local_command_modern_version(
+            command=["tmux", "has-session", "-t", f"={session_name}:0"],
+            cwd=None,
+            is_checked=False,
+            timeout=10.0,
+        )
+        return result.returncode == 0
+
+    if await run_in_threadpool(_is_attachable):
+        return JSONResponse(content=StartAgentResponse(status="ok").model_dump())
+
+    def _run_start() -> tuple[bool, str]:
+        result = run_local_command_modern_version(
+            command=["mngr", "start", agent_name],
+            cwd=None,
+            is_checked=False,
+            timeout=60.0,
+        )
+        succeeded = result.returncode == 0
+        output = result.stdout.strip() if succeeded else result.stderr.strip()
+        return succeeded, output
+
+    success, output = await run_in_threadpool(_run_start)
+    if not success:
+        error = ErrorResponse(detail=f"Failed to start agent '{agent_name}': {output}")
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    return JSONResponse(content=StartAgentResponse(status="ok").model_dump())
+
+
 async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
     """Append a refresh-service event to the agent's refresh events file.
 
@@ -807,6 +878,7 @@ def create_application(
     application.add_api_route("/api/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
+    application.add_api_route("/api/agents/{agent_id}/start", _start_agent, methods=["POST"])
     claude_auth_endpoints.register_routes(application)
     application.add_api_route(
         "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]

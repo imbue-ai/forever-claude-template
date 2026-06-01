@@ -1,0 +1,2 @@
+
+- Agent terminal start: skip `mngr start` when the agent's tmux session is already attachable. Opening the terminal of a running agent now checks `tmux has-session` for `=<MNGR_PREFIX><name>:0` and only invokes `mngr start` when the session is absent. This avoids reparsing the mngr config on every terminal open, so an unrelated `.mngr/settings.toml` error no longer surfaces as a spurious "could not start agent" banner over a healthy, running agent.
