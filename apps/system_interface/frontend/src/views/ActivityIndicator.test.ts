@@ -3,7 +3,7 @@ import type { TranscriptEvent } from "../models/Response";
 import { labelForActivityState } from "./ActivityIndicator";
 
 function userMsg(ts: string): TranscriptEvent {
-  return { timestamp: ts, type: "user_message", event_id: `u-${ts}`, source: "test", content: "hi" };
+  return { timestamp: ts, type: "user_message", event_id: `u-${ts}`, source: "test", role: "user", content: "hi" };
 }
 
 function toolUse(ts: string, toolName: string, callId: string, input: string): TranscriptEvent {
@@ -12,8 +12,12 @@ function toolUse(ts: string, toolName: string, callId: string, input: string): T
     type: "assistant_message",
     event_id: `a-${callId}`,
     source: "test",
+    model: "test-model",
     text: "",
     tool_calls: [{ tool_call_id: callId, tool_name: toolName, input_preview: input }],
+    stop_reason: null,
+    usage: null,
+    is_auth_error: false,
   };
 }
 
@@ -24,7 +28,9 @@ function toolResult(ts: string, callId: string): TranscriptEvent {
     event_id: `r-${callId}`,
     source: "test",
     tool_call_id: callId,
+    tool_name: "test-tool",
     output: "result",
+    is_error: false,
   };
 }
 

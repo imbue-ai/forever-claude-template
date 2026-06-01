@@ -17,6 +17,7 @@ function userMsg(ts: string, content: string, eventId: string = `u-${ts}`): Tran
     type: "user_message",
     event_id: eventId,
     source: "test",
+    role: "user",
     content,
   };
 }
@@ -27,8 +28,12 @@ function assistantMsg(ts: string, text: string, eventId: string = `a-${ts}`): Tr
     type: "assistant_message",
     event_id: eventId,
     source: "test",
+    model: "test-model",
     text,
     tool_calls: [],
+    stop_reason: null,
+    usage: null,
+    is_auth_error: false,
   };
 }
 
@@ -38,8 +43,12 @@ function toolUse(ts: string, toolName: string, callId: string, input: string = "
     type: "assistant_message",
     event_id: `a-${callId}`,
     source: "test",
+    model: "test-model",
     text: "",
     tool_calls: [{ tool_call_id: callId, tool_name: toolName, input_preview: input }],
+    stop_reason: null,
+    usage: null,
+    is_auth_error: false,
   };
 }
 
@@ -50,7 +59,9 @@ function toolResultEvent(ts: string, callId: string): TranscriptEvent {
     event_id: `r-${callId}`,
     source: "test",
     tool_call_id: callId,
+    tool_name: "test-tool",
     output: "ok",
+    is_error: false,
   };
 }
 
@@ -90,8 +101,8 @@ function taskEvent(
     summary: extras.summary ?? null,
     summary_at: extras.summary_at ?? null,
     step: extras.step ?? true,
-    parent_id: extras.parent_id,
-    assignee: extras.assignee,
+    parent_id: extras.parent_id ?? "",
+    assignee: extras.assignee ?? "",
   };
 }
 
@@ -494,7 +505,9 @@ describe("eventsInTaskWindow", () => {
         event_id: `r-${callId}`,
         source: "test",
         tool_call_id: callId,
+        tool_name: "test-tool",
         output: "ok",
+        is_error: false,
       };
     }
     const body = [toolUse("2026-04-28T01:00:45Z", "Read", "tc-late"), toolResult("2026-04-28T01:00:51Z", "tc-late")];
@@ -553,8 +566,12 @@ describe("classifyTopLevelMessages", () => {
       type: "assistant_message",
       event_id: "a-mixed",
       source: "test",
+      model: "test-model",
       text: "Calling out to a tool.",
       tool_calls: [{ tool_call_id: "tc-x", tool_name: "Bash", input_preview: "{}" }],
+      stop_reason: null,
+      usage: null,
+      is_auth_error: false,
     };
     const empty = assistantMsg("2026-04-28T01:00:05Z", "", "a-empty");
     const placed = classifyTopLevelMessages([withTextAndTools, empty], []);

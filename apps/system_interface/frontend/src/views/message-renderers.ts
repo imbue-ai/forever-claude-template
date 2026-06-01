@@ -63,7 +63,9 @@ export function buildToolResultsWithSkillExpansions(events: TranscriptEvent[]): 
           event_id: `skill-expansion-${targetCallId}`,
           source: e.source,
           tool_call_id: targetCallId,
+          tool_name: "Skill",
           output: mergedOutput,
+          is_error: false,
         });
       }
     }

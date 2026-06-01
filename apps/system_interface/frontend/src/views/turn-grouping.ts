@@ -74,15 +74,17 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
     if (existing === undefined) {
       records.set(e.ticket_id, {
         ticket_id: e.ticket_id,
-        title: e.title ?? e.ticket_id,
+        title: e.title,
+        // created_at may be the empty string (missing frontmatter); fall
+        // back to the event timestamp so the record always sorts sensibly.
         created_at: e.created_at || e.timestamp,
         started_at: e.status === "in_progress" ? e.timestamp : null,
         closed_at: e.status === "closed" ? e.timestamp : null,
-        summary: e.status === "closed" ? (e.summary ?? null) : null,
+        summary: e.status === "closed" ? e.summary : null,
         final_status: e.status,
-        step: e.step ?? false,
-        parent_id: e.parent_id ?? "",
-        assignee: e.assignee ?? "",
+        step: e.step,
+        parent_id: e.parent_id,
+        assignee: e.assignee,
         first_observed_at: e.timestamp,
       });
       continue;
@@ -93,7 +95,7 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
     }
     if (e.status === "closed") {
       existing.closed_at = e.timestamp;
-      if (e.summary !== undefined && e.summary !== null) {
+      if (e.summary !== null) {
         existing.summary = e.summary;
       }
     }
@@ -103,15 +105,13 @@ export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRec
     if (e.timestamp < existing.first_observed_at) {
       existing.first_observed_at = e.timestamp;
     }
-    if (e.assignee !== undefined && e.assignee !== "") {
+    if (e.assignee !== "") {
       existing.assignee = e.assignee;
     }
-    if (e.parent_id !== undefined && e.parent_id !== "") {
+    if (e.parent_id !== "") {
       existing.parent_id = e.parent_id;
     }
-    if (e.step !== undefined) {
-      existing.step = e.step;
-    }
+    existing.step = e.step;
   }
   return records;
 }

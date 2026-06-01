@@ -39,41 +39,58 @@ export interface BaseTranscriptEvent {
   timestamp: string;
   event_id: string;
   source: string;
+  // Optional on the base because the two sources disagree: session events
+  // (user/assistant/tool_result) always carry message_uuid, but task_events
+  // never do. session_id is set only when the backend knows which session
+  // file an event came from, so it is conditional on every variant.
   message_uuid?: string;
   session_id?: string;
 }
 
-/** A message from the user (or a hook/system message rendered as one). */
+/**
+ * A message from the user (or a hook/system message rendered as one).
+ * session_parser only emits this event when there is real user text, so
+ * `content` is always present and non-empty.
+ */
 export interface UserMessageEvent extends BaseTranscriptEvent {
   type: "user_message";
-  role?: string;
-  content?: string;
+  role: string;
+  content: string;
 }
 
-/** A model turn: prose text and/or tool calls. */
+/**
+ * A model turn: prose text and/or tool calls. Every field below is always
+ * present in the backend's emit (`session_parser._parse_assistant_message`);
+ * `text` may be empty and `tool_calls` may be empty, but the keys are always
+ * there, and `stop_reason` / `usage` are present-but-nullable.
+ */
 export interface AssistantMessageEvent extends BaseTranscriptEvent {
   type: "assistant_message";
-  model?: string;
-  text?: string;
-  tool_calls?: ToolCall[];
-  stop_reason?: string | null;
-  usage?: {
+  model: string;
+  text: string;
+  tool_calls: ToolCall[];
+  stop_reason: string | null;
+  usage: {
     input_tokens: number;
     output_tokens: number;
-    cache_read_tokens?: number | null;
-    cache_write_tokens?: number | null;
+    cache_read_tokens: number | null;
+    cache_write_tokens: number | null;
   } | null;
   // True when the text matches a known Claude auth-error pattern.
-  is_auth_error?: boolean;
+  is_auth_error: boolean;
 }
 
-/** The result of a single tool call, keyed back by `tool_call_id`. */
+/**
+ * The result of a single tool call, keyed back by `tool_call_id`.
+ * session_parser skips emitting a tool_result with no tool_use_id, so when
+ * one exists `tool_call_id` is always a non-empty string.
+ */
 export interface ToolResultEvent extends BaseTranscriptEvent {
   type: "tool_result";
-  tool_call_id?: string;
-  tool_name?: string;
-  output?: string;
-  is_error?: boolean;
+  tool_call_id: string;
+  tool_name: string;
+  output: string;
+  is_error: boolean;
 }
 
 /**
@@ -85,24 +102,30 @@ export interface ToolResultEvent extends BaseTranscriptEvent {
  * windows with the transcript.
  */
 export interface TaskEvent extends BaseTranscriptEvent {
+  // Every field is unconditionally set by the tickets_watcher's
+  // `_make_event`, mirroring the TicketState parsed from the `.tickets`
+  // file. summary / summary_at are present-but-nullable (null unless the
+  // ticket is closed); created_at / parent_id / assignee are always
+  // strings but may be empty.
   type: "task_event";
-  ticket_id?: string;
-  title?: string;
-  status?: TaskEventStatus;
-  created_at?: string;
-  summary?: string | null;
-  summary_at?: string | null;
+  ticket_id: string;
+  title: string;
+  status: TaskEventStatus;
+  created_at: string;
+  summary: string | null;
+  summary_at: string | null;
   // True iff the ticket is a turn-bound progress record ("step"), as
   // opposed to a regular tk ticket. Step records nest under their
   // parent ticket in the progress view; standalone steps render flat.
-  step?: boolean;
-  // The id of the ticket this one is nested under, if any.
-  parent_id?: string;
+  step: boolean;
+  // The id of the ticket this one is nested under, or "" when none.
+  parent_id: string;
   // The agent currently assigned to the ticket -- the load-bearing
   // "this is now my work" signal for regular tickets (used by
   // turn-grouping to attribute a picked-up ticket to the picker's
-  // first turn rather than the originator's creation turn).
-  assignee?: string;
+  // first turn rather than the originator's creation turn). "" when
+  // unassigned.
+  assignee: string;
 }
 
 /**

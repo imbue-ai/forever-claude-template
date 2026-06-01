@@ -9,8 +9,12 @@ function skillToolCall(ts: string, callId: string): TranscriptEvent {
     type: "assistant_message",
     event_id: `a-${callId}`,
     source: "test",
+    model: "test-model",
     text: "",
     tool_calls: [{ tool_call_id: callId, tool_name: "Skill", input_preview: "{}" }],
+    stop_reason: null,
+    usage: null,
+    is_auth_error: false,
   };
 }
 
@@ -21,7 +25,9 @@ function toolResult(ts: string, callId: string, output: string): TranscriptEvent
     event_id: `r-${callId}`,
     source: "test",
     tool_call_id: callId,
+    tool_name: "test-tool",
     output,
+    is_error: false,
   };
 }
 
@@ -31,6 +37,7 @@ function skillExpansion(ts: string, skillName: string, eventId: string): Transcr
     type: "user_message",
     event_id: eventId,
     source: "test",
+    role: "user",
     content: `Base directory for this skill: /home/.claude/skills/${skillName}/\n\n# ${skillName}\n\nBody of ${skillName}.`,
   };
 }
@@ -93,11 +100,15 @@ describe("buildToolResultsWithSkillExpansions", () => {
         type: "assistant_message",
         event_id: "a-multi",
         source: "test",
+        model: "test-model",
         text: "",
         tool_calls: [
           { tool_call_id: "tc-a", tool_name: "Skill", input_preview: "{}" },
           { tool_call_id: "tc-b", tool_name: "Skill", input_preview: "{}" },
         ],
+        stop_reason: null,
+        usage: null,
+        is_auth_error: false,
       },
       skillExpansion("2026-04-28T01:00:01Z", "alpha", "u-a"),
       skillExpansion("2026-04-28T01:00:02Z", "beta", "u-b"),
@@ -131,8 +142,12 @@ describe("buildToolResultsWithSkillExpansions", () => {
         type: "assistant_message" as const,
         event_id: "a-1",
         source: "test",
+        model: "test-model",
         text: "",
         tool_calls: [{ tool_call_id: "tc-read", tool_name: "Read", input_preview: "" }],
+        stop_reason: null,
+        usage: null,
+        is_auth_error: false,
       },
       toolResult("2026-04-28T01:00:01Z", "tc-read", "file contents"),
     ];
