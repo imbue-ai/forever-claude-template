@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
 
+import anyio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -13,8 +14,27 @@ from fastapi.testclient import TestClient
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
+from imbue.system_interface.event_queues import AgentEventQueues
+from imbue.system_interface.events import BufferBehavior
 from imbue.system_interface.models import AgentStateItem
+from imbue.system_interface.server import _sse_event_stream
 from imbue.system_interface.server import create_application
+
+
+class _StoppableWatcher:
+    """Minimal stand-in for AgentSessionWatcher that records stop() calls."""
+
+    was_stopped = False
+
+    def stop(self) -> None:
+        self.was_stopped = True
+
+
+class _RaisingWatcher:
+    """Stand-in whose stop() raises the kind of error a watchdog teardown can."""
+
+    def stop(self) -> None:
+        raise OSError("inotify teardown failed")
 
 # Placeholder client-side port used by the refresh-service broadcast tests.
 # Only the host portion of the TestClient ``client`` tuple is inspected by the
@@ -364,6 +384,87 @@ def test_proto_agent_logs_endpoint_streams_messages_until_sentinel(app: FastAPI)
 
     assert first == {"line": "starting"}
     assert second == {"line": "still going"}
+
+
+def test_agent_removal_stops_watcher_and_evicts_queue(app: FastAPI) -> None:
+    """Removing an agent stops its session watcher and terminates its SSE subscribers.
+
+    The lifespan registers an agent-removed listener that frees the per-agent
+    resources living on application.state (the watcher thread and the event
+    queues), which the AgentManager itself has no reference to.
+    """
+    with TestClient(app):
+        agent_manager: AgentManager = app.state.agent_manager
+        event_queues: AgentEventQueues = app.state.event_queues
+
+        agent_id = "agent-to-remove"
+        watcher = _StoppableWatcher()
+        app.state.watchers[agent_id] = watcher
+        subscriber = event_queues.register(agent_id)
+
+        agent_manager.remove_agent(agent_id)
+
+        assert watcher.was_stopped is True
+        assert agent_id not in app.state.watchers
+        assert subscriber.get_nowait() is None
+
+
+def test_agent_removal_tolerates_watcher_stop_failure(app: FastAPI) -> None:
+    """A watcher.stop() failure is contained: the queue is still evicted.
+
+    Stopping the watchdog-backed watcher can raise OSError/RuntimeError during
+    teardown. The eviction listener must catch that, log it, and still evict the
+    event queues -- and must not let the error escape onto the observe thread
+    that drives observe-driven removals.
+    """
+    with TestClient(app):
+        agent_manager: AgentManager = app.state.agent_manager
+        event_queues: AgentEventQueues = app.state.event_queues
+
+        agent_id = "agent-bad-watcher"
+        app.state.watchers[agent_id] = _RaisingWatcher()
+        subscriber = event_queues.register(agent_id)
+
+        # Must not raise even though watcher.stop() does.
+        agent_manager.remove_agent(agent_id)
+
+        assert agent_id not in app.state.watchers
+        assert subscriber.get_nowait() is None
+
+
+@pytest.mark.timeout(15)
+def test_sse_event_stream_forwards_filters_and_terminates() -> None:
+    """_sse_event_stream forwards matching events, filters by session, and ends on None.
+
+    Drives the async generator directly (via anyio) over a pre-populated queue
+    so the test is deterministic -- no cross-thread timing. This exercises the
+    async conversion (run_in_threadpool polling), the subagent session filter,
+    the None-sentinel termination, and the unregister-on-exit contract.
+    """
+    queues = AgentEventQueues()
+    agent_id = "stream-agent"
+    subscriber = queues.register(agent_id)
+
+    queues.broadcast(agent_id, {"session_id": "s1", "n": 1, "buffer_behavior": BufferBehavior.IGNORE})
+    queues.broadcast(agent_id, {"session_id": "s2", "n": 2, "buffer_behavior": BufferBehavior.IGNORE})
+    queues.broadcast(agent_id, {"session_id": "s1", "n": 3, "buffer_behavior": BufferBehavior.IGNORE})
+    # A None sentinel (as delivered by shutdown/eviction) must end the stream.
+    subscriber.put_nowait(None)
+
+    async def _drive() -> list[str]:
+        collected: list[str] = []
+        async for frame in _sse_event_stream(queues, subscriber, agent_id, session_id_filter="s1"):
+            collected.append(frame)
+        return collected
+
+    frames = anyio.run(_drive)
+
+    data_frames = [f for f in frames if f.startswith("data:")]
+    assert len(data_frames) == 2, "only the two s1-session events should be forwarded"
+    assert json.loads(data_frames[0][len("data:") :].strip())["n"] == 1
+    assert json.loads(data_frames[1][len("data:") :].strip())["n"] == 3
+    # The generator unregistered itself on exit.
+    assert queues._queues.get(agent_id) is None
 
 
 def test_destroy_rejects_is_primary_agent(client: TestClient, app: FastAPI) -> None:

@@ -79,6 +79,17 @@ export function isConversationNotFound(agentId: string): boolean {
   return notFoundAgentIds.has(agentId);
 }
 
+/**
+ * Drop all cached event state for an agent. Called when an agent is destroyed
+ * so the per-agent caches don't accumulate entries for the lifetime of the
+ * page. Safe to call for an agent with no cached state.
+ */
+export function evictAgentEvents(agentId: string): void {
+  delete eventsByAgent[agentId];
+  notFoundAgentIds.delete(agentId);
+  delete backfillComplete[agentId];
+}
+
 export function getEventsForAgent(agentId: string): TranscriptEvent[] {
   return eventsByAgent[agentId] ?? [];
 }

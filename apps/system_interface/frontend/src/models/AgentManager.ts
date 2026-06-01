@@ -5,6 +5,8 @@
 
 import m from "mithril";
 import { apiUrl } from "../base-path";
+import { evictAgentEvents } from "./Response";
+import { evictStream } from "./StreamingMessage";
 
 export interface AgentState {
   id: string;
@@ -106,12 +108,19 @@ function scheduleReconnect(): void {
 
 function handleEvent(event: WsEvent): void {
   switch (event.type) {
-    case "agents_updated":
+    case "agents_updated": {
+      const survivingIds = new Set(event.agents.map((a) => a.id));
+      for (const previous of agents) {
+        if (!survivingIds.has(previous.id)) {
+          evictAgent(previous.id);
+        }
+      }
       agents = event.agents;
       for (const listener of agentsUpdatedListeners) {
         listener(getAgents());
       }
       break;
+    }
 
     case "applications_updated":
       applications = event.applications;
@@ -171,6 +180,17 @@ export function getAgentById(id: string): AgentState | undefined {
 
 export function removeAgentLocally(agentId: string): void {
   agents = agents.filter((a) => a.id !== agentId);
+  evictAgent(agentId);
+}
+
+/**
+ * Drop every client-side cache entry tied to a destroyed agent: its SSE
+ * stream and its cached transcript events. Keeps the per-agent maps from
+ * accumulating dead entries for the lifetime of the page.
+ */
+function evictAgent(agentId: string): void {
+  evictStream(agentId);
+  evictAgentEvents(agentId);
 }
 
 export function getApplications(): ApplicationEntry[] {
