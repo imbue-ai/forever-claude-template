@@ -9,8 +9,11 @@ from pathlib import Path
 import pytest
 
 from bootstrap.manager import (
+    SVC_EXIT_STATUS_OPTION,
     _build_create_chat_command,
+    _build_service_keystrokes,
     _compute_actions,
+    _compute_restarts,
     _ensure_host_claude_config_dir,
     _format_env_file,
     _initialize_workspace_main_branch,
@@ -79,6 +82,58 @@ def test_compute_actions_handles_mixed_add_remove_change() -> None:
     stops, starts = _compute_actions(desired, current)
     assert sorted(stops) == ["change", "remove"]
     assert sorted(starts) == [("add", "added"), ("change", "new")]
+
+
+# --- Restart policy: _build_service_keystrokes ---
+
+
+def test_build_service_keystrokes_runs_command_then_records_exit_status() -> None:
+    # The service command must run first, then its exit status be recorded so
+    # the manager can detect the service exiting. `$?` must be captured right
+    # after the command so it reflects the service's own status.
+    keys = _build_service_keystrokes("my-server --flag")
+    assert keys.startswith("my-server --flag;")
+    assert SVC_EXIT_STATUS_OPTION in keys
+    assert '"$?"' in keys
+
+
+# --- Restart policy: _compute_restarts ---
+
+
+def test_compute_restarts_restarts_on_failure_after_nonzero_exit() -> None:
+    desired = {"a": {"command": "cmd", "restart": "on-failure"}}
+    assert _compute_restarts(desired, {"a": "1"}) == ["a"]
+
+
+def test_compute_restarts_skips_on_failure_after_clean_exit() -> None:
+    desired = {"a": {"command": "cmd", "restart": "on-failure"}}
+    assert _compute_restarts(desired, {"a": "0"}) == []
+
+
+def test_compute_restarts_never_policy_is_left_dead() -> None:
+    desired = {"a": {"command": "cmd", "restart": "never"}}
+    assert _compute_restarts(desired, {"a": "1"}) == []
+
+
+def test_compute_restarts_defaults_to_never_when_policy_absent() -> None:
+    desired = {"a": {"command": "cmd"}}
+    assert _compute_restarts(desired, {"a": "1"}) == []
+
+
+def test_compute_restarts_skips_service_removed_from_desired() -> None:
+    # A service that exited but is no longer in services.toml must not be
+    # restarted -- the mtime-driven reconcile removes its window instead.
+    assert _compute_restarts({}, {"gone": "1"}) == []
+
+
+def test_compute_restarts_handles_mixed_services() -> None:
+    desired = {
+        "crash": {"command": "c", "restart": "on-failure"},
+        "clean": {"command": "c", "restart": "on-failure"},
+        "oneshot": {"command": "c", "restart": "never"},
+    }
+    exited = {"crash": "2", "clean": "0", "oneshot": "1"}
+    assert _compute_restarts(desired, exited) == ["crash"]
 
 
 # --- Env-file helpers ---
