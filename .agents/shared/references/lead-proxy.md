@@ -6,20 +6,23 @@ name, branch, runtime path, which gate names and terminal statuses apply).
 
 ## Polling for the next report
 
-Start a background poll for the report file. Bash's `run_in_background: true`
-returns the instant the file appears.
+Start a background poll for the report file with `create_worker.py await`. It
+reads `finish_report_path` from the task file's frontmatter, blocks until that
+file appears, prints its contents, and exits 0; on timeout it exits non-zero
+(code 124). Run it with Bash's `run_in_background: true` so it returns the
+instant the report lands.
 
 ```bash
 # Run with Bash run_in_background: true
-timeout 30m bash -c '
-  while [ ! -f <REPORTS_DIR>/report.md ]; do sleep 5; done
-  cat <REPORTS_DIR>/report.md
-'
+uv run .agents/skills/launch-task/scripts/create_worker.py await \
+    --task-file <TASK_FILE>
 ```
 
-The tool output is the report contents: YAML frontmatter (`type`, `name`) plus a
-body. If the timeout trips without the file appearing, do *not* immediately
-treat it as a terminal failure -- see "Diagnose worker liveness" below.
+`--timeout` defaults to `30m`; pass e.g. `--timeout 60m` to re-arm with a longer
+wait. The tool output is the report contents: YAML frontmatter (`type`, `name`)
+plus a body. If await exits non-zero (timeout) without printing a report, do
+*not* immediately treat it as a terminal failure -- see "Diagnose worker
+liveness" below.
 
 ## Diagnose worker liveness before invoking failure flow
 
@@ -117,40 +120,25 @@ On `type: status`:
 In every status case, consume the report (move to `<REPORTS_DIR>/consumed/`) so
 the directory is clean for future runs.
 
-## `mngr push` rationale
+## `mngr rsync` rationale
 
-When pushing reports (or the initial runtime dir to the worker):
+When syncing reports (or the initial runtime dir to the worker):
 
 ```bash
-mngr push <WORKER>:<DEST_DIR> \
-    --source <SOURCE_DIR> \
+mngr rsync <SOURCE_DIR>/ <WORKER>:<DEST_DIR>/ \
     --uncommitted-changes=merge
 ```
 
-- Use the directory form (trailing slash on both sides). Pushing a single file
-  via `--source .../file.txt` fails: rsync interprets the source as a directory
-  and errors with `change_dir`.
+- `mngr rsync` takes `SOURCE DESTINATION` (positional): the local source dir
+  first, then the `<WORKER>:<PATH>` agent endpoint. Exactly one side must
+  reference an agent or remote host.
+- Use the directory form (trailing slash on both sides). mngr passes the paths
+  through to rsync verbatim, so the trailing slash is load-bearing: it makes
+  rsync copy directory *contents* into the destination instead of nesting the
+  dir under it. Syncing a single file fails -- rsync wants a directory.
 - `--uncommitted-changes=merge` is required. The worker's worktree has
   uncommitted changes immediately after creation (the installed worker
   sub-skills under `.agents/skills/`), so the default `fail` mode would refuse
-  the push.
-- There is no `mngr file put` subcommand -- `mngr push` is the correct
+  the sync.
+- There is no `mngr file put` subcommand -- `mngr rsync` is the correct
   mechanism.
-
-## `extract_turn.py`
-
-Capture a turn from the current session transcript:
-
-```bash
-uv run .agents/shared/scripts/extract_turn.py \
-    --nth 1 \
-    --output <RUNTIME_DIR>/turn.jsonl
-```
-
-`--nth 1` selects the *previous* human turn -- the one you typically want to
-capture. `--nth 0` (the default) would capture the current invocation turn,
-which is rarely what you want.
-
-For marker-based slicing when turn counts do not line up cleanly (e.g.
-sub-agent interleaving) and the transcript path resolution chain, run
-`uv run .agents/shared/scripts/extract_turn.py --help`.
