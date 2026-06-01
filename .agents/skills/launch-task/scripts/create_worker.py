@@ -9,7 +9,7 @@ Two subcommands cover the two halves of the lead-side lifecycle:
 
 ``launch``
     Runs the worker-creation lifecycle synchronously (``mngr create`` + the
-    runtime-dir push + the task message) and returns. Callers run this in the
+    runtime-dir sync + the task message) and returns. Callers run this in the
     *foreground* so a failed launch surfaces immediately rather than as a
     delayed background notification.
 
@@ -42,7 +42,7 @@ flow can shape the ticket title, type, and acceptance criteria itself.
 When the worker needs gitignored auxiliary state (scripts, sample data)
 that lives outside the runtime dir, the caller declares it in the task
 frontmatter with a ``source_artifacts_dir`` key; launch reads that key
-and pushes the directory alongside the runtime dir -- no extra CLI flag.
+and syncs the directory alongside the runtime dir -- no extra CLI flag.
 
 Launch lifecycle commands:
 
@@ -161,7 +161,7 @@ def _read_source_artifacts_dir(task_file: Path) -> Path | None:
     frontmatter, or ``None`` when absent.
 
     The caller sets this key when the worker needs gitignored auxiliary state
-    that lives outside the runtime dir; launch pushes that directory alongside
+    that lives outside the runtime dir; launch syncs that directory alongside
     the runtime dir.
     """
     value = _read_frontmatter_field(task_file, "source_artifacts_dir")
@@ -202,7 +202,7 @@ def _flush_common_transcript(state_dir: Path | None, runner: Runner) -> None:
     Best-effort by design: this is a freshness optimization that merely
     races the converter's 5s poller, so a converter failure must not
     abort launch (which would orphan a half-launched worker between
-    the runtime push and the message send). On non-zero exit we log a
+    the runtime sync and the message send). On non-zero exit we log a
     warning to stderr and let launch continue; the worker will see
     whatever the periodic poller has already produced.
     """
@@ -318,7 +318,7 @@ def launch(
         check=True,
     )
 
-    print(f"create_worker: worker {name} launched and runtime pushed")
+    print(f"create_worker: worker {name} launched and runtime synced")
     return 0
 
 
@@ -406,7 +406,7 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
         "--runtime-dir",
         required=True,
         type=Path,
-        help="Existing runtime directory pushed verbatim into the worker's worktree.",
+        help="Existing runtime directory synced verbatim into the worker's worktree.",
     )
     launch_parser.add_argument(
         "--task-file",
