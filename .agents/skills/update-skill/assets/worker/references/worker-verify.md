@@ -16,6 +16,10 @@ Only Gate 2 (final-artifact) applies.
    `scripts/` on disk. Because `mngr create` branched the worker off the
    lead's branch, the committed change is already present in your worktree
    -- this is the post-change state, and it is what scenarios will exercise.
+4. If the rationale alludes to conversational context (e.g. an alternative
+   the user rejected, a constraint the user named), locate those turns in
+   the lead's transcript -- follow
+   `.agents/shared/references/transcript-exploration.md`.
 
 If the diff references `references/*.md` files or other supporting files,
 read those too.
