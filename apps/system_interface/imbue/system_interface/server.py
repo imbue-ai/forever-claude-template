@@ -6,6 +6,7 @@ import socket
 import threading
 import traceback
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -299,39 +300,57 @@ def _get_events(agent_id: str, request: Request) -> Response:
     return JSONResponse(content={"events": events})
 
 
+def _stream_filtered_events(
+    agent_id: str,
+    event_queues: AgentEventQueues,
+    event_queue: "queue.Queue[dict[str, Any] | None]",
+    should_forward: Callable[[dict[str, Any]], bool],
+) -> Iterator[str]:
+    """Yield SSE frames for queued events that pass ``should_forward``.
+
+    Shared by the main agent stream and the per-subagent stream, which differ
+    only in which events they keep: the main stream drops subagent-session
+    events (they belong to the per-subagent stream, and would otherwise render
+    the subagent's own prompt and tool calls inline in the parent thread),
+    while the subagent stream keeps only its own session. Filtered-out events
+    do not reset the keepalive counter. A ``None`` from the queue (shutdown
+    sentinel) ends the stream.
+    """
+    keepalive_counter = 0
+    try:
+        while not event_queues.is_shutdown:
+            try:
+                event = event_queue.get(timeout=1)
+                if event is None:
+                    break
+                if not should_forward(event):
+                    continue
+                keepalive_counter = 0
+                yield f"data: {json.dumps(event)}\n\n"
+            except queue.Empty:
+                keepalive_counter += 1
+                if keepalive_counter >= 8:
+                    keepalive_counter = 0
+                    yield ": keepalive\n\n"
+    except GeneratorExit:
+        pass
+    finally:
+        event_queues.unregister(agent_id, event_queue)
+
+
 def _stream_events(agent_id: str, request: Request) -> Response:
     """SSE stream for an agent's new events."""
     agent_info = _find_agent(agent_id, request)
     if agent_info is None:
         return _agent_not_found_response(agent_id)
 
-    _get_or_create_watcher(request, agent_info)
+    watcher = _get_or_create_watcher(request, agent_info)
 
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)
 
-    def event_generator() -> Iterator[str]:
-        keepalive_counter = 0
-        try:
-            while not event_queues.is_shutdown:
-                try:
-                    event = event_queue.get(timeout=1)
-                    keepalive_counter = 0
-                    if event is None:
-                        break
-                    yield f"data: {json.dumps(event)}\n\n"
-                except queue.Empty:
-                    keepalive_counter += 1
-                    if keepalive_counter >= 8:
-                        keepalive_counter = 0
-                        yield ": keepalive\n\n"
-        except GeneratorExit:
-            pass
-        finally:
-            event_queues.unregister(agent_id, event_queue)
-
     return StreamingResponse(
-        event_generator(),
+        _stream_filtered_events(agent_id, event_queues, event_queue, watcher.is_main_session_event),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -380,30 +399,13 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)
 
-    def event_generator() -> Iterator[str]:
-        keepalive_counter = 0
-        try:
-            while not event_queues.is_shutdown:
-                try:
-                    event = event_queue.get(timeout=1)
-                    if event is None:
-                        break
-                    # Only forward events from this subagent's session
-                    if event.get("session_id") == subagent_session_id:
-                        keepalive_counter = 0
-                        yield f"data: {json.dumps(event)}\n\n"
-                except queue.Empty:
-                    keepalive_counter += 1
-                    if keepalive_counter >= 8:
-                        keepalive_counter = 0
-                        yield ": keepalive\n\n"
-        except GeneratorExit:
-            pass
-        finally:
-            event_queues.unregister(agent_id, event_queue)
-
     return StreamingResponse(
-        event_generator(),
+        _stream_filtered_events(
+            agent_id,
+            event_queues,
+            event_queue,
+            lambda event: event.get("session_id") == subagent_session_id,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

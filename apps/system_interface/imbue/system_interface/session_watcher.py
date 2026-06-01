@@ -74,6 +74,29 @@ class AgentSessionWatcher:
         self._tool_name_by_call_id: dict[str, str] = {}
         self._existing_event_ids: set[str] = set()
         self._subagent_metadata: dict[str, dict[str, str]] = {}  # sub_id -> {agent_type, description}
+        # sub_ids whose meta.json we've already determined is permanently malformed.
+        # Used to log the warning once per file instead of once per poll cycle.
+        self._subagent_meta_read_failed: set[str] = set()
+        # sub_id -> the parent Agent tool_use id, read from the subagent's `<id>.meta.json`
+        # `toolUseId` field. This is the direct, spawn-time link between a parent Agent
+        # tool_call and its subagent -- written before any tool_result lands -- so running
+        # subagents get the rich card. (Claude Code does NOT put a usable parent pointer in
+        # the subagent jsonl's first line: `parentUuid` is null and `sourceToolAssistantUUID`
+        # is absent, so the meta.json is the only pre-completion source.)
+        self._subagent_tool_use_id: dict[str, str] = {}
+        # tool_call_id -> subagent_id, accumulated from parent tool_results as they stream in.
+        # Persistent (like _subagent_tool_use_id) so a parent assistant message broadcast in an
+        # earlier poll cycle can be re-linked once its subagent's tool_result lands in a later
+        # cycle, rather than only on a full re-parse (page refresh). This is the linkage that
+        # works on Claude Code versions whose meta.json omits toolUseId; it resolves the moment
+        # the subagent finishes (during the run the card stays plain until the result lands).
+        self._subagent_id_by_tool_call: dict[str, str] = {}
+        # message_uuid -> assistant_message event that was streamed with at least one Agent
+        # tool_call still missing its subagent_metadata. A subagent's jsonl (and thus its
+        # parent linkage) can appear after the parent was already broadcast, so we keep the
+        # event around to re-enrich and re-broadcast it once linkage lands (see
+        # _rebroadcast_relinked_parents). Fully-linked parents are never cached.
+        self._unlinked_agent_parent_events: dict[str, dict[str, Any]] = {}
 
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
@@ -162,20 +185,60 @@ class AgentSessionWatcher:
         self._discover_sessions()
         return self._subagent_metadata.get(subagent_session_id)
 
+    def is_main_session_event(self, event: dict[str, Any]) -> bool:
+        """True if an event belongs to a main session rather than a subagent session.
+
+        Events with no ``session_id`` (e.g. plugin-injected application events) are
+        treated as main so they keep reaching the main stream. Subagent-session events
+        are delivered only through the per-subagent stream, so the main stream must
+        drop them -- otherwise a running subagent's own prompt, tool calls, and
+        assistant messages would render inline in the parent thread.
+        """
+        session_id = event.get("session_id")
+        if session_id is None:
+            return True
+        return session_id in self._main_session_ids
+
     def _enrich_subagent_metadata(self, events: list[dict[str, Any]]) -> None:
         """Enrich Agent tool_use events with subagent metadata.
 
-        Matches tool_result events that have a subagent_id (extracted from
-        Agent tool results) to their corresponding tool_use events, and adds
-        subagent_metadata to the assistant_message that contains the tool_use.
-        """
-        # Build map: tool_call_id -> subagent_id from tool_result events
-        subagent_by_tool_call: dict[str, str] = {}
-        for event in events:
-            if event.get("type") == "tool_result" and "subagent_id" in event:
-                subagent_by_tool_call[event["tool_call_id"]] = event["subagent_id"]
+        Builds a tool_call_id -> subagent_id map from two sources, in order:
 
-        # Enrich assistant messages that have Agent tool calls
+        1. Disk-based: each subagent's `<id>.meta.json` carries a `toolUseId`
+           that points directly at the parent Agent tool_use id. This is written
+           the moment the subagent spawns, before its tool_result lands, so
+           running subagents get the rich card.
+
+        2. Fallback: tool_result events that carry a `subagent_id` (from the
+           structured `toolUseResult.agentId` field or the legacy `agentId:`
+           text trailer). These mappings are accumulated persistently across
+           poll cycles, so a parent broadcast in an earlier cycle re-links the
+           moment its subagent's tool_result lands -- not only on a full
+           re-parse. This is the linkage that fires on versions whose meta.json
+           omits `toolUseId`.
+        """
+        subagent_by_tool_call: dict[str, str] = {}
+
+        # 1. Disk-based linkage: each subagent meta.json's toolUseId names its parent
+        #    Agent tool_use directly, so no parent-UUID matching or spawn-order heuristic
+        #    is needed. sub_id is the jsonl stem ("agent-<id>"), matching _subagent_metadata.
+        for sub_id, tool_use_id in self._subagent_tool_use_id.items():
+            subagent_by_tool_call[tool_use_id] = sub_id
+
+        # 2. Accumulate tool_result-based linkage from this batch into the persistent map,
+        #    then resolve against the full accumulated map (not just this batch's events).
+        #    Persisting it lets the rebroadcast pass link a cached parent against a
+        #    tool_result that arrived in a different poll cycle.
+        for event in events:
+            if event.get("type") != "tool_result":
+                continue
+            if "subagent_id" not in event:
+                continue
+            self._subagent_id_by_tool_call.setdefault(event["tool_call_id"], event["subagent_id"])
+        for tool_call_id, subagent_id in self._subagent_id_by_tool_call.items():
+            subagent_by_tool_call.setdefault(tool_call_id, subagent_id)
+
+        # Enrich assistant messages that have Agent tool calls.
         for event in events:
             if event.get("type") != "assistant_message":
                 continue
@@ -206,8 +269,14 @@ class AgentSessionWatcher:
             if self._stop_event.is_set():
                 break
 
+            # Order matters: discover refreshes the meta.json/toolUseId caches, poll
+            # reads new events (accumulating tool_result linkage and caching new unlinked
+            # parents), and rebroadcast runs last so it re-links cached parents against the
+            # caches as they stand after BOTH -- letting a tool_result that lands this cycle
+            # upgrade an older parent's card in the same cycle.
             self._discover_sessions()
             self._poll_for_changes()
+            self._rebroadcast_relinked_parents()
 
         if self._observer is not None:
             self._observer.stop()
@@ -267,30 +336,41 @@ class AgentSessionWatcher:
 
         for jsonl_file in subagents_dir.glob("*.jsonl"):
             sub_id = jsonl_file.stem
-            if sub_id in self._session_states:
-                continue
 
-            self._session_states[sub_id] = SessionFileState(sub_id, jsonl_file)
-            self._known_session_ids.append(sub_id)
+            if sub_id not in self._session_states:
+                self._session_states[sub_id] = SessionFileState(sub_id, jsonl_file)
+                self._known_session_ids.append(sub_id)
+                if self._observer is not None:
+                    try:
+                        self._observer.schedule(_ChangeHandler(self._wake_event), str(subagents_dir), recursive=False)
+                    except OSError:
+                        pass
 
-            # Read .meta.json for subagent metadata
-            meta_file = jsonl_file.with_suffix(".meta.json")
-            if meta_file.exists() and sub_id not in self._subagent_metadata:
-                try:
-                    meta = json.loads(meta_file.read_text())
-                    self._subagent_metadata[sub_id] = {
-                        "agent_type": meta.get("agentType", ""),
-                        "description": meta.get("description", ""),
-                        "session_id": sub_id,
-                    }
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            if self._observer is not None:
-                try:
-                    self._observer.schedule(_ChangeHandler(self._wake_event), str(subagents_dir), recursive=False)
-                except OSError:
-                    pass
+            # Cache .meta.json. Retry on each pass while the read fails with OSError
+            # (transient: mid-write, momentary permission glitch). Give up after a
+            # JSONDecodeError (truly malformed -- won't self-heal) so we don't spam
+            # the log on every poll cycle.
+            if sub_id not in self._subagent_metadata and sub_id not in self._subagent_meta_read_failed:
+                meta_file = jsonl_file.with_suffix(".meta.json")
+                if meta_file.exists():
+                    try:
+                        meta = json.loads(meta_file.read_text())
+                        self._subagent_metadata[sub_id] = {
+                            "agent_type": meta.get("agentType", ""),
+                            "description": meta.get("description", ""),
+                            "session_id": sub_id,
+                        }
+                        # toolUseId points directly at the parent Agent tool_use, giving the
+                        # running subagent its rich card before any tool_result lands. Absent
+                        # on older Claude Code versions, which fall back to tool_result linkage.
+                        tool_use_id = meta.get("toolUseId")
+                        if isinstance(tool_use_id, str) and tool_use_id:
+                            self._subagent_tool_use_id[sub_id] = tool_use_id
+                    except json.JSONDecodeError as exc:
+                        logger.warning("Subagent meta.json is not valid JSON, giving up: {}: {}", meta_file, exc)
+                        self._subagent_meta_read_failed.add(sub_id)
+                    except OSError as exc:
+                        logger.debug("Failed to read subagent meta.json {}: {}", meta_file, exc)
 
     def _find_session_file(self, session_id: str) -> Path | None:
         """Search for a session JSONL file under the Claude projects directory."""
@@ -390,4 +470,61 @@ class AgentSessionWatcher:
 
             if new_events:
                 self._enrich_subagent_metadata(new_events)
+                self._cache_unlinked_agent_parents(new_events)
                 self._on_events(self._agent_id, new_events)
+
+    def _cache_unlinked_agent_parents(self, events: list[dict[str, Any]]) -> None:
+        """Remember assistant messages whose Agent tool_calls are not yet linked.
+
+        When an Agent tool_call is broadcast before its subagent's jsonl exists, it
+        goes out without subagent_metadata. We keep the event so a later discovery
+        cycle can re-enrich and re-broadcast it (see _rebroadcast_relinked_parents).
+        Fully-linked parents are skipped -- there is nothing left to resolve.
+        """
+        for event in events:
+            if event.get("type") != "assistant_message":
+                continue
+            agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
+            if not agent_tool_calls:
+                continue
+            if all("subagent_metadata" in tc for tc in agent_tool_calls):
+                continue
+            message_uuid = event.get("message_uuid", "")
+            if message_uuid:
+                self._unlinked_agent_parent_events[message_uuid] = event
+
+    def _rebroadcast_relinked_parents(self) -> None:
+        """Re-emit cached parent events that gained subagent links since broadcast.
+
+        A subagent's jsonl (and thus its parent linkage) can appear after the parent
+        Agent tool_call was already streamed to the frontend. Re-enriching the cached
+        parent and re-broadcasting it lets the frontend upgrade the plain tool-call
+        block into the rich subagent card without a page refresh. Parents whose Agent
+        tool_calls are now all linked are dropped from the cache so memory stays
+        bounded and they are not re-checked every cycle.
+        """
+        relinked: list[dict[str, Any]] = []
+        for message_uuid, event in list(self._unlinked_agent_parent_events.items()):
+            before = self._linked_agent_tool_call_ids(event)
+            self._enrich_subagent_metadata([event])
+            if self._linked_agent_tool_call_ids(event) != before:
+                relinked.append(event)
+            if self._is_fully_linked(event):
+                del self._unlinked_agent_parent_events[message_uuid]
+        if relinked:
+            self._on_events(self._agent_id, relinked)
+
+    @staticmethod
+    def _linked_agent_tool_call_ids(event: dict[str, Any]) -> frozenset[str]:
+        """tool_call_ids of Agent tool_calls in ``event`` that already carry metadata."""
+        return frozenset(
+            tc.get("tool_call_id", "")
+            for tc in event.get("tool_calls", [])
+            if tc.get("tool_name") == "Agent" and "subagent_metadata" in tc
+        )
+
+    @staticmethod
+    def _is_fully_linked(event: dict[str, Any]) -> bool:
+        """True if every Agent tool_call in ``event`` has subagent_metadata."""
+        agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
+        return bool(agent_tool_calls) and all("subagent_metadata" in tc for tc in agent_tool_calls)
