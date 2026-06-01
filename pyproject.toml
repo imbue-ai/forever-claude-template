@@ -10,6 +10,7 @@ dependencies = [
     "app-watcher",
     "web-server",
     "runtime-backup",
+    "host-backup",
     "imbue-common",
     "tomlkit>=0.12",
     "playwright==1.58.0",
@@ -28,10 +29,10 @@ dev = [
     # used by test_mngr_template_stacking.py to verify .mngr/settings.toml
     # composes correctly with vendor/mngr's apply_create_template logic
     "imbue-mngr",
-    # imbue-mngr-claude isn't imported by any /code/ python -- it's here so
-    # `uv sync --all-packages` registers it in /code/.venv. Without it,
+    # imbue-mngr-claude isn't imported by any /mngr/code/ python -- it's here so
+    # `uv sync --all-packages` registers it in /mngr/code/.venv. Without it,
     # `uv run mngr ...` (e.g. from the bootstrap window) resolves to
-    # /code/.venv/bin/mngr but pluggy can't discover the claude plugin via
+    # /mngr/code/.venv/bin/mngr but pluggy can't discover the claude plugin via
     # entry points, so settings.toml fields like `use_env_config_dir`,
     # `auto_allow_permissions`, etc. fail to parse as "Unknown fields".
     # Keeping the venv's mngr in lockstep with the tool-installed mngr
@@ -44,7 +45,7 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "apps/system_interface"]
+members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "apps/system_interface"]
 
 [tool.uv.sources]
 telegram-bot = { workspace = true }
@@ -53,6 +54,7 @@ cloudflare-tunnel = { workspace = true }
 app-watcher = { workspace = true }
 web-server = { workspace = true }
 runtime-backup = { workspace = true }
+host-backup = { workspace = true }
 imbue-common = { path = "vendor/mngr/libs/imbue_common", editable = true }
 imbue-mngr = { path = "vendor/mngr/libs/mngr", editable = true }
 imbue-mngr-claude = { path = "vendor/mngr/libs/mngr_claude", editable = true }

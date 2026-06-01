@@ -23,17 +23,18 @@ host_env__extend = [
     "ENABLE_CLAUDEAI_MCP_SERVERS=false",
     # Tickets live inside runtime/ so they ride the runtime-backup branch.
     # tk reads TICKETS_DIR if set; absolute path so it works from worktree
-    # subdirs too. /code/ is the container WORKDIR (set by the Dockerfile).
-    "TICKETS_DIR=/code/runtime/tickets",
+    # subdirs too. /mngr/code/ is the container WORKDIR (set by the Dockerfile);
+    # a /code -> /mngr/code symlink is kept in the image as a safety net.
+    "TICKETS_DIR=/mngr/code/runtime/tickets",
 ]
-worktree_base_folder = "/worktree/"
+worktree_base_folder = "/mngr/worktree/"
 # claude_subagent_proxy is upstream mngr's experimental Claude-Code-Task ->
 # mngr-managed-subagent proxy. It is not used here. Without this disable, when
 # the proxy plugin is present in the system-tool mngr install it gets the
 # on_after_provisioning hook fired, which installs a PreToolUse:Agent hook
 # (spawn.py) into each new agent's .claude/settings.local.json -- and that
 # hook then wedges parent agents in a Haiku retry loop whenever it hits a
-# permanent error (e.g. the proxy package isn't in /code/.venv, or
+# permanent error (e.g. the proxy package isn't in /mngr/code/.venv, or
 # `mngr-proxy-child` isn't a registered agent type in the resolved mngr).
 # The disable is non-strict (commands.create.disable_plugin path), so this is
 # safe even on installs that don't include the proxy plugin at all.
@@ -117,7 +118,7 @@ extra_window = [
     "telegram='uv run telegram-bot'",
     "terminal='bash scripts/run_ttyd.sh'",
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'",
-    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && git config --global core.hooksPath /code/scripts/git_hooks && gh auth setup-git'"
+    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && git config --global core.hooksPath /mngr/code/scripts/git_hooks && gh auth setup-git'"
 ]
 # Write a sane default tmux config on every minds host. tuple-typed
 # `extra_provision_command` stacks across templates (see
@@ -130,7 +131,7 @@ extra_provision_command__extend = [
 # template for docker provider
 [create_templates.docker]
 provider = "docker"
-target_path = "/code/"
+target_path = "/mngr/code/"
 setting__extend = ["providers.docker.is_enabled=true"]
 build_arg__extend = ["--file=Dockerfile", "."]
 # `--cap-add=SYS_PTRACE` is a `docker run` flag (not `docker build`), so it
@@ -145,21 +146,39 @@ idle_mode = "disabled"
 # this is what gives the agent its ANTHROPIC_API_KEY (etc.) in
 # non-IMBUE_CLOUD compute modes.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
-# I guess it can pass a volume in too if you want
+# Seed /mngr/code from /docker_build_code (baked into the image) onto the
+# per-host volume. Runs synchronously after the host is online but
+# before any agent work_dir setup, so the workspace is in place by the
+# time the user's git refs land on top. See scripts/fct_seed.sh.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 # template for lima VM provider
 [create_templates.lima]
 provider = "lima"
-target_path = "/code/"
+target_path = "/mngr/code/"
 idle_mode = "disabled"
 start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
+# Back host_dir with an in-VM btrfs additional disk instead of a 9p bind
+# mount, so the minds workspace data lives on a snapshottable filesystem
+# (towards consistent backups). This drops the host-side `volumes/<host_id>/`
+# bind mount; offline reads via `mngr event` / `mngr transcript` against
+# a stopped Lima host stop working in this mode until the host is started.
+# See vendor/mngr/specs/lima-btrfs-host-volume/concise.md for the design.
+setting__extend = ["providers.lima.is_host_data_volume_exposed=false"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 extra_provision_command__extend = [
-    # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
-    # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
-    "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
-    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs ripgrep sqlite3 unison",
+    # Create /mngr/worktree/ on the fresh lima VM so worktrees ride the
+    # /mngr/ volume backup, and install the /worktree -> /mngr/worktree
+    # safety-net symlink so any straggling `/worktree/...` references keep
+    # working (mirrors the Dockerfile symlink installed in docker-based
+    # providers).
+    "sudo mkdir -p /mngr/worktree && sudo chown $(whoami) /mngr/worktree && sudo ln -sfn /mngr/worktree /worktree",
+    # Same safety-net symlink for the workspace itself: /code -> /mngr/code
+    # so any straggling absolute /code/... reference still resolves. The
+    # workspace itself rsyncs onto /mngr/code/ via target_path above.
+    "sudo ln -sfn /mngr/code /code",
+    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs restic ripgrep sqlite3 unison",
     "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
     # Install latchkey CLI globally; pinned to the same version as Dockerfile's
     # LATCHKEY_VERSION ARG. Bump both together.
@@ -173,13 +192,13 @@ extra_provision_command__extend = [
     # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
     # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
     # because the uv installer prepends it.
-    "mkdir -p $HOME/.local/bin && ln -sf /code/vendor/tk/ticket $HOME/.local/bin/tk",
+    "mkdir -p $HOME/.local/bin && ln -sf /mngr/code/vendor/tk/ticket $HOME/.local/bin/tk",
 ]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]
 provider = "vultr"
-target_path = "/code/"
+target_path = "/mngr/code/"
 # ``--vps-region=sjc`` (Silicon Valley) instead of the mngr_vultr default
 # ``ewr`` (Newark) -- imbue's operators run the bake from west-coast
 # machines, and the New Jersey region routinely produced ~1s SSH RTTs
@@ -195,11 +214,13 @@ build_arg__extend = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region
 idle_mode = "disabled"
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 # template for OVH VPS provider (the imbue-cloud pool-bake's default)
 [create_templates.ovh]
 provider = "ovh"
-target_path = "/code/"
+target_path = "/mngr/code/"
 # No plan / datacenter baked in: the pool-bake CLI
 # (``mngr imbue_cloud admin pool create``) appends
 # ``-b --vps-datacenter=<region>`` per invocation so a single bake
@@ -213,6 +234,8 @@ build_arg__extend = ["--file=Dockerfile", "."]
 idle_mode = "disabled"
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 # Template for imbue_cloud-leased pool hosts. minds invokes this as
 # `--template main --template imbue_cloud` (mirroring how the other modes
