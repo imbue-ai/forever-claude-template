@@ -170,6 +170,19 @@ function pendingToolCall(events: TranscriptEvent[]): ToolCall | null {
   return null;
 }
 
+// Activity states in which the agent has a turn in progress that the user
+// can interrupt. IDLE and null mean there is nothing to interrupt.
+const WORKING_ACTIVITY_STATES: ReadonlySet<string> = new Set(["THINKING", "TOOL_RUNNING"]);
+
+/**
+ * Whether the given server-derived activity state means the agent is in the
+ * middle of an interruptible turn. Drives the visibility of the stop button
+ * in the message input.
+ */
+export function isWorkingActivityState(state: string | null | undefined): boolean {
+  return state !== null && state !== undefined && WORKING_ACTIVITY_STATES.has(state);
+}
+
 /**
  * Pick the user-facing label for a given server-derived activity state.
  *

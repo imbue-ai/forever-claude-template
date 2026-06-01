@@ -6,6 +6,11 @@ backward to the most recent user message, and counts non-read tool_use blocks
 in the turn that just finished. When the count crosses a threshold the script
 writes a reminder to stderr and exits 2 so the reminder surfaces to the agent.
 
+A turn that the stop button interrupted and the user then resumed is treated
+as one continuous turn: the backward walk folds past Claude Code's
+resume-continuation marker so the pre-interrupt work counts toward the same
+turn (see ``_logical_turn_start``).
+
 The detection is intentionally dumb: the main agent applies its own judgement
 about whether the turn is actually worth crystallizing.
 
@@ -60,6 +65,7 @@ def _load_transcript_parsing() -> Any:
 _transcript_parsing = _load_transcript_parsing()
 iter_transcript = _transcript_parsing.iter_transcript
 is_user_tool_result_carrier = _transcript_parsing.is_user_tool_result_carrier
+is_resume_continuation_marker = _transcript_parsing.is_resume_continuation_marker
 
 # Tool names that count as "pure reads" and are excluded from the tally. The
 # spec (concise.md) is explicit about these three names.
@@ -90,7 +96,7 @@ _GIT_COMMIT_PATTERN = re.compile(r"\bgit commit\b")
 _COMMAND_NAME_PATTERN = re.compile(r"<command-name>/?([\w-]+)</command-name>")
 
 REMINDER_MESSAGE: str = (
-    "The turn that just finished used {count} non-read tool calls.\n"
+    "The turn that just finished used {count} non-read tool calls{interrupt_note}.\n"
     "\n"
     "Quick check: would repeating this task with new inputs follow a "
     "largely similar process -- same sources, same steps, same criteria, "
@@ -109,6 +115,22 @@ REMINDER_MESSAGE: str = (
     "If the task seems like a potential crystallization candidate, ask the user whether they "
     "expect to ever run it again; if so, you should crystallize it."
 )
+
+
+def _interrupt_note(interrupt_count: int) -> str:
+    """Concise parenthetical for a turn that spanned stop-button interrupts.
+
+    Empty when the turn was not interrupted. Otherwise it flags that the count
+    spans pre- and post-interrupt work and gives the escape hatch for the case
+    where the resumed work was actually an unrelated task.
+    """
+    if interrupt_count <= 0:
+        return ""
+    times = "once" if interrupt_count == 1 else f"{interrupt_count} times"
+    return (
+        f" (interrupted by the stop button {times}; the count spans the work "
+        "before and after -- ignore this if those were unrelated tasks)"
+    )
 
 
 def _iter_assistant_tool_uses(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -319,6 +341,24 @@ def _write_nudge_state(path: Path, transcript_path: str, commit_count: int) -> N
         pass
 
 
+def _previous_response_boundary(
+    events: list[dict[str, Any]], before: int
+) -> int | None:
+    """Index of the most recent non-tool-result ``type: user`` event before ``before``.
+
+    Same selection rule as ``_latest_response_boundary`` but the backward scan
+    starts at ``before - 1``. Used to fold interrupted-and-resumed turns.
+    """
+    for index in range(before - 1, -1, -1):
+        event = events[index]
+        if event.get("type") != "user":
+            continue
+        if is_user_tool_result_carrier(event):
+            continue
+        return index
+    return None
+
+
 def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
     """Index of the event that prompted the agent's most recent response.
 
@@ -328,14 +368,37 @@ def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
     re-injections): those also prompt a fresh assistant response, so the
     tool-use count for "the turn that just finished" should reset at them.
     """
-    for index in range(len(events) - 1, -1, -1):
-        event = events[index]
-        if event.get("type") != "user":
-            continue
-        if is_user_tool_result_carrier(event):
-            continue
-        return index
-    return None
+    return _previous_response_boundary(events, len(events))
+
+
+def _logical_turn_start(events: list[dict[str, Any]]) -> int | None:
+    """Index of the user event that begins the logical turn just finished.
+
+    Starts from ``_latest_response_boundary`` and folds backward across Claude
+    Code's post-interrupt resume markers. When the stop button interrupts a
+    turn, ``claude --resume`` injects a resume-continuation marker before the
+    user's next message; that next message continues the interrupted work
+    rather than starting a fresh turn. Folding past the marker makes the
+    pre-interrupt tool calls count toward the same turn. The loop collapses
+    multiple interrupts within one logical turn.
+
+    A Stop-hook re-injection (a different ``isMeta`` event) is NOT folded: it
+    still resets the count, preserving the existing per-response semantics.
+    """
+    boundary = _latest_response_boundary(events)
+    if boundary is None:
+        return None
+    while True:
+        previous = _previous_response_boundary(events, boundary)
+        if previous is None or not is_resume_continuation_marker(events[previous]):
+            return boundary
+        # events[previous] is the framework's resume marker, so the user
+        # message at `boundary` continues an interrupted turn. Fold back to
+        # the user message that started that interrupted turn.
+        before_marker = _previous_response_boundary(events, previous)
+        if before_marker is None:
+            return boundary
+        boundary = before_marker
 
 
 def evaluate(
@@ -349,9 +412,11 @@ def evaluate(
 
     "The turn that just finished" is the agent's most recent response --
     everything after the most recent non-tool-result user event (including
-    Stop-hook meta injections). If the agent replied without tools, the
-    count is zero and the hook stays silent, which is what we want when the
-    Stop hook re-fires after a tool-free acknowledgement.
+    Stop-hook meta injections), with one exception: a turn the stop button
+    interrupted and the user resumed is folded back into one turn (see
+    ``_logical_turn_start``). If the agent replied without tools, the count
+    is zero and the hook stays silent, which is what we want when the Stop
+    hook re-fires after a tool-free acknowledgement.
     """
     transcript_path_str = payload.get("transcript_path")
     if not isinstance(transcript_path_str, str):
@@ -361,7 +426,7 @@ def evaluate(
         return False, ""
 
     events = iter_transcript(transcript_path)
-    boundary = _latest_response_boundary(events)
+    boundary = _logical_turn_start(events)
     turn_events = events if boundary is None else events[boundary + 1 :]
     if not turn_events:
         return False, ""
@@ -397,7 +462,12 @@ def evaluate(
         return False, ""
 
     _write_nudge_state(nudge_state_path, transcript_path_str, len(commit_indices))
-    return True, REMINDER_MESSAGE.format(count=count)
+    interrupt_count = sum(
+        1 for event in turn_events if is_resume_continuation_marker(event)
+    )
+    return True, REMINDER_MESSAGE.format(
+        count=count, interrupt_note=_interrupt_note(interrupt_count)
+    )
 
 
 def _workspace_root() -> Path:

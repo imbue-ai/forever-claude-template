@@ -1056,6 +1056,54 @@ def test_update_session_events_no_op_when_not_tracked(agent_manager: AgentManage
         assert "ghost" not in agent_manager._last_event_type_by_agent
 
 
+def test_reset_activity_state_clears_tool_running(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """reset_activity_state flips a stuck TOOL_RUNNING agent back to IDLE and broadcasts.
+
+    Models the interrupt flow: the agent has an unmatched tool_use in its
+    transcript (TOOL_RUNNING), then gets restarted. The restart leaves the
+    transcript mid-turn, so without an explicit reset the indicator would
+    stay pinned at TOOL_RUNNING.
+    """
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+
+    listener = broadcaster.register()
+    try:
+        agent_manager.update_session_events(
+            "agent-1",
+            [{"type": "assistant_message", "tool_calls": [{"tool_call_id": "call_a", "tool_name": "Bash"}]}],
+        )
+        with agent_manager._lock:
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.TOOL_RUNNING
+
+        agent_manager.reset_activity_state("agent-1")
+
+        with agent_manager._lock:
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+            assert agent_manager._agents["agent-1"].activity_state == ActivityState.IDLE.value
+
+        latest = _last_agents_updated(_drain(listener))
+        assert latest is not None
+        agents = latest["agents"]
+        assert isinstance(agents, list)
+        assert agents[0]["activity_state"] == ActivityState.IDLE.value
+    finally:
+        agent_manager.stop()
+
+
+def test_reset_activity_state_no_op_when_not_tracked(agent_manager: AgentManager) -> None:
+    """reset_activity_state for an untracked agent is a quiet no-op with no cache residue."""
+    agent_manager.reset_activity_state("ghost")
+    with agent_manager._lock:
+        assert "ghost" not in agent_manager._activity_state_by_agent
+        assert "ghost" not in agent_manager._has_unmatched_tool_use_by_agent
+        assert "ghost" not in agent_manager._last_event_type_by_agent
+
+
 def test_stop_activity_tracking_clears_caches(agent_manager: AgentManager, tmp_path: Path) -> None:
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)

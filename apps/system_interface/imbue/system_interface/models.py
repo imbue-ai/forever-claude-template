@@ -36,6 +36,12 @@ class SendMessageResponse(FrozenModel):
     status: str = Field(description="Status of the send operation")
 
 
+class InterruptAgentResponse(FrozenModel):
+    """Response from the /api/agents/{id}/interrupt endpoint."""
+
+    status: str = Field(description="Status of the interrupt operation")
+
+
 class ErrorResponse(FrozenModel):
     """Error response body."""
 

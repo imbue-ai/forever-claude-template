@@ -15,6 +15,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+# Claude Code's post-interrupt resume bookkeeping. When ``claude --resume``
+# reloads a session whose previous turn was cut off (e.g. by the stop button's
+# ``mngr start --restart``), the framework injects an ``isMeta`` user message
+# with exactly this text to close the dangling turn. This literal mirrors
+# ``_RESUME_CONTINUATION_TEXT`` in the system_interface ``session_parser``:
+# both are independent consumers of this Claude Code behavior, and there is no
+# common module either side can import, so the string is duplicated by design.
+RESUME_CONTINUATION_TEXT = "Continue from where you left off."
+
 
 def iter_transcript(transcript_path: Path) -> list[dict[str, Any]]:
     """Return transcript events as a list; tolerates malformed lines."""
@@ -121,6 +130,19 @@ def _event_text(event: dict[str, Any]) -> str:
         ]
         return "\n".join(chunks)
     return ""
+
+
+def is_resume_continuation_marker(event: dict[str, Any]) -> bool:
+    """True if ``event`` is Claude Code's post-interrupt resume marker.
+
+    The marker is an ``isMeta`` user message whose text is exactly the
+    resume-continuation sentinel (see ``RESUME_CONTINUATION_TEXT``). Gating on
+    ``isMeta`` ensures a human who happens to type the same words is not
+    mistaken for the framework's synthetic injection.
+    """
+    if event.get("type") != "user" or event.get("isMeta") is not True:
+        return False
+    return _event_text(event).strip() == RESUME_CONTINUATION_TEXT
 
 
 def find_marker_index(

@@ -76,6 +76,53 @@ def test_is_user_tool_result_carrier_false_for_missing_message() -> None:
     assert transcript_parsing.is_user_tool_result_carrier({"type": "user"}) is False
 
 
+def test_is_resume_continuation_marker_true_for_framework_marker() -> None:
+    event = {
+        "type": "user",
+        "isMeta": True,
+        "message": {
+            "content": [
+                {"type": "text", "text": "Continue from where you left off."}
+            ]
+        },
+    }
+    assert transcript_parsing.is_resume_continuation_marker(event) is True
+
+
+def test_is_resume_continuation_marker_false_for_human_typing_same_words() -> None:
+    event = {
+        "type": "user",
+        "message": {
+            "content": [
+                {"type": "text", "text": "Continue from where you left off."}
+            ]
+        },
+    }
+    assert transcript_parsing.is_resume_continuation_marker(event) is False
+
+
+def test_is_resume_continuation_marker_false_for_other_meta_text() -> None:
+    event = {
+        "type": "user",
+        "isMeta": True,
+        "message": {"content": [{"type": "text", "text": "some other meta text"}]},
+    }
+    assert transcript_parsing.is_resume_continuation_marker(event) is False
+
+
+def test_is_resume_continuation_marker_false_for_assistant_event() -> None:
+    event = {
+        "type": "assistant",
+        "isMeta": True,
+        "message": {
+            "content": [
+                {"type": "text", "text": "Continue from where you left off."}
+            ]
+        },
+    }
+    assert transcript_parsing.is_resume_continuation_marker(event) is False
+
+
 def test_last_user_message_index_returns_human_boundary() -> None:
     events = [
         {"type": "user", "message": {"content": [{"type": "text", "text": "first"}]}},

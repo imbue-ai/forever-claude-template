@@ -58,6 +58,28 @@ def _commit_assistant(block_id: str = "commit-id") -> dict[str, Any]:
     )
 
 
+def _resume_marker() -> dict[str, Any]:
+    """Claude Code's post-interrupt resume marker: an ``isMeta`` user message."""
+    return {
+        "type": "user",
+        "isMeta": True,
+        "message": {
+            "content": [{"type": "text", "text": "Continue from where you left off."}]
+        },
+    }
+
+
+def _synthetic_assistant() -> dict[str, Any]:
+    """The synthetic-model assistant reply Claude Code pairs with the resume marker."""
+    return {
+        "type": "assistant",
+        "message": {
+            "model": "<synthetic>",
+            "content": [{"type": "text", "text": "No response requested."}],
+        },
+    }
+
+
 def _write_transcript(tmp_path: Path, events: list[dict[str, Any]]) -> Path:
     path = tmp_path / "transcript.jsonl"
     path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
@@ -349,6 +371,76 @@ def test_evaluate_tool_results_do_not_reset_count(tmp_path: Path) -> None:
     )
     assert should_warn is True
     assert "8 non-read tool calls" in message
+
+
+def test_evaluate_folds_interrupted_and_resumed_turn(tmp_path: Path) -> None:
+    """A turn the stop button interrupted and the user resumed counts as one
+    turn: pre- and post-interrupt tool calls sum toward the threshold. Neither
+    half alone (5 calls) crosses the threshold of 8."""
+    events = [
+        _user("do the thing"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(5))),
+        # Stop button interrupts; on resume Claude Code injects this pair.
+        _resume_marker(),
+        _synthetic_assistant(),
+        _user("continue"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"v{i}") for i in range(5))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, message = detect.evaluate(
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
+    )
+    assert should_warn is True
+    assert "10 non-read tool calls" in message
+    assert "interrupted by the stop button once" in message
+
+
+def test_evaluate_folds_multiple_interrupts_into_one_turn(tmp_path: Path) -> None:
+    """Several stop-button interrupts within one logical turn all collapse."""
+    events = [
+        _user("start"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"a{i}") for i in range(3))),
+        _resume_marker(),
+        _synthetic_assistant(),
+        _user("continue"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"b{i}") for i in range(3))),
+        _resume_marker(),
+        _synthetic_assistant(),
+        _user("continue again"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"c{i}") for i in range(3))),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, message = detect.evaluate(
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
+    )
+    assert should_warn is True
+    assert "9 non-read tool calls" in message
+    assert "interrupted by the stop button 2 times" in message
+
+
+def test_evaluate_does_not_fold_when_resume_text_is_a_human_message(
+    tmp_path: Path,
+) -> None:
+    """A human who types the resume-continuation words (no ``isMeta`` flag)
+    starts a real new turn -- the prior turn's tool calls must not fold in."""
+    events = [
+        _user("first task"),
+        _assistant_with_tool_uses(*(_tool_use("Bash", f"u{i}") for i in range(20))),
+        # A human literally typing the same words -- no isMeta flag.
+        _user("Continue from where you left off."),
+        _assistant_with_tool_uses(_tool_use("Bash", "v0")),
+    ]
+    transcript = _write_transcript(tmp_path, events)
+    should_warn, _ = detect.evaluate(
+        {"transcript_path": str(transcript)},
+        _empty_skills_root(tmp_path),
+        _workdir(tmp_path),
+    )
+    assert should_warn is False
 
 
 def test_skill_is_crystallized_handles_missing_file(tmp_path: Path) -> None:
