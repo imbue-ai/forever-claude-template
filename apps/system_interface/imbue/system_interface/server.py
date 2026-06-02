@@ -6,7 +6,6 @@ import socket
 import threading
 import traceback
 from collections.abc import AsyncIterator
-from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -94,6 +93,32 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
     application.state.broadcaster = broadcaster
     application.state.agent_manager = agent_manager
+
+    def _evict_agent_resources(agent_id: str) -> None:
+        # Free per-agent resources that live on application.state rather than on
+        # the AgentManager: the session-watcher thread and the SSE event queues.
+        # Fires for every agent-removal path (REST destroy plus observe-driven
+        # destroy / host-destroy), mirroring the lifespan-local closure pattern
+        # already used by _graceful_shutdown_handler below.
+        #
+        # This is an agent-removed listener, and the observe-driven paths invoke
+        # it on the observe-reader background thread (see
+        # AgentManager._notify_agent_removed). Stopping the watchdog-backed
+        # session watcher tears down its inotify emitter and joins its thread,
+        # which can raise OSError (emitter teardown) or RuntimeError (observer /
+        # thread state). We catch exactly those so a teardown hiccup neither
+        # kills the observe thread nor skips the queue eviction below -- while a
+        # programming error in the watcher (e.g. AttributeError) still surfaces
+        # rather than being silently swallowed.
+        watcher = application.state.watchers.pop(agent_id, None)
+        if watcher is not None:
+            try:
+                watcher.stop()
+            except (OSError, RuntimeError) as e:
+                logger.opt(exception=e).error("Failed to stop session watcher for agent {}", agent_id)
+        event_queues.evict(agent_id)
+
+    agent_manager.add_agent_removed_listener(_evict_agent_resources)
 
     # Single shared httpx client for the /service/<name>/ forwarding layer.
     application.state.http_client = httpx.AsyncClient(
@@ -299,7 +324,64 @@ def _get_events(agent_id: str, request: Request) -> Response:
     return JSONResponse(content={"events": events})
 
 
-def _stream_events(agent_id: str, request: Request) -> Response:
+# Number of consecutive idle (1-second) polls before the SSE stream emits a
+# keepalive comment to keep proxies and the browser EventSource from timing
+# out an otherwise-silent connection.
+_SSE_KEEPALIVE_IDLE_POLLS = 8
+
+
+async def _sse_event_stream(
+    event_queues: AgentEventQueues,
+    event_queue: queue.Queue[dict[str, Any] | None],
+    agent_id: str,
+    session_id_filter: str | None,
+) -> AsyncIterator[str]:
+    """Yield SSE frames for events delivered to ``event_queue``.
+
+    Polls the (thread-safe) queue from the threadpool with a 1-second timeout
+    so the asyncio event loop is never blocked and no threadpool worker is
+    pinned: the worker is released on every poll. A ``None`` sentinel (shutdown
+    or destroy-time eviction) ends the stream. When ``session_id_filter`` is
+    set, only events whose ``session_id`` matches are forwarded -- this is how
+    a single per-agent queue serves a subagent-scoped stream.
+    """
+    keepalive_counter = 0
+    try:
+        while not event_queues.is_shutdown:
+            try:
+                event = await run_in_threadpool(event_queue.get, timeout=1)
+            except queue.Empty:
+                keepalive_counter += 1
+                if keepalive_counter >= _SSE_KEEPALIVE_IDLE_POLLS:
+                    keepalive_counter = 0
+                    yield ": keepalive\n\n"
+                continue
+            if event is None:
+                break
+            if session_id_filter is not None and event.get("session_id") != session_id_filter:
+                continue
+            # Reset only when a frame is actually sent to the client: the
+            # keepalive tracks time since the last byte emitted, so events
+            # filtered out by session_id_filter must not reset it (otherwise a
+            # subagent stream could stay silent on a busy other-session agent).
+            keepalive_counter = 0
+            yield f"data: {json.dumps(event)}\n\n"
+    finally:
+        event_queues.unregister(agent_id, event_queue)
+
+
+def _sse_streaming_response(stream: AsyncIterator[str]) -> StreamingResponse:
+    return StreamingResponse(
+        stream,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+async def _stream_events(agent_id: str, request: Request) -> Response:
     """SSE stream for an agent's new events."""
     agent_info = _find_agent(agent_id, request)
     if agent_info is None:
@@ -310,33 +392,8 @@ def _stream_events(agent_id: str, request: Request) -> Response:
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)
 
-    def event_generator() -> Iterator[str]:
-        keepalive_counter = 0
-        try:
-            while not event_queues.is_shutdown:
-                try:
-                    event = event_queue.get(timeout=1)
-                    keepalive_counter = 0
-                    if event is None:
-                        break
-                    yield f"data: {json.dumps(event)}\n\n"
-                except queue.Empty:
-                    keepalive_counter += 1
-                    if keepalive_counter >= 8:
-                        keepalive_counter = 0
-                        yield ": keepalive\n\n"
-        except GeneratorExit:
-            pass
-        finally:
-            event_queues.unregister(agent_id, event_queue)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
+    return _sse_streaming_response(
+        _sse_event_stream(event_queues, event_queue, agent_id, session_id_filter=None)
     )
 
 
@@ -369,7 +426,7 @@ def _get_subagent_events(agent_id: str, subagent_session_id: str, request: Reque
     return JSONResponse(content={"events": events, "metadata": metadata})
 
 
-def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Request) -> Response:
+async def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Request) -> Response:
     """SSE stream for a subagent's new events, filtered by session_id."""
     agent_info = _find_agent(agent_id, request)
     if agent_info is None:
@@ -380,35 +437,8 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)
 
-    def event_generator() -> Iterator[str]:
-        keepalive_counter = 0
-        try:
-            while not event_queues.is_shutdown:
-                try:
-                    event = event_queue.get(timeout=1)
-                    if event is None:
-                        break
-                    # Only forward events from this subagent's session
-                    if event.get("session_id") == subagent_session_id:
-                        keepalive_counter = 0
-                        yield f"data: {json.dumps(event)}\n\n"
-                except queue.Empty:
-                    keepalive_counter += 1
-                    if keepalive_counter >= 8:
-                        keepalive_counter = 0
-                        yield ": keepalive\n\n"
-        except GeneratorExit:
-            pass
-        finally:
-            event_queues.unregister(agent_id, event_queue)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
+    return _sse_streaming_response(
+        _sse_event_stream(event_queues, event_queue, agent_id, session_id_filter=subagent_session_id)
     )
 
 
@@ -715,7 +745,9 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
 
     # Remove the agent from the system_interface's tracked state immediately
     # so the frontend reflects the destruction without waiting for mngr observe.
-    agent_manager.remove_agent(agent_id)
+    # Run off the event loop: remove_agent fires the agent-removed listeners,
+    # which stop the session-watcher thread (a bounded but blocking join).
+    await run_in_threadpool(agent_manager.remove_agent, agent_id)
 
     return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
 

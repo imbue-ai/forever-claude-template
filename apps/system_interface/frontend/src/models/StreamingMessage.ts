@@ -106,6 +106,19 @@ export function disconnectFromStream(agentId: string): void {
   }
 }
 
+/**
+ * Tear down all stream state for a destroyed agent. Like disconnectFromStream
+ * it records the disconnect intent so that any pending error-triggered
+ * reconnect timeout (scheduled before the agent was destroyed) sees the
+ * tombstone and stays down rather than reconnecting to a destroyed agent and
+ * looping forever. It additionally drops the in-flight snapshot buffer, which a
+ * destroyed agent no longer needs.
+ */
+export function evictStream(agentId: string): void {
+  disconnectFromStream(agentId);
+  inFlightSnapshotBuffersByAgent.delete(agentId);
+}
+
 // Compatibility shims
 export function getStreamingMessage(_agentId: string): StreamingMessage | null {
   return null;
