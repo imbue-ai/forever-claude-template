@@ -192,10 +192,12 @@ def _normalize_ref(value: str) -> str:
 
 
 def _validate_ref(ref: str) -> None:
-    """Raise SystemExit if the ref carries an unknown prefix.
+    """Raise SystemExit if the ref carries an unknown prefix or empty name.
 
     The ``self`` sentinel and bare ``https://`` external URLs are accepted
-    in addition to the prefix forms.
+    in addition to the prefix forms. Empty-name forms like ``chat:`` or
+    ``service:`` would otherwise sail past the prefix check and round-trip
+    through the broadcast pipeline before timing out with no useful error.
     """
     if ref == _SELF_REF:
         return
@@ -206,6 +208,10 @@ def _validate_ref(ref: str) -> None:
             f"error: ref {ref!r} must start with one of {_REF_PREFIXES}, "
             f"be a bare service name, or be an https:// URL\n"
         )
+        raise SystemExit(EXIT_ERROR)
+    prefix, _, name = ref.partition(":")
+    if not name:
+        sys.stderr.write(f"error: ref {ref!r} is missing a name after {prefix + ':'!r}\n")
         raise SystemExit(EXIT_ERROR)
 
 
@@ -384,6 +390,38 @@ def _find_panel_summary(layout: dict[str, Any], ref: str) -> dict[str, Any] | No
         if panel.get("ref") == ref:
             return panel
     return None
+
+
+def _require_open(op: str, *refs: str) -> int | None:
+    """Pre-flight check: every named ref must already be a live panel.
+
+    Without this, ops on a closed / nonexistent panel post-and-wait the
+    full ``_wait_stable`` cap before reporting failure, since the
+    frontend's ``handleX`` silently no-ops on null lookups (no error path
+    back to the broadcaster). The script has the layout in hand already,
+    so we can short-circuit. ``self`` resolves server-side to the
+    requester's chat and can't be cheaply checked here -- it's treated
+    as always present. ``https://`` URLs are accepted as refs in some
+    contexts (notably ``open``) where the panel doesn't yet exist; those
+    callers don't pass them to this check. Returns ``EXIT_ERROR`` after
+    writing a stderr line if any ref is missing, else ``None``. A
+    transient ``inspect`` failure (returns ``None``) is treated as "can't
+    tell, proceed" so we don't block legitimate work on a flaky read.
+    """
+    layout = _fetch_layout()
+    if layout is None:
+        return None
+    missing: list[str] = []
+    for ref in refs:
+        if ref == _SELF_REF:
+            continue
+        if _find_panel_summary(layout, ref) is None:
+            missing.append(ref)
+    if not missing:
+        return None
+    listed = ", ".join(repr(r) for r in missing)
+    sys.stderr.write(f"error: {op}: ref {listed} is not open in the current layout\n")
+    return EXIT_ERROR
 
 
 def _refs_in_group(leaf: dict[str, Any]) -> list[str]:
@@ -946,6 +984,8 @@ def _cmd_open(args: argparse.Namespace) -> int:
 def _cmd_focus(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
+    if (err := _require_open("focus", ref)) is not None:
+        return err
     return _run_mutating_op(
         "focus",
         {"ref": ref},
@@ -978,6 +1018,12 @@ def _cmd_split(args: argparse.Namespace) -> int:
     _validate_ref(ref)
     relative_to = _normalize_ref(args.relative_to)
     _validate_ref(relative_to)
+    # ``split`` creates ``ref`` but anchors against ``relative_to``; only the
+    # anchor must already be a live panel. (``ref`` may legitimately be a
+    # closed agent / not-yet-rendered service the script is about to
+    # surface; the frontend handles creation.)
+    if (err := _require_open("split", relative_to)) is not None:
+        return err
     payload: dict[str, Any] = {
         "ref": ref,
         "relative_to": relative_to,
@@ -1045,6 +1091,8 @@ def _cmd_move(args: argparse.Namespace) -> int:
     _validate_ref(ref)
     relative_to = _normalize_ref(args.relative_to)
     _validate_ref(relative_to)
+    if (err := _require_open("move", ref, relative_to)) is not None:
+        return err
     payload: dict[str, Any] = {
         "ref": ref,
         "relative_to": relative_to,
@@ -1103,6 +1151,8 @@ def _cmd_move(args: argparse.Namespace) -> int:
 def _cmd_rename(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
+    if (err := _require_open("rename", ref)) is not None:
+        return err
     title = args.title
     return _run_mutating_op(
         "rename",
@@ -1118,6 +1168,8 @@ def _cmd_rename(args: argparse.Namespace) -> int:
 def _cmd_maximize(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
+    if (err := _require_open("maximize", ref)) is not None:
+        return err
     return _run_mutating_op(
         "maximize",
         {"ref": ref},
@@ -1140,6 +1192,8 @@ def _cmd_restore(_args: argparse.Namespace) -> int:
 def _cmd_replace_url(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
+    if (err := _require_open("replace-url", ref)) is not None:
+        return err
     _validate_replace_url(args.url)
     # The frontend rewrites ``service:<name>[/<path>]`` to ``/service/<name>...``
     # before storing it on the panel; the wait-stable predicate must compare
@@ -1159,6 +1213,14 @@ def _cmd_replace_url(args: argparse.Namespace) -> int:
 def _cmd_refresh(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.target)
     _validate_ref(ref)
+    # ``refresh service:<name>`` reloads *every* iframe for the service
+    # (multi-iframe broadcast on the server side), so the named ref need
+    # not itself be open -- skip the precheck for that form. Every other
+    # target reloads a single specific panel and only makes sense if that
+    # panel is currently open.
+    if not ref.startswith("service:"):
+        if (err := _require_open("refresh", ref)) is not None:
+            return err
     return _run_mutating_op(
         "refresh",
         {"ref": ref},
