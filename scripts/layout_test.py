@@ -689,6 +689,211 @@ def test_where_missing_ref_returns_error(
     assert "not currently open" in err
 
 
+def test_where_emits_json_view_with_neighbors(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``where --json`` emits the structured view as JSON. Locks in the
+    contract programmatic callers (wrapper scripts, other agents)
+    depend on: ``ref`` / ``title`` / ``group.tabs`` /
+    ``neighbors.{left,right,above,below}`` keys are all present, with
+    cardinal directions resolved structurally from the tree."""
+    layout_obj = {
+        "active_panel": "g-chat",
+        "panels": [
+            {"ref": "chat:alice", "title": "alice"},
+            {"ref": "service:web"},
+        ],
+        "tree": {
+            "type": "branch",
+            "arrangement": "row",
+            "size_ratio": 1.0,
+            "children": [
+                {
+                    "type": "leaf",
+                    "size_ratio": 0.4,
+                    "panels": [{"ref": "chat:alice", "active": True, "title": "alice"}],
+                },
+                {
+                    "type": "leaf",
+                    "size_ratio": 0.6,
+                    "panels": [{"ref": "service:web", "active": True}],
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post([], (200, {"ok": True, "layout": layout_obj})))
+
+    rc = layout.main(["where", "chat:alice", "--json"])
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["ref"] == "chat:alice"
+    assert parsed["title"] == "alice"
+    assert parsed["group"]["tabs"] == ["chat:alice*"]
+    # Right neighbor exists; left/above/below are empty in this layout.
+    assert parsed["neighbors"]["right"] == ["service:web*"]
+    assert parsed["neighbors"]["left"] == []
+    assert parsed["neighbors"]["above"] == []
+    assert parsed["neighbors"]["below"] == []
+
+
+def test_where_verbose_includes_full_layout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``where --verbose`` switches to a YAML rendering that includes
+    the full inspect layout under ``full_layout``. The compact text-only
+    columns (the ``left  -`` / ``right -`` table) must NOT appear --
+    verbose is a strict superset of the structured view, not a mix."""
+    layout_obj = {
+        "active_panel": "g-chat",
+        "panels": [{"ref": "chat:alice", "title": "alice"}],
+        "tree": {
+            "type": "branch",
+            "arrangement": "row",
+            "size_ratio": 1.0,
+            "children": [
+                {
+                    "type": "leaf",
+                    "size_ratio": 1.0,
+                    "panels": [{"ref": "chat:alice", "active": True, "title": "alice"}],
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post([], (200, {"ok": True, "layout": layout_obj})))
+
+    rc = layout.main(["where", "chat:alice", "--verbose"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "full_layout:" in out
+    # The renamed branch field is carried through verbatim.
+    assert "arrangement: row" in out
+    # Compact text rendering markers must NOT appear under --verbose.
+    assert "ref:    chat:alice" not in out
+    assert "left    -" not in out
+
+
+def test_move_within_explicit_anchor_uses_share_group_predicate(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``move --direction=within --relative-to=<explicit-ref>`` uses
+    ``_predicate_share_group`` rather than the relaxed any-change
+    fallback. The predicate fires once the moved panel and the anchor
+    appear in the same leaf. Confirms the precise post-op invariant
+    "ref is now a tab-mate of relative_to" is what the success path
+    actually checks."""
+    monkeypatch.delenv(layout.ENV_NO_WAIT_STABLE, raising=False)
+
+    before_layout = {
+        "active_panel": None,
+        "panels": [{"ref": "service:web"}, {"ref": "chat:alice"}],
+        "tree": {
+            "type": "branch",
+            "arrangement": "row",
+            "children": [
+                {"type": "leaf", "panels": [{"ref": "chat:alice"}]},
+                {"type": "leaf", "panels": [{"ref": "service:web"}]},
+            ],
+        },
+    }
+    after_layout = {
+        "active_panel": None,
+        "panels": [{"ref": "service:web"}, {"ref": "chat:alice"}],
+        "tree": {
+            "type": "leaf",
+            "panels": [{"ref": "chat:alice"}, {"ref": "service:web"}],
+        },
+    }
+    call_count = {"inspect": 0}
+
+    def fake_post(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
+        if op == "inspect":
+            call_count["inspect"] += 1
+            return 200, {"ok": True, "layout": before_layout if call_count["inspect"] == 1 else after_layout}
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(layout, "_post_layout", fake_post)
+
+    rc = layout.main(["move", "service:web", "--relative-to", "chat:alice", "--direction", "within"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    # Success diff (not a timeout); predicate matched on the after layout.
+    assert "moved service:web" in err
+    assert "timeout" not in err
+
+
+def test_move_within_explicit_anchor_emits_noop_when_already_tab_mates(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When the pre-op snapshot already has both refs in the same leaf,
+    ``_predicate_share_group`` matches immediately and the op is reported
+    as a no-op without ever POSTing the move."""
+    monkeypatch.delenv(layout.ENV_NO_WAIT_STABLE, raising=False)
+
+    layout_already_grouped = {
+        "active_panel": None,
+        "panels": [{"ref": "service:web"}, {"ref": "chat:alice"}],
+        "tree": {
+            "type": "leaf",
+            "panels": [{"ref": "chat:alice"}, {"ref": "service:web"}],
+        },
+    }
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_post(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
+        if op == "inspect":
+            return 200, {"ok": True, "layout": layout_already_grouped}
+        posted.append((op, args))
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(layout, "_post_layout", fake_post)
+
+    rc = layout.main(["move", "service:web", "--relative-to", "chat:alice", "--direction", "within"])
+    assert rc == 0
+    # The move was NOT POSTed (only inspect snapshots ran).
+    assert posted == []
+    err = capsys.readouterr().err
+    assert "no change" in err
+    assert "service:web" in err
+    assert "chat:alice" in err
+
+
+def test_where_handles_column_arrangement_for_above_below(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``_neighbors_in_direction`` resolves ``above`` and ``below`` against
+    a ``column`` branch (children stacked top-to-bottom). The middle
+    leaf has both an ``above`` and a ``below`` neighbor."""
+    layout_obj = {
+        "active_panel": None,
+        "panels": [
+            {"ref": "chat:alice"},
+            {"ref": "service:web"},
+            {"ref": "terminal:abc"},
+        ],
+        "tree": {
+            "type": "branch",
+            "arrangement": "column",
+            "size_ratio": 1.0,
+            "children": [
+                {"type": "leaf", "panels": [{"ref": "chat:alice", "active": True}]},
+                {"type": "leaf", "panels": [{"ref": "service:web", "active": True}]},
+                {"type": "leaf", "panels": [{"ref": "terminal:abc", "active": True}]},
+            ],
+        },
+    }
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post([], (200, {"ok": True, "layout": layout_obj})))
+
+    rc = layout.main(["where", "service:web", "--json"])
+    assert rc == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["neighbors"]["above"] == ["chat:alice*"]
+    assert parsed["neighbors"]["below"] == ["terminal:abc*"]
+    # No row-arrangement branch is on the path to this leaf, so left and
+    # right must be empty (and not, e.g., wrap around).
+    assert parsed["neighbors"]["left"] == []
+    assert parsed["neighbors"]["right"] == []
+
+
 def test_where_self_is_rejected_without_inspect_round_trip(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
