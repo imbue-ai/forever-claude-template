@@ -39,7 +39,8 @@ close / move / rename / maximize / restore / replace-url / refresh`.
 python3 scripts/layout.py list
 
 # Surface the given service in a tab split alongside the primary chat
-# (focuses an existing tab if one is already open).
+# (reports a no-op if one is already open; use ``focus`` to bring it
+# to the foreground).
 python3 scripts/layout.py open web
 
 # Reload one tab (or, for ``service:<name>``, every iframe tied to
