@@ -222,13 +222,20 @@ def _resolve_ref(
         ref = f"url:{_short_hash(panel_id)}"
     else:
         ref = f"url:{_short_hash(panel_id)}"
-    return {
+    summary: dict[str, Any] = {
         "ref": ref,
         "panel_id": panel_id,
         "panel_type": panel_type,
         "service_name": service_name,
         "title": params.get("title"),
     }
+    # Surface the iframe URL so the CLI's wait-stable poll for
+    # ``replace-url`` has a field to compare against. Only set for iframe
+    # panels (chat/subagent have no URL); kept off when missing so the
+    # absent-vs-empty distinction is clear in JSON output.
+    if panel_type == "iframe" and isinstance(url, str):
+        summary["url"] = url
+    return summary
 
 
 def _serialize_grid_node(
@@ -260,11 +267,17 @@ def _serialize_grid_node(
             "size_ratio": data.get("size"),
             "panels": panels,
         }
-    # Branch node -- horizontal or vertical split between children.
+    # Branch node -- ``arrangement`` describes how children are laid out:
+    # ``row`` = children side by side (dockview internal ``HORIZONTAL``
+    # divider), ``column`` = children stacked top to bottom (internal
+    # ``VERTICAL`` divider). The names match how panels are arranged on
+    # screen rather than the divider's orientation -- the previous
+    # ``orientation: horizontal|vertical`` consistently misled readers
+    # into thinking ``vertical`` meant "stacked top to bottom".
     data = node.get("data", []) or []
     return {
         "type": "branch",
-        "orientation": "horizontal" if node.get("orientation") == "HORIZONTAL" else "vertical",
+        "arrangement": "row" if node.get("orientation") == "HORIZONTAL" else "column",
         "size_ratio": node.get("size"),
         "children": [_serialize_grid_node(child, panel_summaries, panels_meta) for child in data],
     }

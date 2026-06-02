@@ -156,7 +156,7 @@ def test_inspect_emits_url_ref_for_ad_hoc_iframe(tmp_path: Path) -> None:
     assert ref.startswith("url:")
 
 
-def test_inspect_preserves_grid_orientation_in_tree(tmp_path: Path) -> None:
+def test_inspect_preserves_grid_arrangement_in_tree(tmp_path: Path) -> None:
     layout_path = tmp_path / "layout.json"
     _write_layout(
         layout_path,
@@ -185,7 +185,10 @@ def test_inspect_preserves_grid_orientation_in_tree(tmp_path: Path) -> None:
     summary = layout_inspect(layout_path, {"agent-42": "alice"})
     tree = summary["tree"]
     assert tree["type"] == "branch"
-    assert tree["orientation"] == "horizontal"
+    # Dockview ``HORIZONTAL`` (children side by side) is exposed as
+    # ``arrangement: "row"`` -- the previous ``orientation: "horizontal"``
+    # consistently misled readers about which axis was meant.
+    assert tree["arrangement"] == "row"
     assert len(tree["children"]) == 2
     # Coarse size ratios are preserved so an agent can reason about layout.
     assert tree["children"][0]["size_ratio"] == 0.4

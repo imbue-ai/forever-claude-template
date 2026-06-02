@@ -34,6 +34,20 @@ layout = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(layout)
 
 
+@pytest.fixture(autouse=True)
+def _skip_wait_stable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bypass the wait-stable poll for tests that assert on broadcast args.
+
+    Mutating ops in production block until the post-op layout state is
+    observable via ``inspect``; the tests in this file mock ``_post_layout``
+    and assert on exact broadcast args, which the extra ``inspect`` calls
+    from wait-stable would distort. The CLI's contract for this env var is
+    documented in ``scripts/layout.py``. Tests that *want* to exercise the
+    wait-stable behavior explicitly remove this env var via monkeypatch.
+    """
+    monkeypatch.setenv(layout.ENV_NO_WAIT_STABLE, "1")
+
+
 def _write_apps_toml(path: Path, names: list[str]) -> None:
     doc = tomlkit.document()
     apps = tomlkit.aot()
@@ -474,3 +488,277 @@ def test_post_layout_sends_agent_id_header_and_body(monkeypatch: pytest.MonkeyPa
     assert header_names.get("x-mngr-agent-id") == "agent-42"
     parsed_body = json.loads(captured["body"].decode("utf-8"))
     assert parsed_body == {"op": "focus", "args": {"ref": "service:web"}, "agent_id": "agent-42"}
+
+
+# ---------- New surface: within direction, where, wait-stable, no-op, compact ----------
+
+
+def test_split_within_direction_is_accepted_and_passed_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--direction=within`` is the single-call form of "tab into the
+    anchor's own group" -- it must reach the server verbatim so the
+    frontend's ``isWithinDirection`` branch can route through the
+    ``referenceGroup`` placement path."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+    monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
+
+    rc = layout.main(["split", "service:web", "--relative-to", "chat:alice", "--direction", "within"])
+    assert rc == 0
+    op, args = posted[0]
+    assert op == "split"
+    assert args["direction"] == "within"
+    assert args["relative_to"] == "chat:alice"
+    assert args["ref"] == "service:web"
+
+
+def test_move_within_direction_is_accepted_and_passed_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The new ``within`` direction works on ``move`` too -- relocating a
+    panel into another panel's group as a tab."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+
+    rc = layout.main(
+        ["move", "service:web", "--relative-to", "chat:alice", "--direction", "within"]
+    )
+    assert rc == 0
+    op, args = posted[0]
+    assert op == "move"
+    assert args["direction"] == "within"
+
+
+def test_split_within_with_new_group_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--new-group`` is meaningless with ``--direction=within`` (within
+    tabs into the anchor's own group; a fresh group would defeat the
+    point). The CLI must reject the combination before posting."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+    monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
+
+    rc = layout.main(
+        ["split", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--new-group"]
+    )
+    assert rc == layout.EXIT_ERROR
+    assert posted == []
+    err = capsys.readouterr().err
+    assert "--new-group" in err and "within" in err
+
+
+def test_move_within_with_new_group_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+
+    rc = layout.main(
+        ["move", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--new-group"]
+    )
+    assert rc == layout.EXIT_ERROR
+    assert posted == []
+    err = capsys.readouterr().err
+    assert "--new-group" in err and "within" in err
+
+
+def test_inspect_compact_default_renders_one_line_per_group(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Default ``inspect`` is the compact text view -- not YAML. Each leaf
+    is a single bracketed tab list; ``panel_id`` is hidden (verbose-only).
+    The branch header shows ``arrangement`` (``row`` / ``column``)."""
+    layout_obj = {
+        "active_panel": "1",
+        "panels": [],
+        "tree": {
+            "type": "branch",
+            "arrangement": "row",
+            "size_ratio": 1.0,
+            "children": [
+                {
+                    "type": "leaf",
+                    "size_ratio": 0.4,
+                    "panels": [{"ref": "chat:alice", "panel_id": "chat-1", "active": True}],
+                },
+                {
+                    "type": "leaf",
+                    "size_ratio": 0.6,
+                    "panels": [{"ref": "service:web", "panel_id": "p-web", "active": True}],
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post([], (200, {"ok": True, "layout": layout_obj})))
+
+    rc = layout.main(["inspect"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "row size=1.0" in out
+    assert "[chat:alice*]" in out
+    assert "[service:web*]" in out
+    # ``panel_id`` is verbose-only; the compact view must not leak it.
+    assert "panel_id" not in out
+    assert "chat-1" not in out
+
+
+def test_inspect_verbose_emits_yaml_with_panel_ids(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--verbose`` restores the previous YAML-tree-dump rendering,
+    including ``panel_id`` and ``arrangement`` (the renamed field)."""
+    layout_obj = {
+        "active_panel": "1",
+        "panels": [{"ref": "chat:alice", "panel_id": "chat-1"}],
+        "tree": {
+            "type": "branch",
+            "arrangement": "row",
+            "size_ratio": 1.0,
+            "children": [
+                {"type": "leaf", "size_ratio": 1.0,
+                 "panels": [{"ref": "chat:alice", "panel_id": "chat-1", "active": True}]},
+            ],
+        },
+    }
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post([], (200, {"ok": True, "layout": layout_obj})))
+
+    rc = layout.main(["inspect", "--verbose"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "arrangement: row" in out
+    assert "panel_id: chat-1" in out
+
+
+def test_where_shows_tab_mates_and_cardinal_neighbors(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``where <ref>`` is the focused introspection verb: it locates one
+    panel's group, lists its tab-mates, and reports the cardinal-neighbor
+    groups derived structurally from the inspect tree."""
+    layout_obj = {
+        "active_panel": "g-chat",
+        "panels": [
+            {"ref": "chat:alice"},
+            {"ref": "terminal:abc"},
+            {"ref": "service:web"},
+        ],
+        "tree": {
+            "type": "branch",
+            "arrangement": "row",
+            "size_ratio": 1.0,
+            "children": [
+                {
+                    "type": "leaf",
+                    "size_ratio": 0.4,
+                    "panels": [
+                        {"ref": "chat:alice", "active": True, "title": "alice"},
+                        {"ref": "terminal:abc"},
+                    ],
+                },
+                {
+                    "type": "leaf",
+                    "size_ratio": 0.6,
+                    "panels": [{"ref": "service:web", "active": True}],
+                },
+            ],
+        },
+    }
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post([], (200, {"ok": True, "layout": layout_obj})))
+
+    rc = layout.main(["where", "chat:alice"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ref:" in out and "chat:alice" in out
+    # Tab-mates (active tab marked with ``*``)
+    assert "chat:alice*" in out and "terminal:abc" in out
+    # Right neighbor is the service:web group; no left neighbor.
+    assert "service:web*" in out
+    # Compact format pads direction labels to 7 chars.
+    assert "left    -" in out
+
+
+def test_where_missing_ref_returns_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``where`` on an unknown ref must fail loudly rather than silently
+    rendering an empty group view."""
+    layout_obj = {"active_panel": None, "panels": [], "tree": None}
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post([], (200, {"ok": True, "layout": layout_obj})))
+
+    rc = layout.main(["where", "chat:nobody"])
+    assert rc == layout.EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "not currently open" in err
+
+
+def test_rename_emits_diff_after_observed_change(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A successful mutating op prints a one-line diff to stderr after the
+    new state is observable via inspect. Reuses ``_run_mutating_op``'s
+    wait-stable path; the env-var bypass is removed for this test."""
+    # Drop the autouse bypass so the wait-stable code path runs.
+    monkeypatch.delenv(layout.ENV_NO_WAIT_STABLE, raising=False)
+
+    layouts = iter([
+        {"active_panel": None, "panels": [{"ref": "chat:alice", "title": "alice"}], "tree": None},
+        {"active_panel": None, "panels": [{"ref": "chat:alice", "title": "Alice (lead)"}], "tree": None},
+    ])
+
+    def fake_post(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
+        if op == "inspect":
+            return 200, {"ok": True, "layout": next(layouts)}
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(layout, "_post_layout", fake_post)
+
+    rc = layout.main(["rename", "chat:alice", "Alice (lead)"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "renamed chat:alice" in err
+    assert "'alice'" in err and "'Alice (lead)'" in err
+
+
+def test_rename_emits_noop_message_when_title_already_matches(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When the pre-op state already satisfies the predicate, the op is a
+    no-op: stderr signals it explicitly and the op is NOT posted."""
+    monkeypatch.delenv(layout.ENV_NO_WAIT_STABLE, raising=False)
+
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_post(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
+        if op == "inspect":
+            return 200, {
+                "ok": True,
+                "layout": {"active_panel": None, "panels": [{"ref": "chat:alice", "title": "frozen"}], "tree": None},
+            }
+        posted.append((op, args))
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(layout, "_post_layout", fake_post)
+
+    rc = layout.main(["rename", "chat:alice", "frozen"])
+    assert rc == 0
+    # No-op: the mutation op was never POSTed (only the inspect snapshot).
+    assert posted == []
+    err = capsys.readouterr().err
+    assert "no change: chat:alice is already titled 'frozen'" in err
+
+
+def test_maximize_is_unobservable_and_notes_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``maximize`` / ``restore`` / ``refresh`` do not affect
+    inspect-observable state -- the wait-stable path is skipped and the
+    stderr message makes that explicit."""
+    monkeypatch.delenv(layout.ENV_NO_WAIT_STABLE, raising=False)
+
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+
+    rc = layout.main(["maximize", "service:web"])
+    assert rc == 0
+    # Only the broadcast went out -- no inspect probes.
+    assert posted == [("maximize", {"ref": "service:web"})]
+    err = capsys.readouterr().err
+    assert "no observable layout-state change" in err

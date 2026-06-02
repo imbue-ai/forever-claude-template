@@ -3,7 +3,8 @@
 
 Subcommands:
     list                                List addressable services + agents (open/running flags).
-    inspect                             Describe the live dockview state as a ref-resolved tree.
+    inspect                             Describe the live dockview state (compact by default; --verbose for YAML tree).
+    where <ref-or-service>              Show one panel: its group's tab-mates and the refs in each cardinal direction.
     open <ref-or-service>               Surface a service (focus-if-open, else tab into / split next to caller's chat).
     focus <ref-or-service>              Activate the named panel within its group.
     split <ref-or-service> [...]        Add a panel relative to another panel; tabs into an existing adjacent group by default.
@@ -20,16 +21,34 @@ service name as shorthand for ``service:<name>``. ``open`` and ``split`` also
 accept an external ``https://`` URL (bare, or with an optional ``url:`` prefix)
 as the panel to create -- it surfaces as an ad-hoc URL tab.
 
-``open`` / ``split`` / ``move`` default to *tabbing into an existing group*
-that already lives in the requested direction relative to the anchor; pass
-``--new-group`` to force a fresh column / row instead.
+``--direction`` on ``split`` / ``move`` accepts five values:
+
+- ``left`` / ``right`` / ``above`` / ``below`` -- target the *adjacent*
+  group in that cardinal direction relative to the anchor. By default,
+  tabs into an existing group that already lives there; ``--new-group``
+  forces a fresh column / row instead.
+- ``within`` -- target the *anchor's own* group, tabbing the panel in
+  alongside it. ``--new-group`` is meaningless with ``within`` and is
+  rejected. This is the single-call form of "put this in the same group
+  as that".
+
+Mutating ops (``open`` / ``split`` / ``move`` / ``focus`` / ``close`` /
+``rename`` / ``maximize`` / ``restore`` / ``replace-url`` / ``refresh``)
+wait for the resulting state to be observable via ``inspect`` before
+returning. On success they print a concise diff on stderr; on a no-op
+(the requested end state already holds) they print
+``no change: <ref> is ...`` to stderr and exit 0. ``maximize`` /
+``restore`` / ``refresh`` have no observable layout-state change, so
+they confirm the broadcast was sent and note that explicitly.
 
 All ops POST a single body ``{op, args, agent_id}`` to a loopback-only endpoint
 on the workspace server. The caller's ``MNGR_AGENT_ID`` is sent both in the
 JSON body and as the ``X-Mngr-Agent-Id`` request header for telemetry.
 
-Output for ``list`` and ``inspect`` is YAML by default; pass ``--json`` for
-raw object output.
+Output for ``list`` is YAML by default. ``inspect`` and ``where`` default to a
+compact human-scannable rendering; pass ``--verbose`` for the full YAML tree
+including ``panel_id`` / URL details. Pass ``--json`` to either for the raw
+structured object.
 """
 
 import argparse
@@ -41,6 +60,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 import tomlkit
 import yaml
@@ -51,6 +71,13 @@ DEFAULT_WORKSPACE_URL = "http://127.0.0.1:8000"
 ENV_WORKSPACE_URL = "MINDS_WORKSPACE_SERVER_URL"
 ENV_MNGR_AGENT_ID = "MNGR_AGENT_ID"
 MNGR_AGENT_ID_HEADER = "X-Mngr-Agent-Id"
+# Escape hatch for environments without a live frontend to apply layout
+# ops (e.g. the acceptance test that exercises the broadcast pipeline
+# but has no DOM). When set to any non-empty value, mutating ops skip
+# the wait-stable poll, the diff print, and no-op detection -- the
+# script returns as soon as the HTTP POST succeeds. Production callers
+# should never set this; the wait-stable contract is the whole point.
+ENV_NO_WAIT_STABLE = "MINDS_LAYOUT_NO_WAIT_STABLE"
 
 # How long ``open`` / ``split`` wait for a freshly-registered service to
 # appear before giving up. The bootstrap-managed forward_port.py call races
@@ -61,8 +88,19 @@ _REGISTRATION_POLL_INTERVAL_SECONDS = 0.25
 
 # Set of accepted ref prefixes.
 _REF_PREFIXES = ("service:", "chat:", "terminal:", "url:", "subagent:")
-# Set of accepted directions for split/move.
-_DIRECTIONS = ("left", "right", "above", "below")
+# Set of accepted directions for split/move. ``within`` is the synthetic
+# direction that means "tab into the anchor's own group" -- the four
+# cardinal values all describe *adjacent* groups.
+_WITHIN_DIRECTION = "within"
+_CARDINAL_DIRECTIONS = ("left", "right", "above", "below")
+_DIRECTIONS = (*_CARDINAL_DIRECTIONS, _WITHIN_DIRECTION)
+
+# How long mutating ops wait for the resulting state to show up in
+# ``inspect`` before declaring a timeout. The frontend autosaves with a
+# 1.5 s debounce, so a few seconds of headroom is enough for the
+# broadcast -> apply -> debounced save cycle to land on disk.
+_WAIT_STABLE_CAP_SECONDS = 5.0
+_WAIT_STABLE_POLL_SECONDS = 0.25
 
 
 # Exit codes -- intentionally minimal: 0 / 1 / 3.
@@ -270,6 +308,426 @@ def _emit_structured(data: Any, as_json: bool) -> None:
         yaml.safe_dump(data, sys.stdout, sort_keys=False, default_flow_style=False)
 
 
+# ---------- Inspect helpers (used by wait-stable, diff, where, compact view) ----------
+
+
+def _fetch_layout() -> dict[str, Any] | None:
+    """Run ``inspect`` once and return the parsed ``layout`` block, or None on failure.
+
+    Used by ``_wait_stable``, the diff printer, and the ``where`` command.
+    A None return means the inspect HTTP call failed -- callers treat this
+    as "state unknown" rather than "layout is empty".
+    """
+    status, body = _post_layout("inspect", {})
+    if status != 200 or not isinstance(body, dict):
+        return None
+    layout = body.get("layout", {})
+    if not isinstance(layout, dict):
+        return None
+    return layout
+
+
+def _walk_tree_leaves(node: Any) -> list[dict[str, Any]]:
+    """Yield every leaf node in the inspect tree, depth-first.
+
+    Each leaf is the raw ``{"type": "leaf", "panels": [...], ...}`` dict
+    so callers can read its ``panels`` (with ``ref`` / ``active`` flags).
+    """
+    if not isinstance(node, dict):
+        return []
+    if node.get("type") == "leaf":
+        return [node]
+    if node.get("type") == "branch":
+        leaves: list[dict[str, Any]] = []
+        for child in node.get("children", []) or []:
+            leaves.extend(_walk_tree_leaves(child))
+        return leaves
+    return []
+
+
+def _find_leaf_for_ref(layout: dict[str, Any], ref: str) -> dict[str, Any] | None:
+    """Return the leaf node containing ``ref``'s panel, or None if not present."""
+    tree = layout.get("tree")
+    for leaf in _walk_tree_leaves(tree):
+        for panel in leaf.get("panels", []) or []:
+            if panel.get("ref") == ref:
+                return leaf
+    return None
+
+
+def _find_panel_summary(layout: dict[str, Any], ref: str) -> dict[str, Any] | None:
+    """Return the flat panel summary for ``ref``, or None if not present."""
+    for panel in layout.get("panels", []) or []:
+        if panel.get("ref") == ref:
+            return panel
+    return None
+
+
+def _refs_in_group(leaf: dict[str, Any]) -> list[str]:
+    """Tab-mate refs in order, with the active tab marked by a trailing ``*``."""
+    out: list[str] = []
+    for panel in leaf.get("panels", []) or []:
+        ref = panel.get("ref")
+        if not isinstance(ref, str):
+            continue
+        out.append(f"{ref}*" if panel.get("active") else ref)
+    return out
+
+
+def _describe_group(leaf: dict[str, Any] | None) -> str:
+    """One-line "tabs=[r1,r2*,r3]" describing a leaf, or ``<absent>`` for None."""
+    if leaf is None:
+        return "<absent>"
+    refs = _refs_in_group(leaf)
+    return "tabs=[" + ", ".join(refs) + "]"
+
+
+# ---------- Per-op predicates and diff descriptions ----------
+
+
+_Predicate = Callable[[dict[str, Any]], bool]
+_NoopMessage = Callable[[dict[str, Any]], str]
+_DiffMessage = Callable[[dict[str, Any], dict[str, Any]], str]
+
+
+def _predicate_ref_present(ref: str) -> _Predicate:
+    return lambda layout: _find_panel_summary(layout, ref) is not None
+
+
+def _predicate_ref_absent(ref: str) -> _Predicate:
+    return lambda layout: _find_panel_summary(layout, ref) is None
+
+
+def _predicate_focus(ref: str) -> _Predicate:
+    def check(layout: dict[str, Any]) -> bool:
+        leaf = _find_leaf_for_ref(layout, ref)
+        if leaf is None:
+            return False
+        for panel in leaf.get("panels", []) or []:
+            if panel.get("ref") == ref:
+                return bool(panel.get("active"))
+        return False
+
+    return check
+
+
+def _predicate_title(ref: str, title: str) -> _Predicate:
+    def check(layout: dict[str, Any]) -> bool:
+        panel = _find_panel_summary(layout, ref)
+        return panel is not None and panel.get("title") == title
+
+    return check
+
+
+def _predicate_url(ref: str, url: str) -> _Predicate:
+    def check(layout: dict[str, Any]) -> bool:
+        panel = _find_panel_summary(layout, ref)
+        return panel is not None and panel.get("url") == url
+
+    return check
+
+
+def _predicate_share_group(ref: str, anchor_ref: str) -> _Predicate:
+    """True when ``ref`` and ``anchor_ref`` are tab-mates in the same group.
+
+    Used by ``move --direction=within``: the post-op invariant is "the
+    panel ended up in the anchor's group". Both refs must be present and
+    in the same leaf node.
+    """
+
+    def check(layout: dict[str, Any]) -> bool:
+        ref_leaf = _find_leaf_for_ref(layout, ref)
+        anchor_leaf = _find_leaf_for_ref(layout, anchor_ref)
+        if ref_leaf is None or anchor_leaf is None:
+            return False
+        return ref_leaf is anchor_leaf
+
+    return check
+
+
+def _predicate_any_change(before: dict[str, Any]) -> _Predicate:
+    """Relaxed predicate: the layout differs from the snapshot taken before the op.
+
+    Used for cardinal-direction ``move`` where the exact end position
+    depends on whether a sibling group exists -- we know the panel moved
+    when *something* in the layout changes.
+    """
+    before_blob = json.dumps(before, sort_keys=True)
+
+    def check(layout: dict[str, Any]) -> bool:
+        return json.dumps(layout, sort_keys=True) != before_blob
+
+    return check
+
+
+# Marker predicate: signals "no observable layout-state change to confirm".
+# Used by ``maximize`` / ``restore`` / ``refresh`` -- the broadcast lands
+# but layout.json doesn't reflect anything. ``_wait_stable`` short-circuits
+# when it sees this and prints the "broadcast sent" stderr note.
+_UNOBSERVABLE: _Predicate = lambda _layout: True  # noqa: E731
+
+
+# ---------- Wait-stable runner ----------
+
+
+def _wait_stable(
+    op: str,
+    predicate: _Predicate,
+    *,
+    cap: float = _WAIT_STABLE_CAP_SECONDS,
+    poll: float = _WAIT_STABLE_POLL_SECONDS,
+) -> tuple[str, dict[str, Any] | None]:
+    """Poll ``inspect`` until ``predicate(layout)`` holds or ``cap`` elapses.
+
+    Returns ``(status, layout)`` where status is one of ``"changed"`` (the
+    predicate held within the cap), ``"timeout"`` (the cap elapsed without
+    the predicate holding), or ``"unknown"`` (inspect returned no parseable
+    layout -- treat as a soft error). The returned layout is the
+    last-observed state in all cases (None on inspect failure).
+    """
+    deadline = time.monotonic() + cap
+    last: dict[str, Any] | None = None
+    while True:
+        layout = _fetch_layout()
+        if layout is None:
+            sys.stderr.write(f"warning: inspect failed while waiting for {op!r} to settle\n")
+            return "unknown", last
+        last = layout
+        if predicate(layout):
+            return "changed", layout
+        if time.monotonic() >= deadline:
+            return "timeout", layout
+        time.sleep(poll)
+
+
+def _run_mutating_op(
+    op: str,
+    args: dict[str, Any],
+    predicate: _Predicate,
+    *,
+    on_success: _DiffMessage,
+    on_noop: _NoopMessage,
+) -> int:
+    """Standard wrapper for a mutating op: snapshot, post, wait, diff.
+
+    Steps: (1) snapshot the current layout; (2) if the predicate already
+    holds, emit a no-op message on stderr and return 0; (3) POST the op;
+    (4) on HTTP success, capture the allocated ref (terminal) on stdout;
+    (5) wait for the predicate to hold or time out; (6) emit a one-line
+    diff or a timeout error on stderr.
+
+    For ops with no observable layout change, pass ``_UNOBSERVABLE`` as
+    the predicate -- the wrapper short-circuits the snapshot / wait /
+    diff path and just confirms the broadcast went out.
+
+    The ``MINDS_LAYOUT_NO_WAIT_STABLE`` env var bypasses the snapshot /
+    wait / diff path entirely; used by the broadcast-pipeline test that
+    has no live frontend to apply the op.
+    """
+    if predicate is _UNOBSERVABLE:
+        status, body = _post_layout(op, args)
+        if status != 200:
+            return _report_failure(op, status, body)
+        _emit_allocated_ref(body)
+        sys.stderr.write("(broadcast sent; no observable layout-state change to confirm)\n")
+        return EXIT_OK
+
+    if os.environ.get(ENV_NO_WAIT_STABLE):
+        status, body = _post_layout(op, args)
+        if status != 200:
+            return _report_failure(op, status, body)
+        _emit_allocated_ref(body)
+        return EXIT_OK
+
+    before = _fetch_layout()
+    if before is not None and predicate(before):
+        sys.stderr.write(on_noop(before))
+        return EXIT_OK
+
+    status, body = _post_layout(op, args)
+    if status != 200:
+        return _report_failure(op, status, body)
+    _emit_allocated_ref(body)
+
+    wait_status, after = _wait_stable(op, predicate)
+    if wait_status == "changed" and before is not None and after is not None:
+        sys.stderr.write(on_success(before, after))
+        return EXIT_OK
+    if wait_status == "timeout":
+        sys.stderr.write(
+            f"error: timeout waiting for {op!r} to settle after {_WAIT_STABLE_CAP_SECONDS:.0f}s\n"
+        )
+        return EXIT_ERROR
+    sys.stderr.write("(broadcast sent; could not read inspect to confirm new state)\n")
+    return EXIT_OK
+
+
+def _run_terminal_creation_op(op: str, args: dict[str, Any]) -> int:
+    """``open`` / ``split`` against ``service:terminal``: always allocates a fresh ref.
+
+    The server pre-mints the ``terminal:<hash>`` ref and returns it in
+    the HTTP response, so the snapshot-predicate-then-post pattern that
+    other ops use doesn't apply: there's no pre-known ref to predicate
+    against. We POST first, then wait for the server-returned ref to
+    appear in inspect.
+    """
+    if os.environ.get(ENV_NO_WAIT_STABLE):
+        status, body = _post_layout(op, args)
+        if status != 200:
+            return _report_failure(op, status, body)
+        _emit_allocated_ref(body)
+        return EXIT_OK
+
+    status, body = _post_layout(op, args)
+    if status != 200:
+        return _report_failure(op, status, body)
+    allocated = body.get("ref") if isinstance(body, dict) else None
+    _emit_allocated_ref(body)
+    if not isinstance(allocated, str):
+        sys.stderr.write("(broadcast sent; server did not return an allocated ref)\n")
+        return EXIT_OK
+    wait_status, after = _wait_stable(op, _predicate_ref_present(allocated))
+    if wait_status == "changed" and after is not None:
+        leaf = _find_leaf_for_ref(after, allocated)
+        sys.stderr.write(f"created {allocated} in {_describe_group(leaf)}\n")
+        return EXIT_OK
+    if wait_status == "timeout":
+        sys.stderr.write(
+            f"error: timeout waiting for {op!r} to settle after {_WAIT_STABLE_CAP_SECONDS:.0f}s\n"
+        )
+        return EXIT_ERROR
+    sys.stderr.write("(broadcast sent; could not read inspect to confirm new state)\n")
+    return EXIT_OK
+
+
+# ---------- Compact rendering for inspect / where ----------
+
+
+def _format_tree_compact(node: Any, indent: int = 0) -> list[str]:
+    """Render the inspect tree as one line per group, indented by depth.
+
+    Format:
+      ``row size=1.0``             (branch headers; ``column`` for vertical stack)
+      ``  [chat:alice* terminal:abc] size=0.4``  (leaf groups; ``*`` marks active tab)
+
+    Returns a list of formatted lines so callers can append/prepend
+    without dealing with embedded newlines.
+    """
+    pad = "  " * indent
+    if not isinstance(node, dict):
+        return []
+    if node.get("type") == "leaf":
+        refs = _refs_in_group(node)
+        size = node.get("size_ratio")
+        size_str = f" size={size}" if size is not None else ""
+        return [f"{pad}[{' '.join(refs)}]{size_str}"]
+    if node.get("type") == "branch":
+        arrangement = node.get("arrangement", "?")
+        size = node.get("size_ratio")
+        size_str = f" size={size}" if size is not None else ""
+        out = [f"{pad}{arrangement}{size_str}"]
+        for child in node.get("children", []) or []:
+            out.extend(_format_tree_compact(child, indent + 1))
+        return out
+    return []
+
+
+def _emit_layout_view(layout: dict[str, Any], *, as_json: bool, verbose: bool) -> None:
+    """Print the inspect / where layout block in the requested form.
+
+    - ``--json``: structured object, full detail (machine-readable).
+    - ``--verbose`` (text): existing YAML tree dump (full detail).
+    - default (text): compact one-line-per-group rendering, plus an
+      ``active_panel:`` header when set. ``panel_id`` / URL detail is
+      suppressed here; pass ``--verbose`` to see them.
+    """
+    if as_json:
+        sys.stdout.write(json.dumps(layout, indent=2))
+        sys.stdout.write("\n")
+        return
+    if verbose:
+        yaml.safe_dump(layout, sys.stdout, sort_keys=False, default_flow_style=False)
+        return
+    active = layout.get("active_panel")
+    if active is not None:
+        sys.stdout.write(f"active_panel: {active}\n")
+    tree = layout.get("tree")
+    if tree is None:
+        sys.stdout.write("(no layout)\n")
+        return
+    for line in _format_tree_compact(tree):
+        sys.stdout.write(line + "\n")
+
+
+# ---------- where: neighbor lookup by tree structure ----------
+
+
+def _build_leaf_parents(node: Any, parent_chain: tuple[dict[str, Any], ...]) -> dict[int, tuple[dict[str, Any], ...]]:
+    """Map ``id(leaf)`` -> the chain of ancestor branches (root first).
+
+    Used by ``_neighbors_in_direction`` to walk *up* from a leaf to the
+    nearest ancestor of the matching arrangement, then *over* to the
+    child subtree that holds the requested neighbors.
+    """
+    out: dict[int, tuple[dict[str, Any], ...]] = {}
+    if not isinstance(node, dict):
+        return out
+    if node.get("type") == "leaf":
+        out[id(node)] = parent_chain
+        return out
+    if node.get("type") == "branch":
+        extended = (*parent_chain, node)
+        for child in node.get("children", []) or []:
+            out.update(_build_leaf_parents(child, extended))
+    return out
+
+
+def _neighbors_in_direction(
+    layout: dict[str, Any], leaf: dict[str, Any], direction: str
+) -> list[dict[str, Any]]:
+    """Leaves adjacent to ``leaf`` in ``direction``, found by walking the tree.
+
+    Adjacency is structural rather than pixel-precise: we find the
+    nearest ancestor branch whose ``arrangement`` matches the requested
+    axis (``row`` for left/right, ``column`` for above/below), then take
+    the child subtree on the appropriate side of ``leaf`` and collect
+    its leaves. Returns the empty list when no neighbor exists in that
+    direction.
+    """
+    tree = layout.get("tree")
+    if tree is None:
+        return []
+    parents_by_leaf = _build_leaf_parents(tree, ())
+    chain = parents_by_leaf.get(id(leaf), ())
+    if not chain:
+        return []
+    target_arrangement = "row" if direction in ("left", "right") else "column"
+    side = "before" if direction in ("left", "above") else "after"
+
+    # Walk from the innermost ancestor outward; at each branch, if it's
+    # the right arrangement, find which child subtree contains our leaf
+    # and collect leaves from the neighbor subtree on the requested side.
+    current: dict[str, Any] = leaf
+    for ancestor in reversed(chain):
+        if ancestor.get("arrangement") != target_arrangement:
+            current = ancestor
+            continue
+        children = ancestor.get("children", []) or []
+        try:
+            idx = next(i for i, c in enumerate(children) if c is current)
+        except StopIteration:
+            return []
+        if side == "before" and idx > 0:
+            return _walk_tree_leaves(children[idx - 1])
+        if side == "after" and idx < len(children) - 1:
+            return _walk_tree_leaves(children[idx + 1])
+        current = ancestor
+    return []
+
+
+# ---------- Subcommand handlers ----------
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
     status, body = _post_layout("list", {})
     if status != 200 or not isinstance(body, dict):
@@ -283,7 +741,68 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
     status, body = _post_layout("inspect", {})
     if status != 200 or not isinstance(body, dict):
         return _report_failure("inspect", status, body)
-    _emit_structured(body.get("layout", {}), args.json)
+    layout = body.get("layout", {})
+    if not isinstance(layout, dict):
+        layout = {}
+    _emit_layout_view(layout, as_json=args.json, verbose=args.verbose)
+    return EXIT_OK
+
+
+def _cmd_where(args: argparse.Namespace) -> int:
+    ref = _normalize_ref(args.ref)
+    _validate_ref(ref)
+    layout = _fetch_layout()
+    if layout is None:
+        sys.stderr.write("error: inspect failed; could not locate the panel\n")
+        return EXIT_ERROR
+    # Resolve ``self`` against the actual layout: it means the caller's
+    # own chat (``chat:<their-name>``). The server's inspect output keys
+    # chats by agent *name*; we don't know the caller's name from the
+    # client side, so ``self`` here just falls through as a literal ref
+    # lookup -- callers can also pass the explicit ``chat:<name>``.
+    leaf = _find_leaf_for_ref(layout, ref) if ref != _SELF_REF else None
+    if leaf is None and ref == _SELF_REF:
+        sys.stderr.write(
+            "error: 'self' is not directly resolvable from the CLI; pass the explicit "
+            "chat ref (e.g. ``chat:<your-name>``) or use ``inspect`` to see all refs\n"
+        )
+        return EXIT_ERROR
+    if leaf is None:
+        sys.stderr.write(f"error: ref {ref!r} is not currently open\n")
+        return EXIT_ERROR
+
+    panel_summary = _find_panel_summary(layout, ref) or {}
+    view: dict[str, Any] = {
+        "ref": ref,
+        "title": panel_summary.get("title"),
+        "panel_type": panel_summary.get("panel_type"),
+        "group": {
+            "size_ratio": leaf.get("size_ratio"),
+            "tabs": _refs_in_group(leaf),
+        },
+        "neighbors": {
+            direction: [r for n in _neighbors_in_direction(layout, leaf, direction) for r in _refs_in_group(n)]
+            for direction in _CARDINAL_DIRECTIONS
+        },
+    }
+    if args.verbose:
+        view["full_layout"] = layout
+    if args.json:
+        sys.stdout.write(json.dumps(view, indent=2))
+        sys.stdout.write("\n")
+        return EXIT_OK
+    if args.verbose:
+        yaml.safe_dump(view, sys.stdout, sort_keys=False, default_flow_style=False)
+        return EXIT_OK
+    # Compact text rendering: one line per direction, plus the group line.
+    sys.stdout.write(f"ref:    {ref}\n")
+    if panel_summary.get("title"):
+        sys.stdout.write(f"title:  {panel_summary['title']}\n")
+    sys.stdout.write(f"group:  [{' '.join(view['group']['tabs'])}]\n")
+    for direction in _CARDINAL_DIRECTIONS:
+        neighbor_refs = view["neighbors"][direction]
+        rendered = "[" + " ".join(neighbor_refs) + "]" if neighbor_refs else "-"
+        sys.stdout.write(f"{direction:<7} {rendered}\n")
     return EXIT_OK
 
 
@@ -300,20 +819,35 @@ def _cmd_open(args: argparse.Namespace) -> int:
             return EXIT_ERROR
     _validate_ref(ref)
     payload: dict[str, Any] = {"ref": ref, "new_group": bool(args.new_group)}
-    status, body = _post_layout("open", payload)
-    if status != 200:
-        return _report_failure("open", status, body)
-    _emit_allocated_ref(body)
-    return EXIT_OK
+
+    # ``service:terminal`` always creates a fresh tab (no dedup), so the
+    # post-op predicate is "the server-allocated terminal ref is now
+    # present". The allocated ref comes back in the HTTP response body,
+    # so we have to POST first, then wait. For every other ``open``
+    # target the ref is stable: if it's already present the op is a no-op
+    # (focus-in-place), otherwise we wait for the new panel to appear.
+    if ref == "service:terminal":
+        return _run_terminal_creation_op("open", payload)
+
+    return _run_mutating_op(
+        "open",
+        payload,
+        _predicate_ref_present(ref),
+        on_success=lambda b, a: f"opened {ref} in {_describe_group(_find_leaf_for_ref(a, ref))}\n",
+        on_noop=lambda b: f"no change: {ref} is already open in {_describe_group(_find_leaf_for_ref(b, ref))}\n",
+    )
 
 
 def _cmd_focus(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
-    status, body = _post_layout("focus", {"ref": ref})
-    if status != 200:
-        return _report_failure("focus", status, body)
-    return EXIT_OK
+    return _run_mutating_op(
+        "focus",
+        {"ref": ref},
+        _predicate_focus(ref),
+        on_success=lambda b, a: f"focused {ref}\n",
+        on_noop=lambda b: f"no change: {ref} is already the active tab in its group\n",
+    )
 
 
 def _cmd_split(args: argparse.Namespace) -> int:
@@ -329,6 +863,12 @@ def _cmd_split(args: argparse.Namespace) -> int:
     _validate_ref(ref)
     relative_to = _normalize_ref(args.relative_to)
     _validate_ref(relative_to)
+    if args.direction == _WITHIN_DIRECTION and args.new_group:
+        sys.stderr.write(
+            f"error: --new-group is meaningless with --direction={_WITHIN_DIRECTION} "
+            f"(within tabs into the anchor's own group; a new group would defeat the point)\n"
+        )
+        return EXIT_ERROR
     payload: dict[str, Any] = {
         "ref": ref,
         "relative_to": relative_to,
@@ -336,20 +876,32 @@ def _cmd_split(args: argparse.Namespace) -> int:
         "ratio": args.ratio,
         "new_group": bool(args.new_group),
     }
-    status, body = _post_layout("split", payload)
-    if status != 200:
-        return _report_failure("split", status, body)
-    _emit_allocated_ref(body)
-    return EXIT_OK
+
+    # ``service:terminal`` always allocates a fresh ref; same pattern as
+    # ``open``. For other refs the predicate is "ref is now present" --
+    # if it's already open, ``split`` just focuses (no-op).
+    if ref == "service:terminal":
+        return _run_terminal_creation_op("split", payload)
+
+    return _run_mutating_op(
+        "split",
+        payload,
+        _predicate_ref_present(ref),
+        on_success=lambda b, a: f"split: {ref} now in {_describe_group(_find_leaf_for_ref(a, ref))}\n",
+        on_noop=lambda b: f"no change: {ref} is already open in {_describe_group(_find_leaf_for_ref(b, ref))}\n",
+    )
 
 
 def _cmd_close(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
-    status, body = _post_layout("close", {"ref": ref})
-    if status != 200:
-        return _report_failure("close", status, body)
-    return EXIT_OK
+    return _run_mutating_op(
+        "close",
+        {"ref": ref},
+        _predicate_ref_absent(ref),
+        on_success=lambda b, a: f"closed {ref}\n",
+        on_noop=lambda b: f"no change: {ref} is already closed\n",
+    )
 
 
 def _cmd_move(args: argparse.Namespace) -> int:
@@ -357,60 +909,116 @@ def _cmd_move(args: argparse.Namespace) -> int:
     _validate_ref(ref)
     relative_to = _normalize_ref(args.relative_to)
     _validate_ref(relative_to)
+    if args.direction == _WITHIN_DIRECTION and args.new_group:
+        sys.stderr.write(
+            f"error: --new-group is meaningless with --direction={_WITHIN_DIRECTION} "
+            f"(within targets the anchor's own group)\n"
+        )
+        return EXIT_ERROR
     payload: dict[str, Any] = {
         "ref": ref,
         "relative_to": relative_to,
         "direction": args.direction,
         "new_group": bool(args.new_group),
     }
-    status, body = _post_layout("move", payload)
-    if status != 200:
-        return _report_failure("move", status, body)
-    return EXIT_OK
+
+    # For ``within`` the predicate is precise (ref + anchor share a leaf).
+    # For cardinal directions the exact end-position depends on whether a
+    # sibling group exists in that direction (frontend resolves
+    # dynamically); ``any_change`` is the right relaxed predicate, built
+    # against a snapshot taken right before the post. When wait-stable is
+    # bypassed (test mode), skip the snapshot -- ``_run_mutating_op`` will
+    # short-circuit before the predicate is ever called.
+    if args.direction == _WITHIN_DIRECTION:
+        predicate: _Predicate = _predicate_share_group(ref, relative_to)
+        on_noop: _NoopMessage = lambda b: f"no change: {ref} is already in the same group as {relative_to}\n"
+    elif os.environ.get(ENV_NO_WAIT_STABLE):
+        # Predicate is unused; pick anything that won't fire the
+        # ``_UNOBSERVABLE`` short-circuit (which prints the "no
+        # observable change" note that doesn't apply to cardinal move).
+        predicate = lambda _layout: False  # noqa: E731
+        on_noop = lambda b: ""  # noqa: E731
+    else:
+        before_snapshot = _fetch_layout()
+        if before_snapshot is None:
+            sys.stderr.write("warning: inspect failed before move; will not detect a no-op\n")
+            before_snapshot = {}
+        predicate = _predicate_any_change(before_snapshot)
+        on_noop = lambda b: (  # noqa: E731
+            f"no change: layout state is unchanged after move (ref {ref} may already be in the requested position)\n"
+        )
+
+    return _run_mutating_op(
+        "move",
+        payload,
+        predicate,
+        on_success=lambda b, a: f"moved {ref} into {_describe_group(_find_leaf_for_ref(a, ref))}\n",
+        on_noop=on_noop,
+    )
 
 
 def _cmd_rename(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
-    status, body = _post_layout("rename", {"ref": ref, "title": args.title})
-    if status != 200:
-        return _report_failure("rename", status, body)
-    return EXIT_OK
+    title = args.title
+    return _run_mutating_op(
+        "rename",
+        {"ref": ref, "title": title},
+        _predicate_title(ref, title),
+        on_success=lambda b, a: (
+            f"renamed {ref}: {(_find_panel_summary(b, ref) or {}).get('title')!r} -> {title!r}\n"
+        ),
+        on_noop=lambda b: f"no change: {ref} is already titled {title!r}\n",
+    )
 
 
 def _cmd_maximize(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
-    status, body = _post_layout("maximize", {"ref": ref})
-    if status != 200:
-        return _report_failure("maximize", status, body)
-    return EXIT_OK
+    return _run_mutating_op(
+        "maximize",
+        {"ref": ref},
+        _UNOBSERVABLE,
+        on_success=lambda b, a: "",
+        on_noop=lambda b: "",
+    )
 
 
 def _cmd_restore(_args: argparse.Namespace) -> int:
-    status, body = _post_layout("restore", {})
-    if status != 200:
-        return _report_failure("restore", status, body)
-    return EXIT_OK
+    return _run_mutating_op(
+        "restore",
+        {},
+        _UNOBSERVABLE,
+        on_success=lambda b, a: "",
+        on_noop=lambda b: "",
+    )
 
 
 def _cmd_replace_url(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
     _validate_replace_url(args.url)
-    status, body = _post_layout("replace-url", {"ref": ref, "url": args.url})
-    if status != 200:
-        return _report_failure("replace-url", status, body)
-    return EXIT_OK
+    return _run_mutating_op(
+        "replace-url",
+        {"ref": ref, "url": args.url},
+        _predicate_url(ref, args.url),
+        on_success=lambda b, a: (
+            f"replace-url {ref}: {(_find_panel_summary(b, ref) or {}).get('url')!r} -> {args.url!r}\n"
+        ),
+        on_noop=lambda b: f"no change: {ref} is already pointed at {args.url!r}\n",
+    )
 
 
 def _cmd_refresh(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.target)
     _validate_ref(ref)
-    status, body = _post_layout("refresh", {"ref": ref})
-    if status != 200:
-        return _report_failure("refresh", status, body)
-    return EXIT_OK
+    return _run_mutating_op(
+        "refresh",
+        {"ref": ref},
+        _UNOBSERVABLE,
+        on_success=lambda b, a: "",
+        on_noop=lambda b: "",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -421,9 +1029,28 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument("--json", action="store_true", help="Emit JSON instead of YAML")
     p_list.set_defaults(func=_cmd_list)
 
-    p_inspect = subparsers.add_parser("inspect", help="Describe the live dockview state")
-    p_inspect.add_argument("--json", action="store_true", help="Emit JSON instead of YAML")
+    p_inspect = subparsers.add_parser(
+        "inspect", help="Describe the live dockview state (compact text by default)"
+    )
+    p_inspect.add_argument("--json", action="store_true", help="Emit JSON (full detail)")
+    p_inspect.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Emit the full YAML tree (panel_id, URL, etc.) instead of the compact view",
+    )
     p_inspect.set_defaults(func=_cmd_inspect)
+
+    p_where = subparsers.add_parser(
+        "where", help="Show one panel's group tab-mates and the refs in each cardinal direction"
+    )
+    p_where.add_argument("ref", help="Panel ref to locate (service name shorthand accepted)")
+    p_where.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    p_where.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Also include the full inspect layout under ``full_layout``",
+    )
+    p_where.set_defaults(func=_cmd_where)
 
     p_open = subparsers.add_parser("open", help="Surface a service in the UI")
     p_open.add_argument(
@@ -454,14 +1081,26 @@ def main(argv: list[str] | None = None) -> int:
         default="self",
         help="Ref to split relative to. ``self`` (default) resolves to the caller's chat panel.",
     )
-    p_split.add_argument("--direction", default="right", choices=_DIRECTIONS)
+    p_split.add_argument(
+        "--direction",
+        default="right",
+        choices=_DIRECTIONS,
+        help=(
+            "Where to place the new panel relative to the anchor. ``left`` / "
+            "``right`` / ``above`` / ``below`` target the *adjacent* group in "
+            "that direction. ``within`` tabs the panel into the anchor's "
+            "*own* group (the single-call form of 'put X in the same group "
+            "as Y'). Default: ``right``."
+        ),
+    )
     p_split.add_argument("--ratio", type=float, default=0.6, help="Fraction the new panel occupies (0..1)")
     p_split.add_argument(
         "--new-group",
         action="store_true",
         help=(
             "Force a brand-new dockview group instead of tabbing into the group "
-            "that already lives in the requested direction (the default)."
+            "that already lives in the requested direction (the default). "
+            "Rejected when combined with --direction=within."
         ),
     )
     p_split.set_defaults(func=_cmd_split)
@@ -473,13 +1112,23 @@ def main(argv: list[str] | None = None) -> int:
     p_move = subparsers.add_parser("move", help="Relocate an existing panel (state-preserving)")
     p_move.add_argument("ref", help="Panel ref to move")
     p_move.add_argument("--relative-to", required=True, help="Ref to move relative to")
-    p_move.add_argument("--direction", required=True, choices=_DIRECTIONS)
+    p_move.add_argument(
+        "--direction",
+        required=True,
+        choices=_DIRECTIONS,
+        help=(
+            "Where to land the moved panel. Cardinal directions (``left`` / "
+            "``right`` / ``above`` / ``below``) target the adjacent group on "
+            "that side. ``within`` tabs the panel into the anchor's own group."
+        ),
+    )
     p_move.add_argument(
         "--new-group",
         action="store_true",
         help=(
             "Force a brand-new dockview group instead of moving the panel into "
-            "an adjacent existing group (the default)."
+            "an adjacent existing group (the default). Rejected when combined "
+            "with --direction=within."
         ),
     )
     p_move.set_defaults(func=_cmd_move)

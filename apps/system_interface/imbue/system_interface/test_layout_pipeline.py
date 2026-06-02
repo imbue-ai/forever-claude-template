@@ -135,6 +135,12 @@ def _run_layout_script(
             "PYTHONPATH": "",
             "MINDS_WORKSPACE_SERVER_URL": base_url,
             "MNGR_AGENT_ID": _AGENT_ID,
+            # Mutating ops in production block until the layout state
+            # changes are observable via inspect; this test exercises
+            # the broadcast pipeline without a live frontend to apply
+            # the op, so we tell the script not to wait. Documented in
+            # ``scripts/layout.py`` under ``ENV_NO_WAIT_STABLE``.
+            "MINDS_LAYOUT_NO_WAIT_STABLE": "1",
         },
         timeout=15,
     )

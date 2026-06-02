@@ -1189,13 +1189,29 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
   const containerRect = dockviewContainer?.getBoundingClientRect();
   const sizes = computeInitialSize(direction, ratio, containerRect);
 
+  const referencePanel = dockview.panels.find((p) => p.id === referencePanelId);
+  const anchorGroupId = referencePanel?.api.group.id ?? null;
+
+  // ``service:terminal`` is the one creation path the server pre-allocates
+  // a panel id for (so its HTTP response can return the resulting
+  // ``terminal:<hash>`` ref); thread the hint through ``addPanelForRef``.
+  const panelIdHint = ref === "service:terminal" ? (asString(args.panel_id) ?? undefined) : undefined;
+
+  // ``direction: "within"`` tabs the new panel into the anchor's own
+  // group (no sibling lookup, no size hints, ``new_group`` ignored).
+  // This is the unambiguous "put X in the same group as Y" surface --
+  // the cardinal directions all describe *adjacent* groups.
+  if (isWithinDirection(direction)) {
+    if (anchorGroupId === null) return;
+    addPanelForRef(ref, requesterAgentId, { position: { referenceGroup: anchorGroupId }, panelIdHint });
+    return;
+  }
+
   // Default: when a group already lives in the requested direction
   // relative to the anchor, tab the new panel into that group instead
   // of carving a new column. ``new_group`` opts back in to the
   // always-fresh-column behavior.
   const directionArg = directionFromArg(direction);
-  const referencePanel = dockview.panels.find((p) => p.id === referencePanelId);
-  const anchorGroupId = referencePanel?.api.group.id ?? null;
   const sibling =
     !forceNewGroup && anchorGroupId !== null ? findSiblingGroupInDirection(anchorGroupId, directionArg) : null;
   const positionOptions =
@@ -1203,11 +1219,6 @@ async function handleSplit(args: Record<string, unknown>, requesterAgentId: stri
   // Size hints only apply when we're carving a new group; tabbing into
   // an existing group ignores them anyway, so omit to keep intent clear.
   const sizeOptions = sibling !== null ? {} : sizes;
-
-  // ``service:terminal`` is the one creation path the server pre-allocates
-  // a panel id for (so its HTTP response can return the resulting
-  // ``terminal:<hash>`` ref); thread the hint through ``addPanelForRef``.
-  const panelIdHint = ref === "service:terminal" ? (asString(args.panel_id) ?? undefined) : undefined;
 
   // service:, chat:, and https:// all route through ``addPanelForRef``
   // which handles dedup (focus existing instead of duplicating) +
@@ -1220,6 +1231,15 @@ function directionFromArg(direction: string): "left" | "right" | "above" | "belo
     return direction;
   }
   return "right";
+}
+
+/** True for the synthetic ``within`` direction, which means "tab into the
+ *  anchor's own group" rather than naming an adjacent group. Routes
+ *  ``split`` / ``move`` through dockview's ``referenceGroup`` /
+ *  ``moveTo({ group })`` branch with the anchor's group id, bypassing
+ *  ``findSiblingGroupInDirection``. ``new_group`` is meaningless here. */
+function isWithinDirection(direction: string): boolean {
+  return direction === "within";
 }
 
 function computeInitialSize(
@@ -1261,11 +1281,20 @@ async function handleMove(args: Record<string, unknown>, requesterAgentId: strin
   const targetPanel = dockview.panels.find((p) => p.id === targetPanelId);
   const referencePanel = dockview.panels.find((p) => p.id === referencePanelId);
   if (!targetPanel || !referencePanel) return;
+  const anchorGroupId = referencePanel.api.group.id;
+
+  // ``direction: "within"`` moves the panel into the anchor's own group
+  // as another tab. ``new_group`` is meaningless here -- we always tab
+  // into the existing anchor group.
+  if (isWithinDirection(direction)) {
+    targetPanel.api.moveTo({ group: referencePanel.api.group });
+    return;
+  }
+
   // Same share-group default as handleSplit: if a group already lives
   // in the requested direction, drop the panel into it as a tab unless
   // the caller asked for a brand-new group.
   const directionArg = directionFromArg(direction);
-  const anchorGroupId = referencePanel.api.group.id;
   const sibling = !forceNewGroup ? findSiblingGroupInDirection(anchorGroupId, directionArg) : null;
   if (sibling !== null) {
     const siblingGroup = dockview.groups.find((g) => g.id === sibling.id);

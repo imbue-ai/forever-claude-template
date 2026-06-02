@@ -16,18 +16,27 @@ tabs, other agents' chats -- lives alongside it.
 want to surface, inspect, or rearrange tabs. Do not hand-edit the
 dockview layout config.
 
-## The two verbs you'll use 95% of the time
+## The verbs you'll use 95% of the time
 
 | Goal | Command |
 |---|---|
 | See what's currently open and how it's laid out | `python3 scripts/layout.py inspect` |
+| Locate one panel + its tab-mates + cardinal neighbors | `python3 scripts/layout.py where <ref>` |
 | List everything addressable (services + agents) with open/running flags | `python3 scripts/layout.py list` |
 | Surface a service / URL / terminal / chat alongside your chat | `python3 scripts/layout.py open <target>` |
+| Put a new terminal in the same tab group as your chat | `python3 scripts/layout.py split terminal --relative-to=self --direction=within` |
 | Close a tab | `python3 scripts/layout.py close <ref>` |
 
 `open` is the opinionated default. It puts the new tab to the right
 of your chat, joining whatever group already lives there if one is
-open. Targets it accepts:
+open. This *joining-existing-group* rule applies uniformly to every
+`open` target -- terminals, service iframes, external URLs, and chats
+alike. That can be surprising: `open terminal` with a service iframe
+already to the right of your chat tabs the terminal *into that
+iframe's group*, leaving a terminal nested next to an unrelated
+iframe. Pass `--new-group` to force a fresh column instead.
+
+Targets `open` accepts:
 
 - A workspace service name (`web`) -- focuses an existing iframe for
   that service if one is open; otherwise creates one.
@@ -38,13 +47,6 @@ open. Targets it accepts:
 - An external URL (`https://example.com`) -- focuses an existing
   ad-hoc URL tab pointed at that URL, otherwise opens one.
 - A chat ref (`chat:alice`) -- opens another mngr-level agent's chat.
-
-Pass `--new-group` if you specifically want a fresh column instead of
-joining an existing right-side group. Reach for it when you want the
-new panel and the existing right-side panels visible at the same
-time. The default (joining an existing group) makes the new panel a
-tab inside that group, so only one of the group's tabs is shown at a
-time and the others are reached by clicking tabs.
 
 ## Refs: how every panel is addressed
 
@@ -83,9 +85,9 @@ When `open` isn't enough, reach for one of these:
 
 | Goal | Command |
 |---|---|
-| Place a new panel with explicit positioning | `python3 scripts/layout.py split <target> --relative-to=<ref> --direction=<left\|right\|above\|below> [--ratio=0.4] [--new-group]` |
+| Place a new panel with explicit positioning | `python3 scripts/layout.py split <target> --relative-to=<ref> --direction=<left\|right\|above\|below\|within> [--ratio=0.4] [--new-group]` |
 | Focus an existing tab | `python3 scripts/layout.py focus <ref>` |
-| Move an open tab next to another | `python3 scripts/layout.py move <ref> --relative-to=<ref> --direction=<dir> [--new-group]` |
+| Move an open tab next to / into another's group | `python3 scripts/layout.py move <ref> --relative-to=<ref> --direction=<dir> [--new-group]` |
 | Rename a tab's label | `python3 scripts/layout.py rename <ref> "<title>"` |
 | Maximize / restore a group | `python3 scripts/layout.py maximize <ref>` / `python3 scripts/layout.py restore` |
 | Point an iframe at a new URL | `python3 scripts/layout.py replace-url <ref> service:<name>[/path]` |
@@ -97,25 +99,106 @@ direction, size ratio, and whether to share an existing group or
 carve a new one. Use it when `open`'s "to the right of your chat,
 joining adjacent groups" default isn't what you want.
 
-`open`, `split`, and `move` all default to **joining an existing
-group** that already lives in the requested direction relative to the
-anchor: your new panel becomes a tab inside that group, sharing its
-region with whatever else is already there (only one tab visible at a
-time). Pass `--new-group` to carve a fresh column or row instead, so
-the new panel and the existing one are both visible simultaneously.
+### Directions on `split` and `move`
 
-Output for `list` and `inspect` is YAML by default; pass `--json` for
-programmatic consumption.
+`--direction` takes five values:
+
+- `left` / `right` / `above` / `below` describe the **adjacent group**
+  in that cardinal direction relative to the anchor. By default, the
+  new (or moved) panel tabs into a group that already lives there;
+  pass `--new-group` to carve a fresh column / row instead so both
+  panels are visible simultaneously.
+- `within` describes the **anchor's own group**. The panel becomes a
+  tab inside that group, alongside whatever is already there. This is
+  the single-call form of "put X in the same group as Y". `--new-group`
+  is meaningless with `within` and is rejected.
+
+The most common natural request -- "put a new terminal in the same
+tab group as my chat" -- is:
+
+```bash
+python3 scripts/layout.py split terminal --relative-to=self --direction=within
+```
+
+This creates the terminal and drops it as a tab inside the chat's
+group, regardless of what else is to the right.
+
+## Inspecting state
+
+`inspect` defaults to a compact, one-line-per-group rendering:
+
+```
+active_panel: 1
+row size=1.0
+  [chat:alice* terminal:a1b2c3d4] size=0.4
+  [service:web*] size=0.6
+```
+
+The `*` marks the active tab in each group. The header line names
+the **arrangement** of each branch: `row` means children sit side by
+side (left to right), `column` means they stack top to bottom. (The
+older `orientation: horizontal | vertical` wording consistently
+misled readers about which axis was meant; the field was renamed
+accordingly.)
+
+Pass `--verbose` for the full YAML tree (including `panel_id`,
+iframe URLs, and per-panel details) or `--json` for the structured
+object (machine-readable, always full detail).
+
+`where <ref>` zeros in on one panel. Compact default:
+
+```
+ref:    chat:alice
+title:  alice
+group:  [chat:alice* terminal:a1b2c3d4]
+left    -
+right   [service:web*]
+above   -
+below   -
+```
+
+`where --verbose` adds the full inspect tree under `full_layout`.
+
+`list` outputs YAML by default; pass `--json` for programmatic
+consumption.
 
 Run `python3 scripts/layout.py --help` (or `<subcommand> --help`) for
 the full surface.
+
+## Mutating ops are synchronous now
+
+Every mutating op (`open`, `split`, `move`, `focus`, `close`,
+`rename`, `maximize`, `restore`, `replace-url`, `refresh`) waits for
+the resulting state to be observable via `inspect` before returning.
+On success it prints a concise one-line diff on **stderr**:
+
+- `opened service:web in tabs=[chat:alice*, service:web*]`
+- `moved terminal:abc into tabs=[chat:alice*, terminal:abc]`
+- `renamed chat:alice: 'alice' -> 'alice (lead)'`
+
+On a **no-op** (the requested end state already holds), it prints
+`no change: <ref> is already ...` to stderr and exits 0. This lets
+you tell genuine success from "already done" without re-running
+`inspect`.
+
+`maximize`, `restore`, and `refresh` do not affect any
+`inspect`-observable state, so they print
+`(broadcast sent; no observable layout-state change to confirm)` on
+stderr to make explicit that the op was sent without per-op
+confirmation.
+
+**stdout** is reserved for machine-readable output: the
+server-allocated ref for `open terminal` / `split terminal` (so
+wrapper scripts can capture it), and otherwise empty. Diffs and
+no-op messages always go to stderr.
 
 ## Exit codes
 
 `layout.py` uses three exit codes:
 
-- `0` ok
-- `1` error (anything failed -- the specific reason is in stderr)
+- `0` ok (including no-op successes)
+- `1` error (anything failed -- the specific reason is in stderr,
+  including the wait-stable timeout)
 - `3` mutex conflict -- another agent's layout op is in flight (retry
   after a short backoff; the stderr message includes the in-flight
   holder's `agent_id`, `op`, `args`, `started_at`, and a suggested
