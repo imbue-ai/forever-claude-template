@@ -235,10 +235,8 @@ def _parse_assistant_message(
             }
             # For Agent tool calls, surface the description and subagent_type from the
             # tool input directly. These let the frontend render the rich subagent card
-            # (label + agent-type badge) the instant the call appears, before the
-            # subagent is linked to its session -- and the watcher uses the pair as a
-            # content-based fallback for linking running subagents to their session on
-            # Claude Code versions that omit an explicit linkage id.
+            # (label + agent-type badge) the instant the call appears, before the subagent
+            # is linked to its session.
             if tool_name == "Agent" and isinstance(tool_input, dict):
                 description = tool_input.get("description")
                 subagent_type = tool_input.get("subagent_type")

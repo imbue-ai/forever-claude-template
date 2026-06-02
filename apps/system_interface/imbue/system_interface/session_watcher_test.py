@@ -308,8 +308,7 @@ def test_running_subagent_gets_rich_card_from_disk_linkage(tmp_path: Path) -> No
 
 def test_multiple_agent_tool_uses_link_to_their_subagents(tmp_path: Path) -> None:
     """When one assistant message contains multiple Agent tool_uses, each subagent's
-    meta.json toolUseId links it to its specific parent tool_use (no spawn-order
-    heuristic needed)."""
+    meta.json toolUseId links it to its specific parent tool_use, regardless of order."""
     parent_assistant_uuid = "assistant-uuid-multi"
     extra: list[dict[str, Any]] = [
         {

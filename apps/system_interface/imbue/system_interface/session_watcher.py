@@ -87,9 +87,10 @@ class AgentSessionWatcher:
         # tool_call_id -> subagent_id, accumulated from parent tool_results as they stream in.
         # Persistent (like _subagent_tool_use_id) so a parent assistant message broadcast in an
         # earlier poll cycle can be re-linked once its subagent's tool_result lands in a later
-        # cycle, rather than only on a full re-parse (page refresh). This is the linkage that
-        # works on Claude Code versions whose meta.json omits toolUseId; it resolves the moment
-        # the subagent finishes (during the run the card stays plain until the result lands).
+        # cycle, rather than only on a full re-parse (page refresh). This is the fallback that
+        # links sessions recorded on Claude Code versions whose meta.json omits toolUseId; it
+        # resolves the click-through when the subagent finishes (the card itself renders from
+        # the tool call's description/subagent_type as soon as the call appears).
         self._subagent_id_by_tool_call: dict[str, str] = {}
         # message_uuid -> assistant_message event that was streamed with at least one Agent
         # tool_call still missing its subagent_metadata. A subagent's jsonl (and thus its
