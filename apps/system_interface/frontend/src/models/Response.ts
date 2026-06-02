@@ -16,6 +16,12 @@ export interface ToolCall {
   tool_call_id: string;
   tool_name: string;
   input_preview: string;
+  // For Agent tool calls: the description and subagent_type from the tool input, present
+  // as soon as the call appears so the rich card can render before the subagent session is
+  // linked. subagent_metadata (with the session_id for the click-through) is filled in once
+  // the linkage is resolved.
+  description?: string;
+  subagent_type?: string;
   subagent_metadata?: SubagentMetadata;
 }
 

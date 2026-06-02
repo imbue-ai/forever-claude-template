@@ -196,6 +196,42 @@ def test_tool_output_truncation() -> None:
     assert len(events[0]["output"]) <= 2003
 
 
+def test_agent_tool_use_exposes_description_and_subagent_type() -> None:
+    lines = [
+        _make_assistant_line(
+            "uuid-1",
+            "2026-01-01T00:00:00Z",
+            "spawning",
+            tool_calls=[
+                {
+                    "id": "toolu_agent",
+                    "name": "Agent",
+                    "input": {"description": "explore foo", "subagent_type": "Explore", "prompt": "do it"},
+                }
+            ],
+        ),
+    ]
+    events = parse_session_lines(lines)
+    tc = events[0]["tool_calls"][0]
+    assert tc["description"] == "explore foo"
+    assert tc["subagent_type"] == "Explore"
+
+
+def test_non_agent_tool_use_has_no_description_or_subagent_type() -> None:
+    lines = [
+        _make_assistant_line(
+            "uuid-1",
+            "2026-01-01T00:00:00Z",
+            "reading",
+            tool_calls=[{"id": "toolu_read", "name": "Read", "input": {"file_path": "/x", "description": "nope"}}],
+        ),
+    ]
+    events = parse_session_lines(lines)
+    tc = events[0]["tool_calls"][0]
+    assert "description" not in tc
+    assert "subagent_type" not in tc
+
+
 def _make_agent_tool_result_line(
     uuid: str,
     timestamp: str,

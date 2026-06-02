@@ -208,31 +208,35 @@ export function renderAssistantMessage(
 
 export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode {
   const metadata = toolCall.subagent_metadata;
-  if (!metadata) {
-    return renderToolCallBlock(toolCall, null);
-  }
-
-  const description = metadata.description || "Sub-agent";
-  const agentType = metadata.agent_type || "";
+  // Description and agent type come from the tool call itself, so the card renders fully
+  // even before the subagent session is linked; fall back to metadata if the tool input
+  // fields are absent (older events).
+  const description = toolCall.description || metadata?.description || "Sub-agent";
+  const agentType = toolCall.subagent_type || metadata?.agent_type || "";
+  const sessionId = metadata?.session_id;
 
   return m("div", { class: "subagent-card" }, [
     m("div", { class: "subagent-card-header" }, [
       m("span", { class: "subagent-card-description" }, description),
       agentType ? m("span", { class: "subagent-card-type-badge" }, agentType) : null,
     ]),
-    m(
-      "a",
-      {
-        class: "subagent-card-link",
-        href: "javascript:void(0)",
-        onclick(e: Event) {
-          e.preventDefault();
-          e.stopPropagation();
-          openSubagentTab(agentId, metadata.session_id, description);
-        },
-      },
-      "View conversation",
-    ),
+    // The click-through needs the subagent session_id, which only arrives once the call is
+    // linked. Until then show a non-clickable "running" state so the card is still rich.
+    sessionId
+      ? m(
+          "a",
+          {
+            class: "subagent-card-link",
+            href: "javascript:void(0)",
+            onclick(e: Event) {
+              e.preventDefault();
+              e.stopPropagation();
+              openSubagentTab(agentId, sessionId, description);
+            },
+          },
+          "View conversation",
+        )
+      : m("span", { class: "subagent-card-link subagent-card-link--pending" }, "Running…"),
   ]);
 }
 
@@ -284,7 +288,10 @@ export function renderAssistantMessageChildren(
     children.push(m(MarkdownContent, { content: textContent }));
   }
   for (const toolCall of toolCalls) {
-    if (toolCall.tool_name === "Agent" && toolCall.subagent_metadata) {
+    // Render the rich card as soon as we have the Agent call's description (from the tool
+    // input), even before its subagent session is linked; the card shows a non-clickable
+    // "Running…" state until subagent_metadata.session_id arrives.
+    if (toolCall.tool_name === "Agent" && (toolCall.subagent_metadata || toolCall.description)) {
       children.push(renderSubagentCard(toolCall, agentId));
     } else {
       const result = toolResults.get(toolCall.tool_call_id) ?? null;

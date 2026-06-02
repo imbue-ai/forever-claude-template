@@ -234,17 +234,18 @@ def _make_agent_tool_use_assistant(
 def _write_subagent_session(
     parent_session_file: Path,
     agent_id: str,
-    tool_use_id: str,
     first_timestamp: str,
     *,
+    tool_use_id: str | None = None,
     agent_type: str = "Explore",
     description: str = "test sub",
 ) -> Path:
     """Write a subagent jsonl + meta.json mirroring real Claude Code output.
 
     The jsonl first line has parentUuid=None and no sourceToolAssistantUUID (as real
-    sidechain sessions do); the parent linkage lives in the meta.json `toolUseId`,
-    which names the parent Agent tool_use directly.
+    sidechain sessions do). When ``tool_use_id`` is given, it is written to the meta.json
+    `toolUseId` (the direct parent link, newer Claude Code); when None it is omitted, as on
+    older versions that have no spawn-time linkage id.
     """
     subagents_dir = parent_session_file.parent / parent_session_file.stem / "subagents"
     subagents_dir.mkdir(parents=True, exist_ok=True)
@@ -261,9 +262,10 @@ def _write_subagent_session(
         "sessionId": parent_session_file.stem,
     }
     sub_file.write_text(json.dumps(first_line) + "\n")
-    (subagents_dir / f"{sub_id}.meta.json").write_text(
-        json.dumps({"agentType": agent_type, "description": description, "toolUseId": tool_use_id})
-    )
+    meta: dict[str, Any] = {"agentType": agent_type, "description": description}
+    if tool_use_id is not None:
+        meta["toolUseId"] = tool_use_id
+    (subagents_dir / f"{sub_id}.meta.json").write_text(json.dumps(meta))
     return sub_file
 
 
@@ -567,7 +569,9 @@ def test_tool_result_in_later_poll_relinks_cached_parent(tmp_path: Path) -> None
         uuid=parent_assistant_uuid,
         timestamp="2026-01-01T00:00:01Z",
         tool_use_id=tool_use_id,
-        description="explore tr",
+        # Deliberately differs from the subagent metadata's description below so the
+        # content-order fallback cannot match -- isolating the tool_result linkage path.
+        description="explore tr (call)",
     )
     tool_result_line: dict[str, Any] = {
         "type": "user",
@@ -597,10 +601,12 @@ def test_tool_result_in_later_poll_relinks_cached_parent(tmp_path: Path) -> None
     watcher._read_initial_offsets()
 
     # The subagent's meta.json was discovered (so its agent_type/description are known) but
-    # carries no toolUseId on this version, so the disk linkage cannot fire.
+    # carries no toolUseId on this version, so the disk linkage cannot fire. Its description
+    # differs from the parent tool call's, so the content-order fallback cannot match either,
+    # leaving the tool_result agentId as the only linkage.
     watcher._subagent_metadata["agent-trsubid"] = {
         "agent_type": "Explore",
-        "description": "explore tr",
+        "description": "explore tr (sub)",
         "session_id": "agent-trsubid",
     }
 
@@ -624,7 +630,70 @@ def test_tool_result_in_later_poll_relinks_cached_parent(tmp_path: Path) -> None
     assert len(collected) > emissions_before, "parent should be re-broadcast once the tool_result lands"
     relinked_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
     assert relinked_tc is not None
-    assert relinked_tc["subagent_metadata"]["description"] == "explore tr"
+    assert relinked_tc["subagent_metadata"]["description"] == "explore tr (sub)"
+
+
+def test_content_order_links_running_subagent_without_tooluseid(tmp_path: Path) -> None:
+    """During a run on versions with no meta.json toolUseId and before any tool_result,
+    a running subagent links to its parent Agent tool_call by matching
+    (subagent_type, description). This gives the live rich card + conversation link."""
+    parent_assistant_uuid = "assistant-uuid-co"
+    tool_use_id = "toolu_co"
+    parent_event = _make_agent_tool_use_assistant(
+        uuid=parent_assistant_uuid,
+        timestamp="2026-01-01T00:00:01Z",
+        tool_use_id=tool_use_id,
+        description="explore co",
+        subagent_type="Explore",
+    )
+
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+    watcher._discover_sessions()
+    watcher._read_initial_offsets()
+
+    # Parent arrives before the subagent files exist: broadcast without a card.
+    with open(parent_session_file, "a") as f:
+        f.write(json.dumps(parent_event) + "\n")
+    watcher._poll_for_changes()
+    watcher._rebroadcast_relinked_parents()
+    tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert tc is not None
+    assert "subagent_metadata" not in tc
+
+    # The running subagent's files appear: meta.json WITHOUT toolUseId, and no tool_result yet.
+    _write_subagent_session(
+        parent_session_file,
+        agent_id="cosubid",
+        first_timestamp="2026-01-01T00:00:02Z",
+        agent_type="Explore",
+        description="explore co",
+    )
+    watcher._discover_sessions()
+    watcher._rebroadcast_relinked_parents()
+
+    # Linked live via content-order matching, with no authoritative source involved.
+    assert watcher._subagent_tool_use_id == {}
+    assert watcher._subagent_id_by_tool_call == {}
+    linked_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert linked_tc is not None
+    assert linked_tc["subagent_metadata"]["session_id"] == "agent-cosubid"
+    assert linked_tc["subagent_metadata"]["description"] == "explore co"
+
+    # The content-order link is provisional, so the parent stays cached (a later tool_result
+    # could still correct it) and is not re-broadcast again with no change.
+    assert parent_assistant_uuid in watcher._unlinked_agent_parent_events
+    emissions = len(collected)
+    watcher._rebroadcast_relinked_parents()
+    assert len(collected) == emissions
 
 
 def test_is_main_session_event_excludes_subagent_sessions(tmp_path: Path) -> None:
