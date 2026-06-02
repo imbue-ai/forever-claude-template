@@ -592,8 +592,13 @@ def _run_mutating_op(
     _emit_allocated_ref(body)
 
     wait_status, after = _wait_stable(op, predicate)
-    if wait_status == "changed" and before is not None and after is not None:
-        sys.stderr.write(on_success(before, after))
+    if wait_status == "changed" and after is not None:
+        # ``before`` may be None if the pre-op inspect failed transiently
+        # but the post-op poll recovered. The success diff still makes
+        # sense -- we have the ``after`` half; pass an empty dict in
+        # place of the missing ``before`` so the message callbacks (which
+        # mostly read fields off ``after``) still produce output.
+        sys.stderr.write(on_success(before or {}, after))
         return EXIT_OK
     if wait_status == "timeout":
         sys.stderr.write(
