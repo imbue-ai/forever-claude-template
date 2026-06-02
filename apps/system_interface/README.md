@@ -46,7 +46,7 @@ python3 scripts/layout.py open web
 # that service).
 python3 scripts/layout.py refresh web
 
-# Inspect the live grid tree -- orientations, sizes, active panel,
+# Inspect the live grid tree -- arrangements, sizes, active panel,
 # ref-resolved panel list.
 python3 scripts/layout.py inspect
 ```
