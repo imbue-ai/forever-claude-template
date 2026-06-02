@@ -733,17 +733,7 @@ async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
     If the agent's tmux session already exists it is already attachable, so we
     skip `mngr start` entirely. This is the common case (opening the terminal
     of an agent that is already up) and avoids needlessly reinvoking `mngr
-    start`, which reparses the mngr config on every call -- an unrelated
-    config error there would otherwise surface as a spurious "could not start
-    agent" banner over a perfectly healthy, running agent.
-
-    Attachability is tested exactly the way the ttyd dispatch attaches --
-    `tmux has-session -t "=<session>:0"` -- rather than by trusting the
-    agent's cached lifecycle state, which is unreliable here because the mngr
-    observe discovery stream reports every agent as RUNNING regardless of its
-    real state. Only when the session is absent (or its name is unknown) do
-    we fall back to `mngr start`, which filters its targets to STOPPED agents
-    and creates the missing session.
+    start`.
     """
     agent_manager: AgentManager = request.app.state.agent_manager
     agent_state = agent_manager.get_agent_by_id(agent_id)
