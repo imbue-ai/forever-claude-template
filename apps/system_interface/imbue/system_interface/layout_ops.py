@@ -238,16 +238,36 @@ def _resolve_ref(
     return summary
 
 
+def _orthogonal_orientation(orientation: str) -> str:
+    """Flip a dockview ``Orientation`` string between ``HORIZONTAL`` and ``VERTICAL``.
+
+    Mirrors dockview-core's ``orthogonal`` helper: gridview alternates the
+    effective orientation of branch nodes at each level of nesting, but the
+    persisted ``layout.json`` only stores the *root* grid orientation --
+    individual branch nodes carry no ``orientation`` field. So whenever we
+    recurse into a child branch we flip the orientation we were called
+    with. Anything other than the two known values flips to ``HORIZONTAL``
+    so the renderer can still produce something deterministic on a
+    malformed input.
+    """
+    return "VERTICAL" if orientation == "HORIZONTAL" else "HORIZONTAL"
+
+
 def _serialize_grid_node(
     node: dict[str, Any],
     panel_summaries: dict[str, dict[str, Any]],
     panels_meta: dict[str, dict[str, Any]],
+    orientation: str,
 ) -> dict[str, Any]:
     """Recursively project the dockview grid tree into a compact summary.
 
     ``panel_summaries`` maps panel_id -> the resolved ref dict from
     ``_resolve_ref``. ``panels_meta`` maps panel_id -> the dockview-panel
     record (for the title fallback when params.title is unset).
+    ``orientation`` is the effective dockview orientation for the current
+    branch level, threaded through from ``layout_inspect`` because the
+    persisted JSON only stores the root grid orientation -- the gridview
+    contract is that nested branches always alternate.
     """
     node_type = node.get("type")
     if node_type == "leaf":
@@ -273,11 +293,14 @@ def _serialize_grid_node(
     # ``VERTICAL`` divider). The names match how panels are arranged on
     # screen rather than the divider's orientation.
     data = node.get("data", []) or []
+    child_orientation = _orthogonal_orientation(orientation)
     return {
         "type": "branch",
-        "arrangement": "row" if node.get("orientation") == "HORIZONTAL" else "column",
+        "arrangement": "row" if orientation == "HORIZONTAL" else "column",
         "size_ratio": node.get("size"),
-        "children": [_serialize_grid_node(child, panel_summaries, panels_meta) for child in data],
+        "children": [
+            _serialize_grid_node(child, panel_summaries, panels_meta, child_orientation) for child in data
+        ],
     }
 
 
@@ -334,8 +357,14 @@ def layout_inspect(layout_json_path: Path | None, agent_name_by_id: dict[str, st
         {k: v for k, v in summary.items() if k != "panel_id"} for summary in panel_summaries.values()
     ]
     dockview = raw.get("dockview", {}) or {}
-    root = (dockview.get("grid", {}) or {}).get("root")
-    tree = _serialize_grid_node(root, panel_summaries, panels_meta) if root else None
+    grid = dockview.get("grid", {}) or {}
+    root = grid.get("root")
+    # The root branch carries no ``orientation`` field of its own; dockview
+    # stores it once at the grid level and the gridview contract flips it
+    # at each nested branch. Default to ``HORIZONTAL`` when missing so a
+    # malformed / empty layout still renders deterministically.
+    root_orientation = grid.get("orientation") or "HORIZONTAL"
+    tree = _serialize_grid_node(root, panel_summaries, panels_meta, root_orientation) if root else None
     return {
         "active_panel": dockview.get("activeGroup"),
         "panels": flat_panels,

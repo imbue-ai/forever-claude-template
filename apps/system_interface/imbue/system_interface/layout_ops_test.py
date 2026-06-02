@@ -163,6 +163,8 @@ def test_inspect_emits_url_ref_for_ad_hoc_iframe(tmp_path: Path) -> None:
 
 def test_inspect_preserves_grid_arrangement_in_tree(tmp_path: Path) -> None:
     layout_path = tmp_path / "layout.json"
+    # Dockview persists the orientation on the *grid* (once) rather than
+    # on each branch node, matching ``dockview-core``'s gridview format.
     _write_layout(
         layout_path,
         dockview={
@@ -171,15 +173,15 @@ def test_inspect_preserves_grid_arrangement_in_tree(tmp_path: Path) -> None:
                 "p2": {"id": "p2", "title": "web"},
             },
             "grid": {
+                "orientation": "HORIZONTAL",
                 "root": {
                     "type": "branch",
-                    "orientation": "HORIZONTAL",
                     "size": 1.0,
                     "data": [
                         {"type": "leaf", "data": {"views": ["p1"], "activeView": "p1", "size": 0.4}},
                         {"type": "leaf", "data": {"views": ["p2"], "activeView": "p2", "size": 0.6}},
                     ],
-                }
+                },
             },
         },
         panel_params={
@@ -197,6 +199,91 @@ def test_inspect_preserves_grid_arrangement_in_tree(tmp_path: Path) -> None:
     # Coarse size ratios are preserved so an agent can reason about layout.
     assert tree["children"][0]["size_ratio"] == 0.4
     assert tree["children"][1]["size_ratio"] == 0.6
+
+
+def test_inspect_alternates_arrangement_at_each_nesting_level(tmp_path: Path) -> None:
+    """Nested branches alternate ``row`` / ``column`` as dockview-gridview does.
+
+    Dockview only stores the root grid orientation; child branch nodes
+    carry no ``orientation`` field of their own. Reading the field per
+    branch (as the serializer used to) defaults nested branches to a
+    constant arrangement and reports nested layouts incorrectly. The
+    serializer threads the root orientation down and flips it at each
+    level of nesting to match dockview's ``orthogonal`` semantics.
+    """
+    layout_path = tmp_path / "layout.json"
+    _write_layout(
+        layout_path,
+        dockview={
+            "panels": {
+                "p1": {"id": "p1", "title": "a"},
+                "p2": {"id": "p2", "title": "b"},
+                "p3": {"id": "p3", "title": "c"},
+            },
+            "grid": {
+                "orientation": "VERTICAL",
+                "root": {
+                    "type": "branch",
+                    "size": 1.0,
+                    "data": [
+                        {"type": "leaf", "data": {"views": ["p1"], "activeView": "p1", "size": 0.3}},
+                        {
+                            "type": "branch",
+                            "size": 0.7,
+                            "data": [
+                                {"type": "leaf", "data": {"views": ["p2"], "activeView": "p2", "size": 0.5}},
+                                {"type": "leaf", "data": {"views": ["p3"], "activeView": "p3", "size": 0.5}},
+                            ],
+                        },
+                    ],
+                },
+            },
+        },
+        panel_params={
+            "p1": {"panelType": "chat", "chatAgentId": "agent-a"},
+            "p2": {"panelType": "chat", "chatAgentId": "agent-b"},
+            "p3": {"panelType": "chat", "chatAgentId": "agent-c"},
+        },
+    )
+    summary = layout_inspect(
+        layout_path, {"agent-a": "a", "agent-b": "b", "agent-c": "c"}
+    )
+    tree = summary["tree"]
+    # Root grid orientation is VERTICAL -> children stack -> column.
+    assert tree["arrangement"] == "column"
+    # The nested branch is one level down; gridview flips orientation, so
+    # its children are arranged side by side -> row.
+    nested = tree["children"][1]
+    assert nested["type"] == "branch"
+    assert nested["arrangement"] == "row"
+
+
+def test_inspect_defaults_missing_grid_orientation_to_horizontal(tmp_path: Path) -> None:
+    """A layout missing ``grid.orientation`` still renders deterministically.
+
+    Older saved layouts (and the empty-dockview boot path) don't always
+    write the orientation field. The serializer falls back to
+    ``HORIZONTAL`` rather than producing a tree without an ``arrangement``.
+    """
+    layout_path = tmp_path / "layout.json"
+    _write_layout(
+        layout_path,
+        dockview={
+            "panels": {"p1": {"id": "p1", "title": "only"}},
+            "grid": {
+                "root": {
+                    "type": "branch",
+                    "size": 1.0,
+                    "data": [
+                        {"type": "leaf", "data": {"views": ["p1"], "activeView": "p1", "size": 1.0}},
+                    ],
+                },
+            },
+        },
+        panel_params={"p1": {"panelType": "chat", "chatAgentId": "a"}},
+    )
+    summary = layout_inspect(layout_path, {"a": "a"})
+    assert summary["tree"]["arrangement"] == "row"
 
 
 def test_list_marks_open_services_via_layout_json(tmp_path: Path) -> None:
