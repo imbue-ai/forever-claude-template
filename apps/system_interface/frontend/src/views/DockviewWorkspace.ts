@@ -1287,6 +1287,11 @@ async function handleMove(args: Record<string, unknown>, requesterAgentId: strin
   // as another tab. ``new_group`` is meaningless here -- we always tab
   // into the existing anchor group.
   if (isWithinDirection(direction)) {
+    // Same self-move guard as the cardinal-direction path below: if the
+    // target is already in the anchor's group as a sole occupant, the
+    // dockview ``moveTo`` would empty + dispose the source before adding
+    // to the destination (same group), dropping the panel from the layout.
+    if (targetPanel.api.group.id === referencePanel.api.group.id) return;
     targetPanel.api.moveTo({ group: referencePanel.api.group });
     return;
   }
@@ -1299,6 +1304,12 @@ async function handleMove(args: Record<string, unknown>, requesterAgentId: strin
   if (sibling !== null) {
     const siblingGroup = dockview.groups.find((g) => g.id === sibling.id);
     if (siblingGroup) {
+      // Guard against tabbing a sole-occupant panel into its own group:
+      // dockview's ``moveTo`` removes from the source group first, which
+      // empties + disposes the source. If source === destination, the
+      // destination is now disposed and the panel is dropped from the
+      // layout entirely. Treat the request as a no-op instead.
+      if (siblingGroup.id === targetPanel.api.group.id) return;
       targetPanel.api.moveTo({ group: siblingGroup });
       return;
     }
