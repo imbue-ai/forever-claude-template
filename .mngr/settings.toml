@@ -156,7 +156,7 @@ idle_mode = "disabled"
 start_arg = ["--cpus=2", "--memory=4", "--disk=20"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
-extra_provision_command = [
+extra_provision_command__extend = [
     # Create /worktree/ on the fresh lima VM so it matches the Dockerfile's
     # `RUN mkdir -p /worktree` and the default worktree_base_folder works.
     "sudo mkdir -p /worktree && sudo chown $(whoami) /worktree",
