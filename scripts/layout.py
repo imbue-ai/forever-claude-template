@@ -572,6 +572,7 @@ def _run_mutating_op(
     *,
     on_success: _DiffMessage,
     on_noop: _NoopMessage,
+    skip_pre_op_noop: bool = False,
 ) -> int:
     """Standard wrapper for a mutating op: snapshot, post, wait, diff.
 
@@ -588,6 +589,16 @@ def _run_mutating_op(
     The ``MINDS_LAYOUT_NO_WAIT_STABLE`` env var bypasses the snapshot /
     wait / diff path entirely; used by the broadcast-pipeline test that
     has no live frontend to apply the op.
+
+    ``skip_pre_op_noop`` disables step (2) for callers whose predicate is
+    snapshot-relative -- ie. captures a "before" baseline and reports
+    True whenever the layout has moved off it (see
+    ``_predicate_any_change``). Such a predicate is meaningless for
+    pre-op no-op detection: a fresh ``_fetch_layout()`` here would race
+    against autosave / other ops and either spuriously match (skipping
+    the POST) or trivially miss; either way the answer is not "the op
+    is already a no-op". Callers using invariant predicates (eg.
+    "ref is present", "title equals X") leave this False.
     """
     if predicate is _UNOBSERVABLE:
         status, body = _post_layout(op, args)
@@ -605,7 +616,7 @@ def _run_mutating_op(
         return EXIT_OK
 
     before = _fetch_layout()
-    if before is not None and predicate(before):
+    if not skip_pre_op_noop and before is not None and predicate(before):
         sys.stderr.write(on_noop(before))
         return EXIT_OK
 
@@ -1032,17 +1043,24 @@ def _cmd_move(args: argparse.Namespace) -> int:
     }
 
     # For ``within`` with an explicit anchor ref the predicate is precise
-    # (ref + anchor share a leaf). ``within`` with ``--relative-to=self``
-    # falls back to ``any_change`` because the ``self`` sentinel never
-    # appears as a real ref in inspect output -- the frontend resolves it
-    # server-side, but client-side we have no way to map it to the
-    # caller's ``chat:<name>`` leaf without an extra round trip.
-    # For cardinal directions the exact end-position depends on whether a
-    # sibling group exists in that direction (frontend resolves
-    # dynamically); ``any_change`` is the right relaxed predicate, built
-    # against a snapshot taken right before the post. When wait-stable is
-    # bypassed (test mode), skip the snapshot -- ``_run_mutating_op`` will
-    # short-circuit before the predicate is ever called.
+    # (ref + anchor share a leaf) and behaves as a real invariant -- pre-op
+    # no-op detection works correctly. ``within`` with
+    # ``--relative-to=self`` falls back to ``any_change`` because the
+    # ``self`` sentinel never appears as a real ref in inspect output --
+    # the frontend resolves it server-side, but client-side we have no way
+    # to map it to the caller's ``chat:<name>`` leaf without an extra
+    # round trip. For cardinal directions the exact end-position depends
+    # on whether a sibling group exists in that direction (frontend
+    # resolves dynamically); ``any_change`` is the right relaxed
+    # predicate, built against a snapshot taken right before the post.
+    # ``any_change`` is snapshot-relative, not invariant-based, so we
+    # pass ``skip_pre_op_noop=True`` -- testing it against a
+    # ``_run_mutating_op``-fetched ``before`` snapshot can spuriously
+    # match if any state changes in the gap, dropping the POST. When
+    # wait-stable is bypassed (test mode), skip the snapshot --
+    # ``_run_mutating_op`` will short-circuit before the predicate is
+    # ever called.
+    skip_pre_op_noop = False
     if args.direction == _WITHIN_DIRECTION and relative_to != _SELF_REF:
         predicate: _Predicate = _predicate_share_group(ref, relative_to)
         on_noop: _NoopMessage = lambda b: f"no change: {ref} is already in the same group as {relative_to}\n"
@@ -1058,9 +1076,9 @@ def _cmd_move(args: argparse.Namespace) -> int:
             sys.stderr.write("warning: inspect failed before move; will not detect a no-op\n")
             before_snapshot = {}
         predicate = _predicate_any_change(before_snapshot)
-        on_noop = lambda b: (  # noqa: E731
-            f"no change: layout state is unchanged after move (ref {ref} may already be in the requested position)\n"
-        )
+        # Snapshot-relative predicate -- not usable for pre-op no-op detection.
+        skip_pre_op_noop = True
+        on_noop = lambda b: ""  # noqa: E731
 
     return _run_mutating_op(
         "move",
@@ -1068,6 +1086,7 @@ def _cmd_move(args: argparse.Namespace) -> int:
         predicate,
         on_success=lambda b, a: f"moved {ref} into {_describe_group(_find_leaf_for_ref(a, ref))}\n",
         on_noop=on_noop,
+        skip_pre_op_noop=skip_pre_op_noop,
     )
 
 
