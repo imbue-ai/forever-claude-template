@@ -1181,7 +1181,16 @@ def main(argv: list[str] | None = None) -> int:
             "as Y'). Default: ``right``."
         ),
     )
-    p_split.add_argument("--ratio", type=float, default=0.6, help="Fraction the new panel occupies (0..1)")
+    p_split.add_argument(
+        "--ratio",
+        type=float,
+        default=0.6,
+        help=(
+            "Fraction the new panel occupies (0..1). Ignored when "
+            "--direction=within, because the panel tabs into the anchor's "
+            "own group and size hints don't apply."
+        ),
+    )
     p_split.add_argument(
         "--new-group",
         action="store_true",
