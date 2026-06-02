@@ -87,7 +87,14 @@ _REGISTRATION_TIMEOUT_SECONDS = 5.0
 _REGISTRATION_POLL_INTERVAL_SECONDS = 0.25
 
 # Set of accepted ref prefixes.
-_REF_PREFIXES = ("service:", "chat:", "terminal:", "url:", "subagent:")
+#
+# ``chat-terminal:<name>`` addresses the singleton terminal panel attached
+# to the named agent's tmux session (URL pattern ``/service/terminal/
+# ?arg=_&arg=agent&arg=<name>``). Listed before ``chat:`` because the
+# ``_normalize_ref`` prefix scan returns on the first match -- if ``chat:``
+# came first the longer prefix would never be recognized and
+# ``chat-terminal:foo`` would degrade to a bare service-name fallback.
+_REF_PREFIXES = ("service:", "chat-terminal:", "chat:", "terminal:", "url:", "subagent:")
 # Set of accepted directions for split/move. ``within`` is the synthetic
 # direction that means "tab into the anchor's own group" -- the four
 # cardinal values all describe *adjacent* groups.

@@ -277,3 +277,53 @@ def test_open_close_chat_ref_broadcasts_layout_ops(
         assert close_msg["args"] == {"ref": f"chat:{_AGENT_NAME}"}
     finally:
         broadcaster.unregister(client_queue)
+
+
+def test_open_chat_terminal_ref_broadcasts_through_pipeline(
+    layout_server: tuple[str, WebSocketBroadcaster],
+    tmp_path: Path,
+) -> None:
+    """``open chat-terminal:<name>`` reaches the broadcaster with the ref intact.
+
+    Covers the new agent-attached terminal ref end-to-end: the script's
+    ref-prefix table must include ``chat-terminal:``, the broadcast
+    endpoint must accept it (no service registration check, no
+    ``service:terminal`` panel_id allocation), and the args must arrive
+    unchanged so the frontend can resolve to the per-agent terminal URL.
+    """
+    base_url, broadcaster = layout_server
+    sandbox = tmp_path / "cwd"
+    sandbox.mkdir()
+
+    client_queue = broadcaster.register()
+    try:
+        result = _run_layout_script(
+            ["open", f"chat-terminal:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox
+        )
+        assert result.returncode == 0, f"stderr={result.stderr!r}"
+        msg = _await_layout_op(client_queue, timeout=2.0)
+        assert msg["op"] == "open"
+        assert msg["args"] == {"ref": f"chat-terminal:{_AGENT_NAME}", "new_group": False}
+    finally:
+        broadcaster.unregister(client_queue)
+
+
+def test_list_includes_chat_terminal_entry_for_seeded_agent(
+    layout_server: tuple[str, WebSocketBroadcaster],
+    tmp_path: Path,
+) -> None:
+    """``list`` surfaces the per-agent terminal alongside the chat entry.
+
+    Discoverability: an agent listing without the terminal would force
+    callers to know about the ``chat-terminal:`` form out of band.
+    """
+    base_url, _ = layout_server
+    sandbox = tmp_path / "cwd"
+    sandbox.mkdir()
+
+    result = _run_layout_script(["list", "--json"], base_url=base_url, cwd=sandbox)
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    entries = json.loads(result.stdout)
+    by_ref = {e["ref"]: e for e in entries}
+    assert f"chat-terminal:{_AGENT_NAME}" in by_ref
+    assert by_ref[f"chat-terminal:{_AGENT_NAME}"]["kind"] == "agent-terminal"

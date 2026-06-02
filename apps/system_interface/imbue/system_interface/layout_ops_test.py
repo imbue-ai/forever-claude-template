@@ -141,6 +141,61 @@ def test_inspect_resolves_iframe_with_service_name(tmp_path: Path) -> None:
     assert "service:web" in refs
 
 
+def test_inspect_emits_chat_terminal_ref_for_agent_attached_terminal(tmp_path: Path) -> None:
+    """An iframe pointed at the per-agent terminal URL projects to ``chat-terminal:<name>``.
+
+    The chat panel's "Open agent terminal" button mints iframes pointed
+    at ``/service/terminal/?arg=_&arg=agent&arg=<name>``; ``_resolve_ref``
+    must recognize that URL shape and emit the stable
+    ``chat-terminal:<name>`` ref so the panel is addressable by name
+    rather than via an opaque ``terminal:<hash>``.
+    """
+    layout_path = tmp_path / "layout.json"
+    _write_layout(
+        layout_path,
+        dockview={
+            "panels": {"p1": {"id": "p1", "title": "alice terminal"}},
+            "grid": {"root": {"type": "leaf", "data": {"views": ["p1"], "activeView": "p1", "size": 1.0}}},
+        },
+        panel_params={
+            "p1": {
+                "panelType": "iframe",
+                "url": "/service/terminal/?arg=_&arg=agent&arg=alice",
+            }
+        },
+    )
+    summary = layout_inspect(layout_path, {})
+    refs = [p["ref"] for p in summary["panels"]]
+    assert "chat-terminal:alice" in refs
+
+
+def test_inspect_keeps_anonymous_terminal_as_terminal_hash_ref(tmp_path: Path) -> None:
+    """Terminals minted by the "New terminal" button use ``arg=workdir`` and stay ``terminal:<hash>``.
+
+    Only the agent-attached terminal pattern (``arg=agent&arg=<name>``)
+    projects to ``chat-terminal:<name>``; everything else under
+    ``/service/terminal/`` falls back to the opaque hash form.
+    """
+    layout_path = tmp_path / "layout.json"
+    _write_layout(
+        layout_path,
+        dockview={
+            "panels": {"p1": {"id": "p1", "title": "terminal"}},
+            "grid": {"root": {"type": "leaf", "data": {"views": ["p1"], "activeView": "p1", "size": 1.0}}},
+        },
+        panel_params={
+            "p1": {
+                "panelType": "iframe",
+                "url": "/service/terminal/?arg=_&arg=workdir&arg=%2Fmngr%2Fcode",
+            }
+        },
+    )
+    summary = layout_inspect(layout_path, {})
+    panel = summary["panels"][0]
+    assert panel["ref"].startswith("terminal:")
+    assert not panel["ref"].startswith("chat-terminal:")
+
+
 def test_inspect_emits_url_ref_for_ad_hoc_iframe(tmp_path: Path) -> None:
     layout_path = tmp_path / "layout.json"
     _write_layout(
@@ -361,3 +416,63 @@ def test_list_marks_running_agents(tmp_path: Path) -> None:
     by_ref = {e["ref"]: e for e in entries}
     assert by_ref["chat:alice"]["is_running"] is True
     assert by_ref["chat:bob"]["is_running"] is False
+
+
+def test_list_emits_chat_terminal_entry_per_agent(tmp_path: Path) -> None:
+    """``layout_list`` exposes the per-agent terminal as a discoverable ref.
+
+    Surfacing ``chat-terminal:<name>`` in ``list`` lets callers see the
+    terminal exists before opening it, mirroring how ``chat:<name>``
+    advertises the chat tab. ``is_running`` tracks the owning agent so
+    a stopped agent's terminal is flagged accordingly.
+    """
+    entries = layout_list(
+        service_names=(),
+        agents=[
+            {"id": "a1", "name": "alice", "state": "running", "labels": {}, "work_dir": None},
+            {"id": "a2", "name": "bob", "state": "stopped", "labels": {}, "work_dir": None},
+        ],
+        layout_json_path=tmp_path / "missing.json",
+        agent_name_by_id={"a1": "alice", "a2": "bob"},
+    )
+    by_ref = {e["ref"]: e for e in entries}
+    assert "chat-terminal:alice" in by_ref
+    assert by_ref["chat-terminal:alice"]["kind"] == "agent-terminal"
+    assert by_ref["chat-terminal:alice"]["is_running"] is True
+    assert by_ref["chat-terminal:alice"]["is_open"] is False
+    assert by_ref["chat-terminal:bob"]["is_running"] is False
+
+
+def test_list_chat_terminal_marks_open_when_url_is_mounted(tmp_path: Path) -> None:
+    """``is_open`` on the ``chat-terminal:`` entry tracks the agent-attached URL.
+
+    The ``_collect_open_refs`` helper builds the mount set from the same
+    ``_resolve_ref`` projection that ``inspect`` uses, so the listing
+    stays in sync with what would appear there.
+    """
+    layout_path = tmp_path / "layout.json"
+    _write_layout(
+        layout_path,
+        dockview={
+            "panels": {"p1": {"id": "p1", "title": "alice terminal"}},
+            "grid": {"root": {"type": "leaf", "data": {"views": ["p1"], "activeView": "p1", "size": 1.0}}},
+        },
+        panel_params={
+            "p1": {
+                "panelType": "iframe",
+                "url": "/service/terminal/?arg=_&arg=agent&arg=alice",
+            }
+        },
+    )
+    entries = layout_list(
+        service_names=(),
+        agents=[
+            {"id": "a1", "name": "alice", "state": "running", "labels": {}, "work_dir": None},
+            {"id": "a2", "name": "bob", "state": "running", "labels": {}, "work_dir": None},
+        ],
+        layout_json_path=layout_path,
+        agent_name_by_id={"a1": "alice", "a2": "bob"},
+    )
+    by_ref = {e["ref"]: e for e in entries}
+    assert by_ref["chat-terminal:alice"]["is_open"] is True
+    assert by_ref["chat-terminal:bob"]["is_open"] is False

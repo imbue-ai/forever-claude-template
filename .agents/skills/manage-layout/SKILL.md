@@ -48,6 +48,11 @@ Targets `open` accepts:
 - An external URL (`https://example.com`) -- creates a new ad-hoc URL
   tab, or reports a no-op if one is already open pointed at that URL.
 - A chat ref (`chat:alice`) -- opens another mngr-level agent's chat.
+- A `chat-terminal:<name>` ref -- opens (or focuses, if already open)
+  the terminal attached to that agent's tmux session. Singleton: a
+  second `open chat-terminal:alice` focuses the existing panel rather
+  than creating a duplicate. This is the same terminal the chat
+  panel's "Open agent terminal" button mounts.
 
 ## Refs: how every panel is addressed
 
@@ -57,14 +62,17 @@ Every panel has a stable, type-prefixed ref returned by `inspect`:
 |---|---|---|
 | `service:<name>` | The iframe for a registered workspace service. | `service:web` |
 | `chat:<agent-name>` | The chat tab for an mngr-level agent. | `chat:alice` |
-| `terminal:<short-hash>` | A terminal tab (one ref per terminal, since each is independent). | `terminal:1a2b3c4d` |
+| `chat-terminal:<agent-name>` | The terminal attached to that agent's tmux session. Singleton per agent. | `chat-terminal:alice` |
+| `terminal:<short-hash>` | An anonymous terminal tab (created via `open terminal` / "New terminal"; each is a fresh instance). | `terminal:1a2b3c4d` |
 | `url:<short-hash>` | An ad-hoc external URL tab. | `url:9f8e7d6c` |
 | `subagent:<session-id>` | A harness-level subagent panel. | `subagent:abcd1234` |
 
 When you call `open terminal`, the new tab's `terminal:<hash>` ref is
 printed to stdout -- capture it if you need to address that specific
 terminal later (focus, move, close). Otherwise, run `inspect` to
-recover refs at any time.
+recover refs at any time. `chat-terminal:<name>` is stable by
+construction, so you don't need to capture it: the same ref always
+addresses the same agent's terminal.
 
 Shorthands accepted anywhere a ref is expected:
 

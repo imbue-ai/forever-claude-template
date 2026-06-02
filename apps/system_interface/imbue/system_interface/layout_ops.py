@@ -21,11 +21,18 @@ import hashlib
 import json
 import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
 
 from loguru import logger as _loguru_logger
+
+# Path prefix the dispatcher uses for the workspace terminal service. The
+# agent-attached terminal URL the frontend stores is
+# ``/service/terminal/?arg=_&arg=agent&arg=<name>``; the anonymous "New
+# terminal" path uses ``arg=workdir`` instead and is left as ``terminal:<hash>``.
+_TERMINAL_SERVICE_URL_PATH = "/service/terminal/"
 
 # Set of op names the endpoint dispatches on. Anything else is a 400.
 _KNOWN_OPS: frozenset[str] = frozenset(
@@ -187,6 +194,32 @@ def allocate_terminal_panel_id() -> tuple[str, str]:
     return panel_id, f"terminal:{_short_hash(panel_id)}"
 
 
+def _extract_agent_terminal_name(url: str) -> str | None:
+    """If ``url`` is the per-agent terminal URL, return the bound agent name.
+
+    The frontend's chat-panel "Open agent terminal" button mints iframes
+    pointed at ``/service/terminal/?arg=_&arg=agent&arg=<name>`` (the
+    ttyd dispatch script attaches to the named tmux session). Detecting
+    this shape lets ``_resolve_ref`` project these panels as
+    ``chat-terminal:<name>`` -- a stable, predictable ref that mirrors
+    the ``chat:<name>`` convention -- instead of the opaque
+    ``terminal:<hash>`` it would otherwise emit. Anonymous terminals
+    minted via the "New terminal" button use ``arg=workdir`` instead and
+    fall through to the ``terminal:<hash>`` branch.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.path != _TERMINAL_SERVICE_URL_PATH:
+        return None
+    # ``parse_qs`` returns repeated-key values in the order they appear in
+    # the query string, which is what the frontend's URL builder emits:
+    # ``arg=_&arg=agent&arg=<name>``.
+    args = urllib.parse.parse_qs(parsed.query, keep_blank_values=True).get("arg", [])
+    if len(args) != 3 or args[0] != "_" or args[1] != "agent":
+        return None
+    name = args[2]
+    return name or None
+
+
 def _resolve_ref(
     panel_id: str,
     params: dict[str, Any] | None,
@@ -216,7 +249,12 @@ def _resolve_ref(
         ref = f"subagent:{subagent_session_id or _short_hash(panel_id)}"
     elif panel_type == "iframe" and service_name:
         ref = f"service:{service_name}"
-    elif panel_type == "iframe" and isinstance(url, str) and url.startswith("/service/terminal/"):
+    elif panel_type == "iframe" and isinstance(url, str) and (agent_terminal_name := _extract_agent_terminal_name(url)) is not None:
+        # Per-agent terminals get the symmetric ``chat-terminal:<name>``
+        # form so they're addressable by name (parallel to ``chat:<name>``)
+        # rather than only via the opaque ``terminal:<hash>``.
+        ref = f"chat-terminal:{agent_terminal_name}"
+    elif panel_type == "iframe" and isinstance(url, str) and url.startswith(_TERMINAL_SERVICE_URL_PATH):
         ref = f"terminal:{_short_hash(panel_id)}"
     elif panel_type == "iframe":
         ref = f"url:{_short_hash(panel_id)}"
@@ -402,15 +440,31 @@ def layout_list(
         name = agent.get("name") or agent.get("id") or ""
         ref = f"chat:{name}"
         state = agent.get("state", "")
+        # ``state`` strings vary across providers but ``running`` is the
+        # conventional alive value used by mngr observe.
+        is_running = state == "running"
         entries.append(
             {
                 "ref": ref,
                 "kind": "agent",
                 "display_name": name,
                 "is_open": ref in open_refs,
-                # ``state`` strings vary across providers but ``running`` is
-                # the conventional alive value used by mngr observe.
-                "is_running": state == "running",
+                "is_running": is_running,
+            }
+        )
+        # The agent-attached terminal is a separately-addressable singleton
+        # (one tmux session per agent name). Its ``is_open`` reflects
+        # whether a panel pointed at ``/service/terminal/?arg=_&arg=agent
+        # &arg=<name>`` is currently mounted; ``is_running`` mirrors the
+        # owning agent so a stopped agent's terminal is flagged as such.
+        terminal_ref = f"chat-terminal:{name}"
+        entries.append(
+            {
+                "ref": terminal_ref,
+                "kind": "agent-terminal",
+                "display_name": f"{name} terminal",
+                "is_open": terminal_ref in open_refs,
+                "is_running": is_running,
             }
         )
     return entries

@@ -174,6 +174,41 @@ def test_open_new_group_flag_sets_payload(tmp_path: Path, monkeypatch: pytest.Mo
     assert posted == [("open", {"ref": "service:web", "new_group": True})]
 
 
+def test_open_chat_terminal_ref_skips_registration_and_posts_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``chat-terminal:<name>`` is a stable agent-bound ref, not a service.
+
+    The script must accept it as a valid prefix (no service registration
+    poll, no bare-name fallback to ``service:``) and post the ref through
+    to the broadcast endpoint unchanged so the frontend can resolve it
+    to the per-agent terminal URL.
+    """
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+    # No applications.toml is set up: if the script misclassified the ref
+    # as ``service:chat-terminal:alice`` the registration poll would fire.
+
+    rc = layout.main(["open", "chat-terminal:alice"])
+    assert rc == 0
+    assert posted == [("open", {"ref": "chat-terminal:alice", "new_group": False})]
+
+
+def test_normalize_ref_preserves_chat_terminal_prefix() -> None:
+    """``chat-terminal:`` must round-trip through ``_normalize_ref`` unchanged.
+
+    The prefix scan in ``_normalize_ref`` walks ``_REF_PREFIXES`` in
+    order; if ``chat:`` came before ``chat-terminal:`` the longer form
+    would never be recognized, and ``chat-terminal:alice`` would be
+    accepted via the ``chat:`` branch -- silently producing a
+    miscategorized ref. Ordering ``chat-terminal:`` first in the prefix
+    table is the fix; this test catches a regression in that ordering.
+    """
+    assert layout._normalize_ref("chat-terminal:alice") == "chat-terminal:alice"
+    # Sanity: the ordinary ``chat:`` form is still recognized.
+    assert layout._normalize_ref("chat:alice") == "chat:alice"
+
+
 def test_open_external_url_skips_registration_and_posts_bare_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """A bare ``https://`` target is an external-URL ref: it must NOT be
     treated as a service name (no applications.toml registration check)
