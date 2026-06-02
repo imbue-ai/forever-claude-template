@@ -802,18 +802,18 @@ def _cmd_where(args: argparse.Namespace) -> int:
     if layout is None:
         sys.stderr.write("error: inspect failed; could not locate the panel\n")
         return EXIT_ERROR
-    # Resolve ``self`` against the actual layout: it means the caller's
-    # own chat (``chat:<their-name>``). The server's inspect output keys
-    # chats by agent *name*; we don't know the caller's name from the
-    # client side, so ``self`` here just falls through as a literal ref
-    # lookup -- callers can also pass the explicit ``chat:<name>``.
-    leaf = _find_leaf_for_ref(layout, ref) if ref != _SELF_REF else None
-    if leaf is None and ref == _SELF_REF:
+    # ``self`` is a sentinel the *server* resolves to the caller's chat
+    # panel (using the agent_id header). Client-side we don't know the
+    # caller's chat ref (``chat:<name>``), so we can't do a tree lookup
+    # for ``self`` here -- reject it with a pointer to the explicit form
+    # rather than silently returning a "not currently open" error.
+    if ref == _SELF_REF:
         sys.stderr.write(
             "error: 'self' is not directly resolvable from the CLI; pass the explicit "
             "chat ref (e.g. ``chat:<your-name>``) or use ``inspect`` to see all refs\n"
         )
         return EXIT_ERROR
+    leaf = _find_leaf_for_ref(layout, ref)
     if leaf is None:
         sys.stderr.write(f"error: ref {ref!r} is not currently open\n")
         return EXIT_ERROR
