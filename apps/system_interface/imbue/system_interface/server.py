@@ -26,11 +26,13 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
+from imbue.mngr.errors import BaseMngrError
 from imbue.system_interface import claude_auth_endpoints
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.system_interface.agent_discovery import send_message
+from imbue.system_interface.agent_discovery import start_agent
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
@@ -722,7 +724,7 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
 
 
 async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
-    """Start a STOPPED agent so its terminal session becomes attachable.
+    """Ensure an agent is running so its terminal session is attachable.
 
     Opening an agent's terminal attaches to that agent's tmux session; while
     the agent is STOPPED that session does not exist, so the attach fails
@@ -730,52 +732,26 @@ async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
     tab -- both for the chat-page "Open agent terminal" link and for terminal
     tabs restored from a saved dockview layout.
 
-    If the agent's tmux session already exists it is already attachable, so we
-    skip `mngr start` entirely. This is the common case (opening the terminal
-    of an agent that is already up) and avoids needlessly reinvoking `mngr
-    start`.
+    This goes through the exact same in-process mngr start path that sending a
+    message to the agent uses (see ``agent_discovery.start_agent``), so opening
+    a terminal and messaging the agent succeed or fail together rather than
+    diverging. mngr's own lifecycle check makes the start a no-op for an
+    already-running agent, so this is cheap in the common case.
     """
-    agent_manager: AgentManager = request.app.state.agent_manager
-    agent_state = agent_manager.get_agent_by_id(agent_id)
-    if agent_state is None:
-        error = ErrorResponse(detail=f"Agent '{agent_id}' not found")
-        return JSONResponse(content=error.model_dump(), status_code=404)
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
 
-    agent_name = agent_state.name
-    # Derive the tmux session name exactly as the ttyd dispatch and the
-    # screen-capture endpoint do: "<MNGR_PREFIX><name>" (default prefix
-    # "mngr-"). See ``ttyd_agent.sh`` and ``_get_screen_capture`` above.
-    prefix = os.environ.get("MNGR_PREFIX", "mngr-")
-    session_name = f"{prefix}{agent_name}"
+    def _run_start() -> str | None:
+        try:
+            start_agent(agent_info.name)
+            return None
+        except BaseMngrError as e:
+            return str(e)
 
-    def _is_attachable() -> bool:
-        # Mirror the ttyd dispatch's exact-match target (leading "=", window
-        # 0) so prefix-overlapping session names can't yield a false positive.
-        result = run_local_command_modern_version(
-            command=["tmux", "has-session", "-t", f"={session_name}:0"],
-            cwd=None,
-            is_checked=False,
-            timeout=10.0,
-        )
-        return result.returncode == 0
-
-    if await run_in_threadpool(_is_attachable):
-        return JSONResponse(content=StartAgentResponse(status="ok").model_dump())
-
-    def _run_start() -> tuple[bool, str]:
-        result = run_local_command_modern_version(
-            command=["mngr", "start", agent_name],
-            cwd=None,
-            is_checked=False,
-            timeout=60.0,
-        )
-        succeeded = result.returncode == 0
-        output = result.stdout.strip() if succeeded else result.stderr.strip()
-        return succeeded, output
-
-    success, output = await run_in_threadpool(_run_start)
-    if not success:
-        error = ErrorResponse(detail=f"Failed to start agent '{agent_name}': {output}")
+    error_message = await run_in_threadpool(_run_start)
+    if error_message is not None:
+        error = ErrorResponse(detail=f"Failed to start agent '{agent_info.name}': {error_message}")
         return JSONResponse(content=error.model_dump(), status_code=500)
 
     return JSONResponse(content=StartAgentResponse(status="ok").model_dump())

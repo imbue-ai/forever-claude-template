@@ -3,7 +3,6 @@
 import json
 import queue
 from pathlib import Path
-from typing import Any
 from typing import Generator
 from unittest.mock import patch
 
@@ -11,7 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.mngr.errors import AgentStartError
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
@@ -405,98 +404,37 @@ def _register_agent(app: FastAPI, agent_id: str, name: str, state: str) -> None:
     )
 
 
-def _finished(returncode: int, stdout: str = "", stderr: str = "") -> FinishedProcess:
-    return FinishedProcess(
-        returncode=returncode,
-        stdout=stdout,
-        stderr=stderr,
-        command=("fake",),
-        is_output_already_logged=False,
-    )
-
-
-def _patch_run_command(
-    *, has_session_returncode: int, start_returncode: int = 0, start_stdout: str = "", start_stderr: str = ""
-) -> Any:
-    """Patch `run_local_command_modern_version` for the agent-start endpoint.
-
-    The endpoint shells out twice: first `tmux has-session` to test whether
-    the agent's session already exists (and is therefore attachable), then
-    `mngr start` only when it does not. The side effect dispatches on the
-    command so each subprocess can be controlled independently.
-    """
-
-    def _side_effect(**kwargs: Any) -> FinishedProcess:
-        command = kwargs["command"]
-        if command[:2] == ["tmux", "has-session"]:
-            return _finished(returncode=has_session_returncode)
-        if command[:2] == ["mngr", "start"]:
-            return _finished(returncode=start_returncode, stdout=start_stdout, stderr=start_stderr)
-        raise AssertionError(f"unexpected command: {command}")
-
-    return patch("imbue.system_interface.server.run_local_command_modern_version", side_effect=_side_effect)
-
-
 def test_start_unknown_agent_returns_404(client: TestClient) -> None:
     """POST /api/agents/<id>/start returns 404 for an unknown agent."""
     response = client.post("/api/agents/nonexistent/start")
     assert response.status_code == 404
 
 
-def test_start_skips_mngr_start_when_session_attachable(client: TestClient, app: FastAPI) -> None:
-    """When the tmux session already exists, the endpoint does not run `mngr start`.
+def test_start_invokes_in_process_start_with_agent_name(client: TestClient, app: FastAPI) -> None:
+    """The endpoint delegates to the in-process ``start_agent`` keyed by name.
 
-    Opening the terminal of an already-running agent is the common case. Since
-    the session is attachable, the endpoint must not reinvoke `mngr start` --
-    doing so reparses the mngr config and would surface an unrelated config
-    error as a spurious start failure over a healthy agent.
+    Opening a terminal must go through the same in-process mngr start path that
+    messaging an agent uses, so the two cannot diverge. The endpoint therefore
+    calls ``start_agent(<name>)`` rather than shelling out to ``mngr start``.
     """
     _register_agent(app, "agent-running", "running-agent", "RUNNING")
 
-    with _patch_run_command(has_session_returncode=0) as mock_run:
+    with patch("imbue.system_interface.server.start_agent") as mock_start:
         response = client.post("/api/agents/agent-running/start")
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    commands = [call.kwargs["command"] for call in mock_run.call_args_list]
-    assert commands == [["tmux", "has-session", "-t", "=mngr-running-agent:0"]]
-    assert not any(c[:2] == ["mngr", "start"] for c in commands)
-
-
-def test_start_uses_configured_prefix_for_session_check(
-    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The attachability check targets `<MNGR_PREFIX><name>` with exact match."""
-    monkeypatch.setenv("MNGR_PREFIX", "custom-")
-    _register_agent(app, "agent-running", "running-agent", "RUNNING")
-
-    with _patch_run_command(has_session_returncode=0) as mock_run:
-        response = client.post("/api/agents/agent-running/start")
-
-    assert response.status_code == 200
-    assert mock_run.call_args.kwargs["command"] == ["tmux", "has-session", "-t", "=custom-running-agent:0"]
-
-
-def test_start_runs_mngr_start_when_session_absent(client: TestClient, app: FastAPI) -> None:
-    """When no tmux session exists, the endpoint starts the agent via `mngr start`."""
-    _register_agent(app, "agent-stopped", "stopped-agent", "STOPPED")
-
-    with _patch_run_command(
-        has_session_returncode=1, start_returncode=0, start_stdout="Started agent: stopped-agent"
-    ) as mock_run:
-        response = client.post("/api/agents/agent-stopped/start")
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-    commands = [call.kwargs["command"] for call in mock_run.call_args_list]
-    assert ["mngr", "start", "stopped-agent"] in commands
+    mock_start.assert_called_once_with("running-agent")
 
 
 def test_start_failure_returns_500(client: TestClient, app: FastAPI) -> None:
-    """A failed `mngr start` (for a non-attachable agent) surfaces as a 500 with stderr."""
+    """A failed start surfaces as a 500 carrying the mngr error message."""
     _register_agent(app, "agent-stopped", "stopped-agent", "STOPPED")
 
-    with _patch_run_command(has_session_returncode=1, start_returncode=1, start_stderr="boom"):
+    with patch(
+        "imbue.system_interface.server.start_agent",
+        side_effect=AgentStartError("stopped-agent", "boom"),
+    ):
         response = client.post("/api/agents/agent-stopped/start")
 
     assert response.status_code == 500
