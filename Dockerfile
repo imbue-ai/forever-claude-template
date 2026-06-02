@@ -59,6 +59,12 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh && echo 'PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
 ENV PATH="/root/.local/bin:$PATH"
 
+# Source /mngr/env (when present) for interactive bash sessions. The env file
+# is mounted into the container at runtime and holds the variables mngr
+# commands need; sourcing it here lets terminals spawned via
+# `docker exec -it <container> bash` run mngr commands without manual setup.
+RUN printf '%s\n' 'if [ -f /mngr/env ]; then set -a; . /mngr/env; set +a; fi' >> /root/.bashrc
+
 # Install claude code (pinned via CLAUDE_CODE_VERSION build arg; bump in sync with
 # agent_types.claude.version in .mngr/settings.toml so the provisioning-time
 # version check matches)
@@ -88,7 +94,7 @@ RUN mkdir -p /root/.ssh && \
 # LATCHKEY_GATEWAY URL is injected at `mngr create` time by the outside
 # caller (see .mngr/settings.toml's pass_env), so we do not hardcode it here.
 #
-ARG LATCHKEY_VERSION=2.11.3
+ARG LATCHKEY_VERSION=2.14.0
 RUN npm install -g "latchkey@${LATCHKEY_VERSION}"
 
 # install python dependencies

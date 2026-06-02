@@ -193,6 +193,14 @@ extra_provision_command__extend = [
     # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
     # because the uv installer prepends it.
     "mkdir -p $HOME/.local/bin && ln -sf /mngr/code/vendor/tk/ticket $HOME/.local/bin/tk",
+    # Source /mngr/env (the host env file, when present) for interactive bash
+    # sessions, so a shell opened via `limactl shell <instance>` inherits the
+    # variables mngr commands need. Mirrors the Dockerfile snippet that does
+    # the same for docker-based providers (`docker exec -it bash`); the only
+    # difference is the non-root lima user's $HOME/.bashrc target instead of
+    # /root/.bashrc. mngr otherwise only sources /mngr/env in the tmux
+    # default-command, so manually-opened shells miss it without this.
+    '''printf '%s\n' 'if [ -f /mngr/env ]; then set -a; . /mngr/env; set +a; fi' >> "$HOME/.bashrc"''',
 ]
 
 # template for vultr VPS provider (cloud mode)
