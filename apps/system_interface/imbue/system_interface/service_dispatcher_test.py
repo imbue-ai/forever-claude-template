@@ -285,3 +285,22 @@ def test_websocket_unknown_service_closes_with_4004(workspace_client: TestClient
         with workspace_client.websocket_connect("/service/nonexistent/anything") as ws:
             ws.receive_text()
     assert excinfo.value.code == 4004
+
+
+def test_invalid_service_name_is_rejected_with_404(workspace_client: TestClient) -> None:
+    """A service name with characters outside the safe set is rejected before any forwarding.
+
+    The name flows into generated JavaScript (the service worker, the bootstrap
+    page) and a cookie name, so the ``__sw.js`` route -- reachable before the
+    service-registration check -- must not interpolate an unvalidated value.
+    """
+    response = workspace_client.get("/service/web.evil/__sw.js")
+    assert response.status_code == 404
+
+
+def test_invalid_service_name_websocket_closes_with_4004(workspace_client: TestClient) -> None:
+    """A WS upgrade with an unsafe service name is closed with 4004."""
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with workspace_client.websocket_connect("/service/web.evil/anything") as ws:
+            ws.receive_text()
+    assert excinfo.value.code == 4004

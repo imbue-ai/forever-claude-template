@@ -43,6 +43,17 @@ from imbue.system_interface.proxy import rewrite_proxied_html
 
 _PROXY_TIMEOUT_SECONDS: Final[float] = 30.0
 
+# Timeout policy for streamed (SSE / chunked) proxied requests. Connect, write,
+# and pool acquisition keep a bounded timeout, but the read timeout is disabled:
+# a legitimate long-lived SSE stream can stay quiet for far longer than 30s
+# between events, and a blanket read timeout would sever it mid-stream.
+_STREAMING_REQUEST_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(
+    connect=_PROXY_TIMEOUT_SECONDS,
+    read=None,
+    write=_PROXY_TIMEOUT_SECONDS,
+    pool=_PROXY_TIMEOUT_SECONDS,
+)
+
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {
         "transfer-encoding",
@@ -57,12 +68,17 @@ def _sw_cookie_name(service_name: str) -> str:
 
 
 def _make_loading_html(current_service: ServiceName, agent_manager: AgentManager) -> str:
-    other_services = tuple(
-        ServiceName(name) for name in agent_manager.list_service_names() if name != str(current_service)
-    )
+    other_services: list[ServiceName] = []
+    for name in agent_manager.list_service_names():
+        if name == str(current_service):
+            continue
+        try:
+            other_services.append(ServiceName(name))
+        except ValueError:
+            logger.debug("Skipping service with unsupported name on loading page: {!r}", name)
     return generate_backend_loading_html(
         current_service=current_service,
-        other_services=other_services,
+        other_services=tuple(other_services),
     )
 
 
@@ -133,6 +149,7 @@ async def _forward_http_request_streaming(
         url=proxy_url,
         headers=headers,
         content=body,
+        timeout=_STREAMING_REQUEST_TIMEOUT,
     )
     try:
         backend_response = await http_client.send(backend_request, stream=True)
@@ -206,10 +223,10 @@ def _build_proxy_response(
     return response
 
 
-async def _handle_service_sw_js(service_name: str) -> Response:
+async def _handle_service_sw_js(service_name: ServiceName) -> Response:
     """Serve the scoped service worker script for a service."""
     return Response(
-        content=generate_service_worker_js(ServiceName(service_name)),
+        content=generate_service_worker_js(service_name),
         media_type="application/javascript",
     )
 
@@ -220,11 +237,15 @@ async def _handle_service_http(
     request: Request,
 ) -> Response:
     """Handle an HTTP request under ``/service/<name>/<path>``."""
-    parsed_service = ServiceName(service_name)
+    try:
+        parsed_service = ServiceName(service_name)
+    except ValueError:
+        return Response(status_code=404, content="Invalid service name")
+
     agent_manager: AgentManager = request.app.state.agent_manager
 
     if path == "__sw.js":
-        return await _handle_service_sw_js(service_name)
+        return await _handle_service_sw_js(parsed_service)
 
     is_navigation = request.headers.get("sec-fetch-mode") == "navigate"
 
@@ -328,9 +349,15 @@ async def _handle_service_websocket(
     path: str,
 ) -> None:
     """Proxy a WebSocket connection under ``/service/<name>/<path>`` to the backend service."""
+    try:
+        parsed_service = ServiceName(service_name)
+    except ValueError:
+        await websocket.close(code=4004, reason="Invalid service name")
+        return
+
     agent_manager: AgentManager = websocket.app.state.agent_manager
 
-    backend_url = agent_manager.get_service_url(service_name)
+    backend_url = agent_manager.get_service_url(parsed_service)
     if backend_url is None:
         await websocket.close(code=4004, reason=f"Unknown service: {service_name}")
         return
