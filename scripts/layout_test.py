@@ -689,6 +689,27 @@ def test_where_missing_ref_returns_error(
     assert "not currently open" in err
 
 
+def test_where_self_is_rejected_without_inspect_round_trip(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``where self`` cannot be resolved client-side (the ``self`` sentinel
+    is resolved server-side using the agent-id header). The CLI rejects
+    it with an actionable error pointing at the explicit ``chat:<name>``
+    form, and must do so BEFORE the ``_fetch_layout()`` round-trip --
+    otherwise a downed server would surface a misleading "inspect failed"
+    message rather than the actionable one."""
+    posted: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
+
+    rc = layout.main(["where", "self"])
+    assert rc == layout.EXIT_ERROR
+    # No HTTP calls at all -- the rejection short-circuits before inspect.
+    assert posted == []
+    err = capsys.readouterr().err
+    assert "'self'" in err
+    assert "chat:" in err
+
+
 def test_rename_emits_diff_after_observed_change(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
