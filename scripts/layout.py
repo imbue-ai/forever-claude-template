@@ -930,6 +930,10 @@ def _cmd_where(args: argparse.Namespace) -> int:
 
 def _cmd_open(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.target)
+    # Validate before the registration wait so empty-name / malformed refs
+    # fail instantly instead of spending the full registration timeout
+    # polling for an obviously-bogus service name.
+    _validate_ref(ref)
     if ref.startswith("service:"):
         service_name = ref.removeprefix("service:")
         if not _wait_for_registration(service_name, _REGISTRATION_TIMEOUT_SECONDS):
@@ -939,7 +943,6 @@ def _cmd_open(args: argparse.Namespace) -> int:
                 f"Did you forward_port.py / start the service?\n"
             )
             return EXIT_ERROR
-    _validate_ref(ref)
     payload: dict[str, Any] = {"ref": ref, "new_group": bool(args.new_group)}
 
     # ``service:terminal`` always creates a fresh tab (no dedup), so the
@@ -1007,6 +1010,9 @@ def _cmd_split(args: argparse.Namespace) -> int:
         )
         return EXIT_ERROR
     ref = _normalize_ref(args.target)
+    # Validate before the registration wait (see ``_cmd_open`` for the
+    # rationale).
+    _validate_ref(ref)
     if ref.startswith("service:"):
         service_name = ref.removeprefix("service:")
         if not _wait_for_registration(service_name, _REGISTRATION_TIMEOUT_SECONDS):
@@ -1015,7 +1021,6 @@ def _cmd_split(args: argparse.Namespace) -> int:
                 f"after waiting {_REGISTRATION_TIMEOUT_SECONDS:.0f}s.\n"
             )
             return EXIT_ERROR
-    _validate_ref(ref)
     relative_to = _normalize_ref(args.relative_to)
     _validate_ref(relative_to)
     # ``split`` creates ``ref`` but anchors against ``relative_to``; only the
