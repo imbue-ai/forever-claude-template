@@ -79,6 +79,10 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
           const reqErr = err as { response?: { detail?: string }; message?: string };
           const detail = reqErr.response?.detail ?? reqErr.message ?? String(err);
           console.error(`Failed to interrupt agent ${agentId}: ${detail}`);
+          // Surface the failure to the user: they deliberately clicked Stop,
+          // and on failure the agent is still running. Matches the alert-based
+          // feedback convention for user-initiated mutations (see executeDestroy).
+          alert(`Failed to interrupt agent: ${detail}`);
         } finally {
           isInterruptInFlight = false;
           m.redraw();
