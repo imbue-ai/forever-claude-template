@@ -764,6 +764,123 @@ def test_maximize_is_unobservable_and_notes_it(
     assert "no observable layout-state change" in err
 
 
+def test_open_https_url_succeeds_when_url_panel_appears(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``open https://...`` must NOT predicate on the literal URL as a ref:
+    the frontend creates ad-hoc URL panels with refs of the form
+    ``url:<short_hash>``, so a ref-equality predicate would always
+    time out. Wait-stable should match by ``url`` field instead and
+    report success when the new url panel becomes visible in inspect."""
+    monkeypatch.delenv(layout.ENV_NO_WAIT_STABLE, raising=False)
+
+    target_url = "https://example.com/dashboard"
+    before_layout = {"active_panel": None, "panels": [], "tree": None}
+    after_layout = {
+        "active_panel": "p1",
+        "panels": [
+            {"ref": "url:abc12345", "panel_type": "iframe", "url": target_url, "title": "example"},
+        ],
+        "tree": {
+            "type": "leaf",
+            "size_ratio": 1.0,
+            "panels": [{"ref": "url:abc12345", "active": True}],
+        },
+    }
+    call_count = {"inspect": 0}
+
+    def fake_post(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
+        if op == "inspect":
+            call_count["inspect"] += 1
+            return 200, {"ok": True, "layout": before_layout if call_count["inspect"] == 1 else after_layout}
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(layout, "_post_layout", fake_post)
+
+    rc = layout.main(["open", target_url])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "opened" in err
+    assert "timeout" not in err
+
+
+def test_open_https_url_emits_noop_when_url_already_open(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When the requested ``https://`` URL is already open as an ad-hoc
+    URL panel, ``_predicate_url_panel_present`` matches on the pre-op
+    snapshot -- the CLI reports a no-op and does NOT post the op."""
+    monkeypatch.delenv(layout.ENV_NO_WAIT_STABLE, raising=False)
+
+    target_url = "https://example.com/"
+    layout_already_open = {
+        "active_panel": "p1",
+        "panels": [
+            {"ref": "url:abc12345", "panel_type": "iframe", "url": target_url, "title": "example"},
+        ],
+        "tree": {
+            "type": "leaf",
+            "size_ratio": 1.0,
+            "panels": [{"ref": "url:abc12345", "active": True}],
+        },
+    }
+    posted: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_post(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
+        if op == "inspect":
+            return 200, {"ok": True, "layout": layout_already_open}
+        posted.append((op, args))
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(layout, "_post_layout", fake_post)
+
+    rc = layout.main(["open", target_url])
+    assert rc == 0
+    # No-op: the mutation op was never POSTed (only inspect snapshots).
+    assert posted == []
+    err = capsys.readouterr().err
+    assert "no change" in err
+    assert target_url in err
+
+
+def test_split_https_url_uses_url_predicate_not_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``split https://...`` mirrors ``open`` -- the panel's actual ref is
+    ``url:<hash>``, not the literal URL, so the wait-stable predicate
+    must scan by ``url`` field."""
+    monkeypatch.delenv(layout.ENV_NO_WAIT_STABLE, raising=False)
+
+    target_url = "https://example.com/page"
+    before_layout = {"active_panel": None, "panels": [], "tree": None}
+    after_layout = {
+        "active_panel": "p1",
+        "panels": [
+            {"ref": "url:def67890", "panel_type": "iframe", "url": target_url, "title": "example"},
+        ],
+        "tree": {
+            "type": "leaf",
+            "size_ratio": 1.0,
+            "panels": [{"ref": "url:def67890", "active": True}],
+        },
+    }
+    call_count = {"inspect": 0}
+
+    def fake_post(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
+        if op == "inspect":
+            call_count["inspect"] += 1
+            return 200, {"ok": True, "layout": before_layout if call_count["inspect"] == 1 else after_layout}
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(layout, "_post_layout", fake_post)
+
+    rc = layout.main(["split", target_url, "--relative-to", "chat:alice"])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "split" in err
+    assert "timeout" not in err
+
+
 def test_move_within_self_uses_any_change_predicate_not_share_group(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -427,6 +427,48 @@ def _predicate_url(ref: str, url: str) -> _Predicate:
     return check
 
 
+def _find_iframe_panel_by_url(layout: dict[str, Any], url: str) -> dict[str, Any] | None:
+    """Return the first iframe panel whose ``url`` matches, or None.
+
+    Used by ``open`` / ``split`` against an external ``https://`` target:
+    the resulting panel's ref is ``url:<short_hash>``, not the literal
+    URL, so ``_predicate_ref_present`` can't match. Scan by ``url``
+    instead, restricted to ``panel_type == "iframe"`` so we don't
+    accidentally match an unrelated chat / subagent panel.
+    """
+    for panel in layout.get("panels", []) or []:
+        if panel.get("panel_type") == "iframe" and panel.get("url") == url:
+            return panel
+    return None
+
+
+def _predicate_url_panel_present(url: str) -> _Predicate:
+    """True when any iframe panel in the layout has ``url`` equal to ``url``.
+
+    Companion to ``_find_iframe_panel_by_url`` -- used as the wait-stable
+    predicate for ``open`` / ``split`` with an ``https://`` target, since
+    the frontend dedups on URL and the server-emitted ref is a
+    panel-id-derived ``url:<hash>`` rather than the literal URL.
+    """
+    return lambda layout: _find_iframe_panel_by_url(layout, url) is not None
+
+
+def _leaf_for_url(layout: dict[str, Any], url: str) -> dict[str, Any] | None:
+    """Locate the leaf containing the URL panel, for use in diff messages.
+
+    Resolves the URL to its ``url:<hash>`` ref via the flat panels list,
+    then defers to ``_find_leaf_for_ref``. Returns None if either lookup
+    misses.
+    """
+    panel = _find_iframe_panel_by_url(layout, url)
+    if panel is None:
+        return None
+    ref = panel.get("ref")
+    if not isinstance(ref, str):
+        return None
+    return _find_leaf_for_ref(layout, ref)
+
+
 def _predicate_share_group(ref: str, anchor_ref: str) -> _Predicate:
     """True when ``ref`` and ``anchor_ref`` are tab-mates in the same group.
 
@@ -829,6 +871,25 @@ def _cmd_open(args: argparse.Namespace) -> int:
     if ref == "service:terminal":
         return _run_terminal_creation_op("open", payload)
 
+    # ``https://`` URL targets create ad-hoc URL panels whose
+    # server-emitted ref is ``url:<short_hash(panel_id)>`` -- the literal
+    # URL never appears as a ref. Predicate by ``url`` field instead so
+    # wait-stable / no-op detection work for external-URL opens.
+    if ref.startswith("https://"):
+        return _run_mutating_op(
+            "open",
+            payload,
+            _predicate_url_panel_present(ref),
+            on_success=lambda b, a: (
+                f"opened {ref} (url panel) -- now in "
+                f"{_describe_group(_leaf_for_url(a, ref))}\n"
+            ),
+            on_noop=lambda b: (
+                f"no change: {ref} is already open in "
+                f"{_describe_group(_leaf_for_url(b, ref))}\n"
+            ),
+        )
+
     return _run_mutating_op(
         "open",
         payload,
@@ -882,6 +943,23 @@ def _cmd_split(args: argparse.Namespace) -> int:
     # if it's already open, ``split`` just focuses (no-op).
     if ref == "service:terminal":
         return _run_terminal_creation_op("split", payload)
+
+    # ``https://`` URL targets are predicate-by-URL for the same reason
+    # ``open`` is: the server emits ``url:<hash>``, not the literal URL.
+    if ref.startswith("https://"):
+        return _run_mutating_op(
+            "split",
+            payload,
+            _predicate_url_panel_present(ref),
+            on_success=lambda b, a: (
+                f"split: {ref} (url panel) now in "
+                f"{_describe_group(_leaf_for_url(a, ref))}\n"
+            ),
+            on_noop=lambda b: (
+                f"no change: {ref} is already open in "
+                f"{_describe_group(_leaf_for_url(b, ref))}\n"
+            ),
+        )
 
     return _run_mutating_op(
         "split",
