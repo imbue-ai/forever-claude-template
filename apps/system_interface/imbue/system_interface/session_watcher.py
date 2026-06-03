@@ -27,6 +27,29 @@ logger = _loguru_logger
 _BRIEF_WAIT_SECONDS = 0.5
 
 
+def read_complete_lines_since_offset(file_path: Path, byte_offset: int) -> tuple[int, list[str]]:
+    """Read newly-appended, newline-terminated lines from ``file_path`` starting at ``byte_offset``.
+
+    Returns the advanced byte offset and the decoded complete lines. Only complete,
+    newline-terminated lines are consumed: a trailing partial line means the file was
+    caught mid-write (Claude may split a single JSONL record across flushes that a poll
+    lands between), so its bytes are left unread and the returned offset stays aligned to
+    a line boundary -- the next read reparses the full line once it lands. When there are
+    no new bytes or no complete line yet, the offset is returned unchanged with an empty
+    list. Raises ``OSError`` if the file cannot be read.
+    """
+    with open(file_path, "rb") as f:
+        f.seek(byte_offset)
+        new_data = f.read()
+
+    last_newline = new_data.rfind(b"\n")
+    if last_newline == -1:
+        return byte_offset, []
+    complete_data = new_data[: last_newline + 1]
+    new_offset = byte_offset + len(complete_data)
+    return new_offset, complete_data.decode("utf-8", errors="replace").splitlines()
+
+
 class SessionFileState:
     """Tracks reading state for a single session JSONL file."""
 
@@ -416,27 +439,11 @@ class AgentSessionWatcher:
             if current_size <= state.byte_offset:
                 continue
 
-            # Read new bytes
             try:
-                with open(state.file_path, "rb") as f:
-                    f.seek(state.byte_offset)
-                    new_data = f.read()
+                new_offset, new_lines = read_complete_lines_since_offset(state.file_path, state.byte_offset)
             except OSError:
                 continue
-
-            # Only consume complete, newline-terminated lines. A trailing
-            # partial line means we caught the file mid-write (Claude may
-            # split a single JSONL record across multiple flushes that the
-            # poll picks up between). Leaving the partial bytes unread keeps
-            # byte_offset aligned with line boundaries so the next poll
-            # reparses the full line once it lands.
-            last_newline = new_data.rfind(b"\n")
-            if last_newline == -1:
-                continue
-            complete_data = new_data[: last_newline + 1]
-            state.byte_offset = state.byte_offset + len(complete_data)
-
-            new_lines = complete_data.decode("utf-8", errors="replace").splitlines()
+            state.byte_offset = new_offset
             if not new_lines:
                 continue
 

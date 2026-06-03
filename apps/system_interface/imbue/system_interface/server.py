@@ -40,7 +40,6 @@ from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
-from imbue.system_interface.events import BufferBehavior
 from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.layout_ops import allocate_terminal_panel_id
 from imbue.system_interface.layout_ops import is_broadcasting_op
@@ -94,8 +93,6 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     """
     event_queues = AgentEventQueues()
     application.state.event_queues = event_queues
-    application.state.watchers = {}
-    application.state.tickets_watchers = {}
 
     preconfigured_agent_manager: AgentManager | None = application.state.preconfigured_agent_manager
     if preconfigured_agent_manager is None:
@@ -153,11 +150,11 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
 
 def _stop_all_watchers(application: FastAPI) -> None:
-    watchers: dict[str, AgentSessionWatcher] = getattr(application.state, "watchers", {})
+    watchers: dict[str, AgentSessionWatcher] = application.state.watchers
     for watcher in watchers.values():
         watcher.stop()
     watchers.clear()
-    tickets_watchers: dict[str, AgentTicketsWatcher] = getattr(application.state, "tickets_watchers", {})
+    tickets_watchers: dict[str, AgentTicketsWatcher] = application.state.tickets_watchers
     for tickets_watcher in tickets_watchers.values():
         tickets_watcher.stop()
     tickets_watchers.clear()
@@ -184,8 +181,7 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
         # IGNORE: session events are persisted in JSONL and recoverable via
         # the REST /events endpoint; storing them in the in-memory replay
         # buffer would grow unboundedly for the agent's lifetime.
-        for event in events:
-            event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
+        event_queues.broadcast_all_ignored(agent_id, events)
         # Recompute the per-agent activity state from the full transcript.
         # The session watcher's incremental ``events`` argument only contains
         # the newest lines, but the activity tracker needs the full transcript
@@ -221,21 +217,16 @@ def _get_or_create_tickets_watcher(request: Request, agent_info: AgentInfo) -> A
     if agent_info.id in tickets_watchers:
         return tickets_watchers[agent_info.id]
 
-    def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
-        # The tickets watcher emits a single `step_enrichment` snapshot message
-        # whenever ticket state changes. IGNORE keeps it out of the in-memory
-        # replay buffer: it is a full snapshot recomputed on every GET /events
-        # (via get_enrichment()), so buffering successive snapshots would grow
-        # unboundedly for no benefit. The frontend replaces its enrichment
-        # table each time one arrives.
-        for event in events:
-            event_queues.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
-
+    # The tickets watcher emits a single `step_enrichment` snapshot message whenever
+    # ticket state changes. ``broadcast_all_ignored`` delivers it live without buffering:
+    # it is a full snapshot recomputed on every GET /events (via get_enrichment()), so
+    # buffering successive snapshots would grow unboundedly for no benefit. The frontend
+    # replaces its enrichment table each time one arrives.
     watcher = AgentTicketsWatcher(
         agent_id=agent_info.id,
         agent_name=agent_info.name,
         tickets_dir=read_tickets_dir_from_env_file(agent_info.agent_state_dir, Path(agent_info.work_dir)),
-        on_events=on_events,
+        on_events=event_queues.broadcast_all_ignored,
     )
     tickets_watchers[agent_info.id] = watcher
     watcher.start()
@@ -1005,6 +996,12 @@ def create_application(
     # subprocess survives between the /start and /submit-code requests.
     application.state.claude_auth_service = claude_auth_service or ClaudeAuthService()
     application.state.welcome_resender = welcome_resender or WelcomeResender()
+    # Per-agent watcher registries. Seeded here (not only in ``_lifespan``) so the
+    # attributes always exist on ``app.state`` -- ``_stop_all_watchers`` runs in test
+    # paths that construct the app without driving the lifespan, and would otherwise
+    # have to defensively probe for these attributes.
+    application.state.watchers = {}
+    application.state.tickets_watchers = {}
 
     plugin_manager = get_plugin_manager()
     plugin_manager.hook.endpoint(app=application)

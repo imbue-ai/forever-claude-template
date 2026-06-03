@@ -33,12 +33,7 @@ def test_prevent_while_true() -> None:
 
 def test_prevent_time_sleep() -> None:
     # +1 for service_dispatcher_test._wait_for_port's TCP-ready poll loop.
-    # +3 for session_watcher_test.test_watcher_does_not_lose_events_on_partial_writes:
-    # the test must let the watchdog observer thread initialize, sleep between two
-    # halves of a partial-flushed JSONL line, and poll for delivery. There is no
-    # observable signal to await -- the bug being verified is that the poll silently
-    # drops bytes -- so real wall-clock waits are the only way to drive the scenario.
-    rc.check_time_sleep(_DIR, snapshot(10))
+    rc.check_time_sleep(_DIR, snapshot(7))
 
 
 def test_prevent_global_keyword() -> None:
@@ -98,11 +93,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    # Two getattrs on FastAPI app.state for the per-agent watchers dicts:
-    # one for session watchers, one for tickets watchers. Both guard
-    # against test paths where _lifespan() doesn't run; direct attribute
-    # access would raise AttributeError on app.state in those cases.
-    rc.check_getattr(_DIR, snapshot(2))
+    rc.check_getattr(_DIR, snapshot(0))
 
 
 def test_prevent_setattr() -> None:
@@ -271,11 +262,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    # +1 for the on_events callback nested inside _get_or_create_tickets_watcher.
-    # The closure captures event_queues from the outer scope; this matches the
-    # existing pattern used by _get_or_create_watcher (which is one of the
-    # original 3).
-    rc.check_inline_functions(_DIR, snapshot(4))
+    rc.check_inline_functions(_DIR, snapshot(1))
 
 
 def test_prevent_underscore_imports() -> None:
