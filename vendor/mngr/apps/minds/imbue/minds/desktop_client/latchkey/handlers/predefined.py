@@ -205,14 +205,43 @@ def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
     No catalog entry means we have no permissions to offer the user; the
     only sensible action is to send the request straight to deny.
     """
+    # Rendered inside the desktop client's transparent modal overlay (same as
+    # the catalog-backed dialog), so it uses a dim backdrop + centered card and
+    # a JS-driven Deny that closes the modal rather than a raw form post (which
+    # would render the deny endpoint's JSON response inside the overlay).
+    escaped_scope = html_module.escape(scope)
+    escaped_request_id = html_module.escape(request_id, quote=True)
     body = (
-        "<!DOCTYPE html><html><body><h1>Unknown scope</h1>"
-        f"<p>The agent requested permissions under scope <code>{html_module.escape(scope)}</code>, "
+        '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        "<title>Unknown scope</title>"
+        "<style>body{margin:0;font-family:-apple-system,sans-serif;background:transparent;}"
+        ".backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;"
+        "align-items:flex-start;justify-content:center;overflow-y:auto;padding:24px;}"
+        ".dialog{width:100%;max-width:640px;margin:auto;background:#fff;border:1px solid #e4e4e7;"
+        "border-radius:16px;box-shadow:0 10px 25px rgba(0,0,0,0.15);padding:28px;}"
+        "h1{font-size:22px;margin:0 0 12px;color:#18181b;}p{color:#3f3f46;line-height:1.5;}"
+        "code{background:#f4f4f5;padding:2px 5px;border-radius:4px;}"
+        ".actions{display:flex;justify-content:flex-end;margin-top:20px;}"
+        "button{padding:8px 14px;border-radius:6px;font-size:14px;font-weight:500;cursor:pointer;"
+        "background:#fef2f2;color:#dc2626;border:1px solid #fecaca;}button:hover{background:#fee2e2;}"
+        "</style></head><body>"
+        '<div class="backdrop" onclick="if(event.target.classList.contains(\'backdrop\'))closeDialog()">'
+        '<div class="dialog"><h1>Unknown scope</h1>'
+        f"<p>The agent requested permissions under scope <code>{escaped_scope}</code>, "
         "but this scope is not in the latchkey gateway's permission catalog. The request can only "
         "be denied from here.</p>"
-        f'<form method="POST" action="/requests/{html_module.escape(request_id, quote=True)}/deny">'
-        '<button type="submit">Deny</button></form>'
-        "</body></html>"
+        '<div class="actions"><button type="button" onclick="denyRequest()">Deny</button></div>'
+        "</div></div>"
+        "<script>"
+        "function closeDialog(){"
+        "if(window.minds&&window.minds.closeModal){window.minds.closeModal();}"
+        'else{window.location.href="/";}}'
+        "function denyRequest(){"
+        f'fetch("/requests/{escaped_request_id}/deny",'
+        '{method:"POST",credentials:"same-origin",keepalive:true}).catch(function(){});'
+        "closeDialog();}"
+        'document.addEventListener("keydown",function(e){if(e.key==="Escape")closeDialog();});'
+        "</script></body></html>"
     )
     return HTMLResponse(content=body, status_code=200)
 
@@ -352,7 +381,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 response_event = self._write_response_and_notify(
                     request_event_id=request_event_id,
                     agent_id=agent_id,
-                    service_info=service_info,
+                    scope=service_info.scope,
                     status=RequestStatus.DENIED,
                     message=message,
                 )
@@ -376,7 +405,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=agent_id,
-            service_info=service_info,
+            scope=service_info.scope,
             status=RequestStatus.GRANTED,
             message=granted_message,
         )
@@ -391,14 +420,22 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
-        service_info: ServicePermissionInfo,
+        scope: str,
+        display_name: str,
     ) -> tuple[str, RequestResponseEvent]:
-        """Append a DENIED response and notify the agent. Returns ``(message, response_event)``."""
-        message = _format_denied_message(service_info.display_name)
+        """Append a DENIED response and notify the agent. Returns ``(message, response_event)``.
+
+        ``scope`` is the Detent scope schema the request was filed under;
+        it goes into the response event for informational purposes (the
+        inbox joins responses to requests on ``request_event_id``).
+        ``display_name`` is the human-readable service name shown in the
+        agent-facing message.
+        """
+        message = _format_denied_message(display_name)
         response_event = self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=agent_id,
-            service_info=service_info,
+            scope=scope,
             status=RequestStatus.DENIED,
             message=message,
         )
@@ -559,10 +596,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             return _json_error("Unsupported request type", status_code=500)
         service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
-            return _json_error(
-                f"Scope '{req_event.scope}' is not in the gateway catalog",
-                status_code=400,
-            )
+            # Even invalid permission requests can be denied.
+            display_name = req_event.scope
+        else:
+            display_name = service_info.display_name
 
         request_event_id = str(req_event.event_id)
         parsed_agent_id = AgentId(req_event.agent_id)
@@ -571,7 +608,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             lambda: self.deny(
                 request_event_id=request_event_id,
                 agent_id=parsed_agent_id,
-                service_info=service_info,
+                scope=req_event.scope,
+                display_name=display_name,
             ),
         )
         self._mirror_response_into_inbox(request, response_event)
@@ -655,7 +693,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         self,
         request_event_id: str,
         agent_id: AgentId,
-        service_info: ServicePermissionInfo,
+        scope: str,
         status: RequestStatus,
         message: str,
     ) -> RequestResponseEvent:
@@ -689,7 +727,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             status=status,
             agent_id=str(agent_id),
             request_type=str(RequestType.LATCHKEY_PERMISSION),
-            scope=service_info.scope,
+            scope=scope,
         )
         append_response_event(self.data_dir, response_event)
         self.mngr_message_sender.send(agent_id, message)
@@ -706,7 +744,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         is just so the requests panel doesn't show the resolved request as
         still pending until the next desktop-client restart.
 
-        Also wakes the chrome SSE so the new ``request_count`` is pushed
+        Also wakes the chrome SSE so the new ``requests`` payload is pushed
         right away -- otherwise the panel would keep showing the resolved
         card for up to 30s while the SSE poll waits for its next tick.
         """

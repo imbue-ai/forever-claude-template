@@ -1,4 +1,5 @@
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 
@@ -90,3 +91,49 @@ class DestroyAgentResponse(FrozenModel):
     """Response from the agent destroy endpoint."""
 
     status: str = Field(description="Result of the destroy operation")
+
+
+class StartAgentResponse(FrozenModel):
+    """Response from the agent start endpoint."""
+
+    status: str = Field(description="Result of the start operation")
+
+
+class ClaudeAuthStatusResponse(FrozenModel):
+    """Response from /api/claude-auth/status."""
+
+    logged_in: bool = Field(description="Whether claude is currently authenticated")
+    auth_method: str | None = Field(default=None, description="e.g. 'oauth', 'api_key'")
+    api_provider: str | None = Field(default=None, description="e.g. 'anthropic', 'claudeai'")
+    email: str | None = Field(default=None, description="The authenticated user's email, if any")
+    org_id: str | None = Field(default=None, description="Anthropic organization ID, if any")
+    org_name: str | None = Field(default=None, description="Anthropic organization name, if any")
+    subscription_type: str | None = Field(
+        default=None, description="Subscription tier (e.g. 'Max'); absent for Console accounts"
+    )
+
+
+class ClaudeOAuthStartRequest(FrozenModel):
+    """Request body for POST /api/claude-auth/start."""
+
+    provider: str = Field(description="Either 'claudeai' (subscription) or 'console'")
+
+
+class ClaudeOAuthStartResponse(FrozenModel):
+    """Response from POST /api/claude-auth/start."""
+
+    session_id: str = Field(description="Opaque token identifying the in-flight OAuth session")
+    oauth_url: str = Field(description="URL the user opens to authorize the login")
+
+
+class ClaudeOAuthSubmitCodeRequest(FrozenModel):
+    """Request body for POST /api/claude-auth/submit-code."""
+
+    session_id: str = Field(description="session_id returned by /start")
+    code: str = Field(description="The CODE#STATE the user pasted from the browser")
+
+
+class ClaudeAuthApiKeyRequest(FrozenModel):
+    """Request body for POST /api/claude-auth/submit-api-key."""
+
+    api_key: SecretStr = Field(description="A raw `sk-ant-...` API key")

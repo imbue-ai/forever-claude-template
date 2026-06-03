@@ -19,6 +19,49 @@ export function isCollapsibleUserMessage(content: string): { label: string } | n
   return null;
 }
 
+/**
+ * Hide auth-error turns from the pre-login prefix once login has recovered.
+ *
+ * A fresh chat with no Claude credentials produces a run of "Not logged in"
+ * assistant messages before the user authenticates. Once login succeeds and
+ * /welcome is resent, the first visible turn should be the friendly greeting,
+ * not the prior failed attempts.
+ *
+ * Restricted to the PREFIX of the transcript (turns that occurred before any
+ * successful assistant message). A mid-session token expiration -- where the
+ * user has already had successful exchanges before the auth error -- is left
+ * intact, since the user may want to scroll back to see what they were doing.
+ */
+export function computeAuthErrorHiddenEventIds(events: TranscriptEvent[]): Set<string> {
+  const hidden = new Set<string>();
+
+  let firstSuccessIdx = -1;
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    if (ev.type === "assistant_message" && ev.is_auth_error !== true) {
+      firstSuccessIdx = i;
+      break;
+    }
+  }
+  if (firstSuccessIdx === -1) return hidden;
+
+  for (let i = 0; i < firstSuccessIdx; i++) {
+    const ev = events[i];
+    if (ev.type !== "assistant_message" || ev.is_auth_error !== true) continue;
+    hidden.add(ev.event_id);
+    for (let j = i - 1; j >= 0; j--) {
+      const prev = events[j];
+      if (prev.type === "user_message") {
+        hidden.add(prev.event_id);
+        break;
+      }
+      if (prev.type === "assistant_message") break;
+    }
+  }
+
+  return hidden;
+}
+
 export function isHiddenUserMessage(content: string): boolean {
   // The minds desktop client seeds every new agent with "/welcome" as its
   // initial message so the welcome skill can produce a friendly greeting.
@@ -102,6 +145,15 @@ export function countResolvedToolResults(
   return count;
 }
 
+export function countSubagentCards(toolCalls: ToolCall[] | undefined): number {
+  if (!toolCalls) return 0;
+  let count = 0;
+  for (const tc of toolCalls) {
+    if (tc.subagent_metadata) count++;
+  }
+  return count;
+}
+
 export function StableAssistantMessage(): m.Component<{
   event: TranscriptEvent;
   toolResults: Map<string, TranscriptEvent>;
@@ -109,11 +161,21 @@ export function StableAssistantMessage(): m.Component<{
 }> {
   let renderedEventId: string | null = null;
   let renderedToolResultCount = 0;
+  let renderedSubagentCardCount = 0;
   return {
     onbeforeupdate(vnode) {
       const { event, toolResults } = vnode.attrs;
       const currentToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
-      return event.event_id !== renderedEventId || currentToolResultCount !== renderedToolResultCount;
+      // A subagent card can appear after the message was first rendered: the
+      // backend re-broadcasts the parent with subagent_metadata once a running
+      // subagent's linkage lands. Repaint when that count grows so the plain
+      // tool-call block upgrades to the rich card.
+      const currentSubagentCardCount = countSubagentCards(event.tool_calls);
+      return (
+        event.event_id !== renderedEventId ||
+        currentToolResultCount !== renderedToolResultCount ||
+        currentSubagentCardCount !== renderedSubagentCardCount
+      );
     },
     view(vnode) {
       const event = vnode.attrs.event;
@@ -121,6 +183,7 @@ export function StableAssistantMessage(): m.Component<{
       const agentId = vnode.attrs.agentId;
       renderedEventId = event.event_id;
       renderedToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
+      renderedSubagentCardCount = countSubagentCards(event.tool_calls);
 
       return m("div", renderAssistantMessageChildren(event, toolResults, agentId));
     },
@@ -145,41 +208,141 @@ export function renderAssistantMessage(
 
 export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode {
   const metadata = toolCall.subagent_metadata;
-  if (!metadata) {
-    return renderToolCallBlock(toolCall, null);
-  }
-
-  const description = metadata.description || "Sub-agent";
-  const agentType = metadata.agent_type || "";
+  // Description and agent type come from the tool call itself, so the card renders fully
+  // even before the subagent session is linked; fall back to metadata if the tool input
+  // fields are absent (older events).
+  const description = toolCall.description || metadata?.description || "Sub-agent";
+  const agentType = toolCall.subagent_type || metadata?.agent_type || "";
+  const sessionId = metadata?.session_id;
 
   return m("div", { class: "subagent-card" }, [
     m("div", { class: "subagent-card-header" }, [
       m("span", { class: "subagent-card-description" }, description),
       agentType ? m("span", { class: "subagent-card-type-badge" }, agentType) : null,
     ]),
+    // The click-through needs the subagent session_id, which only arrives once the call is
+    // linked. Until then show a non-clickable "running" state so the card is still rich.
+    sessionId
+      ? m(
+          "a",
+          {
+            class: "subagent-card-link",
+            href: "javascript:void(0)",
+            onclick(e: Event) {
+              e.preventDefault();
+              e.stopPropagation();
+              openSubagentTab(agentId, sessionId, description);
+            },
+          },
+          "View conversation",
+        )
+      : m("span", { class: "subagent-card-link subagent-card-link--pending" }, "Running…"),
+  ]);
+}
+
+/**
+ * Detect a *successful* latchkey permission-request creation call and pull the
+ * resulting request id out of the tool result.
+ *
+ * An agent asks the user for permission by POSTing to the reserved
+ * `latchkey-self.invalid/permission-requests` host (see the latchkey skill).
+ * The created request's JSON -- including a `request_id` -- is echoed back on
+ * stdout, so the tool result output contains a `"request_id": "..."` field.
+ *
+ * Returns the request id when the tool call is such a creation POST and it
+ * succeeded; otherwise null (in which case the caller renders the raw tool
+ * block, so failures/errors stay visible and debuggable).
+ */
+export function parsePermissionRequest(
+  toolCall: ToolCall,
+  toolResult: TranscriptEvent | null,
+): { requestId: string } | null {
+  // The command is JSON-encoded inside input_preview; the reserved host is
+  // short enough to survive the 200-char preview truncation.
+  const input = toolCall.input_preview || "";
+  if (!input.includes("latchkey-self.invalid/permission-requests")) {
+    return null;
+  }
+  // Only a creation (POST) yields a request_id; reads of existing permissions
+  // hit different endpoints and are excluded by the host check above anyway.
+  if (!/-X\s*POST|--request\s*POST/i.test(input)) {
+    return null;
+  }
+  if (!toolResult || toolResult.is_error === true) {
+    return null;
+  }
+  const output = toolResult.output || "";
+  const match = output.match(/"request_id"\s*:\s*"([^"]+)"/);
+  if (!match) {
+    return null;
+  }
+  return { requestId: match[1] };
+}
+
+/**
+ * Ask the outer Minds app to open its permission-request modal. The chat UI
+ * runs inside an iframe, so we hand the request id to the parent via
+ * postMessage rather than rendering the modal ourselves.
+ */
+export function openPermissionRequest(requestId: string): void {
+  window.parent.postMessage({ type: "minds:open-request-modal", requestId }, "*");
+}
+
+/** Small lock glyph for the permission-request footer button. */
+function renderLockIcon(): m.Vnode {
+  return m(
+    "svg",
+    {
+      class: "permission-request-icon",
+      width: "14",
+      height: "14",
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      "stroke-width": "2",
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
+      "aria-hidden": "true",
+    },
+    [m("rect", { x: "3", y: "11", width: "18", height: "11", rx: "2" }), m("path", { d: "M7 11V7a5 5 0 0 1 10 0v4" })],
+  );
+}
+
+/**
+ * Footer rendered inside a permission-request tool block: an outlined button
+ * that opens the modal. Living inside the block (rather than alongside it)
+ * ties the affordance visually to the request that created it.
+ */
+export function renderPermissionRequestFooter(requestId: string): m.Vnode {
+  return m("div", { class: "tool-call-permission-footer" }, [
     m(
-      "a",
+      "button",
       {
-        class: "subagent-card-link",
-        href: "javascript:void(0)",
+        class: "permission-request-button",
+        type: "button",
         onclick(e: Event) {
           e.preventDefault();
           e.stopPropagation();
-          openSubagentTab(agentId, metadata.session_id, description);
+          openPermissionRequest(requestId);
         },
       },
-      "View conversation",
+      [renderLockIcon(), m("span", "Permission request")],
     ),
   ]);
 }
 
-export function renderToolCallBlock(toolCall: ToolCall, toolResult: TranscriptEvent | null): m.Vnode {
+export function renderToolCallBlock(
+  toolCall: ToolCall,
+  toolResult: TranscriptEvent | null,
+  footer: m.Vnode | null = null,
+): m.Vnode {
   const headerText = `Tool: ${toolCall.tool_name}`;
   const inputText = toolCall.input_preview || "";
   const outputText = toolResult?.output || "";
   const isError = toolResult?.is_error === true;
+  const blockClass = footer ? "tool-call-block tool-call-block--permission-request" : "tool-call-block";
 
-  return m("div", { class: "tool-call-block" }, [
+  return m("div", { class: blockClass }, [
     m(
       "div",
       {
@@ -201,6 +364,7 @@ export function renderToolCallBlock(toolCall: ToolCall, toolResult: TranscriptEv
           ])
         : null,
     ]),
+    footer,
   ]);
 }
 
@@ -221,12 +385,21 @@ export function renderAssistantMessageChildren(
     children.push(m(MarkdownContent, { content: textContent }));
   }
   for (const toolCall of toolCalls) {
-    if (toolCall.tool_name === "Agent" && toolCall.subagent_metadata) {
+    // Render the rich card as soon as we have the Agent call's description (from the tool
+    // input), even before its subagent session is linked; the card shows a non-clickable
+    // "Running…" state until subagent_metadata.session_id arrives.
+    if (toolCall.tool_name === "Agent" && (toolCall.subagent_metadata || toolCall.description)) {
       children.push(renderSubagentCard(toolCall, agentId));
-    } else {
-      const result = toolResults.get(toolCall.tool_call_id) ?? null;
-      children.push(renderToolCallBlock(toolCall, result));
+      continue;
     }
+    const result = toolResults.get(toolCall.tool_call_id) ?? null;
+    // For a successful permission request, render the button as a footer inside
+    // the tool block so the affordance is visually bound to the request. The
+    // block stays in place (the footer is appended within it once the result
+    // arrives), so the layout doesn't jump.
+    const permissionRequest = parsePermissionRequest(toolCall, result);
+    const footer = permissionRequest ? renderPermissionRequestFooter(permissionRequest.requestId) : null;
+    children.push(renderToolCallBlock(toolCall, result, footer));
   }
   return children;
 }

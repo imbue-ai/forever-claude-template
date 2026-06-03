@@ -505,3 +505,120 @@ def test_initialize_workspace_main_branch_is_idempotent_on_clean_main(
     _initialize_workspace_main_branch()
     branch = _git_in(work_dir, "branch", "--show-current").stdout.strip()
     assert branch == "main"
+
+
+# --- detect_snapshot_settings / init_backup_config_with_settings ---
+
+
+import tomllib as _tomllib
+
+import tomlkit
+from host_backup.config import (
+    SnapshotMethod,
+    SnapshotSettings,
+    render_default_backup_toml,
+)
+
+from bootstrap.manager import (
+    detect_snapshot_settings,
+    init_backup_config_with_settings,
+)
+
+
+def test_detect_snapshot_settings_picks_outer_trigger_when_trigger_dir_present(
+    tmp_path: Path,
+) -> None:
+    """If trigger_dir is a real dir on disk, bootstrap selects OUTER_TRIGGER."""
+    trigger_dir = tmp_path / "mngr-snapshot"
+    trigger_dir.mkdir()
+    settings = detect_snapshot_settings(
+        trigger_dir=trigger_dir,
+        host_dir=tmp_path / "mngr",
+    )
+    assert settings.method == SnapshotMethod.OUTER_TRIGGER
+    assert settings.trigger_dir == trigger_dir
+
+
+def test_detect_snapshot_settings_falls_back_to_direct_when_no_btrfs(
+    tmp_path: Path,
+) -> None:
+    """No trigger dir + non-btrfs host_dir => DIRECT."""
+    host_dir = tmp_path / "mngr"
+    host_dir.mkdir()
+    settings = detect_snapshot_settings(
+        trigger_dir=tmp_path / "absent-trigger",
+        host_dir=host_dir,
+    )
+    assert settings.method == SnapshotMethod.DIRECT
+    assert settings.snapshot_read_path == host_dir
+
+
+def test_init_backup_config_writes_defaults_when_files_absent(tmp_path: Path) -> None:
+    """First boot: backup.toml + restic.env are rendered from scratch."""
+    snapshot = SnapshotSettings(
+        method=SnapshotMethod.DIRECT, snapshot_read_path=Path("/mngr")
+    )
+    backup_toml_path = tmp_path / "backup.toml"
+    restic_env_path = tmp_path / "secrets" / "restic.env"
+    init_backup_config_with_settings(
+        snapshot,
+        backup_toml_path=backup_toml_path,
+        restic_env_path=restic_env_path,
+    )
+    assert backup_toml_path.exists()
+    assert restic_env_path.exists()
+    parsed = _tomllib.loads(backup_toml_path.read_text())
+    assert parsed["snapshot"]["method"] == SnapshotMethod.DIRECT.value
+
+
+def test_init_backup_config_preserves_user_fields_on_reboot(tmp_path: Path) -> None:
+    """A re-boot with a different detected method preserves user retention edits."""
+    backup_toml_path = tmp_path / "backup.toml"
+    restic_env_path = tmp_path / "secrets" / "restic.env"
+
+    # First boot: write a default toml then user edits retention.
+    backup_toml_path.write_text(
+        render_default_backup_toml(
+            SnapshotSettings(
+                method=SnapshotMethod.DIRECT, snapshot_read_path=Path("/mngr")
+            )
+        )
+    )
+    doc = tomlkit.parse(backup_toml_path.read_text())
+    doc["retention"]["keep_hourly"] = 99
+    backup_toml_path.write_text(tomlkit.dumps(doc))
+
+    # Second boot: detector now says OUTER_TRIGGER.
+    init_backup_config_with_settings(
+        SnapshotSettings(
+            method=SnapshotMethod.OUTER_TRIGGER,
+            btrfs_mount_path=Path("/mngr-btrfs"),
+            host_subvolume_path=Path("/mngr-btrfs/abcdef"),
+            snapshot_current_path=Path("/mngr-btrfs/snapshots/current"),
+            snapshot_read_path=Path("/mngr-snapshots/current"),
+            trigger_dir=Path("/mngr-snapshot"),
+        ),
+        backup_toml_path=backup_toml_path,
+        restic_env_path=restic_env_path,
+    )
+    parsed = _tomllib.loads(backup_toml_path.read_text())
+    assert parsed["snapshot"]["method"] == SnapshotMethod.OUTER_TRIGGER.value
+    assert parsed["retention"]["keep_hourly"] == 99
+
+
+def test_init_backup_config_is_noop_when_restic_env_already_exists(
+    tmp_path: Path,
+) -> None:
+    """If the user already populated restic.env, bootstrap must not overwrite it."""
+    backup_toml_path = tmp_path / "backup.toml"
+    restic_env_path = tmp_path / "secrets" / "restic.env"
+    restic_env_path.parent.mkdir(parents=True)
+    restic_env_path.write_text("RESTIC_PASSWORD=user-set\n")
+    init_backup_config_with_settings(
+        SnapshotSettings(
+            method=SnapshotMethod.DIRECT, snapshot_read_path=Path("/mngr")
+        ),
+        backup_toml_path=backup_toml_path,
+        restic_env_path=restic_env_path,
+    )
+    assert restic_env_path.read_text() == "RESTIC_PASSWORD=user-set\n"

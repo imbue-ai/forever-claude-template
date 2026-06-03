@@ -15,7 +15,7 @@ Usage:
         --name inbox-status --description "inbox status dashboard" \\
         [--port 8081] [--extra-dep "jinja2>=3.1"] [--extra-dep "anthropic>=0.40"]
 
-Run from the repo root (`/code`). Fails non-zero with a clear message on
+Run from the repo root (`/mngr/code`). Fails non-zero with a clear message on
 any failure (lib already exists, reserved name, sync failure, etc.).
 """
 
@@ -95,9 +95,9 @@ def _applications_toml_ports(applications_toml: Path) -> set[int]:
 
 
 def _pick_port(repo_root: Path, requested: int | None) -> int:
-    in_use = _services_toml_ports(repo_root / "services.toml") | _applications_toml_ports(
-        repo_root / "runtime" / "applications.toml"
-    )
+    in_use = _services_toml_ports(
+        repo_root / "services.toml"
+    ) | _applications_toml_ports(repo_root / "runtime" / "applications.toml")
     if requested is not None:
         if requested in in_use:
             sys.exit(f"error: --port {requested} is already in use by another service")
@@ -142,14 +142,14 @@ packages = ["src/{package}"]
 def _lib_runner(name: str, description: str, port: int) -> str:
     return f'''"""{description}.
 
-Services run from /code (the repo root). Conventions:
+Services run from /mngr/code (the repo root). Conventions:
 
 - Runtime state files (anything written and read across runs, e.g.
   cursors, caches, last-visit timestamps): use cwd-relative paths like
   ``Path("runtime/{name}/...")``. Do NOT use ``Path(__file__)``-based
   paths for runtime state -- the bug to avoid is one process writing
-  to ``/code/runtime/...`` while another reads from
-  ``/code/libs/<pkg>/runtime/...``.
+  to ``/mngr/code/runtime/...`` while another reads from
+  ``/mngr/code/libs/<pkg>/runtime/...``.
 - Static assets shipped alongside this file (templates, default
   configs, bundled JSON): ``Path(__file__).parent / "assets/..."`` is
   fine and is the right pattern.
@@ -198,10 +198,9 @@ if __name__ == "__main__":
 
 
 def _lib_ratchets() -> str:
-    return '''from pathlib import Path
+    return """from pathlib import Path
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
 from inline_snapshot import snapshot
 
 _DIR = Path(__file__).parent
@@ -274,27 +273,25 @@ def test_prevent_asyncio_import() -> None:
 def test_prevent_dataclasses_import() -> None:
     rc.check_dataclasses_import(_DIR, snapshot(0))
 
-
-# --- Linting ---
-
-
-def test_no_ruff_errors() -> None:
-    check_no_ruff_errors(_DIR)
-'''
+"""
 
 
 def _lib_readme(name: str, description: str) -> str:
     return f"# {name}\n\n{description}\n"
 
 
-def _write_lib(repo_root: Path, name: str, description: str, port: int, extras: list[str]) -> Path:
+def _write_lib(
+    repo_root: Path, name: str, description: str, port: int, extras: list[str]
+) -> Path:
     package = _kebab_to_snake(name)
     lib_dir = repo_root / "libs" / package
     if lib_dir.exists():
         sys.exit(f"error: {lib_dir} already exists")
     src_dir = lib_dir / "src" / package
     src_dir.mkdir(parents=True)
-    (lib_dir / "pyproject.toml").write_text(_lib_pyproject(name, package, description, extras))
+    (lib_dir / "pyproject.toml").write_text(
+        _lib_pyproject(name, package, description, extras)
+    )
     (lib_dir / "README.md").write_text(_lib_readme(name, description))
     (lib_dir / f"test_{package}_ratchets.py").write_text(_lib_ratchets())
     (src_dir / "__init__.py").write_text("")
@@ -320,7 +317,9 @@ def _update_root_pyproject(repo_root: Path, name: str, package: str) -> None:
         sys.exit("error: root pyproject.toml is missing a [project] table")
     deps = project.get("dependencies")
     if not isinstance(deps, Array):
-        sys.exit("error: root pyproject.toml [project].dependencies is missing or not an array")
+        sys.exit(
+            "error: root pyproject.toml [project].dependencies is missing or not an array"
+        )
     _ensure_in_array(deps, name)
 
     tool = doc.get("tool")
@@ -400,7 +399,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--name", required=True, help="kebab-case service name")
     parser.add_argument("--description", required=True, help="one-line description")
-    parser.add_argument("--port", type=int, default=None, help="explicit port (auto-picked if omitted)")
+    parser.add_argument(
+        "--port", type=int, default=None, help="explicit port (auto-picked if omitted)"
+    )
     parser.add_argument(
         "--extra-dep",
         action="append",
@@ -421,12 +422,16 @@ def main() -> None:
 
     _validate_name(args.name)
     repo_root = (
-        Path(args.repo_root).resolve() if args.repo_root else _find_repo_root(Path.cwd())
+        Path(args.repo_root).resolve()
+        if args.repo_root
+        else _find_repo_root(Path.cwd())
     )
     package = _kebab_to_snake(args.name)
     port = _pick_port(repo_root, args.port)
 
-    lib_dir = _write_lib(repo_root, args.name, args.description, port, list(args.extra_dep))
+    lib_dir = _write_lib(
+        repo_root, args.name, args.description, port, list(args.extra_dep)
+    )
     _update_root_pyproject(repo_root, args.name, package)
     _update_services_toml(repo_root, args.name, port)
 

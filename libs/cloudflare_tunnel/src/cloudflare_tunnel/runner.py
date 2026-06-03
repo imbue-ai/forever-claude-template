@@ -1,7 +1,13 @@
 """Cloudflare tunnel runner service.
 
-Watches runtime/secrets for CLOUDFLARE_TUNNEL_TOKEN. When a token appears
-or changes, starts (or restarts) ``cloudflared tunnel run --token <token>``.
+Watches ``runtime/secrets/cloudflare_tunnel.env`` for CLOUDFLARE_TUNNEL_TOKEN.
+When a token appears or changes, starts (or restarts) ``cloudflared tunnel run
+--token <token>``; when the file is removed, stops cloudflared.
+
+``runtime/secrets/`` is a directory of per-secret ``*.env`` files (this token,
+``restic.env`` for backups, ``telegram.env`` for the bot, ...). Each writer
+owns its own file so they never clobber one another -- the historical
+single-file ``runtime/secrets`` is gone.
 
 Uses both inotify (when available) and mtime polling (10-second fallback)
 to detect changes robustly. All cloudflared output is forwarded immediately
@@ -15,7 +21,9 @@ import sys
 import time
 from pathlib import Path
 
-SECRETS_FILE = Path("runtime/secrets")
+# Directory of per-secret env files; we own only cloudflare_tunnel.env in it.
+SECRETS_DIR = Path("runtime/secrets")
+TOKEN_FILE = SECRETS_DIR / "cloudflare_tunnel.env"
 POLL_INTERVAL_SECONDS = 10
 TOKEN_PATTERN = re.compile(
     r"""^export\s+CLOUDFLARE_TUNNEL_TOKEN=["']?([^"'\s]+)["']?\s*$""", re.MULTILINE
@@ -23,7 +31,7 @@ TOKEN_PATTERN = re.compile(
 
 
 def _read_token(path: Path) -> str | None:
-    """Extract CLOUDFLARE_TUNNEL_TOKEN from the secrets file."""
+    """Extract CLOUDFLARE_TUNNEL_TOKEN from the token file."""
     if not path.exists():
         return None
     text = path.read_text()
@@ -34,9 +42,12 @@ def _read_token(path: Path) -> str | None:
 
 
 def _try_setup_inotify(path: Path) -> object | None:
-    """Try to set up inotify watching on the secrets file's parent directory.
+    """Try to set up inotify watching on the token file's parent directory.
 
     Returns an inotifyx file descriptor (int) or None if inotify is not available.
+    Watches creates/modifies/moves *and* deletes/moves-away so the runner wakes
+    promptly when the token file is removed (tunnel torn down), not just when it
+    appears or changes.
     """
     try:
         import inotifyx  # type: ignore[import-untyped]
@@ -47,7 +58,11 @@ def _try_setup_inotify(path: Path) -> object | None:
         inotifyx.add_watch(
             fd,
             str(parent),
-            inotifyx.IN_MODIFY | inotifyx.IN_CREATE | inotifyx.IN_MOVED_TO,
+            inotifyx.IN_MODIFY
+            | inotifyx.IN_CREATE
+            | inotifyx.IN_MOVED_TO
+            | inotifyx.IN_DELETE
+            | inotifyx.IN_MOVED_FROM,
         )
         return fd
     except (ImportError, OSError):
@@ -100,14 +115,14 @@ def _stop_cloudflared(process: subprocess.Popen[bytes] | None) -> None:
 def main() -> None:
     """Main loop: watch for token changes and manage cloudflared lifecycle."""
     print(
-        "[cloudflare-tunnel] Starting tunnel runner, watching runtime/secrets",
+        f"[cloudflare-tunnel] Starting tunnel runner, watching {TOKEN_FILE}",
         file=sys.stderr,
         flush=True,
     )
 
-    SECRETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    inotify_fd = _try_setup_inotify(SECRETS_FILE)
+    inotify_fd = _try_setup_inotify(TOKEN_FILE)
     if inotify_fd is not None:
         print(
             "[cloudflare-tunnel] Using inotify for file watching",
@@ -135,13 +150,13 @@ def main() -> None:
     while True:
         # Check for token changes
         try:
-            new_mtime = SECRETS_FILE.stat().st_mtime if SECRETS_FILE.exists() else 0.0
+            new_mtime = TOKEN_FILE.stat().st_mtime if TOKEN_FILE.exists() else 0.0
         except OSError:
             new_mtime = 0.0
 
         if new_mtime != last_mtime:
             last_mtime = new_mtime
-            new_token = _read_token(SECRETS_FILE)
+            new_token = _read_token(TOKEN_FILE)
 
             if new_token != current_token:
                 if new_token is not None:
