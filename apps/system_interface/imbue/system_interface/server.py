@@ -38,6 +38,13 @@ from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.events import BufferBehavior
+from imbue.system_interface.layout_ops import LayoutMutex
+from imbue.system_interface.layout_ops import allocate_terminal_panel_id
+from imbue.system_interface.layout_ops import is_broadcasting_op
+from imbue.system_interface.layout_ops import is_known_op
+from imbue.system_interface.layout_ops import is_mutating_op
+from imbue.system_interface.layout_ops import layout_inspect
+from imbue.system_interface.layout_ops import layout_list
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentListItem
 from imbue.system_interface.models import AgentListResponse
@@ -51,7 +58,6 @@ from imbue.system_interface.models import SendMessageRequest
 from imbue.system_interface.models import SendMessageResponse
 from imbue.system_interface.models import StartAgentResponse
 from imbue.system_interface.plugins import get_plugin_manager
-from imbue.system_interface.request_writer import write_refresh_request
 from imbue.system_interface.service_dispatcher import register_service_routes
 from imbue.system_interface.session_watcher import AgentSessionWatcher
 from imbue.system_interface.welcome_resend import WelcomeResender
@@ -97,6 +103,10 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
     application.state.broadcaster = broadcaster
     application.state.agent_manager = agent_manager
+    # Advisory in-process mutex serializing layout-mutating ops. The agent
+    # script never auto-retries on contention -- it surfaces the 409 to the
+    # agent along with the in-flight holder's metadata.
+    application.state.layout_mutex = LayoutMutex()
 
     # Single shared httpx client for the /service/<name>/ forwarding layer.
     application.state.http_client = httpx.AsyncClient(
@@ -757,38 +767,122 @@ async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
     return JSONResponse(content=StartAgentResponse(status="ok").model_dump())
 
 
-async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
-    """Append a refresh-service event to the agent's refresh events file.
+async def _layout_broadcast_endpoint(request: Request) -> JSONResponse:
+    """Unified loopback endpoint for the agent-facing ``scripts/layout.py`` helper.
 
-    Called by agents inside the container to tell the minds desktop client
-    that an open web-service tab should reload. The desktop client picks the
-    event up via ``mngr event --follow`` and POSTs back to the broadcast
-    endpoint below.
-    """
-    try:
-        await run_in_threadpool(write_refresh_request, service_name)
-        return JSONResponse(content={"ok": True})
-    except (RuntimeError, OSError) as e:
-        error = ErrorResponse(detail=str(e))
-        return JSONResponse(content=error.model_dump(), status_code=500)
+    Body: ``{op, args, agent_id}``.
 
+    Dispatch:
 
-async def _refresh_service_broadcast_endpoint(service_name: str, request: Request) -> JSONResponse:
-    """Broadcast a refresh_service WebSocket message for the given service_name.
+    - ``list`` / ``inspect``: pure server-side queries that read the
+      ``agent_manager``'s in-memory service/agent registry plus the
+      persisted ``layout.json`` (for ``is_open`` flags / tree layout)
+      and return a structured payload. Bypass the mutex.
+    - ``refresh``: a state-preserving broadcast that doesn't mutate
+      serialized layout. Bypass the mutex.
+    - All other ops (``open``, ``focus``, ``split``, ``close``, ``move``,
+      ``rename``, ``maximize``, ``restore``, ``replace-url``): acquire
+      the advisory mutex first; on contention return HTTP 409 with the
+      holder's metadata so the caller can decide whether to retry. On
+      success, broadcast the ``layout_op`` WS message and return.
 
-    Called by the desktop client after it observes a refresh event on the
-    mngr event stream. Locked to loopback clients since no authentication
-    exists between the desktop client and the system_interface inside the
-    container.
+    The endpoint is locked to loopback clients (no authentication exists
+    between callers and the system interface inside the container).
     """
     client_host = request.client.host if request.client is not None else ""
     if client_host not in _LOOPBACK_CLIENT_HOSTS:
-        error = ErrorResponse(detail="refresh-service broadcast is only callable from loopback")
+        error = ErrorResponse(detail="layout broadcast is only callable from loopback")
         return JSONResponse(content=error.model_dump(), status_code=403)
 
-    broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
-    broadcaster.broadcast_refresh_service(service_name)
-    return JSONResponse(content={"ok": True})
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError) as e:
+        _loguru_logger.opt(exception=e).warning("layout broadcast received invalid JSON body")
+        error = ErrorResponse(detail="Invalid JSON in request body")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+    if not isinstance(body, dict):
+        error = ErrorResponse(detail="Request body must be a JSON object")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    op = body.get("op")
+    args_raw = body.get("args", {})
+    agent_id = body.get("agent_id") or request.headers.get("X-Mngr-Agent-Id") or ""
+    if not isinstance(op, str) or not is_known_op(op):
+        error = ErrorResponse(detail=f"Unknown layout op: {op!r}")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+    if not isinstance(args_raw, dict):
+        error = ErrorResponse(detail="``args`` must be a JSON object")
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    agent_manager: AgentManager = request.app.state.agent_manager
+    agent_name_by_id = {a["id"]: a["name"] for a in agent_manager.get_agents_serialized()}
+
+    if op == "list":
+        layout_dir = _primary_agent_layout_dir()
+        layout_path = (layout_dir / _LAYOUT_FILENAME) if layout_dir is not None else None
+        entries = layout_list(
+            agent_manager.list_service_names(),
+            agent_manager.get_agents_serialized(),
+            layout_path,
+            agent_name_by_id,
+        )
+        # Log the caller for telemetry; v1 has no enforcement.
+        logger.info("layout op={} agent_id={} entries={}", op, agent_id, len(entries))
+        return JSONResponse(content={"ok": True, "entries": entries})
+
+    if op == "inspect":
+        layout_dir = _primary_agent_layout_dir()
+        layout_path = (layout_dir / _LAYOUT_FILENAME) if layout_dir is not None else None
+        summary = layout_inspect(layout_path, agent_name_by_id)
+        logger.info("layout op={} agent_id={} panels={}", op, agent_id, len(summary.get("panels", [])))
+        return JSONResponse(content={"ok": True, "layout": summary})
+
+    if not is_broadcasting_op(op):
+        # Defensive: every non-list/inspect op should broadcast. Catch
+        # drift in the op-set definitions.
+        error = ErrorResponse(detail=f"Op {op!r} has no broadcast handler")
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    # Terminal creation is the one path where the script returns a ref
+    # synchronously: the frontend's "New terminal" button gives each
+    # terminal a freshly-minted iframe panel id, so the server pre-mints
+    # one here, injects it into the broadcast args (the frontend uses it
+    # verbatim), and reports the resulting ``terminal:<hash>`` ref back
+    # in the HTTP response. Every other ref kind either dedups against
+    # the existing panel set or is discoverable via a subsequent
+    # ``inspect``.
+    allocated_ref: str | None = None
+    if op in {"open", "split"} and args_raw.get("ref") == "service:terminal":
+        panel_id, allocated_ref = allocate_terminal_panel_id()
+        args_raw = {**args_raw, "panel_id": panel_id}
+
+    layout_mutex: LayoutMutex = request.app.state.layout_mutex
+    if is_mutating_op(op):
+        holder = layout_mutex.try_acquire(agent_id, op, args_raw)
+        if holder is not None:
+            error_body = {
+                "detail": (
+                    f"Another layout op is in flight: agent_id={holder['agent_id']} "
+                    f"op={holder['operation']}. Retry after the mutex TTL elapses."
+                ),
+                "retry_after_ms": layout_mutex.retry_after_ms(),
+                "in_flight": holder,
+            }
+            return JSONResponse(content=error_body, status_code=409)
+        try:
+            broadcaster: WebSocketBroadcaster = request.app.state.broadcaster
+            broadcaster.broadcast_layout_op(op, args_raw, requester_agent_id=agent_id)
+        finally:
+            layout_mutex.release(agent_id, op)
+    else:
+        broadcaster = request.app.state.broadcaster
+        broadcaster.broadcast_layout_op(op, args_raw, requester_agent_id=agent_id)
+
+    logger.info("layout op={} agent_id={} args={}", op, agent_id, args_raw)
+    response_body: dict[str, Any] = {"ok": True}
+    if allocated_ref is not None:
+        response_body["ref"] = allocated_ref
+    return JSONResponse(content=response_body)
 
 
 def _inject_agent_id_meta_tag(html_content: str) -> str:
@@ -846,12 +940,7 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/start", _start_agent, methods=["POST"])
     claude_auth_endpoints.register_routes(application)
-    application.add_api_route(
-        "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
-    )
-    application.add_api_route(
-        "/api/refresh-service/{service_name}/broadcast", _refresh_service_broadcast_endpoint, methods=["POST"]
-    )
+    application.add_api_route("/api/layout/broadcast", _layout_broadcast_endpoint, methods=["POST"])
     application.add_api_route(
         "/api/agents/{agent_id}/subagents/{subagent_session_id}/events", _get_subagent_events, methods=["GET"]
     )
