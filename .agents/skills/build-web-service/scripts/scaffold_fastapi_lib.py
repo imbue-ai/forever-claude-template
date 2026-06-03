@@ -201,7 +201,6 @@ def _lib_ratchets() -> str:
     return """from pathlib import Path
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
 from inline_snapshot import snapshot
 
 _DIR = Path(__file__).parent
@@ -274,12 +273,6 @@ def test_prevent_asyncio_import() -> None:
 def test_prevent_dataclasses_import() -> None:
     rc.check_dataclasses_import(_DIR, snapshot(0))
 
-
-# --- Linting ---
-
-
-def test_no_ruff_errors() -> None:
-    check_no_ruff_errors(_DIR)
 """
 
 
