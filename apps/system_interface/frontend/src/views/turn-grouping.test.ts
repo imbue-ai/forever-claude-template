@@ -462,6 +462,36 @@ describe("audit regressions", () => {
   });
 });
 
+describe("regular ticket transitions (cod-oglc repro)", () => {
+  // The real bababa case: while step s1 was open, the crystallize flow ran a
+  // Bash command that created AND started a *regular* ticket (cod-oglc, no
+  // `step: true`), so its output carried `Updated cod-oglc -> in_progress`.
+  // A regular ticket is absent from the steps-only enrichment table, so it must
+  // NOT appear as a timeline node -- it previously leaked in titled with its raw
+  // id because enrichment had no entry to override the fallback title.
+  it("does not render a started regular ticket as a step node", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "k1"),
+      result("2026-04-28T01:00:01Z", "k1", "Updated s1 -> in_progress"),
+      // The crystallize command: not a recognised pure-tk call (begins with cd),
+      // so it renders as work; its output starts a regular ticket.
+      tkMsg("2026-04-28T01:00:02Z", "cd /code && tk create x && tk start cod-oglc", "cr"),
+      result("2026-04-28T01:00:02Z", "cr", "Updated cod-oglc -> in_progress\nTICKET=cod-oglc"),
+      workMsg("2026-04-28T01:00:03Z", "Bash", "w1"),
+      result("2026-04-28T01:00:03Z", "w1", "ok"),
+    ];
+    // Enrichment knows s1 (a step) but NOT cod-oglc (a regular ticket).
+    const sections = run(events, enrich({ s1: { status: "in_progress" } }), /* idle */ false);
+    const steps = stepItems(sections[0].items);
+    // Only the real step renders; cod-oglc never becomes a node.
+    expect(steps.map((s) => s.ticket_id)).toEqual(["s1"]);
+    // The crystallize command and the work after it stay inside the open step,
+    // since the regular-ticket start never hijacked the current step.
+    expect(steps[0].events.map((e) => e.event_id)).toEqual(["a-cr", "a-w1"]);
+  });
+});
+
 describe("batched transitions (bababa real transcript)", () => {
   // The real bababa case: the agent batched `tk close nzb4 && tk close p5jc &&
   // tk start ts53` into ONE Bash command, so all three transitions arrive in

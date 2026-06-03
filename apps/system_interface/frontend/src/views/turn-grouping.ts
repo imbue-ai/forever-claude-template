@@ -10,8 +10,14 @@
  *
  * tk also provides an *enrichment* side-table keyed by id: the canonical
  * title, the close summary, and the roster of pending (not-yet-started)
- * steps. Enrichment decorates the transcript-derived skeleton by id; it does
- * not decide order or grouping.
+ * steps. The table holds step records only (built from `step: true`
+ * frontmatter), so it doubles as the membership test for the walk: a
+ * `tk start`/`tk close` transition whose id is NOT in the table belongs to a
+ * regular ticket the agent picked up -- it carries the same
+ * `Updated <id> -> <status>` line a step does, so the walk skips it to avoid
+ * minting a phantom node. Beyond that membership gate, enrichment only
+ * decorates the transcript-derived skeleton by id; it does not decide order
+ * or grouping.
  *
  * The walk maintains a single "current open step": events while a step is
  * open group under it; events while none is open fall into an ungrouped
@@ -249,6 +255,16 @@ export function buildSections(
       const stepBefore = current.current_step_id;
       let lastOpened: string | null = null;
       for (const t of parsed.transitions) {
+        // Only step records render in the timeline. A `tk start`/`tk close` on a
+        // regular ticket the agent picked up prints the same
+        // `Updated <id> -> <status>` line as a step does, but a regular ticket
+        // is absent from the steps-only enrichment table. Skip its transition
+        // rather than mint a phantom node titled with the raw ticket id; any
+        // work batched with that command stays in the step that was already
+        // open (or renders inline if none was), exactly as if the tk verb
+        // weren't there. (See the enrichment side-table, which the tickets
+        // watcher builds from `step: true` frontmatter only.)
+        if (!enrichment.has(t.id)) continue;
         applyTransition(current, t);
         if (t.status === "in_progress") lastOpened = t.id;
       }
