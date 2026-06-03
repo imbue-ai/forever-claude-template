@@ -4,6 +4,354 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+The latchkey services catalog now maps each raw service name to a list of scope entries instead of a single entry, so one service can expose more than one detent scope. `LatchkeyGatewayClient.get_available_services` now returns `dict[str, tuple[AvailableServiceEntry, ...]]`, and `ServicesCatalog.get` / `ServicesCatalog.as_mapping` now return a tuple of `ServicePermissionInfo` per service. Per-scope lookup via `ServicesCatalog.get_by_scope` is unchanged.
+
+## 2026-05-29
+
+Exclude the Latchkey dependency from the minimum age check (we are co-developing Latchkey together with Minds).
+
+Simplified the latchkey predefined-permission approval dialog for non-technical users. By default it now shows a read-only, informative list of the permissions the agent is requesting (no checkboxes), with only Approve and Deny actions. A small "Adjust" link (rendered inside the permission list, aligned with the permission names) reveals the full per-permission checkbox editor (the previous appearance) for users who want fine-grained control. The dialog was also visually streamlined: the standalone "Workspace:" line was removed, the agent's reason is now attributed prominently as "<workspace> says:", the request summary is a single sentence ("Approving will grant <workspace> and its sibling agents the following permissions:"), and the service name in the header no longer renders inside a grey box. The file-sharing permission dialog was updated to match this chrome (same header treatment, "<workspace> says:" attribution, dropped workspace line, and a single summary sentence naming the workspace, access level, and host-wide scope). The rationale text is italicized, the "Adjust" link is right-aligned within the permission list and separated from it by a faint divider, and the page now reserves the scrollbar gutter so expanding the editor no longer shifts the layout sideways.
+
+- `apps/minds`: activate the ToDesktop `beforeInstall` hook so the build
+  server re-downloads/re-resolves `uv` and `git` for its target platform
+  rather than using the bytes uploaded from the developer's machine.
+  Wires `package.json`'s `todesktop:beforeInstall` to
+  `./scripts/download-binaries.js`, and restores the `downloadUv()`
+  orchestrator in that file (it had been removed in the bundled-git
+  carve-out because it was dormant without this PR's hook wiring).
+- `apps/minds`: pin both `pnpm` and `node` via ToDesktop's first-class
+  `pnpmVersion` / `nodeVersion` config fields, sourcing the literal
+  values from `package.json`'s `engines` block (which #1710 already
+  pins to `pnpm 10.33.4` and `node 24.15.0`). To make this work,
+  `todesktop.json` is replaced with a `todesktop.js` that does
+  `require('./package.json')` and reads `engines.pnpm` and
+  `engines.node` into the `pnpmVersion` and `nodeVersion` ToDesktop
+  config fields; ToDesktop's CLI supports `.json`, `.js`, and `.ts`
+  config formats. Net effect: `package.json` is now the single source
+  of truth for the pnpm + node versions used on dev laptops (via
+  `engines` + `.nvmrc`), in imbue CI (via the workflow's explicit
+  installs, still a separate pin), and on ToDesktop's runner (via
+  `todesktop.js` reading `package.json`). Replaces a draft of this
+  PR that had a home-rolled `installPnpm()` fallback ladder
+  (~80 LoC + a 14-line rationale comment) -- ToDesktop's runtime
+  already provisions the requested versions before installing
+  dependencies, so the ladder was working around the absence of a
+  knob that isn't absent. Empirically verified end-to-end against a
+  draft ToDesktop build from `wz/minds_onboard` (build
+  `260528yf2ma2jd4`) with the earlier `"pnpmVersion": "10.33.4"`
+  spelling: both Linux and Mac arm64 finished, packaged binary
+  launches and round-trips a first message E2E. The `beforeInstall`
+  hook stays for `uv` + `git` (no first-class ToDesktop knob).
+  `apps/minds/scripts/build_test.py` (which reads the ToDesktop config
+  to assert the limactl signing contract) now shells out to `node -e
+  "console.log(JSON.stringify(require('./todesktop.js')))"`. It
+  module-level-skips via `pytest.mark.skipif(shutil.which('node') is
+  None, ...)` when no node is on PATH -- matches the existing
+  `mngr_latchkey` precedent for Node-dependent Python tests. Coverage
+  gap: this test currently doesn't run in the offload sandbox (no
+  node there). Adding node to the offload image -- or to a
+  minds-specific sandbox image -- is a follow-up.
+- `apps/minds`: consolidate `downloadUv` into a single definition in
+  `scripts/download-binaries.js` and import it into `scripts/build.js`,
+  mirroring how `downloadGit` and `download` are already shared.
+  Removes the duplicated `UV_VERSION` constant, `getUvDownloadUrl`,
+  and `downloadUv` from `build.js`. Both call sites (local
+  `pnpm build` and ToDesktop's `beforeInstall` hook) now run the same
+  implementation against their own resources directory.
+
+- Resetting or destroying an env no longer leaves its mngr Docker state container (`<MNGR_PREFIX>docker-state-<user_id>`) running forever. Both `minds env destroy` and the activate-time generation-mismatch auto-wipe now remove that env's exact state container and its backing volume.
+- The auto-wipe now also destroys the env's mngr agents (in a single `mngr destroy` call) before wiping local state, so their Docker host containers and build images are cleaned up too.
+- Env-teardown agent destruction now uses one batched `mngr destroy` call instead of one call per agent.
+
+The "destroy workspace" UI action now releases the underlying
+imbue_cloud-leased host's lease immediately rather than waiting the 7-day
+destroyed-host grace period for mngr's GC to run `delete_host`. The
+implementation lives in `mngr destroy` (see `libs/mngr/changelog/`);
+minds' destroy command was previously *intentionally* not chaining lease
+release because the grace-period delegation was the design. That
+intentional decision is no longer correct -- `mngr destroy` now drops
+cloud-side resources up front, and the grace period only retains
+historical state. The stale "Lease release is intentionally NOT chained
+here" comment in `destroying.py` is updated to reflect the new contract.
+
+# Self-hosted Mac runner support
+
+- Added `apps/minds/scripts/mac-runner-reset.sh`: cleans `~/.minds`, removes the installed `.app`, kills leftover Minds processes, and stops/deletes any Lima VM instances. Optionally re-downloads + installs a fresh `.app` from a ToDesktop `.zip` URL passed as the first argument. Intended to run at the start of every verification job on the dedicated self-hosted mac-runner so each run starts from a known-clean state. Preserves only the Lima base-image cache (`~/Library/Caches/lima/`), which is ~1.5 GB and unrelated to Minds itself.
+
+Added a "Backup provider" control to the workspace create form, mirroring the
+existing "AI provider" toggle, with three options:
+
+- `imbue_cloud` -- creates a per-workspace R2 bucket (named after the new host
+  id) and a scoped key, then injects a `runtime/secrets/restic.env` pointing
+  the FCT `host_backup` service at that bucket. Gated on a selected account;
+  the default when an account is present.
+- `manual` -- a free-form `KEY=VALUE` block written verbatim to `restic.env`
+  (you supply `RESTIC_REPOSITORY` and backend credentials).
+- `configure_later` -- injects nothing now; the default when no account is
+  selected.
+
+When a real backup provider is chosen, a "Backup encryption method" row
+appears: `master_password` or `no_password`. The conditional backup fields
+(restic environment, encryption method, master password) render as standard
+label-on-left / field-on-right rows like the rest of the form.
+
+minds (which now requires `restic` to be installed on the machine running it)
+initializes each workspace's restic repository itself and gives the workspace
+its own random repository password, so the master password never enters the
+workspace. Enabling backups: resolve the repository + credentials, generate a
+random per-workspace password, `restic init` the repo with the master
+password (or empty for `no_password`), `restic key add` the random password,
+write the canonical `restic.env` to a 0600 minds-side file, and inject that
+file into the workspace. The `manual` block must not set `RESTIC_PASSWORD`
+(minds assigns it).
+
+A freshly-minted imbue_cloud (Cloudflare R2) credential takes a few seconds to
+become active at the storage backend's edge, so the immediate `restic init`
+could fail with a transient `Unauthorized`. minds now retries the `restic init`
+/ `restic key add` bootstrap on such transient auth failures for a bounded
+window, so backup provisioning rides out that propagation delay instead of
+failing outright.
+
+Backup setup runs asynchronously after the host is created (mirroring the
+Cloudflare tunnel-token injection) and is non-fatal: a failure surfaces as a
+notification and leaves the workspace running. The reusable
+`configure_backups_for_host` operation can be re-applied to an existing host
+later and is idempotent (an existing canonical env is re-injected; an
+already-created bucket / initialized repo is reused). The canonical
+`restic.env` is never auto-deleted, so a stopped or destroyed workspace's
+backups stay recoverable.
+
+The Projects page now shows each project's backup status (Backing up / Backed
+up N ago / No backups / Unknown), fetched once on load from a new
+`/api/backup-status` route that queries restic per project from the minds
+machine. While that request is in flight each tile shows "Checking backups…",
+and a freshly-created workspace with no backups yet shows "Created N ago"
+(for the first 75 minutes after creation) instead of "No backups", so a brand
+new project doesn't look alarming before its first backup has had a chance to
+run. The route includes each workspace's creation time for this.
+
+A backed-up project also gets a "download" link next to its status that exports
+the latest snapshot as a zip. minds builds the zip on demand from the minds
+machine (no workspace access needed) by restoring the latest snapshot to a temp
+dir and zipping it -- `restic restore` downloads in parallel and is ~50x faster
+than `restic dump --archive zip` (which fetches blobs sequentially: ~5 min vs
+~10 s for a ~95 MiB snapshot). The zip lands in a /tmp file keyed by host id
+(so re-exports overwrite rather than accumulate) and is served via a new
+`GET /api/backup-export/{agent_id}` route; the temp restore dir is always
+cleaned up. The link shows a spinner and "exporting…" while the zip is built.
+
+New `BackupProvider` / `BackupEncryptionMethod` primitives; new
+`mngr imbue_cloud bucket ...` wrappers on the imbue_cloud CLI client.
+
+## 2026-05-28
+
+Pin minds desktop client JS toolchain to exact versions: pnpm 10.33.4 and Node.js 24.15.0. With `engine-strict=true` plus exact `engines.node`/`engines.pnpm`, installs fail fast on mismatch instead of breaking in confusing ways. Added `.nvmrc` so nvm/fnm users pick up the pinned Node automatically. Documented how existing developers can install the pinned versions (nvm/fnm for Node, `npm install --global pnpm@10.33.4` for pnpm, with a note that Homebrew's `@<major>` kegs drift) in `apps/minds/docs/desktop-app.md`. Also pinned end-user Python to `==3.12.13` in `apps/minds/electron/pyproject/pyproject.toml` (the packaged-app pyproject that uv reads at first launch) so every install downloads the same interpreter instead of the latest 3.12 patch available at the time.
+
+Added a 7-day dependency cooldown (minimum release age) for supply-chain hardening: `minimumReleaseAge: 10080` in `apps/minds/pnpm-workspace.yaml` (pnpm) and `exclude-newer = "7 days"` under `[tool.uv]` in the packaged `apps/minds/electron/pyproject/pyproject.toml` (uv). Both refuse to resolve any distribution -- including transitive ones -- published within the last week, so a freshly-compromised release cannot be pulled in before it is noticed. The cooldown only affects resolution; frozen-lockfile installs are unaffected.
+
+Upgraded Electron from `35.7.5` to `40.10.1` so the runtime shipped to end users bundles Node.js `24.15.0` -- matching the exact Node version pinned for development (`engines.node` / `.nvmrc`). Previously the bundled Electron shipped a different (Node 22.x) runtime than the one developers built against. Electron 40 is the lowest major on the Node 24 line, so 40.10.1 is the smallest jump that reaches the pinned `24.15.0`; staying on 40 avoids the behavior changes introduced in 41 (cookie `changed`-event cause values) and 42 (macOS notifications require code-signing) that a jump to the newest line would pull in, none of which our Electron code depends on today but which would otherwise widen the review/test surface. 40.10.1 also clears the new 7-day pnpm cooldown (published more than a week ago), so it needs no `minimumReleaseAgeExclude`.
+
+Bumped the bundled `UV_VERSION` in `apps/minds/scripts/build.js` from `0.7.12` to `0.11.15`. uv only supports the relative-duration form of `exclude-newer` (e.g. `"7 days"`) as of 0.10.0; the older 0.7.12 fails to parse it, silently ignores the cooldown, and -- because the committed lockfile was generated with a timestamp cutoff that 0.7.12 then sees as "removed" -- discards the lockfile and re-resolves unpinned at end-user first launch. (The lockfile's `revision = 3` format is not the issue: 0.7.12 reads revision-3 lockfiles fine; the trigger is purely the unparseable relative `exclude-newer`.) Bumping to 0.11.15 makes the shipped uv able to parse the cooldown, so it takes effect and the committed lockfile is honored.
+
+Bumped the dependency cooldown (minimum release age) for the minds desktop toolchain from 7 days to 14 days. `minimumReleaseAge` in `apps/minds/pnpm-workspace.yaml` is now `20160` minutes (pnpm), and `exclude-newer` under `[tool.uv]` in the packaged `apps/minds/electron/pyproject/pyproject.toml` is now `"14 days"` (uv). The packaged `uv.lock`'s metadata `exclude-newer-span` was bumped in parallel from `P7D` to `P14D` to stay consistent without a full re-resolve. Behavior is unchanged otherwise: the cooldown only bites during resolution, frozen-lockfile installs are unaffected.
+
+Bump Latchkey dependency to 2.12.2. The newest Latchkey version properly shows the ToS dialog to first-time Google Cloud users.
+
+- `apps/minds`: bundle the real macOS `git` binary plus its `libexec/git-core`
+  helpers instead of the xcode-select shim. The previous inline `downloadGit()`
+  in `scripts/build.js` ran `which git`, which on macOS returns the 118 KB
+  `/usr/bin/git` shim -- a launcher that re-invokes the real git from
+  `/Library/Developer/CommandLineTools/`. Bundling the shim into a sandboxed
+  packaged app meant runtime `git clone` SIGKILLs on any Mac without Xcode CLT
+  installed at the expected path. The new `scripts/download-binaries.js`
+  resolves the real binary via `xcrun --find git`, copies it plus its
+  `libexec/git-core` helpers and templates, and SHA256-verifies all
+  downloaded archives. Also bumps the ToDesktop `uploadSizeLimit` from 300 to
+  600 because the real binary plus its libexec push the bundle over the
+  previous limit.
+
+# Desktop e2e opts FCT's config into the pytest guard (test-only)
+
+mngr's `is_allowed_in_pytest` config field now defaults to `False`, and every
+config loaded during a pytest run must opt in. The desktop-client Docker e2e
+(`test_desktop_client_e2e.py`) deliberately loads forever-claude-template's real
+`.mngr/settings.toml` (it pins `MNGR_ROOT_NAME=mngr` to get the create
+templates), so it now adds `is_allowed_in_pytest = true` to that checkout for the
+duration of the test and restores it afterward. The opt-in is intentionally
+added in-test (not shipped in FCT's config, which would disable the guard for
+every FCT-based project). Test-only change.
+
+# Extract Electron e2e workspace creation flow into a reusable runner
+
+Split the Playwright-over-CDP driver out of
+`apps/minds/test_desktop_client_e2e.py` into a new module at
+`apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py` so the
+same flow can be invoked outside pytest. The new module exposes the
+public entry points `create_workspace_via_electron`, `resolve_fct_path`,
+`ensure_minds_env_defaults`, `configure_logging`, `find_free_port`, and
+`destroy_agent_best_effort`; everything else stays underscore-prefixed.
+
+The existing pytest test was reduced to a thin wrapper that:
+
+- calls `ensure_minds_env_defaults(setenv=monkeypatch.setenv)` so any
+  injected env vars get reverted between tests,
+- delegates the actual Electron / Playwright flow to
+  `create_workspace_via_electron`, and
+- always calls `destroy_agent_best_effort` in `finally` so a successful
+  test never leaks an agent into the host.
+
+`scripts/snapshot_minds_e2e_state.py` is the second caller: it invokes
+`create_workspace_via_electron` directly and deliberately omits the
+`mngr destroy` cleanup, because the whole point of the snapshot is to
+capture a sandbox in which the workspace's Docker container is alive.
+
+Also added a `*/desktop_client/e2e_workspace_runner.py` exclusion to the
+`test_prevent_direct_subprocess` ratchet, since the new module
+necessarily shells out to `electron`, `git`, and `uv run mngr destroy`
+(operator-tool subprocesses with no `ConcurrencyGroup`-managed
+equivalent). No user-visible behavior change.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+Bump Latchkey dependency to 2.12.1. The newest Latchkey version is capable of reusing Google Projects which is important because the default limit on Google Project count is low.
+
+# Fix a signing-key generation race that intermittently logged users out
+
+`FileAuthStore.get_signing_key` generated the cookie signing key lazily
+on first access without any synchronization. FastAPI dispatches sync
+route handlers on a threadpool, so on a fresh data directory the desktop
+client's startup burst -- `/authenticate` plus the `/` redirect target,
+`/_chrome`, and `/welcome`, each of which checks authentication -- could
+all reach key generation concurrently. Two interleavings both broke auth:
+
+- A reader saw the just-created key file as momentarily empty (the old
+  code did a non-atomic `write_text`) and raised `SigningKeyError`, so
+  `/authenticate` returned 500 and no session cookie was set.
+- Two threads each generated a *different* key and raced to write it;
+  the last writer won and silently invalidated the cookie that had just
+  been signed with the earlier key, so the next request's
+  `verify_session_cookie` failed and the user appeared logged out.
+
+Either way the subsequent page load came back unauthenticated. This was
+the dominant cause of flaky failures in the `test-docker-electron` CI job
+(`test_create_local_docker_workspace_via_electron` timing out on the
+`#create-form` selector because `GET /create` returned 403).
+
+`get_signing_key` now reads the existing key on the fast path and, when
+it must generate one, serializes generation behind a per-store lock with
+a double-checked re-read and writes the key via `atomic_write` so a
+concurrent reader never observes a partial file. Concurrent first-time
+callers now always converge on a single persisted key.
+
+Fixed the Deny button on the latchkey permission-request dialog so it works even when the requested scope is not in the gateway's services catalog (e.g. a typo from the agent or a stale catalog). Previously clicking Deny returned `{"error": "Scope 'XYZ' is not in the gateway catalog"}`; the deny flow now falls back to the raw scope string for both the persisted response event and the agent-facing message, so the pending request is always torn down and the agent is always notified.
+
+# ty 0.0.39 type fix
+
+- `_resolve_ws_name_and_account` now returns `list[AccountSession]` instead of `list[object]`. `ty` 0.0.39 rejected the previous annotation because `list` is invariant (`list[AccountSession]` is not assignable to `list[object]`); the precise element type is also more accurate.
+
+No user-facing behavior change.
+
+## 2026-05-26
+
+# Minds API access: gateway-only, single key, per-agent URL prefix
+
+The minds desktop client used to expose its `/api/v1/...` REST API to
+workspaces over a per-agent reverse SSH tunnel, writing the resulting
+URL to `$MNGR_AGENT_STATE_DIR/minds_api_url` and injecting a per-agent
+UUID4 `MINDS_API_KEY` into each new host's env file. None of that is
+how agents actually reach the Minds API anymore -- the latchkey
+gateway's `minds-api-proxy` extension already handled it -- so the
+machinery is gone:
+
+- `minds run` no longer asks the `mngr forward` plugin for a
+  `--reverse 0:<port>` tunnel and no longer registers any
+  `on_reverse_tunnel_established` callback. The `MindsApiUrlWriter`
+  and `LocalAgentDiscoveryHandler` classes (and their tests) have
+  been removed from `forward_cli.py`.
+- `agent_creator.py` no longer generates a per-agent `MINDS_API_KEY`,
+  no longer adds `--host-env MINDS_API_KEY=...` to `mngr create`, and
+  no longer stores any per-agent `api_key_hash` file. Workspaces no
+  longer carry the env var at all.
+- The `apps/minds/imbue/minds/desktop_client/api_key_store.py` module
+  has been rewritten around a single central key, freshly generated
+  in memory on every `minds run` via `generate_api_key()`. The key is
+  not persisted to disk -- the supervisor is always restarted on
+  minds startup and gets the current value in its env, the bare-
+  origin auth gate sees the same in-memory value, and no other
+  process reads the key. Rotating per-startup removes a long-lived
+  secret from the filesystem.
+- The `/api/v1/...` bearer-auth gate (used by both `api_v1.py` and the
+  WebDAV mount under `/api/v1/files`) now compares the inbound
+  `Authorization: Bearer <key>` against that single value with a
+  constant-time check. Routes that need an agent id take it from the
+  URL path -- the auth dependency itself returns `None`.
+- The notifications endpoint moved from `POST /api/v1/notifications`
+  to `POST /api/v1/agents/<agent_id>/notifications`, matching the
+  Telegram routes. Every `/api/v1` route is now per-agent.
+- Every agent created by minds gets added to the host's
+  `minds-api-proxy-allowed-agent` enum at finalize-host-permissions
+  time. The baseline permissions file's first rule rejects any
+  `/minds-api-proxy/api/v1/agents/<id>/...` whose `<id>` is not in
+  that enum, so an agent on host A cannot reach the Minds API on
+  behalf of an agent on host B (B's id only appears in B's host's
+  permissions file).
+- The desktop client now calls
+  `imbue.mngr_latchkey.agent_setup.register_agent_for_host(...)` directly
+  -- a single library call that does an atomic file edit -- instead of
+  the previous gateway-extension dance that POSTed two schemas + one
+  rule per agent. The `gateway_client` field on `AgentCreator` is
+  gone; `LatchkeyGatewayClient` keeps its existing user-grant API
+  (`set_permission_rule`, etc.) but no longer ships the low-level
+  schema-altering methods (`set_permission_schema`,
+  `delete_permission_schema`, `delete_permission_rule`).
+- The operator-facing equivalent is the new
+  `mngr latchkey register-agent --host-id ID --agent-id ID` CLI command.
+- The `inject_tunnel_token_into_agent` helper moved out of
+  `api_v1.py` into its own module so it can be imported without
+  pulling the FastAPI router in.
+
+Documentation:
+[`apps/minds/docs/latchkey-permissions.md`](docs/latchkey-permissions.md)
+now has a "Minds API access through the gateway" section describing
+the new model; [`specs/minds-rest-api/spec.md`](../../specs/minds-rest-api/spec.md)
+has a banner pointing out which parts are superseded.
+
+- Renamed the minds ``LaunchMode.LOCAL`` compute provider to ``LaunchMode.DOCKER`` everywhere (Python code, ``/create`` form HTML, ``/api/create-agent`` JSON payloads, docs). The mode has always meant "Docker container on the user's machine"; the old name collided with mngr's own ``local`` provider (which runs agents as host processes), so the rename eliminates that ambiguity. The other modes (``LIMA``, ``CLOUD``, ``IMBUE_CLOUD``) are unchanged. ``/api/create-agent`` and the create form now expect ``launch_mode=DOCKER`` instead of ``LOCAL``; submitting ``LOCAL`` is no longer recognized.
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+- `apps/minds`: bundle Lima into the desktop app. `scripts/build.js` now downloads the official Lima 2.1.1 release tarball for the build host's platform/arch and extracts it into `resources/lima/`; the packaged backend prepends `resources/lima/bin` to `PATH` so `limactl` is found without a separate `brew install lima` step. The unsigned `lima-guestagent.Darwin-*.gz` Mach-O payloads are stripped after extraction -- they break macOS notarization and are unreachable (we run Linux VMs only). A new `entitlements.mac.plist` carries `com.apple.security.virtualization` (required by `limactl`'s VZ driver), and `todesktop.json` wires it in via a `mac` block that also deep-signs the bundled `limactl`. On macOS Apple Silicon this is fully self-contained via Lima's `vz` backend; macOS Intel and Linux still require QEMU on the host machine.
+- `apps/minds`: bump `workspace_ready_timeout_seconds` from 60s to 300s (`agent_creator.py`). First-boot provisioning (uv sync, npm ci + run build for the system_interface frontend) regularly takes 90-180s on a fresh VM or Docker host, so the 60s default was bouncing users to the recovery page while the agent was still finishing provisioning. The probe is cheap so a generous cap is harmless.
+
+- Fixed a stale `LaunchMode.LOCAL` reference in `agent_creator_test.py` that was missed during the `LaunchMode.LOCAL` -> `LaunchMode.DOCKER` rename, which was causing `test_no_type_errors` to fail. No user-visible behavior change.
+
+Hardened the workspace-restart shell command in `desktop_client/app.py` to use
+exact-session matching. The previous `tmux kill-window -t "${MNGR_PREFIX}system-services:svc-system_interface"`
+form had no leading `=`, so if the `${MNGR_PREFIX}system-services` session was gone
+but a sibling-prefix session was alive, the kill-window could silently land on the
+wrong agent's session and kill a window there. The command now uses
+`-t "=${MNGR_PREFIX}system-services:svc-system_interface"` so tmux refuses to misroute.
+
+To prevent recurrences, adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule
+(added in `imbue_common`) via `rc.check_bare_tmux_targets(_DIR, snapshot(0))` in
+this project's `test_ratchets.py`. The ratchet flags new occurrences of
+`tmux <subcmd> -t '<bare-name>'` -- targets without a leading `=` exact-match
+prefix, which can silently route commands to a sibling session whose name shares
+a prefix with the intended one. The adopting test starts at a baseline of zero
+violations.
+
 ## 2026-05-22
 
 `minds run` no longer dictates the `mngr forward` plugin's port. The `--mngr-forward-port` flag and the `MINDS_MNGR_FORWARD_PORT` environment variable are removed: the plugin now picks its own port (its default, or an OS-assigned fallback when the default is taken) and reports it back via its `listening` envelope. `minds run` blocks briefly at startup until that envelope arrives, then uses the reported port for everything downstream; if the plugin fails to report a port within 5s, startup aborts with a clear error.

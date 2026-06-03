@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.10] - 2026-06-01
+
+### Changed
+
+- Changed: Provider's `get_host_and_agent_details` override now accepts and forwards the new `offline_field_generators` parameter to the base implementation, so offline plugin fields are populated when a host falls back to offline data.
+
+## [v0.2.9] - 2026-05-28
+
 ### Changed
 
 - Changed: `mngr list` no longer aborts when the Modal per-user environment hasn't been created yet — the backend raises a new `ProviderEmptyError` (distinct from `ProviderUnavailableError`) and the listing pipeline silently skips it. Only `mngr create` is allowed to bootstrap the environment.
