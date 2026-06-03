@@ -125,7 +125,7 @@ extra_window = [
 # `apply_create_template` in vendor/mngr/.../common_opts.py), so the
 # mode-specific templates (docker/lima/...) keep their own commands.
 extra_provision_command__extend = [
-    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' > "$HOME/.tmux.conf"''',
+    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' 'set -g set-clipboard on' > "$HOME/.tmux.conf"''',
 ]
 
 # template for docker provider
