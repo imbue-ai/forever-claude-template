@@ -93,6 +93,12 @@ class DestroyAgentResponse(FrozenModel):
     status: str = Field(description="Result of the destroy operation")
 
 
+class StartAgentResponse(FrozenModel):
+    """Response from the agent start endpoint."""
+
+    status: str = Field(description="Result of the start operation")
+
+
 class ClaudeAuthStatusResponse(FrozenModel):
     """Response from /api/claude-auth/status."""
 

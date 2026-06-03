@@ -75,6 +75,24 @@ def _has_tool_results_only(content: str | list[Any] | Any) -> bool:
     return True
 
 
+def _extract_subagent_id(structured_agent_id: str | None, result_content: str) -> str | None:
+    """Resolve the subagent id for an Agent tool_result.
+
+    Prefers the structured toolUseResult.agentId field, falling back to the
+    `agentId: <id>` text trailer in the tool result content. Newer Claude Code
+    versions may emit only the structured field; older versions or nested
+    subagents may emit only the trailer.
+    """
+    if structured_agent_id:
+        return structured_agent_id
+    if not result_content:
+        return None
+    agent_id_match = _AGENT_ID_PATTERN.search(result_content)
+    if agent_id_match:
+        return agent_id_match.group(1)
+    return None
+
+
 def _make_event_id(uuid: str, suffix: str) -> str:
     """Derive a deterministic event_id from the source UUID and a suffix."""
     return f"{uuid}-{suffix}"
@@ -210,13 +228,24 @@ def _parse_assistant_message(
             if call_id and tool_name:
                 tool_name_by_call_id[call_id] = tool_name
 
-            tool_calls.append(
-                {
-                    "tool_call_id": call_id,
-                    "tool_name": tool_name,
-                    "input_preview": input_preview,
-                }
-            )
+            tool_call: dict[str, str] = {
+                "tool_call_id": call_id,
+                "tool_name": tool_name,
+                "input_preview": input_preview,
+            }
+            # For Agent tool calls, surface the description and subagent_type from the
+            # tool input directly. These let the frontend render the rich subagent card
+            # (label + agent-type badge) the instant the call appears, before the subagent
+            # is linked to its session.
+            if tool_name == "Agent" and isinstance(tool_input, dict):
+                description = tool_input.get("description")
+                subagent_type = tool_input.get("subagent_type")
+                if isinstance(description, str) and description:
+                    tool_call["description"] = description
+                if isinstance(subagent_type, str) and subagent_type:
+                    tool_call["subagent_type"] = subagent_type
+
+            tool_calls.append(tool_call)
 
     usage: dict[str, Any] | None = None
     if usage_raw:
@@ -259,6 +288,13 @@ def _parse_user_message(
 ) -> None:
     message: dict[str, Any] = raw.get("message", {})
     content = message.get("content")
+
+    tool_use_result = raw.get("toolUseResult")
+    structured_agent_id: str | None = None
+    if isinstance(tool_use_result, dict):
+        agent_id_value = tool_use_result.get("agentId")
+        if isinstance(agent_id_value, str) and agent_id_value:
+            structured_agent_id = agent_id_value
 
     # Emit user text message if there is actual user text
     if not _has_tool_results_only(content):
@@ -311,12 +347,10 @@ def _parse_user_message(
 
             tool_name = tool_name_by_call_id.get(tool_call_id, "unknown")
 
-            # Extract subagent ID BEFORE truncation (it may be at the end)
+            # Extract subagent ID BEFORE truncation (the trailer may be at the end).
             extracted_subagent_id: str | None = None
-            if tool_name == "Agent" and result_content:
-                agent_id_match = _AGENT_ID_PATTERN.search(result_content)
-                if agent_id_match:
-                    extracted_subagent_id = agent_id_match.group(1)
+            if tool_name == "Agent":
+                extracted_subagent_id = _extract_subagent_id(structured_agent_id, result_content)
 
             if len(result_content) > _MAX_OUTPUT_LENGTH:
                 result_content = result_content[:_MAX_OUTPUT_LENGTH] + "..."

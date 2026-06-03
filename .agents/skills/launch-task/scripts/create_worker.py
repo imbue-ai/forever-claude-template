@@ -130,10 +130,16 @@ def _parse_duration(value: str) -> float:
 def _read_frontmatter_field(task_file: Path, key: str) -> str | None:
     """Return the string value of frontmatter ``key``, or ``None`` if absent.
 
-    Returns ``None`` when the file has no/broken frontmatter or the key is
-    missing -- full schema validation is the worker's job
-    (``parse_task_frontmatter.py``); here we pull out one key at a time. Raises
-    ``ValueError`` only when the key is present but not a non-empty string.
+    Returns ``None`` when the file has no frontmatter block (no leading ``---``)
+    or the key is missing -- full schema validation is the worker's job
+    (``parse_task_frontmatter.py``); here we pull out one key at a time.
+
+    Raises ``ValueError`` when the frontmatter is genuinely malformed -- a
+    present block whose body is invalid YAML, or a key present but not a
+    non-empty string. A broken frontmatter block is an authoring bug in the
+    task file, so we surface it (with the original parse error chained) rather
+    than silently degrading it to "field absent" and launching the worker with
+    the wrong inputs.
     """
     lines = task_file.read_text(encoding="utf-8").splitlines()
     if not lines or lines[0].strip() != "---":
@@ -144,8 +150,10 @@ def _read_frontmatter_field(task_file: Path, key: str) -> str | None:
         return None
     try:
         frontmatter = yaml.safe_load("\n".join(lines[1:end_idx]))
-    except yaml.YAMLError:
-        return None
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            f"{task_file}: frontmatter block is present but contains invalid YAML"
+        ) from exc
     if not isinstance(frontmatter, dict):
         return None
     value = frontmatter.get(key)
@@ -256,9 +264,12 @@ def launch(
 ) -> int:
     """Run the worker-creation lifecycle. Returns the process exit code.
 
-    Pre-flight checks (existence of ``runtime_dir``, ``task_file``, and any
-    ``source_artifacts_dir`` declared in the task frontmatter) run first so
-    a typo doesn't half-create a worker.
+    Pre-flight checks run first so a typo doesn't half-create a worker:
+    ``runtime_dir`` and ``task_file`` existence (and any declared
+    ``source_artifacts_dir``'s existence) return exit code 2 with a clean
+    message, since those are caller-supplied paths. Malformed task-file
+    frontmatter instead raises ``ValueError`` (full traceback) -- that's a bug
+    in how the task file was composed, not a bad CLI argument.
 
     ``state_dir`` is the lead's ``MNGR_AGENT_STATE_DIR``; when set, the
     converter at ``<state_dir>/commands/common_transcript.sh`` is flushed
@@ -276,11 +287,12 @@ def launch(
     if not task_file.is_file():
         print(f"create_worker: --task-file not found: {task_file}", file=sys.stderr)
         return 2
-    try:
-        artifacts_dir = _read_source_artifacts_dir(task_file)
-    except ValueError as exc:
-        print(f"create_worker: {exc}", file=sys.stderr)
-        return 2
+    # A malformed ``source_artifacts_dir`` (or invalid frontmatter YAML) is an
+    # authoring bug in the task file -- let it raise so the caller gets the full
+    # traceback rather than a terse one-line message. The CLI path checks above
+    # stay as clean exit-2 validations (those are caller-supplied arguments, not
+    # file content).
+    artifacts_dir = _read_source_artifacts_dir(task_file)
     if artifacts_dir is not None and not artifacts_dir.is_dir():
         print(
             f"create_worker: source_artifacts_dir is not a directory: {artifacts_dir}",
@@ -374,11 +386,10 @@ def _run_launch(args: argparse.Namespace, runner: Runner | None) -> int:
 
 
 def _run_await(args: argparse.Namespace) -> int:
-    try:
-        report_path = _read_finish_report_path(args.task_file)
-    except ValueError as exc:
-        print(f"create_worker: {exc}", file=sys.stderr)
-        return 2
+    # A missing/malformed ``finish_report_path`` is an authoring bug in the task
+    # file; let the ValueError raise for a full traceback rather than swallowing
+    # it into a terse exit-2 message (matches ``launch``'s handling above).
+    report_path = _read_finish_report_path(args.task_file)
     return await_report(
         report_path=report_path,
         timeout_seconds=args.timeout,

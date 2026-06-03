@@ -26,25 +26,41 @@ npm install
 npm run dev
 ```
 
-## Refreshing web-service tabs from an agent
+## Driving the workspace layout from an agent
 
-An agent running inside the workspace container can tell the user's Minds UI
-to reload any open tab for one of its web services. The agent POSTs to the
-system interface on localhost (default port 8000, matching
-`Config.system_interface_port`):
+An agent running inside the workspace container can rearrange the
+dockview through the agent-facing `scripts/layout.py` helper. The
+subcommand surface covers `list / inspect / open / focus / split /
+close / move / rename / maximize / restore / replace-url / refresh`.
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/refresh-service/web"
+# Print every addressable thing (registered services + mngr agents)
+# with open/running flags. YAML by default, ``--json`` to switch.
+python3 scripts/layout.py list
+
+# Surface the given service in a tab split alongside the primary chat
+# (reports a no-op if one is already open; use ``focus`` to bring it
+# to the foreground).
+python3 scripts/layout.py open web
+
+# Reload one tab (or, for ``service:<name>``, every iframe tied to
+# that service).
+python3 scripts/layout.py refresh web
+
+# Inspect the live grid tree -- arrangements, sizes, active panel,
+# ref-resolved panel list.
+python3 scripts/layout.py inspect
 ```
 
-This appends a `refresh_service` event to the agent's
-`events/refresh/events.jsonl` file. The minds desktop client tails the event
-via `mngr event --follow`, then POSTs back to the system interface which
-broadcasts a WebSocket message telling the frontend to reload every open
-iframe tab tied to the given service (matched by the iframe's
-`data-service-name` attribute). Replace `web` with whichever service name
-(as listed in `runtime/applications.toml` / the tab dropdown) you want to
-refresh.
+Every op POSTs `{op, args, agent_id}` to the loopback-only
+`/api/layout/broadcast` endpoint on the system interface. Mutating ops
+acquire an in-process advisory mutex (HTTP 409 with the in-flight
+holder's metadata on contention); reads bypass it. Panels are
+addressed by stable, type-prefixed refs: `service:<name>`,
+`chat:<agent-name>`, `subagent:<session-id>`, `terminal:<short-hash>`,
+`url:<short-hash>`. Subcommands that take a "service or ref" argument
+also accept a bare service name (e.g. `web` -> `service:web`). See the
+`manage-layout` skill for end-to-end orientation.
 
 ## Building
 

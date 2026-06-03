@@ -25,22 +25,22 @@ import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { renderUserMessage, renderAssistantMessage, computeAuthErrorHiddenEventIds } from "./message-renderers";
-import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
+import { buildAgentTerminalUrl, getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
 
 function getAgentTerminalUrl(agentId: string): string {
-  const baseUrl = getTerminalUrl();
-  const separator = baseUrl.includes("?") ? "&" : "?";
   // The ttyd dispatch script is invoked as `bash -c "$SCRIPT" <args...>` where
-  // the first trailing arg becomes $0 (not $1). The dispatch reads KEY="$1",
-  // so we prepend a dummy "_" to land the real key in $1. That matches the
-  // pattern used by the existing workdir deep-link in DockviewWorkspace.ts.
-  // Passing the agent name as $2 lets agent.sh attach to that agent's tmux
-  // session ("${MNGR_PREFIX}<name>") rather than the primary agent's. If the
-  // agent isn't in the local cache yet, fall back to no name arg and let
-  // agent.sh attach to the ambient session.
+  // the first trailing arg becomes $0 (not $1). ``buildAgentTerminalUrl``
+  // emits ``arg=_&arg=agent&arg=<name>`` so the dispatch lands ``agent`` in
+  // ``$1`` and the name in ``$2``, mirroring the workdir deep-link pattern.
+  // When the agent isn't in the local cache yet, fall back to the bare
+  // base URL and let agent.sh attach to the ambient session.
   const agent = getAgentById(agentId);
-  const args = agent?.name ? `arg=_&arg=agent&arg=${encodeURIComponent(agent.name)}` : "arg=_&arg=agent";
-  return `${baseUrl}${separator}${args}`;
+  if (!agent?.name) {
+    const baseUrl = getTerminalUrl();
+    const separator = baseUrl.includes("?") ? "&" : "?";
+    return `${baseUrl}${separator}arg=_&arg=agent`;
+  }
+  return buildAgentTerminalUrl(agent.name);
 }
 
 function openAgentTerminalTab(agentId: string): void {

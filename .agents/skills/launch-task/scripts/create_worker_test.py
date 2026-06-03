@@ -172,28 +172,48 @@ def test_source_artifacts_dir_missing_is_fatal(
     assert "source_artifacts_dir" in capsys.readouterr().err
 
 
-def test_source_artifacts_dir_non_string_is_fatal(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A non-string ``source_artifacts_dir`` value aborts before launch."""
+def test_source_artifacts_dir_non_string_raises(tmp_path: Path) -> None:
+    """A non-string ``source_artifacts_dir`` value raises (full traceback) before
+    any mngr call -- a malformed task file is an authoring bug, not a bad CLI arg."""
     runtime, task, _ = _make_layout(tmp_path)
     task.write_text(
         "---\nlead_agent: lead\nsource_artifacts_dir: [a, b]\n---\n\nbody\n"
     )
     runner = _RecordingRunner()
 
-    rc = create_worker_mod.launch(
-        name="demo-worker",
-        template="worker",
-        runtime_dir=runtime,
-        task_file=task,
-        workspace="ws",
-        runner=runner,
-    )
+    with pytest.raises(ValueError, match="source_artifacts_dir"):
+        create_worker_mod.launch(
+            name="demo-worker",
+            template="worker",
+            runtime_dir=runtime,
+            task_file=task,
+            workspace="ws",
+            runner=runner,
+        )
 
-    assert rc == 2
     assert runner.calls == []
-    assert "source_artifacts_dir" in capsys.readouterr().err
+
+
+def test_invalid_frontmatter_yaml_raises(tmp_path: Path) -> None:
+    """A present frontmatter block with invalid YAML raises rather than being
+    silently treated as 'no frontmatter' -- it would otherwise mask an
+    authoring bug and launch the worker with the wrong inputs."""
+    runtime, task, _ = _make_layout(tmp_path)
+    # A ``---`` block whose body is not valid YAML (unclosed bracket).
+    task.write_text("---\nsource_artifacts_dir: [a, b\n---\n\nbody\n")
+    runner = _RecordingRunner()
+
+    with pytest.raises(ValueError, match="invalid YAML"):
+        create_worker_mod.launch(
+            name="demo-worker",
+            template="worker",
+            runtime_dir=runtime,
+            task_file=task,
+            workspace="ws",
+            runner=runner,
+        )
+
+    assert runner.calls == []
 
 
 def test_malformed_frontmatter_does_not_abort_launch(tmp_path: Path) -> None:
@@ -612,17 +632,14 @@ def test_main_await_prints_report(
     assert capsys.readouterr().out == "hello from worker\n"
 
 
-def test_main_await_missing_finish_report_path_is_fatal(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """await exits 2 (not the timeout code) when the field is absent."""
+def test_main_await_missing_finish_report_path_raises(tmp_path: Path) -> None:
+    """await raises (full traceback) when the required field is absent, rather
+    than swallowing it into a terse exit-2 message."""
     task = tmp_path / "task.md"
     task.write_text("---\nlead_agent: lead\n---\n\nbody\n")
 
-    rc = create_worker_mod.main(_await_argv(task))
-
-    assert rc == 2
-    assert "finish_report_path" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="finish_report_path"):
+        create_worker_mod.main(_await_argv(task))
 
 
 @pytest.mark.parametrize(

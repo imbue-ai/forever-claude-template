@@ -28,6 +28,21 @@ _marker_for() {
     printf '%s/done.%s\n' "$MARKER_DIR" "$1"
 }
 
+_recover_interrupted_dpkg() {
+    # A prior apt/dpkg run that was killed mid-operation leaves dpkg
+    # half-configured, after which every `apt-get install` aborts with
+    # "dpkg was interrupted, you must manually run 'dpkg --configure -a'".
+    # This happens routinely for pool hosts: the bake's `mngr stop` parks the
+    # host while this deferred install's first-boot `apt` is still running, so
+    # the post-lease retry would otherwise fail forever. Run the documented
+    # recovery up front -- it's a fast no-op when dpkg is already consistent.
+    # Best-effort: if recovery itself fails we log it loudly (not silently) and
+    # let the apt step below surface the real error.
+    if ! dpkg --configure -a; then
+        _log "WARNING: 'dpkg --configure -a' returned non-zero; the apt install below may still fail"
+    fi
+}
+
 _install_playwright() {
     local marker
     marker="$(_marker_for playwright)"
@@ -35,6 +50,10 @@ _install_playwright() {
         _log "playwright: marker present at $marker, skipping"
         return 0
     fi
+    # `playwright install --with-deps` shells out to apt; recover any
+    # interrupted dpkg state first so an install the bake interrupted can
+    # actually complete on retry.
+    _recover_interrupted_dpkg
     _log "playwright: installing chromium + apt system libs (this may take a few minutes)"
     # `--with-deps` apt-installs the system libraries chromium needs.
     # `uv run` uses the workspace venv (the playwright Python wheel is

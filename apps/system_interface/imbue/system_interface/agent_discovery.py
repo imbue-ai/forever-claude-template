@@ -10,12 +10,16 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.api.find import find_one_agent
+from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.main import get_or_create_plugin_manager
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.env_utils import parse_env_file
 
 logger = _loguru_logger
@@ -170,3 +174,36 @@ def send_message(agent_name: str, message: str) -> bool:
     finally:
         cg.__exit__(None, None, None)
     return len(result.successful_agents) > 0
+
+
+def start_agent(agent_name: str) -> None:
+    """Ensure an agent is running, starting it if it is STOPPED.
+
+    This deliberately goes through the *same* in-process mngr path that
+    ``send_message`` uses to auto-start a STOPPED agent: it loads the mngr
+    context exactly the same way (so the same config, env, and cwd apply),
+    then resolves the agent and runs mngr's own ``ensure_agent_started``
+    (via ``resolve_to_started_host_and_running_agent(..., allow_auto_start=
+    True)``). That is what gives us the invariant that opening an agent's
+    terminal and sending it a message succeed or fail together -- neither
+    reimplements the start, so neither can diverge from the other.
+
+    ``ensure_agent_started`` is a clean no-op for an agent that is already
+    running, so this is cheap in the common case (opening the terminal of an
+    agent that is already up).
+
+    Raises ``MngrError`` (e.g. ``AgentNotFoundError`` if the agent does
+    not exist, or a start failure) -- callers surface these to the user.
+    """
+    mngr_ctx, cg = _get_mngr_context()
+    try:
+        address = AgentAddress(agent=AgentName(agent_name))
+        host_ref, agent_ref = find_one_agent(address, mngr_ctx)
+        resolve_to_started_host_and_running_agent(
+            host_ref=host_ref,
+            agent_ref=agent_ref,
+            allow_auto_start=True,
+            mngr_ctx=mngr_ctx,
+        )
+    finally:
+        cg.__exit__(None, None, None)
