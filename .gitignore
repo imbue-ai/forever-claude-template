@@ -318,3 +318,6 @@ scripts/notify_user.local.sh
 
 # make sure we don't check in reviewer logs
 .reviewer/logs/
+
+# Reviewer plugin scratch output
+.reviewer/tmp/

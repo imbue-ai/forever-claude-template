@@ -12,6 +12,7 @@ import {
   type SerializedDockview,
 } from "dockview-core";
 import { ChatPanel } from "./ChatPanel";
+import { AgentTerminalPanel } from "./AgentTerminalPanel";
 import { IframePanel, reloadIframesForService } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
@@ -830,12 +831,27 @@ function initializeDockview(parentElement: HTMLElement): void {
             agentId: params?.chatAgentId ?? params?.agentId ?? getPrimaryAgentId(),
           });
 
-        case "iframe":
+        case "iframe": {
+          // Agent-terminal tabs route to AgentTerminalPanel, which starts the
+          // agent before attaching its terminal session. They are identified
+          // by their URL shape: the terminal service URL plus the ttyd
+          // agent-dispatch key (`arg=agent`), which `getAgentTerminalUrl`
+          // constructs and no other iframe URL uses.
+          const iframeUrl = params?.url ?? "";
+          const isAgentTerminal = iframeUrl.startsWith(getTerminalUrl()) && iframeUrl.includes("arg=agent");
+          if (isAgentTerminal) {
+            return createMithrilRenderer(AgentTerminalPanel, {
+              agentId: params?.agentId ?? "",
+              url: iframeUrl,
+              title: params?.title ?? "Tab",
+            });
+          }
           return createMithrilRenderer(IframePanel, {
             url: params?.url ?? "",
             title: params?.title ?? "Tab",
             serviceName: params?.serviceName,
           });
+        }
 
         case "subagent":
           return createMithrilRenderer(SubagentView, {
