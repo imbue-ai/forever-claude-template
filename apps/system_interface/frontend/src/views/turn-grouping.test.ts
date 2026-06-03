@@ -461,3 +461,40 @@ describe("audit regressions", () => {
     expect(sections[0].trailing_reply.map((e) => e.event_id)).toEqual(["rB"]);
   });
 });
+
+describe("batched transitions (bababa real transcript)", () => {
+  // The real bababa case: the agent batched `tk close nzb4 && tk close p5jc &&
+  // tk start ts53` into ONE Bash command, so all three transitions arrive in
+  // one tool output. Node order must still follow transition order
+  // (nzb4, p5jc, ts53) -- the started step must not hoist above the
+  // closed-without-work step.
+  it("orders a batched close+close+start by transition order, not opens-first", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "set up my inbox view"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start cod-nzb4", "k1"),
+      result("2026-04-28T01:00:01Z", "k1", "Updated cod-nzb4 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Bash", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      tkMsg("2026-04-28T01:00:03Z", "tk close cod-nzb4 && tk close cod-p5jc && tk start cod-ts53", "kb"),
+      result(
+        "2026-04-28T01:00:03Z",
+        "kb",
+        "Updated cod-nzb4 -> closed\nUpdated cod-p5jc -> closed\nUpdated cod-ts53 -> in_progress",
+      ),
+      assistantText("2026-04-28T01:00:04Z", "Now let me fetch a sample.", "narr"),
+      workMsg("2026-04-28T01:00:05Z", "Bash", "w2"),
+      result("2026-04-28T01:00:05Z", "w2", "ok"),
+    ];
+    const sections = run(
+      events,
+      enrich({
+        "cod-nzb4": { status: "closed" },
+        "cod-p5jc": { status: "closed" },
+        "cod-ts53": { status: "in_progress" },
+      }),
+      /* idle */ false,
+    );
+    const steps = stepItems(sections[0].items);
+    expect(steps.map((s) => s.ticket_id)).toEqual(["cod-nzb4", "cod-p5jc", "cod-ts53"]);
+  });
+});

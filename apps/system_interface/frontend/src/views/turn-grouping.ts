@@ -240,15 +240,21 @@ export function buildSections(
     if (e.type === "assistant_message") {
       if (current === null) current = ensureSection(null, "section-pre");
       const parsed = parseMessage(e, toolResults);
-      // Apply opens BEFORE routing this message's content, so work that shares
-      // a message with a `tk start` groups under the step it opens. Apply
-      // closes AFTER, so work that shares a message with a `tk close` still
-      // groups under the step being closed rather than falling out ungrouped.
-      for (const t of parsed.transitions) if (t.status === "in_progress") applyTransition(current, t);
-      if (parsed.render !== null && (parsed.render.text || parsed.render.tool_calls.length > 0)) {
-        routeMessage(current, parsed.render);
+      // Apply transitions in transcript order so each step node lands at its
+      // real position -- a batched `tk close a && tk start b` must keep a's node
+      // before b's. Then route this message's content to the step it belongs
+      // to: the step it opened (work shares a message with its `tk start`), or
+      // else the step that was current before the message (work shares a
+      // message with a `tk close` -- it stays in the closing step).
+      const stepBefore = current.current_step_id;
+      let lastOpened: string | null = null;
+      for (const t of parsed.transitions) {
+        applyTransition(current, t);
+        if (t.status === "in_progress") lastOpened = t.id;
       }
-      for (const t of parsed.transitions) if (t.status === "closed") applyTransition(current, t);
+      if (parsed.render !== null && (parsed.render.text || parsed.render.tool_calls.length > 0)) {
+        routeMessage(current, parsed.render, lastOpened ?? stepBefore);
+      }
       continue;
     }
     // tool_result events are resolved by id via toolResults; no routing needed.
@@ -310,11 +316,10 @@ function applyTransition(section: SectionBuilder, t: { id: string; status: "in_p
   if (section.current_step_id === t.id) section.current_step_id = null;
 }
 
-function routeMessage(section: SectionBuilder, e: AssistantMessageEvent): void {
-  const step_id = section.current_step_id;
+function routeMessage(section: SectionBuilder, e: AssistantMessageEvent, step_id: string | null): void {
   section.entries.push({ kind: "event", event: e, step_id });
   if (step_id !== null) {
-    section.steps.get(step_id)!.events.push(e);
+    section.steps.get(step_id)?.events.push(e);
   }
 }
 
