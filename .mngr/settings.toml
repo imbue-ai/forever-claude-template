@@ -158,50 +158,27 @@ provider = "lima"
 target_path = "/mngr/code/"
 idle_mode = "disabled"
 start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
-# Back host_dir with an in-VM btrfs additional disk instead of a 9p bind
-# mount, so the minds workspace data lives on a snapshottable filesystem
-# (towards consistent backups). This drops the host-side `volumes/<host_id>/`
-# bind mount; offline reads via `mngr event` / `mngr transcript` against
-# a stopped Lima host stop working in this mode until the host is started.
-# See vendor/mngr/specs/lima-btrfs-host-volume/concise.md for the design.
-setting__extend = ["providers.lima.is_host_data_volume_exposed=false"]
+# Run the minds workspace inside a Docker container *in* the Lima VM (built
+# from the same Dockerfile as the docker/vultr providers) rather than directly
+# in the VM. This keeps every provider's dependencies installed identically
+# (one Dockerfile, no sudo, always in sync) and replaces the hand-maintained
+# toolchain install that used to live in extra_provision_command__extend.
+# is_host_in_docker forces the in-VM btrfs additional-disk layout, so
+# is_host_data_volume_exposed must be false; host_dir lives on a per-host btrfs
+# subvolume bind-mounted into the container, giving consistent snapshots.
+# Offline reads via `mngr event` / `mngr transcript` against a stopped Lima
+# host stop working in this mode until the host is started.
+setting__extend = [
+    "providers.lima.is_host_in_docker=true",
+    "providers.lima.is_host_data_volume_exposed=false",
+]
+# Build the project image inside the VM, exactly like the docker template.
+build_arg__extend = ["--file=Dockerfile", "."]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
-extra_provision_command__extend = [
-    # Create /mngr/worktree/ on the fresh lima VM so worktrees ride the
-    # /mngr/ volume backup, and install the /worktree -> /mngr/worktree
-    # safety-net symlink so any straggling `/worktree/...` references keep
-    # working (mirrors the Dockerfile symlink installed in docker-based
-    # providers).
-    "sudo mkdir -p /mngr/worktree && sudo chown $(whoami) /mngr/worktree && sudo ln -sfn /mngr/worktree /worktree",
-    # Same safety-net symlink for the workspace itself: /code -> /mngr/code
-    # so any straggling absolute /code/... reference still resolves. The
-    # workspace itself rsyncs onto /mngr/code/ via target_path above.
-    "sudo ln -sfn /mngr/code /code",
-    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs restic ripgrep sqlite3 unison",
-    "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
-    # Install latchkey CLI globally; pinned to the same version as Dockerfile's
-    # LATCHKEY_VERSION ARG. Bump both together.
-    "sudo npm install -g latchkey@2.7.2",
-    "curl -LsSf https://astral.sh/uv/install.sh | sh",
-    "ARCH=$(uname -m) && sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && sudo chmod +x /usr/local/bin/ttyd",
-    "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh",
-    "cd apps/system_interface/frontend && npm ci && npm run build",
-    "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
-    "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
-    # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
-    # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
-    # because the uv installer prepends it.
-    "mkdir -p $HOME/.local/bin && ln -sf /mngr/code/vendor/tk/ticket $HOME/.local/bin/tk",
-    # Source /mngr/env (the host env file, when present) for interactive bash
-    # sessions, so a shell opened via `limactl shell <instance>` inherits the
-    # variables mngr commands need. Mirrors the Dockerfile snippet that does
-    # the same for docker-based providers (`docker exec -it bash`); the only
-    # difference is the non-root lima user's $HOME/.bashrc target instead of
-    # /root/.bashrc. mngr otherwise only sources /mngr/env in the tmux
-    # default-command, so manually-opened shells miss it without this.
-    '''printf '%s\n' 'if [ -f /mngr/env ]; then set -a; . /mngr/env; set +a; fi' >> "$HOME/.bashrc"''',
-]
+# Same first-boot seed as the docker template; see comment there. Runs in the
+# container (the host), where /usr/local/bin/fct-seed is baked into the image.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]
