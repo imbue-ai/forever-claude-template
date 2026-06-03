@@ -26,7 +26,7 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.system_interface import claude_auth_endpoints
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
@@ -746,7 +746,7 @@ async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
         try:
             start_agent(agent_info.name)
             return None
-        except BaseMngrError as e:
+        except MngrError as e:
             return str(e)
 
     error_message = await run_in_threadpool(_run_start)
