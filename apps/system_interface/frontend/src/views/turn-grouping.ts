@@ -155,6 +155,16 @@ interface Placement {
   step_id: string | null;
 }
 
+/** An ordered skeleton entry recorded as the transcript is walked. A `step`
+ *  entry marks where a step node first appears -- its first transition (an
+ *  open, or a close with no prior open) -- so the node is positioned by that
+ *  transition even when the step carries no work. An `event` entry is a routed
+ *  assistant message. Timeline items are rebuilt from these in transcript
+ *  order. */
+type SectionEntry =
+  | { kind: "step"; id: string }
+  | { kind: "event"; event: AssistantMessageEvent; step_id: string | null };
+
 interface SectionBuilder {
   user_event: UserMessageEvent | null;
   key: string;
@@ -162,11 +172,12 @@ interface SectionBuilder {
   steps: Map<string, StepNode>;
   step_order: string[];
   placements: Placement[];
-  /** Non-boundary user-message chips, with the index into `placements` they
+  /** Ordered skeleton of step appearances and routed events (see SectionEntry),
+   *  used to assemble timeline items in transcript order. */
+  entries: SectionEntry[];
+  /** Non-boundary user-message chips, with the index into `entries` they
    *  follow, so they render at their chronological spot. */
   chips: { event: UserMessageEvent; after: number }[];
-  /** Ordered record of step/ungrouped openings so items can be rebuilt in
-   *  transcript order. Each entry is a step id or null (ungrouped run break). */
   current_step_id: string | null;
 }
 
@@ -177,6 +188,7 @@ function newSection(user_event: UserMessageEvent | null, key: string): SectionBu
     steps: new Map(),
     step_order: [],
     placements: [],
+    entries: [],
     chips: [],
     current_step_id: null,
   };
@@ -213,7 +225,7 @@ export function buildSections(
       if (isNonBoundaryUserMessage(e.content ?? "")) {
         // Stop-hook feedback and the like: a chip inside the current section.
         if (current !== null && isStopHookFeedback(e.content ?? "")) {
-          current.chips.push({ event: e, after: current.placements.length - 1 });
+          current.chips.push({ event: e, after: current.entries.length - 1 });
         }
         // Hidden non-boundary messages (skill expansions, /welcome) are dropped.
         continue;
@@ -253,6 +265,7 @@ function openStep(section: SectionBuilder, id: string, is_carryover: boolean): v
       events: [],
     });
     section.step_order.push(id);
+    section.entries.push({ kind: "step", id });
   }
   section.current_step_id = id;
 }
@@ -280,6 +293,7 @@ function applyTransition(section: SectionBuilder, t: { id: string; status: "in_p
       events: [],
     });
     section.step_order.push(t.id);
+    section.entries.push({ kind: "step", id: t.id });
   }
   if (section.current_step_id === t.id) section.current_step_id = null;
 }
@@ -287,6 +301,7 @@ function applyTransition(section: SectionBuilder, t: { id: string; status: "in_p
 function routeMessage(section: SectionBuilder, e: AssistantMessageEvent): void {
   const step_id = section.current_step_id;
   section.placements.push({ event: e, step_id });
+  section.entries.push({ kind: "event", event: e, step_id });
   if (step_id !== null) {
     section.steps.get(step_id)!.events.push(e);
   }
@@ -311,13 +326,13 @@ function finalizeSection(
   for (let i = 0; i < section.placements.length; i++) {
     if (isWork(section.placements[i].event)) lastWorkIdx = i;
   }
-  const trailingIdx = new Set<number>();
+  const trailingIds = new Set<string>();
   const trailing_reply: AssistantMessageEvent[] = [];
   for (let i = lastWorkIdx + 1; i < section.placements.length; i++) {
     const p = section.placements[i];
     if (isProse(p.event)) {
       trailing_reply.push(p.event);
-      trailingIdx.add(i);
+      trailingIds.add(p.event.event_id);
       // Remove promoted prose from its step's grouped events.
       if (p.step_id !== null) {
         const node = section.steps.get(p.step_id);
@@ -354,8 +369,12 @@ function finalizeSection(
     node.is_frontier = node.ticket_id === frontierId && node.status === "active";
   }
 
-  // 5. Build items in transcript order: walk placements, emitting each step
-  //    node at its first appearance and coalescing ungrouped prose/work runs.
+  // 5. Build timeline items by walking the entry skeleton in transcript order.
+  //    Each step node is emitted at its first appearance -- its transition --
+  //    so a step renders at its transcript position even if it carried no work.
+  //    Routed events live in their step node (already emitted) or coalesce into
+  //    an inline ungrouped run when no step was open. Carryover steps were
+  //    recorded as the section's first entries, so they lead the timeline.
   const items: TimelineItem[] = [];
   const emittedSteps = new Set<string>();
   let ungrouped: AssistantMessageEvent[] = [];
@@ -367,52 +386,39 @@ function finalizeSection(
     }
   };
 
-  // Carryover steps that were re-opened render at the very top, before any
-  // placement (they carry no new events until the agent acts).
-  for (const id of section.step_order) {
-    const node = section.steps.get(id)!;
-    if (node.is_carryover && !emittedSteps.has(id)) {
-      items.push({ kind: "step", step: node });
-      emittedSteps.add(id);
-    }
-  }
-
   const chipsAfter = new Map<number, UserMessageEvent[]>();
   for (const c of section.chips) {
     const arr = chipsAfter.get(c.after) ?? [];
     arr.push(c.event);
     chipsAfter.set(c.after, arr);
   }
-  // A chip that fires before any placement (after === -1) renders at the top.
-  for (const c of chipsAfter.get(-1) ?? []) items.push({ kind: "chip", event: c });
-
-  for (let i = 0; i < section.placements.length; i++) {
-    if (trailingIdx.has(i)) continue;
-    const p = section.placements[i];
-    if (p.step_id !== null) {
-      flushUngrouped();
-      if (!emittedSteps.has(p.step_id)) {
-        items.push({ kind: "step", step: section.steps.get(p.step_id)! });
-        emittedSteps.add(p.step_id);
-      }
-    } else {
-      ungrouped.push(p.event);
-    }
-    for (const c of chipsAfter.get(i) ?? []) {
+  const emitChips = (afterIdx: number): void => {
+    for (const c of chipsAfter.get(afterIdx) ?? []) {
       flushUngrouped();
       items.push({ kind: "chip", event: c });
     }
+  };
+
+  // A chip that fires before any entry (after === -1) renders at the top.
+  emitChips(-1);
+
+  for (let i = 0; i < section.entries.length; i++) {
+    const entry = section.entries[i];
+    if (entry.kind === "step") {
+      flushUngrouped();
+      if (!emittedSteps.has(entry.id)) {
+        items.push({ kind: "step", step: section.steps.get(entry.id)! });
+        emittedSteps.add(entry.id);
+      }
+    } else if (!trailingIds.has(entry.event.event_id) && entry.step_id === null) {
+      // An ungrouped event (no step open): coalesce into an inline run.
+      // In-step events render inside the step node; trailing prose renders
+      // below the timeline (see trailing_reply).
+      ungrouped.push(entry.event);
+    }
+    emitChips(i);
   }
   flushUngrouped();
-
-  // Any step that transitioned but never received a placement (e.g. created
-  // and closed with no work) still needs to render, in its declared order.
-  for (const id of section.step_order) {
-    if (!emittedSteps.has(id)) {
-      items.push({ kind: "step", step: section.steps.get(id)! });
-      emittedSteps.add(id);
-    }
-  }
 
   // 6. Pending roster (tail section only): steps in enrichment that never
   //    started anywhere, as dashed placeholders at the tail, in tk `created`

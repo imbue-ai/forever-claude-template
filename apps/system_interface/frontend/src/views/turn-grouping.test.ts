@@ -151,6 +151,41 @@ describe("bug fixes", () => {
   });
 });
 
+describe("step ordering edge cases", () => {
+  // BUG 3 (bababa repro): a step closed without ever being started -- and thus
+  // with no work events -- must still render at its transcript position, not be
+  // shoved below a later step that does have work. Here p5jc closes (no work)
+  // before ts53 starts and does work; p5jc must sit between nzb4 and ts53.
+  it("positions a no-work step at its transition spot, not below a later working step", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "set up my inbox view"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start nzb4", "k1"),
+      result("2026-04-28T01:00:01Z", "k1", "Updated nzb4 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Bash", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      tkMsg("2026-04-28T01:00:03Z", "tk close nzb4", "k2"),
+      result("2026-04-28T01:00:03Z", "k2", "Updated nzb4 -> closed"),
+      // p5jc is closed directly, with no start and no work.
+      tkMsg("2026-04-28T01:00:04Z", "tk close p5jc", "k3"),
+      result("2026-04-28T01:00:04Z", "k3", "Updated p5jc -> closed"),
+      tkMsg("2026-04-28T01:00:05Z", "tk start ts53", "k4"),
+      result("2026-04-28T01:00:05Z", "k4", "Updated ts53 -> in_progress"),
+      assistantText("2026-04-28T01:00:06Z", "Now let me fetch a sample.", "narr"),
+      workMsg("2026-04-28T01:00:07Z", "Bash", "w2"),
+      result("2026-04-28T01:00:07Z", "w2", "ok"),
+    ];
+    const sections = run(
+      events,
+      enrich({ nzb4: { status: "closed" }, p5jc: { status: "closed" }, ts53: { status: "in_progress" } }),
+      /* idle */ false,
+    );
+    const steps = stepItems(sections[0].items);
+    expect(steps.map((s) => s.ticket_id)).toEqual(["nzb4", "p5jc", "ts53"]);
+    expect(steps[1].status).toBe("done"); // p5jc: done, in the middle
+    expect(steps[2].status).toBe("active"); // ts53: active, at the bottom
+  });
+});
+
 describe("grouping and status", () => {
   it("groups a step's work and shows its close summary when done", () => {
     const events = [
