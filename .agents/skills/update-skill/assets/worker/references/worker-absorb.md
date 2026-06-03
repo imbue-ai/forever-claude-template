@@ -5,9 +5,10 @@ Follow this flow when your task file carries `FLOW: absorb`. Both Gate 1
 
 ## Stage 1: Replicate
 
-1. Read the task file to learn which skill was used and what was missing.
-2. Read the incident transcript the task file points at (typically
-   `runtime/update/<target>/turn.jsonl`).
+1. Read the task file. The `## Incident summary` description and the
+   `## Anchors` verbatim quotes are your primary guide.
+2. Locate the incident and the manual follow-up in the lead's transcript
+   -- follow `.agents/shared/references/transcript-exploration.md`.
 3. Read the target skill's current `SKILL.md` and any scripts under
    `scripts/`. A skill may be pure prose.
 

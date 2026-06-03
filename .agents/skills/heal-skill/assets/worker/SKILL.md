@@ -1,6 +1,6 @@
 ---
 name: heal-skill-worker
-description: Repair a failing skill. Invoke when your task file asks you to heal a specific skill by pointing at its incident transcript.
+description: Repair a failing skill. Invoke when your task file asks you to heal a specific skill, providing an incident description plus verbatim quote anchors that locate the failure in the lead's transcript.
 metadata:
   role: worker-sub-skill
 ---
@@ -26,12 +26,14 @@ Valid `name:` values for this worker:
 
 ## Stage 1: Replicate
 
-1. Read the task file to learn which skill failed and how.
-2. Read the incident transcript the task file points at.
-3. Read the skill's current `SKILL.md` and any scripts under `<skill_directory>/scripts/`.
-   A skill may be pure prose (no scripts), in which case "replicate" means
-   tracing the SKILL.md instructions against the incident inputs to see
-   where the recipe led astray.
+1. Read the task file. The `## Incident summary` description and the
+   `## Anchors` verbatim quotes are your primary guide.
+2. Locate the incident in the lead's transcript -- follow
+   `.agents/shared/references/transcript-exploration.md`.
+3. Read the skill's current `SKILL.md` and any scripts under
+   `<skill_directory>/scripts/`. A skill may be pure prose (no scripts),
+   in which case "replicate" means tracing the SKILL.md instructions
+   against the incident inputs to see where the recipe led astray.
 4. Reproduce the failure. If the failure depends on external state you
    cannot recreate, construct a minimal synthetic input that exercises the
    same code path (or, for a prose-only skill, the same branch of the
