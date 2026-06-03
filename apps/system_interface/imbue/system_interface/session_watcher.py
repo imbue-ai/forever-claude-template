@@ -341,7 +341,7 @@ class AgentSessionWatcher:
                         # loop still picks up subagent changes at POLL_INTERVAL, just
                         # without sub-second latency -- log so the degraded watch is
                         # diagnosable rather than silently dropped.
-                        logger.debug("Failed to schedule watchdog for %s", subagents_dir)
+                        logger.debug("Failed to schedule watchdog for {}", subagents_dir)
 
             # Cache .meta.json. Retry on each pass while the read fails with OSError
             # (transient: mid-write, momentary permission glitch). Give up after a
