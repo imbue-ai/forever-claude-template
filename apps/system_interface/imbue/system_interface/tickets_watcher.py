@@ -126,9 +126,7 @@ class AgentTicketsWatcher:
         request-time discoveries so other websocket subscribers don't miss
         them.
         """
-        changed = self._scan()
-        with self._scan_lock:
-            snapshot = self._copy_enrichment()
+        changed, snapshot = self._scan_and_copy()
         if changed:
             self._on_events(self._agent_id, [self._enrichment_message(snapshot)])
         return snapshot
@@ -140,9 +138,8 @@ class AgentTicketsWatcher:
             self._wake_event.clear()
             if self._stop_event.is_set():
                 break
-            if self._scan():
-                with self._scan_lock:
-                    snapshot = self._copy_enrichment()
+            changed, snapshot = self._scan_and_copy()
+            if changed:
                 self._on_events(self._agent_id, [self._enrichment_message(snapshot)])
 
         if self._observer is not None:
@@ -168,50 +165,59 @@ class AgentTicketsWatcher:
         except OSError as e:
             logger.warning("Failed to start watchdog observer for tickets dir {}: {}", parent_dir, e)
 
-    def _scan(self) -> bool:
-        """Rebuild the enrichment snapshot from disk. Returns True if it
-        changed since the last scan.
+    def _scan_and_copy(self) -> tuple[bool, dict[str, dict[str, Any]]]:
+        """Rebuild the snapshot from disk and copy it, atomically under a single
+        `_scan_lock` acquisition, returning (changed, snapshot_copy).
 
-        Re-reads every step ticket each scan (ticket directories are small).
-        Holds _scan_lock so a concurrent get_enrichment() from a request
-        handler cannot observe a half-rebuilt snapshot.
+        Detection and copy MUST happen in the same critical section: doing them
+        in two separate locked sections lets a concurrent scan (the poll thread
+        or another request handler) slip between them and advance the snapshot,
+        decoupling the copy a caller broadcasts from the change it detected.
         """
         with self._scan_lock:
-            if not self._tickets_dir.exists():
-                if self._enrichment:
-                    self._enrichment = {}
-                    return True
-                return False
+            changed = self._rebuild_locked()
+            return changed, self._copy_enrichment()
 
-            new_enrichment: dict[str, dict[str, Any]] = {}
-            for md_file in sorted(self._tickets_dir.glob("*.md")):
-                try:
-                    stat = md_file.stat()
-                except OSError as e:
-                    logger.debug("Skipping ticket file {}: {}", md_file, e)
-                    continue
+    def _rebuild_locked(self) -> bool:
+        """Rebuild `_enrichment` from disk in place; return True if it changed.
+        Re-reads every step ticket each scan (ticket directories are small).
+        The caller MUST hold `_scan_lock`.
+        """
+        if not self._tickets_dir.exists():
+            if self._enrichment:
+                self._enrichment = {}
+                return True
+            return False
 
-                state = parse_ticket_file(md_file)
-                if state is None:
-                    continue
-                # Only step records render; regular tickets are dropped.
-                if not state.step:
-                    continue
-                if self._should_skip_for_agent(state):
-                    continue
+        new_enrichment: dict[str, dict[str, Any]] = {}
+        for md_file in sorted(self._tickets_dir.glob("*.md")):
+            try:
+                stat = md_file.stat()
+            except OSError as e:
+                logger.debug("Skipping ticket file {}: {}", md_file, e)
+                continue
 
-                created_at = _normalize_iso(state.created_at) if state.created_at else _mtime_iso(stat.st_mtime)
-                new_enrichment[state.ticket_id] = {
-                    "title": state.title,
-                    "summary": state.summary if state.status == "closed" else None,
-                    "status": state.status,
-                    "created_at": created_at,
-                }
+            state = parse_ticket_file(md_file)
+            if state is None:
+                continue
+            # Only step records render; regular tickets are dropped.
+            if not state.step:
+                continue
+            if self._should_skip_for_agent(state):
+                continue
 
-            if new_enrichment == self._enrichment:
-                return False
-            self._enrichment = new_enrichment
-            return True
+            created_at = _normalize_iso(state.created_at) if state.created_at else _mtime_iso(stat.st_mtime)
+            new_enrichment[state.ticket_id] = {
+                "title": state.title,
+                "summary": state.summary if state.status == "closed" else None,
+                "status": state.status,
+                "created_at": created_at,
+            }
+
+        if new_enrichment == self._enrichment:
+            return False
+        self._enrichment = new_enrichment
+        return True
 
     def _should_skip_for_agent(self, state: TicketState) -> bool:
         """A step record surfaces only to its creator (the `agent` stamp set

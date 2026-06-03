@@ -10,6 +10,7 @@ tickets are dropped.
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -252,3 +253,66 @@ def test_get_enrichment_broadcasts_snapshot_on_change(tmp_path: Path) -> None:
     watcher.get_enrichment()
     assert len(calls) == 2
     assert calls[1][1][0]["enrichment"]["ts-cb"]["status"] == "in_progress"
+
+
+def test_concurrent_reads_do_not_decouple_broadcast_from_change(tmp_path: Path) -> None:
+    """Under concurrent get_enrichment() calls (request handlers racing the poll
+    thread), each broadcast must reflect the change it detected. The split
+    detect-then-copy form let a concurrent scan advance the snapshot between
+    detection and copy, so the same state could be broadcast twice while an
+    intermediate state was skipped. Invariant guarded here: no two CONSECUTIVE
+    broadcasts carry the same status -- impossible on the atomic code (a second
+    scan sees no change), reproduced by the decoupling bug. The driver only ever
+    writes a status different from the previous one, so a duplicate can only come
+    from decoupling, not from a real repeat."""
+    tickets_dir = tmp_path / ".tickets"
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    md = tickets_dir / "tt-race.md"
+    tmp = tickets_dir / "tt-race.tmp"
+
+    def write(status: str) -> None:
+        # Write atomically (temp + rename) so a concurrent scan never reads a
+        # half-written file -- isolates the test to the decoupling race.
+        tmp.write_text(_ticket_text("tt-race", status, title="Race"))
+        tmp.rename(md)
+
+    write("open")
+    lock = threading.Lock()
+    broadcasts: list[str | None] = []
+
+    def cb(_agent_id: str, events: list[dict[str, Any]]) -> None:
+        with lock:
+            for e in events:
+                broadcasts.append(e["enrichment"].get("tt-race", {}).get("status"))
+
+    watcher = AgentTicketsWatcher("a", "a-name", tickets_dir, cb)
+    stop = threading.Event()
+    # Release readers and the writer together for maximum contention, with no
+    # sleeps: the GIL interleaves the tight scan loops with the writer's file
+    # I/O. The invariant holds for ANY interleaving on the atomic code, so the
+    # test never flaky-fails; it only fails if the decoupling race is present.
+    n_readers = 4
+    gate = threading.Barrier(n_readers + 1)
+
+    def reader() -> None:
+        gate.wait()
+        while not stop.is_set():
+            watcher.get_enrichment()
+
+    readers = [threading.Thread(target=reader) for _ in range(n_readers)]
+    for r in readers:
+        r.start()
+    gate.wait()
+    # Each successive status differs from the previous one (no real repeats).
+    for status in ["in_progress", "closed", "open"] * 40 + ["in_progress", "closed"]:
+        write(status)
+    stop.set()
+    for r in readers:
+        r.join()
+    # Final drain so the terminal state is observed.
+    watcher.get_enrichment()
+
+    with lock:
+        seen = list(broadcasts)
+    for i in range(1, len(seen)):
+        assert seen[i] != seen[i - 1], f"consecutive duplicate broadcast at {i}: {seen}"
