@@ -1,35 +1,27 @@
 import { describe, expect, it } from "vitest";
-import type { TranscriptEvent, TaskEvent, ToolResultEvent } from "../models/Response";
-import type { StepView } from "./turn-grouping";
-import {
-  buildTaskRecords,
-  buildStepPlanOrder,
-  buildSectionSteps,
-  stepActiveInWindow,
-  attributeNarration,
-  eventsInTaskWindow,
-  classifyTopLevelMessages,
-  placeStopHookChips,
-} from "./turn-grouping";
+import type {
+  TranscriptEvent,
+  TaskEvent,
+  ToolResultEvent,
+  AssistantMessageEvent,
+  UserMessageEvent,
+} from "../models/Response";
+import type { StepEnrichment, StepNode, TimelineItem } from "./turn-grouping";
+import { buildEnrichment, buildSections } from "./turn-grouping";
 
-function userMsg(ts: string, content: string, eventId: string = `u-${ts}`): TranscriptEvent {
-  return {
-    timestamp: ts,
-    type: "user_message",
-    event_id: eventId,
-    source: "test",
-    role: "user",
-    content,
-  };
+// --- Event builders ---
+
+function userMsg(ts: string, content: string, id = `u-${ts}`): UserMessageEvent {
+  return { timestamp: ts, type: "user_message", event_id: id, source: "test", role: "user", content };
 }
 
-function assistantMsg(ts: string, text: string, eventId: string = `a-${ts}`): TranscriptEvent {
+function assistantText(ts: string, text: string, id = `a-${ts}`): AssistantMessageEvent {
   return {
     timestamp: ts,
     type: "assistant_message",
-    event_id: eventId,
+    event_id: id,
     source: "test",
-    model: "test-model",
+    model: "m",
     text,
     tool_calls: [],
     stop_reason: null,
@@ -38,49 +30,49 @@ function assistantMsg(ts: string, text: string, eventId: string = `a-${ts}`): Tr
   };
 }
 
-function toolUse(ts: string, toolName: string, callId: string, input: string = "{}"): TranscriptEvent {
+/** A non-tk work message: one tool call, no prose. */
+function workMsg(ts: string, toolName: string, callId: string, id = `a-${callId}`): AssistantMessageEvent {
   return {
     timestamp: ts,
     type: "assistant_message",
-    event_id: `a-${callId}`,
+    event_id: id,
     source: "test",
-    model: "test-model",
+    model: "m",
     text: "",
-    tool_calls: [{ tool_call_id: callId, tool_name: toolName, input_preview: input }],
+    tool_calls: [{ tool_call_id: callId, tool_name: toolName, input_preview: `{"path":"x"}` }],
     stop_reason: null,
     usage: null,
     is_auth_error: false,
   };
 }
 
-function toolResultEvent(ts: string, callId: string): TranscriptEvent {
+/** A tk lifecycle command as it appears in the transcript: a Bash tool call
+ *  whose input_preview is the JSON-encoded command. */
+function tkMsg(ts: string, command: string, callId: string, id = `a-${callId}`): AssistantMessageEvent {
+  return {
+    timestamp: ts,
+    type: "assistant_message",
+    event_id: id,
+    source: "test",
+    model: "m",
+    text: "",
+    tool_calls: [{ tool_call_id: callId, tool_name: "Bash", input_preview: `{"command":"${command}"}` }],
+    stop_reason: null,
+    usage: null,
+    is_auth_error: false,
+  };
+}
+
+function result(ts: string, callId: string, output: string): ToolResultEvent {
   return {
     timestamp: ts,
     type: "tool_result",
     event_id: `r-${callId}`,
     source: "test",
     tool_call_id: callId,
-    tool_name: "test-tool",
-    output: "ok",
+    tool_name: "test",
+    output,
     is_error: false,
-  };
-}
-
-/** Build a StepView for placement/narration tests. */
-function stepView(overrides: Partial<StepView> & Pick<StepView, "ticket_id" | "status">): StepView {
-  return {
-    title: overrides.title ?? "Step",
-    summary: overrides.summary ?? null,
-    created_at: overrides.created_at ?? overrides.active_window_start ?? "2026-04-28T01:00:00Z",
-    started_at: overrides.started_at ?? overrides.active_window_start ?? null,
-    active_window_start: overrides.active_window_start ?? null,
-    active_window_end: overrides.active_window_end ?? null,
-    is_step: overrides.is_step ?? true,
-    parent_id: overrides.parent_id ?? "",
-    children: overrides.children ?? [],
-    narration: overrides.narration ?? null,
-    is_settled: overrides.is_settled ?? false,
-    ...overrides,
   };
 }
 
@@ -96,7 +88,7 @@ function taskEvent(
     event_id: `${ticketId}-${status}`,
     source: "tk",
     ticket_id: ticketId,
-    title: extras.title ?? "Some task",
+    title: extras.title ?? "Some step",
     status,
     created_at: extras.created_at ?? ts,
     summary: extras.summary ?? null,
@@ -107,992 +99,254 @@ function taskEvent(
   };
 }
 
-/** Plan order recovered from a test event stream, mirroring ChatPanel: build a
- *  tool_call_id -> tool_result map, then derive the create ordering. */
-function planOrderFor(events: TranscriptEvent[]): Map<string, number> {
+function enrich(entries: Record<string, Partial<StepEnrichment>>): Map<string, StepEnrichment> {
+  const m = new Map<string, StepEnrichment>();
+  for (const [id, e] of Object.entries(entries)) {
+    m.set(id, {
+      title: e.title ?? id,
+      summary: e.summary ?? null,
+      status: e.status ?? "in_progress",
+      created_at: e.created_at ?? "2026-04-28T01:00:00.000000Z",
+    });
+  }
+  return m;
+}
+
+/** Build the toolResults map from the event list (as ChatPanel does) and run. */
+function run(events: TranscriptEvent[], enrichment: Map<string, StepEnrichment> = new Map(), agentIsIdle = true) {
   const toolResults = new Map<string, ToolResultEvent>();
   for (const e of events) {
     if (e.type === "tool_result") toolResults.set(e.tool_call_id, e);
   }
-  return buildStepPlanOrder(events, toolResults);
+  return buildSections(events, toolResults, enrichment, agentIsIdle);
 }
 
-/** Helper: build steps active in a window from events, mirroring what
- *  ChatPanel does inline. */
-function stepsForWindow(events: TranscriptEvent[], start_ts: string, end_ts: string, is_settled: boolean): StepView[] {
-  return buildSectionSteps(buildTaskRecords(events), start_ts, end_ts, is_settled, planOrderFor(events));
+function stepItems(items: TimelineItem[]): StepNode[] {
+  return items.filter((i): i is { kind: "step"; step: StepNode } => i.kind === "step").map((i) => i.step);
 }
 
-/** Helper: collect body events in a window from the full event list. */
-function bodyEventsInWindow(events: TranscriptEvent[], start_ts: string, end_ts: string): TranscriptEvent[] {
-  return events
-    .filter((e) => {
-      if (e.type !== "assistant_message" && e.type !== "tool_result") return false;
-      if (e.timestamp < start_ts) return false;
-      if (end_ts !== "" && e.timestamp >= end_ts) return false;
-      return true;
-    })
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-}
-
-describe("buildTaskRecords", () => {
-  it("folds three events for one ticket into a single record with all timestamps", () => {
+describe("buildEnrichment", () => {
+  it("folds task_events by id, keeps only steps, latest status wins, summary on close", () => {
     const events = [
-      taskEvent("t1", "open", "2026-04-28T01:00:00Z", { created_at: "2026-04-28T01:00:00Z" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:01:00Z"),
-      taskEvent("t1", "closed", "2026-04-28T01:02:00Z", {
-        summary: "Did the thing.",
-        summary_at: "2026-04-28T01:01:50Z",
+      taskEvent("s1", "open", "2026-04-28T01:00:00Z", { title: "First", created_at: "2026-04-28T01:00:00Z" }),
+      taskEvent("s1", "in_progress", "2026-04-28T01:00:05Z", { title: "First", created_at: "2026-04-28T01:00:00Z" }),
+      taskEvent("s1", "closed", "2026-04-28T01:00:10Z", {
+        title: "First",
+        created_at: "2026-04-28T01:00:00Z",
+        summary: "Did the thing",
       }),
+      taskEvent("reg", "open", "2026-04-28T01:00:00Z", { step: false }),
     ];
-    const records = buildTaskRecords(events);
-    const record = records.get("t1");
-    expect(record).toBeDefined();
-    expect(record?.created_at).toBe("2026-04-28T01:00:00Z");
-    expect(record?.started_at).toBe("2026-04-28T01:01:00Z");
-    expect(record?.closed_at).toBe("2026-04-28T01:02:00Z");
-    expect(record?.summary).toBe("Did the thing.");
-    expect(record?.final_status).toBe("closed");
-  });
-
-  it("ignores non-task events", () => {
-    const events = [userMsg("2026-04-28T01:00:00Z", "hi"), assistantMsg("2026-04-28T01:00:01Z", "hello")];
-    const records = buildTaskRecords(events);
-    expect(records.size).toBe(0);
-  });
-
-  it("falls back to the event timestamp when created_at is an empty string", () => {
-    const events = [taskEvent("t1", "open", "2026-04-28T01:00:00Z", { created_at: "" })];
-    const records = buildTaskRecords(events);
-    expect(records.get("t1")?.created_at).toBe("2026-04-28T01:00:00Z");
+    const table = buildEnrichment(events);
+    expect(table.has("reg")).toBe(false);
+    const s1 = table.get("s1")!;
+    expect(s1.title).toBe("First");
+    expect(s1.status).toBe("closed");
+    expect(s1.summary).toBe("Did the thing");
+    expect(s1.created_at).toBe("2026-04-28T01:00:00Z");
   });
 });
 
-describe("stepActiveInWindow", () => {
-  it("includes a step first observed inside the window", () => {
-    const events = [taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" })];
-    const record = buildTaskRecords(events).get("t1")!;
-    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z")).toBe(true);
-  });
-
-  it("includes a step that started before the window and is still open", () => {
+describe("bug fixes", () => {
+  // BUG 1: work done before the first step must not vanish.
+  it("renders tool calls done before the first step in an ungrouped item", () => {
     const events = [
-      taskEvent("t1", "open", "2026-04-28T00:50:00Z", { created_at: "2026-04-28T00:50:00Z" }),
-      taskEvent("t1", "in_progress", "2026-04-28T00:55:00Z"),
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      workMsg("2026-04-28T01:00:05Z", "Read", "tc-read"),
+      result("2026-04-28T01:00:06Z", "tc-read", "file contents"),
+      tkMsg("2026-04-28T01:00:10Z", "tk start s1", "tc-start"),
+      result("2026-04-28T01:00:11Z", "tc-start", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:15Z", "Edit", "tc-edit"),
+      result("2026-04-28T01:00:16Z", "tc-edit", "ok"),
     ];
-    const record = buildTaskRecords(events).get("t1")!;
-    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z")).toBe(true);
+    const sections = run(events, enrich({ s1: { title: "Do it" } }));
+    expect(sections).toHaveLength(1);
+    const items = sections[0].items;
+    // The pre-step Read is an ungrouped item that comes BEFORE the step node.
+    expect(items[0].kind).toBe("ungrouped");
+    const ung = items[0] as { kind: "ungrouped"; events: AssistantMessageEvent[] };
+    expect(ung.events.map((e) => e.event_id)).toEqual(["a-tc-read"]);
+    expect(items[1].kind).toBe("step");
+    const step = (items[1] as { kind: "step"; step: StepNode }).step;
+    expect(step.ticket_id).toBe("s1");
+    expect(step.events.map((e) => e.event_id)).toEqual(["a-tc-edit"]);
   });
 
-  it("excludes a step that closed before the window started", () => {
+  // BUG 2: a started step renders in its transcript position, never hoisted up.
+  it("positions an in-progress step after earlier closed steps, not at the top", () => {
     const events = [
-      taskEvent("t1", "open", "2026-04-28T00:50:00Z", { created_at: "2026-04-28T00:50:00Z" }),
-      taskEvent("t1", "closed", "2026-04-28T00:55:00Z"),
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start a", "t-a-start"),
+      result("2026-04-28T01:00:01Z", "t-a-start", "Updated a -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w-a"),
+      result("2026-04-28T01:00:02Z", "w-a", "ok"),
+      tkMsg("2026-04-28T01:00:03Z", "tk close a", "t-a-close"),
+      result("2026-04-28T01:00:03Z", "t-a-close", "Updated a -> closed"),
+      tkMsg("2026-04-28T01:00:04Z", "tk start b", "t-b-start"),
+      result("2026-04-28T01:00:04Z", "t-b-start", "Updated b -> in_progress"),
+      workMsg("2026-04-28T01:00:05Z", "Edit", "w-b"),
+      result("2026-04-28T01:00:05Z", "w-b", "ok"),
     ];
-    const record = buildTaskRecords(events).get("t1")!;
-    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z")).toBe(false);
-  });
-
-  it("includes a step that started before and closed during the window", () => {
-    const events = [
-      taskEvent("t1", "open", "2026-04-28T00:50:00Z", { created_at: "2026-04-28T00:50:00Z" }),
-      taskEvent("t1", "in_progress", "2026-04-28T00:55:00Z"),
-      taskEvent("t1", "closed", "2026-04-28T01:00:30Z"),
-    ];
-    const record = buildTaskRecords(events).get("t1")!;
-    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z")).toBe(true);
-  });
-
-  it("works with open-ended window (tail partition)", () => {
-    const events = [taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" })];
-    const record = buildTaskRecords(events).get("t1")!;
-    expect(stepActiveInWindow(record, "2026-04-28T01:00:00Z", "")).toBe(true);
-  });
-});
-
-describe("step rendering in partitions", () => {
-  it("attributes a step to the partition it was created in", () => {
-    const events: TranscriptEvent[] = [
-      userMsg("2026-04-28T01:00:00Z", "fix the thing"),
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", {
-        created_at: "2026-04-28T01:00:10Z",
-        title: "Look at the thing",
-      }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      taskEvent("t1", "closed", "2026-04-28T01:00:50Z", {
-        summary: "Found the thing",
-        summary_at: "2026-04-28T01:00:45Z",
-      }),
-      assistantMsg("2026-04-28T01:00:55Z", "Done."),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    expect(steps).toHaveLength(1);
-    expect(steps[0]).toMatchObject({
-      ticket_id: "t1",
-      title: "Look at the thing",
-      status: "done",
-      summary: "Found the thing",
-    });
-  });
-
-  it("clamps a step's status to each partition: still active in the earlier block, done in the later one", () => {
-    // The step is in_progress at the 01:01:00 boundary and only closes at
-    // 01:01:30, in the second partition. The earlier block must render it as
-    // still-active (not retroactively "done"), and its summary/closed_at must
-    // not leak backwards; the later block renders the close.
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Step 1" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      taskEvent("t1", "closed", "2026-04-28T01:01:30Z", {
-        summary: "Wrapped up step 1",
-        summary_at: "2026-04-28T01:01:25Z",
-      }),
-    ];
-    // First partition: 01:00:00 -> 01:01:00 (closes later, so still active here)
-    const steps1 = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true);
-    expect(steps1).toHaveLength(1);
-    expect(steps1[0]).toMatchObject({ ticket_id: "t1", status: "active", summary: null, active_window_end: null });
-
-    // Second partition: 01:01:00 -> "" (tail) -- the close lands here
-    const steps2 = stepsForWindow(events, "2026-04-28T01:01:00Z", "", false);
-    expect(steps2).toHaveLength(1);
-    expect(steps2[0]).toMatchObject({ ticket_id: "t1", status: "done", summary: "Wrapped up step 1" });
-  });
-
-  it("does not show a step that was closed before the partition", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Step 1" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      taskEvent("t1", "closed", "2026-04-28T01:00:50Z"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:01:00Z", "", false);
-    expect(steps).toHaveLength(0);
-  });
-
-  it("carries a still-open step across multiple partitions", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Long task" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-    ];
-    // Partition 1: 01:00 -> 01:01
-    expect(stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true)).toHaveLength(1);
-    // Partition 2: 01:01 -> 01:02
-    expect(stepsForWindow(events, "2026-04-28T01:01:00Z", "2026-04-28T01:02:00Z", true)).toHaveLength(1);
-    // Partition 3: 01:02 -> tail
-    expect(stepsForWindow(events, "2026-04-28T01:02:00Z", "", false)).toHaveLength(1);
-  });
-
-  it("gives pending tasks no active window so they own no body events", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("active", "open", "2026-04-28T01:00:05Z", { created_at: "2026-04-28T01:00:05Z", title: "Active" }),
-      taskEvent("active", "in_progress", "2026-04-28T01:00:10Z"),
-      taskEvent("pending", "open", "2026-04-28T01:00:12Z", { created_at: "2026-04-28T01:00:12Z", title: "Pending" }),
-      toolUse("2026-04-28T01:00:20Z", "Read", "tc-active"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    const pendingStep = steps.find((s) => s.ticket_id === "pending");
-    expect(pendingStep).toBeDefined();
-    expect(pendingStep?.status).toBe("pending");
-    expect(pendingStep?.active_window_start).toBeNull();
-    const body = bodyEventsInWindow(events, "2026-04-28T01:00:00Z", "");
-    expect(eventsInTaskWindow(pendingStep!, body)).toEqual([]);
-  });
-
-  it("orders carryover steps above own steps", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Carryover" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      taskEvent("t2", "open", "2026-04-28T01:01:10Z", { created_at: "2026-04-28T01:01:10Z", title: "Fresh" }),
-    ];
-    // Second partition: 01:01 -> tail. t1 is carryover, t2 is new.
-    const steps = stepsForWindow(events, "2026-04-28T01:01:00Z", "", false);
-    expect(steps.map((s) => s.title)).toEqual(["Carryover", "Fresh"]);
-  });
-
-  it("orders own steps by started_at, not created_at, when started out of order", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "First planned" }),
-      taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Second planned" }),
-      taskEvent("t2", "in_progress", "2026-04-28T01:00:30Z"),
-      taskEvent("t2", "closed", "2026-04-28T01:00:40Z", { summary: "Did t2 first." }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:50Z"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    expect(steps.map((s) => s.title)).toEqual(["Second planned", "First planned"]);
-  });
-
-  it("sorts not-yet-started steps by created_at after started ones", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Alpha" }),
-      taskEvent("t2", "open", "2026-04-28T01:00:20Z", { created_at: "2026-04-28T01:00:20Z", title: "Bravo" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:25Z"),
-      taskEvent("t3", "open", "2026-04-28T01:00:30Z", { created_at: "2026-04-28T01:00:30Z", title: "Charlie" }),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    expect(steps.map((s) => s.title)).toEqual(["Alpha", "Bravo", "Charlie"]);
-    expect(steps.map((s) => s.status)).toEqual(["active", "pending", "pending"]);
-  });
-
-  it("drops regular tickets -- only step records appear", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("auth-1", "in_progress", "2026-04-28T01:00:05Z", {
-        title: "Refactor auth middleware",
-        step: false,
-      }),
-      taskEvent("step-1", "open", "2026-04-28T01:00:10Z", {
-        title: "Read the middleware",
-        parent_id: "auth-1",
-      }),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    expect(steps.map((s) => s.ticket_id)).toEqual(["step-1"]);
-    expect(steps[0].is_step).toBe(true);
-  });
-});
-
-describe("is_settled", () => {
-  it("is false for active steps in the tail partition when agent is not idle", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    expect(steps[0].is_settled).toBe(false);
-  });
-
-  it("is true for active steps in the tail partition when agent is idle", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", true);
-    expect(steps[0].is_settled).toBe(true);
-  });
-
-  it("is true for active steps in a past partition (has a successor)", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true);
-    expect(steps[0].is_settled).toBe(true);
-  });
-
-  it("is false for done steps (is_settled only applies to active steps)", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      taskEvent("t1", "closed", "2026-04-28T01:00:50Z", { summary: "Done." }),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true);
+    const sections = run(events, enrich({ a: {}, b: {} }), /* idle */ false);
+    const steps = stepItems(sections[0].items);
+    expect(steps.map((s) => s.ticket_id)).toEqual(["a", "b"]);
     expect(steps[0].status).toBe("done");
-    expect(steps[0].is_settled).toBe(false);
-  });
-
-  it("spins only the frontier step in the running tail; an earlier still-open step settles", () => {
-    // The agent is on the most-recently-started step. An earlier step left
-    // open is not the frontier, so it must not show a live spinner above it.
-    const events: TranscriptEvent[] = [
-      taskEvent("a", "open", "2026-04-28T01:00:05Z", { created_at: "2026-04-28T01:00:05Z", title: "First" }),
-      taskEvent("a", "in_progress", "2026-04-28T01:00:10Z"),
-      taskEvent("b", "open", "2026-04-28T01:00:15Z", { created_at: "2026-04-28T01:00:15Z", title: "Second" }),
-      taskEvent("b", "in_progress", "2026-04-28T01:00:20Z"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    const a = steps.find((s) => s.ticket_id === "a")!;
-    const b = steps.find((s) => s.ticket_id === "b")!;
-    expect(a.status).toBe("active");
-    expect(a.is_settled).toBe(true); // superseded -> static ring, no spinner
-    expect(b.status).toBe("active");
-    expect(b.is_settled).toBe(false); // frontier -> live spinner
-  });
-
-  it("settles an earlier open step even when the later step that superseded it is already done", () => {
-    // The screenshot bug: step 'a' spins while a *later* step 'b' is already
-    // done. Once a later step started -- even one that has since closed -- the
-    // earlier open step was left behind and must render static, not spinning.
-    const events: TranscriptEvent[] = [
-      taskEvent("a", "open", "2026-04-28T01:00:05Z", { created_at: "2026-04-28T01:00:05Z", title: "Start service" }),
-      taskEvent("a", "in_progress", "2026-04-28T01:00:10Z"),
-      taskEvent("b", "open", "2026-04-28T01:00:15Z", { created_at: "2026-04-28T01:00:15Z", title: "Build UI" }),
-      taskEvent("b", "in_progress", "2026-04-28T01:00:20Z"),
-      taskEvent("b", "closed", "2026-04-28T01:00:40Z", { summary: "Built the UI." }),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    const a = steps.find((s) => s.ticket_id === "a")!;
-    const b = steps.find((s) => s.ticket_id === "b")!;
-    expect(a.status).toBe("active");
-    expect(a.is_settled).toBe(true); // not the frontier (b started later) -> static
-    expect(b.status).toBe("done");
+    expect(steps[1].status).toBe("active");
+    expect(steps[1].is_frontier).toBe(true);
   });
 });
 
-describe("picked-up-ticket attribution", () => {
-  it("attributes a ticket to the window containing its earliest observed event", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("auth-1", "in_progress", "2026-04-28T03:00:30Z", {
-        title: "Auth refactor",
-        assignee: "agent-B",
-        created_at: "2026-04-27T10:00:00Z",
-      }),
+describe("grouping and status", () => {
+  it("groups a step's work and shows its close summary when done", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      tkMsg("2026-04-28T01:00:03Z", "tk close s1", "t2"),
+      result("2026-04-28T01:00:03Z", "t2", "Updated s1 -> closed"),
     ];
-    // Window 1: 02:00 -> 03:00 -- the ticket's created_at is way before
-    // both windows, but first_observed_at is in window 2.
-    const steps1 = stepsForWindow(events, "2026-04-28T02:00:00Z", "2026-04-28T03:00:00Z", true);
-    expect(steps1).toEqual([]);
-    // Window 2: 03:00 -> tail
-    const steps2 = stepsForWindow(events, "2026-04-28T03:00:00Z", "", false);
-    expect(steps2.map((s) => s.ticket_id)).toEqual(["auth-1"]);
-  });
-});
-
-describe("eventsInTaskWindow", () => {
-  it("returns only events between a step's started_at and closed_at", () => {
-    const step: StepView = {
-      ticket_id: "t1",
-      title: "Step 1",
-      status: "done",
-      summary: "Did it",
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:20Z",
-      active_window_start: "2026-04-28T01:00:20Z",
-      active_window_end: "2026-04-28T01:00:50Z",
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    const body = [
-      assistantMsg("2026-04-28T01:00:15Z", "before start"),
-      toolUse("2026-04-28T01:00:25Z", "Read", "tc1"),
-      toolUse("2026-04-28T01:00:45Z", "Edit", "tc2"),
-      assistantMsg("2026-04-28T01:00:55Z", "after end"),
-    ];
-    const result = eventsInTaskWindow(step, body);
-    expect(result.map((e) => e.event_id)).toEqual(["a-tc1", "a-tc2"]);
-  });
-
-  it("returns events through end when active_window_end is null", () => {
-    const step: StepView = {
-      ticket_id: "t1",
-      title: "Active",
-      status: "active",
-      summary: null,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:20Z",
-      active_window_start: "2026-04-28T01:00:20Z",
-      active_window_end: null,
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    const body = [toolUse("2026-04-28T01:00:25Z", "Read", "tc1"), toolUse("2026-04-28T01:00:45Z", "Edit", "tc2")];
-    expect(eventsInTaskWindow(step, body)).toHaveLength(2);
-  });
-
-  it("pulls in a trailing tool_result whose tool_use was in window", () => {
-    const step: StepView = {
-      ticket_id: "t1",
-      title: "Step 1",
-      status: "done",
-      summary: "Did it",
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:20Z",
-      active_window_start: "2026-04-28T01:00:20Z",
-      active_window_end: "2026-04-28T01:00:50Z",
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    function toolResult(ts: string, callId: string): TranscriptEvent {
-      return {
-        timestamp: ts,
-        type: "tool_result",
-        event_id: `r-${callId}`,
-        source: "test",
-        tool_call_id: callId,
-        tool_name: "test-tool",
-        output: "ok",
-        is_error: false,
-      };
-    }
-    const body = [toolUse("2026-04-28T01:00:45Z", "Read", "tc-late"), toolResult("2026-04-28T01:00:51Z", "tc-late")];
-    const result = eventsInTaskWindow(step, body);
-    expect(result.map((e) => e.event_id)).toEqual(["a-tc-late", "r-tc-late"]);
-  });
-
-  it("caps an abandoned step's window at the next step's start when steps are provided", () => {
-    const abandoned: StepView = {
-      ticket_id: "step-a",
-      title: "First, never closed",
-      status: "active",
-      summary: null,
-      created_at: "2026-04-28T01:00:00Z",
-      started_at: "2026-04-28T01:00:00Z",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: null,
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    const properlyClosed: StepView = {
-      ticket_id: "step-b",
-      title: "Second, closed cleanly",
-      status: "done",
-      summary: "Did the second step.",
-      created_at: "2026-04-28T01:00:10Z",
-      started_at: "2026-04-28T01:00:10Z",
-      active_window_start: "2026-04-28T01:00:10Z",
-      active_window_end: "2026-04-28T01:00:30Z",
-      is_step: true,
-      parent_id: "",
-      children: [],
-      narration: null,
-      is_settled: false,
-    };
-    const steps = [abandoned, properlyClosed];
-    const body = [
-      toolUse("2026-04-28T01:00:05Z", "Read", "tc-a"),
-      toolUse("2026-04-28T01:00:15Z", "Edit", "tc-b"),
-      toolUse("2026-04-28T01:00:25Z", "Bash", "tc-c"),
-    ];
-    const withSteps = eventsInTaskWindow(abandoned, body, steps);
-    expect(withSteps.map((e) => e.event_id)).toEqual(["a-tc-a"]);
-    const withoutSteps = eventsInTaskWindow(abandoned, body);
-    expect(withoutSteps).toHaveLength(3);
-  });
-});
-
-describe("classifyTopLevelMessages", () => {
-  it("excludes tool-bearing and empty-text assistant_messages", () => {
-    const withTextAndTools: TranscriptEvent = {
-      timestamp: "2026-04-28T01:00:00Z",
-      type: "assistant_message",
-      event_id: "a-mixed",
-      source: "test",
-      model: "test-model",
-      text: "Calling out to a tool.",
-      tool_calls: [{ tool_call_id: "tc-x", tool_name: "Bash", input_preview: "{}" }],
-      stop_reason: null,
-      usage: null,
-      is_auth_error: false,
-    };
-    const empty = assistantMsg("2026-04-28T01:00:05Z", "", "a-empty");
-    const placed = classifyTopLevelMessages([withTextAndTools, empty], []);
-    expect(placed).toEqual({ leading: [], inter_step: [], trailing: [] });
-  });
-
-  // A2 (close -> speak, the ideal): the post-close reply is trailing.
-  it("promotes a post-close message to the trailing reply (A2)", () => {
-    const doneStep = stepView({
-      ticket_id: "t1",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:50Z",
-      summary: "Found the null-check bug and patched it.",
-    });
-    const reply = assistantMsg("2026-04-28T01:00:55Z", "Fixed it -- want a regression test?", "msg-reply");
-    const placed = classifyTopLevelMessages([reply], [doneStep]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
-    expect(placed.leading).toEqual([]);
-    expect(placed.inter_step).toEqual([]);
-  });
-
-  // A3 (speak -> close): the pre-close message stays in-step, not promoted.
-  it("keeps a pre-close message in-step, not promoted (A3)", () => {
-    const doneStep = stepView({
-      ticket_id: "t1",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:50Z",
-      summary: "Found the null-check bug and patched it.",
-    });
-    const preClose = assistantMsg("2026-04-28T01:00:45Z", "Fixed it -- want a regression test?", "msg-pre");
-    const placed = classifyTopLevelMessages([preClose], [doneStep]);
-    expect(placed).toEqual({ leading: [], inter_step: [], trailing: [] });
-  });
-
-  // A4 (speak -> close -> speak): only the post-close message is promoted.
-  it("promotes only the post-close message when text brackets the close (A4)", () => {
-    const doneStep = stepView({
-      ticket_id: "t1",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:50Z",
-    });
-    const pre = assistantMsg("2026-04-28T01:00:45Z", "Patched it.", "msg-pre");
-    const post = assistantMsg("2026-04-28T01:00:55Z", "Want a regression test?", "msg-post");
-    const placed = classifyTopLevelMessages([pre, post], [doneStep]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-post"]);
-    expect(placed.inter_step).toEqual([]);
-    expect(placed.leading).toEqual([]);
-  });
-
-  // B2 (open step, speak after the last tool): reply promotes below.
-  it("promotes a message after the last tool when the step never closed (B2)", () => {
-    const openStep = stepView({
-      ticket_id: "t1",
-      status: "active",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: null,
-      is_settled: true,
-    });
-    const body = [
-      toolUse("2026-04-28T01:00:10Z", "Edit", "tc-1"),
-      toolResultEvent("2026-04-28T01:00:11Z", "tc-1"),
-      assistantMsg("2026-04-28T01:00:20Z", "Fixed the null-check. Want a test?", "msg-reply"),
-    ];
-    const placed = classifyTopLevelMessages(body, [openStep]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
-    expect(placed.inter_step).toEqual([]);
-    expect(placed.leading).toEqual([]);
-  });
-
-  // B3 (open, speak, tools, speak): mid-work narration stays in-step; only
-  // the trailing message (after the last tool) is promoted.
-  it("promotes only the trailing message; mid-work narration stays in-step (B3)", () => {
-    const openStep = stepView({
-      ticket_id: "t1",
-      status: "active",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: null,
-      is_settled: true,
-    });
-    const narration = assistantMsg("2026-04-28T01:00:05Z", "Found the bug -- patching now.", "msg-narr");
-    const reply = assistantMsg("2026-04-28T01:00:30Z", "Done. Want a test?", "msg-reply");
-    const body = [narration, toolUse("2026-04-28T01:00:15Z", "Edit", "tc-1"), reply];
-    const placed = classifyTopLevelMessages(body, [openStep]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
-    expect(placed.leading).toEqual([]);
-    expect(placed.inter_step).toEqual([]);
-  });
-
-  // B4 (first step closed, second open, trailing reply): scan stops at the
-  // second step's tool activity, never reaching the first close.
-  it("promotes the trailing reply across a closed-then-open step pair (B4)", () => {
-    const closed = stepView({
-      ticket_id: "step-a",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:30Z",
-    });
-    const open = stepView({
-      ticket_id: "step-b",
-      status: "active",
-      active_window_start: "2026-04-28T01:00:40Z",
-      active_window_end: null,
-      is_settled: true,
-    });
-    const body = [
-      toolUse("2026-04-28T01:00:50Z", "Bash", "tc-1"),
-      assistantMsg("2026-04-28T01:01:00Z", "Started the tests -- pytest or unittest?", "msg-reply"),
-    ];
-    const placed = classifyTopLevelMessages(body, [closed, open]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
-    expect(placed.inter_step).toEqual([]);
-    expect(placed.leading).toEqual([]);
-  });
-
-  // C1 (leading): prose before the first step renders above the timeline.
-  it("classifies prose before the first step as leading", () => {
-    const step = stepView({
-      ticket_id: "t1",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:10Z",
-      active_window_end: "2026-04-28T01:00:50Z",
-    });
-    const lead = assistantMsg("2026-04-28T01:00:05Z", "Sure -- tracing the auth path first.", "msg-lead");
-    const placed = classifyTopLevelMessages([lead], [step]);
-    expect(placed.leading.map((e) => e.event_id)).toEqual(["msg-lead"]);
-    expect(placed.trailing).toEqual([]);
-    expect(placed.inter_step).toEqual([]);
-  });
-
-  // C2 (full composite): leading + inter-step + trailing in one section.
-  it("classifies leading, inter-step, and trailing prose together (C2)", () => {
-    const step1 = stepView({
-      ticket_id: "step-1",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:10Z",
-      active_window_end: "2026-04-28T01:00:30Z",
-    });
-    const step2 = stepView({
-      ticket_id: "step-2",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:50Z",
-      active_window_end: "2026-04-28T01:01:10Z",
-    });
-    const lead = assistantMsg("2026-04-28T01:00:05Z", "On it -- tracing the auth path.", "msg-lead");
-    const inter = assistantMsg("2026-04-28T01:00:40Z", "Refresh path has the same flaw -- next.", "msg-inter");
-    const trail = assistantMsg("2026-04-28T01:01:20Z", "Both paths fixed. Want tests?", "msg-trail");
-    const placed = classifyTopLevelMessages([lead, inter, trail], [step1, step2]);
-    expect(placed.leading.map((e) => e.event_id)).toEqual(["msg-lead"]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-trail"]);
-    expect(placed.inter_step).toHaveLength(1);
-    expect(placed.inter_step[0].event.event_id).toBe("msg-inter");
-    expect(placed.inter_step[0].before_step_id).toBe("step-2");
-  });
-
-  // A1 (close, silent): nothing trailing.
-  it("returns nothing when the agent closes and stays silent (A1)", () => {
-    const doneStep = stepView({
-      ticket_id: "t1",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:50Z",
-      summary: "Found the null-check bug and patched it.",
-    });
-    expect(classifyTopLevelMessages([], [doneStep])).toEqual({ leading: [], inter_step: [], trailing: [] });
-  });
-
-  // Issue 4: a wrap-up reply emitted at end of turn while a step is still
-  // open must stay promoted after the next user message arrives and the step
-  // later closes. With the per-partition clamp, the step renders active (no
-  // future closed_at) in the earlier block, so the reply boundary stays at
-  // the last tool call and the wrap-up remains the trailing reply.
-  it("keeps the end-of-turn reply trailing when its step only closes in a later partition", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:10Z", { created_at: "2026-04-28T01:00:10Z", title: "Work" }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:20Z"),
-      toolUse("2026-04-28T01:00:30Z", "Edit", "tc-1"),
-      assistantMsg("2026-04-28T01:00:50Z", "Done -- want me to also add a test?", "msg-reply"),
-      // The step is only closed in the next partition (after a later user msg).
-      taskEvent("t1", "closed", "2026-04-28T01:02:00Z", { summary: "Did the work." }),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z", true);
-    expect(steps[0]).toMatchObject({ status: "active", active_window_end: null });
-    const body = bodyEventsInWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T01:01:00Z");
-    const placed = classifyTopLevelMessages(body, steps);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-reply"]);
-  });
-
-  it("promotes a multi-message trailing reply run as a single trailing block", () => {
-    const doneStep = stepView({
-      ticket_id: "t1",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:30Z",
-    });
-    const r1 = assistantMsg("2026-04-28T01:00:40Z", "Here's the summary.", "msg-1");
-    const r2 = assistantMsg("2026-04-28T01:00:45Z", "And one caveat.", "msg-2");
-    const placed = classifyTopLevelMessages([r1, r2], [doneStep]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-1", "msg-2"]);
-  });
-});
-
-describe("stop-hook reply segments (issue 3)", () => {
-  const doneStep = (): StepView =>
-    stepView({
-      ticket_id: "t1",
-      status: "done",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: "2026-04-28T01:00:20Z",
-      summary: "Did the work.",
-    });
-
-  it("weaves the pre-hook reply into the timeline and trails only the post-hook reply (tool work follows)", () => {
-    // The pre-hook wrap-up is shown at its chronological position (woven), the
-    // post-hook reply trails below. Neither collapses; the post-hook tool call
-    // no longer buries the pre-hook reply.
-    const body = [
-      toolUse("2026-04-28T01:00:10Z", "Edit", "tc-pre"),
-      assistantMsg("2026-04-28T01:00:30Z", "Done -- here is the summary.", "msg-pre"),
-      userMsg("2026-04-28T01:00:40Z", "Stop hook feedback:\nRun /autofix.", "u-hook"),
-      toolUse("2026-04-28T01:00:50Z", "Bash", "tc-post"),
-      assistantMsg("2026-04-28T01:01:00Z", "Autofix found nothing; working tree clean.", "msg-post"),
-    ];
-    const placed = classifyTopLevelMessages(body, [doneStep()]);
-    // pre-hook reply is woven in (shown, not collapsed), positioned after the
-    // last step (no later step to precede -> before_step_id "").
-    expect(placed.inter_step.map((p) => [p.event.event_id, p.before_step_id])).toEqual([["msg-pre", ""]]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-post"]);
-    expect(placed.leading).toEqual([]);
-  });
-
-  it("shows a pre-hook reply (after the last step closed) woven in, with the post-hook reply trailing", () => {
-    // Constraint: a reply written after the last step closed must stay visible,
-    // not collapse under that step. Here it is woven in (before_step_id "").
-    const body = [
-      toolUse("2026-04-28T01:00:10Z", "Edit", "tc-pre"),
-      assistantMsg("2026-04-28T01:00:30Z", "Done -- want a test?", "msg-pre"),
-      userMsg("2026-04-28T01:00:40Z", "Stop hook feedback:\nReview the conversation.", "u-hook"),
-      assistantMsg("2026-04-28T01:00:50Z", "Nothing to change; ready for your go-ahead.", "msg-post"),
-    ];
-    const placed = classifyTopLevelMessages(body, [doneStep()]);
-    expect(placed.inter_step.map((p) => p.event.event_id)).toEqual(["msg-pre"]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-post"]);
-  });
-
-  it("shows a pre-hook reply that was last while the step stayed open (woven, not collapsed)", () => {
-    // Constraint's second case: the last step never closed and the reply is the
-    // last thing in the pre-hook segment. It must be woven in, never folded
-    // into the open step's expandable body.
-    const openStep = stepView({
-      ticket_id: "t1",
-      status: "active",
-      active_window_start: "2026-04-28T01:00:00Z",
-      active_window_end: null,
-      is_settled: true,
-    });
-    const body = [
-      toolUse("2026-04-28T01:00:10Z", "Edit", "tc-pre"),
-      assistantMsg("2026-04-28T01:00:30Z", "Finished the change.", "msg-pre"),
-      userMsg("2026-04-28T01:00:40Z", "Stop hook feedback:\nRun /autofix.", "u-hook"),
-      assistantMsg("2026-04-28T01:00:45Z", "Re-running autofix now.", "msg-post-narr"),
-      toolUse("2026-04-28T01:00:50Z", "Bash", "tc-post"),
-      assistantMsg("2026-04-28T01:01:00Z", "All clean.", "msg-post-reply"),
-    ];
-    const placed = classifyTopLevelMessages(body, [openStep]);
-    // pre-hook reply woven (shown), final reply trails.
-    expect(placed.inter_step.map((p) => p.event.event_id)).toEqual(["msg-pre"]);
-    expect(placed.trailing.map((e) => e.event_id)).toEqual(["msg-post-reply"]);
-    // msg-post-narr is mid-work in the post-hook segment -> stays in-step.
-    const placedIds = [...placed.inter_step.map((p) => p.event.event_id), ...placed.trailing.map((e) => e.event_id)];
-    expect(placedIds).not.toContain("msg-post-narr");
-  });
-});
-
-describe("placeStopHookChips", () => {
-  const hookMsg = (ts: string, id: string): TranscriptEvent => userMsg(ts, "Stop hook feedback:\nRun /autofix.", id);
-
-  it("places the chip before the first step that starts after the hook fired", () => {
-    const pre = stepView({ ticket_id: "pre", status: "done", active_window_start: "2026-04-28T01:00:00Z" });
-    const post = stepView({ ticket_id: "post", status: "active", active_window_start: "2026-04-28T01:00:40Z" });
-    const body = [hookMsg("2026-04-28T01:00:30Z", "u-hook")];
-    const placed = placeStopHookChips(body, [pre, post]);
-    expect(placed).toHaveLength(1);
-    expect(placed[0].event.event_id).toBe("u-hook");
-    expect(placed[0].before_step_id).toBe("post");
-  });
-
-  it("places the chip after the last step when no step starts after the hook", () => {
-    const a = stepView({ ticket_id: "a", status: "done", active_window_start: "2026-04-28T01:00:00Z" });
-    const b = stepView({ ticket_id: "b", status: "done", active_window_start: "2026-04-28T01:00:10Z" });
-    const body = [hookMsg("2026-04-28T01:00:50Z", "u-hook")];
-    const placed = placeStopHookChips(body, [a, b]);
-    expect(placed).toHaveLength(1);
-    expect(placed[0].before_step_id).toBe(""); // render at the bottom of the timeline
-  });
-
-  it("ignores non-stop-hook user messages and assistant messages", () => {
-    const step = stepView({ ticket_id: "t1", status: "done", active_window_start: "2026-04-28T01:00:00Z" });
-    const body = [
-      userMsg("2026-04-28T01:00:10Z", "Base directory for this skill: /x/skills/foo/", "u-skill"),
-      assistantMsg("2026-04-28T01:00:20Z", "some prose", "a-1"),
-      userMsg("2026-04-28T01:00:30Z", "a real user prompt", "u-real"),
-    ];
-    expect(placeStopHookChips(body, [step])).toEqual([]);
-  });
-
-  it("places multiple hooks each before their following step", () => {
-    const s1 = stepView({ ticket_id: "s1", status: "done", active_window_start: "2026-04-28T01:00:00Z" });
-    const s2 = stepView({ ticket_id: "s2", status: "done", active_window_start: "2026-04-28T01:00:40Z" });
-    const s3 = stepView({ ticket_id: "s3", status: "active", active_window_start: "2026-04-28T01:01:20Z" });
-    const body = [hookMsg("2026-04-28T01:00:30Z", "u-h1"), hookMsg("2026-04-28T01:01:10Z", "u-h2")];
-    const placed = placeStopHookChips(body, [s1, s2, s3]);
-    expect(placed.map((p) => [p.event.event_id, p.before_step_id])).toEqual([
-      ["u-h1", "s2"],
-      ["u-h2", "s3"],
-    ]);
-  });
-});
-
-describe("narration attribution", () => {
-  it("uses the latest in-window text-only message that is FOLLOWED by tool activity", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
-    ];
-    const body = [
-      assistantMsg("2026-04-28T01:00:10Z", "Trying approach A.", "a1"),
-      toolUse("2026-04-28T01:00:12Z", "Read", "tc-1"),
-      assistantMsg("2026-04-28T01:00:20Z", "Approach A failed, trying B.", "a2"),
-      toolUse("2026-04-28T01:00:22Z", "Edit", "tc-2"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    attributeNarration(steps, body);
+    const sections = run(events, enrich({ s1: { title: "Fix it", summary: "Fixed the bug", status: "closed" } }));
+    const steps = stepItems(sections[0].items);
     expect(steps).toHaveLength(1);
-    expect(steps[0].narration).toBe("Approach A failed, trying B.");
-  });
-
-  it("does NOT use a trailing message that is not followed by tool activity (it is the reply)", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
-    ];
-    const body = [
-      assistantMsg("2026-04-28T01:00:10Z", "Mid-work narration.", "a1"),
-      toolUse("2026-04-28T01:00:12Z", "Read", "tc-1"),
-      assistantMsg("2026-04-28T01:00:30Z", "All done -- this is the reply.", "a2"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    attributeNarration(steps, body);
-    // The narration is the FIRST message (followed by a tool), not the
-    // trailing reply (which has no tool after it).
-    expect(steps[0].narration).toBe("Mid-work narration.");
-  });
-
-  it("still surfaces narration on a settled (idle, unclosed) step -- decoupled from is_settled", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Investigate", step: true }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
-    ];
-    const body = [
-      assistantMsg("2026-04-28T01:00:10Z", "Found the bug -- patching now.", "a1"),
-      toolUse("2026-04-28T01:00:15Z", "Edit", "tc-1"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "2026-04-28T02:00:00Z", true);
-    attributeNarration(steps, body);
-    expect(steps[0].is_settled).toBe(true);
-    expect(steps[0].narration).toBe("Found the bug -- patching now.");
-  });
-
-  it("leaves narration null on a closed step -- the summary owns the slot", () => {
-    const events: TranscriptEvent[] = [
-      taskEvent("t1", "open", "2026-04-28T01:00:05Z", { title: "Do the thing", step: true }),
-      taskEvent("t1", "in_progress", "2026-04-28T01:00:06Z", { step: true }),
-      taskEvent("t1", "closed", "2026-04-28T01:00:30Z", { summary: "Did the thing.", step: true }),
-    ];
-    const body = [
-      assistantMsg("2026-04-28T01:00:10Z", "Mid-task narration.", "a1"),
-      toolUse("2026-04-28T01:00:12Z", "Read", "tc-1"),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T01:00:00Z", "", false);
-    attributeNarration(steps, body);
+    expect(steps[0].title).toBe("Fix it");
     expect(steps[0].status).toBe("done");
-    expect(steps[0].summary).toBe("Did the thing.");
-    expect(steps[0].narration).toBeNull();
+    expect(steps[0].summary).toBe("Fixed the bug");
+    expect(steps[0].events.map((e) => e.event_id)).toEqual(["a-w1"]);
+  });
+
+  it("does not render tk lifecycle commands as work", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+    ];
+    const sections = run(events, enrich({ s1: {} }));
+    const steps = stepItems(sections[0].items);
+    expect(steps[0].events).toHaveLength(0);
+    // No ungrouped items: the tk call was consumed, not rendered.
+    expect(sections[0].items.filter((i) => i.kind === "ungrouped")).toHaveLength(0);
   });
 });
 
-/** Build an assistant message issuing N parallel `tk create --step` Bash tool
- *  calls (in the given order) plus each call's tool_result printing the ticket
- *  id -- the transcript shape the frontend recovers plan order from. */
-function parallelCreateCalls(ts: string, calls: Array<{ callId: string; printedId: string }>): TranscriptEvent[] {
-  const assistant: TranscriptEvent = {
-    timestamp: ts,
-    type: "assistant_message",
-    event_id: `a-create-${ts}`,
-    source: "test",
-    model: "test-model",
-    text: "",
-    tool_calls: calls.map(({ callId }) => ({
-      tool_call_id: callId,
-      tool_name: "Bash",
-      input_preview: `{"command":"tk create --step \\"step\\""}`,
-    })),
-    stop_reason: null,
-    usage: null,
-    is_auth_error: false,
-  };
-  const results: TranscriptEvent[] = calls.map(({ callId, printedId }) => ({
-    timestamp: ts,
-    type: "tool_result",
-    event_id: `r-${callId}`,
-    source: "test",
-    tool_call_id: callId,
-    tool_name: "Bash",
-    output: printedId,
-    is_error: false,
-  }));
-  return [assistant, ...results];
-}
-
-describe("buildStepPlanOrder", () => {
-  it("recovers plan order from parallel create tool calls, not id or timestamp order", () => {
-    // Three creates issued as parallel tool calls. Ids chosen so alphabetical
-    // order (aaa2, mmm3, zzz1) differs from the order the model issued them
-    // (zzz1, aaa2, mmm3) -- the case that used to scramble.
-    const events = parallelCreateCalls("2026-04-28T01:00:00.000000Z", [
-      { callId: "c1", printedId: "cod-zzz1" },
-      { callId: "c2", printedId: "cod-aaa2" },
-      { callId: "c3", printedId: "cod-mmm3" },
-    ]);
-    const order = planOrderFor(events);
-    expect(order.get("cod-zzz1")).toBe(0);
-    expect(order.get("cod-aaa2")).toBe(1);
-    expect(order.get("cod-mmm3")).toBe(2);
+describe("reply promotion", () => {
+  it("promotes a wrap-up reply written before the closing tk close (rule 7a)", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      assistantText("2026-04-28T01:00:03Z", "All done -- want a test?", "reply"),
+      tkMsg("2026-04-28T01:00:04Z", "tk close s1", "t2"),
+      result("2026-04-28T01:00:04Z", "t2", "Updated s1 -> closed"),
+    ];
+    const sections = run(events, enrich({ s1: { status: "closed" } }));
+    expect(sections[0].trailing_reply.map((e) => e.event_id)).toEqual(["reply"]);
+    // The reply is not buried in the step.
+    const steps = stepItems(sections[0].items);
+    expect(steps[0].events.map((e) => e.event_id)).toEqual(["a-w1"]);
   });
 
-  it("omits ids it cannot recover (a capture that prints nothing)", () => {
-    // `S1=$(tk create ...)` captures the id into a shell var and prints
-    // nothing, so the tool_result has no id to read -- that step is absent and
-    // the sort falls back to its created timestamp instead.
-    const events: TranscriptEvent[] = [
-      {
-        timestamp: "2026-04-28T01:00:00.000000Z",
-        type: "assistant_message",
-        event_id: "a-cap",
-        source: "test",
-        model: "test-model",
-        text: "",
-        tool_calls: [
-          { tool_call_id: "c1", tool_name: "Bash", input_preview: `{"command":"S1=$(tk create --step x)"}` },
-        ],
-        stop_reason: null,
-        usage: null,
-        is_auth_error: false,
-      },
-      toolResultEvent("2026-04-28T01:00:00.000000Z", "c1"), // output "ok" -- no id
+  it("keeps mid-work narration in the step, not as the reply", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      assistantText("2026-04-28T01:00:02Z", "Found it, patching now.", "narr"),
+      workMsg("2026-04-28T01:00:03Z", "Edit", "w1"),
+      result("2026-04-28T01:00:03Z", "w1", "ok"),
+      assistantText("2026-04-28T01:00:04Z", "Done.", "reply"),
     ];
-    expect(planOrderFor(events).size).toBe(0);
+    const sections = run(events, enrich({ s1: {} }));
+    const steps = stepItems(sections[0].items);
+    expect(steps[0].narration).toBe("Found it, patching now.");
+    expect(sections[0].trailing_reply.map((e) => e.event_id)).toEqual(["reply"]);
+  });
+
+  it("treats prose before the first step as an ungrouped (leading) item", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      assistantText("2026-04-28T01:00:01Z", "Sure, tracing the auth path.", "lead"),
+      tkMsg("2026-04-28T01:00:02Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:02Z", "t1", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:03Z", "Edit", "w1"),
+      result("2026-04-28T01:00:03Z", "w1", "ok"),
+    ];
+    const sections = run(events, enrich({ s1: {} }));
+    const items = sections[0].items;
+    expect(items[0].kind).toBe("ungrouped");
+    const ung = items[0] as { kind: "ungrouped"; events: AssistantMessageEvent[] };
+    expect(ung.events.map((e) => e.event_id)).toEqual(["lead"]);
+    expect(sections[0].trailing_reply).toHaveLength(0);
   });
 });
 
-describe("sortSteps plan order and start time", () => {
-  it("orders not-yet-started steps by plan order even when created in the same instant", () => {
-    // All three created at the same timestamp (parallel) and still pending.
-    // Without plan order this would fall through to arbitrary id order.
-    const ts = "2026-04-28T01:00:00.000000Z";
-    const events: TranscriptEvent[] = [
-      ...parallelCreateCalls(ts, [
-        { callId: "c1", printedId: "cod-zzz1" },
-        { callId: "c2", printedId: "cod-aaa2" },
-        { callId: "c3", printedId: "cod-mmm3" },
-      ]),
-      taskEvent("cod-zzz1", "open", ts, { created_at: ts }),
-      taskEvent("cod-aaa2", "open", ts, { created_at: ts }),
-      taskEvent("cod-mmm3", "open", ts, { created_at: ts }),
+describe("carryover", () => {
+  it("re-renders a still-open step at the top of the next turn with frozen prior state", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "first", "u1"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      userMsg("2026-04-28T01:00:10Z", "second", "u2"),
+      workMsg("2026-04-28T01:00:11Z", "Edit", "w2"),
+      result("2026-04-28T01:00:11Z", "w2", "ok"),
+      tkMsg("2026-04-28T01:00:12Z", "tk close s1", "t2"),
+      result("2026-04-28T01:00:12Z", "t2", "Updated s1 -> closed"),
     ];
-    const steps = stepsForWindow(events, "2026-04-28T00:59:00.000000Z", "", false);
-    expect(steps.map((s) => s.ticket_id)).toEqual(["cod-zzz1", "cod-aaa2", "cod-mmm3"]);
+    const sections = run(events, enrich({ s1: { status: "closed" } }));
+    expect(sections).toHaveLength(2);
+
+    const s1FirstTurn = stepItems(sections[0].items)[0];
+    expect(s1FirstTurn.is_carryover).toBe(false);
+    expect(s1FirstTurn.status).toBe("active"); // frozen: never flips to done here
+    expect(s1FirstTurn.events.map((e) => e.event_id)).toEqual(["a-w1"]);
+
+    const s1SecondTurn = stepItems(sections[1].items)[0];
+    expect(sections[1].items[0].kind).toBe("step"); // at the top
+    expect(s1SecondTurn.is_carryover).toBe(true);
+    expect(s1SecondTurn.status).toBe("done");
+    expect(s1SecondTurn.events.map((e) => e.event_id)).toEqual(["a-w2"]);
+  });
+});
+
+describe("pending roster", () => {
+  it("appends never-started steps as pending placeholders at the tail, in created order", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+    ];
+    const enrichment = enrich({
+      s1: { status: "in_progress" },
+      s2: { title: "Second", status: "open", created_at: "2026-04-28T01:00:00.000002Z" },
+      s3: { title: "Third", status: "open", created_at: "2026-04-28T01:00:00.000001Z" },
+    });
+    const sections = run(events, enrichment, /* idle */ false);
+    const steps = stepItems(sections[0].items);
+    // s1 active first; pending s3 then s2 (by created), placeholders at the tail.
+    expect(steps.map((s) => s.ticket_id)).toEqual(["s1", "s3", "s2"]);
+    expect(steps[1].status).toBe("pending");
+    expect(steps[2].status).toBe("pending");
+    expect(steps[0].is_frontier).toBe(true);
   });
 
-  it("re-sorts started steps by start time when the agent starts out of plan order", () => {
-    // Plan order is aaa1 then bbb2, but the agent starts bbb2 first. Started
-    // steps order by when they actually started, so bbb2 sits above aaa1.
-    const createTs = "2026-04-28T01:00:00.000000Z";
-    const events: TranscriptEvent[] = [
-      ...parallelCreateCalls(createTs, [
-        { callId: "c1", printedId: "cod-aaa1" },
-        { callId: "c2", printedId: "cod-bbb2" },
-      ]),
-      taskEvent("cod-aaa1", "open", createTs, { created_at: createTs }),
-      taskEvent("cod-bbb2", "open", createTs, { created_at: createTs }),
-      taskEvent("cod-bbb2", "in_progress", "2026-04-28T01:01:00.000000Z"),
-      taskEvent("cod-aaa1", "in_progress", "2026-04-28T01:02:00.000000Z"),
+  it("does not show pending placeholders in a non-tail section", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "first", "u1"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      tkMsg("2026-04-28T01:00:02Z", "tk close s1", "t1c"),
+      result("2026-04-28T01:00:02Z", "t1c", "Updated s1 -> closed"),
+      userMsg("2026-04-28T01:00:10Z", "second", "u2"),
     ];
-    const steps = stepsForWindow(events, "2026-04-28T00:59:00.000000Z", "", false);
-    expect(steps.map((s) => s.ticket_id)).toEqual(["cod-bbb2", "cod-aaa1"]);
-  });
-
-  it("falls back to the created timestamp when no plan order is available", () => {
-    // No tk-create tool calls (e.g. a server-restart replay with only task
-    // events). Distinct sub-second created timestamps, with ids whose
-    // alphabetical order is the reverse of creation -- ordering by created
-    // time, not id, is what we want.
-    const events: TranscriptEvent[] = [
-      taskEvent("cod-zzz9", "open", "2026-04-28T01:00:00.100000Z", { created_at: "2026-04-28T01:00:00.100000Z" }),
-      taskEvent("cod-aaa0", "open", "2026-04-28T01:00:00.200000Z", { created_at: "2026-04-28T01:00:00.200000Z" }),
-    ];
-    const steps = stepsForWindow(events, "2026-04-28T00:59:00.000000Z", "", false);
-    expect(steps.map((s) => s.ticket_id)).toEqual(["cod-zzz9", "cod-aaa0"]);
+    const enrichment = enrich({ s1: { status: "closed" }, sp: { status: "open" } });
+    const sections = run(events, enrichment);
+    // The pending sp shows only in the tail (second) section.
+    expect(stepItems(sections[0].items).map((s) => s.ticket_id)).toEqual(["s1"]);
+    expect(stepItems(sections[1].items).map((s) => s.ticket_id)).toEqual(["sp"]);
   });
 });

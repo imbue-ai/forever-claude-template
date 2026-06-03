@@ -1,18 +1,30 @@
 /**
- * Step model: fold task_event stream into renderable step state.
+ * Step grouping: a single in-order walk of the transcript.
  *
- * Steps (tk step records) are the primary grouping unit for the progress
- * view. Each step has a time window (started_at -> closed_at) and
- * transcript events whose timestamps fall in that window belong to it.
+ * The progress view is a frontend for the transcript. Structure -- which
+ * steps exist, their order, their open/close transitions, which events
+ * belong to which step -- is read purely from transcript *position*, never
+ * reconstructed from timestamps. tk lifecycle commands (`tk create/start/
+ * close`) appear in the transcript as Bash tool calls; their results carry
+ * the canonical id and status (`Updated <id> -> <status>`), which is all the
+ * structure we need.
  *
- * This module provides:
- *   - TaskRecord: folded per-ticket state from task_event events
- *   - StepView: renderable projection of a TaskRecord
- *   - Query functions for attributing events to steps
+ * tk is demoted to an *enrichment* side-table keyed by id: it supplies the
+ * canonical title, the close summary, and the roster of pending (not-yet-
+ * started) steps. It decorates the transcript-derived skeleton; it never
+ * decides order or grouping.
  *
- * The rendering layer (ChatPanel) partitions the event stream by
- * user-message boundaries and uses these utilities to populate each
- * partition. There is no formalized "turn" or "section" abstraction here.
+ * The walk maintains a single "current open step": events while a step is
+ * open group under it; events while none is open fall into an ungrouped
+ * run rendered inline (the same plain-chat path used for turns with no
+ * steps). A step still open when the next user message arrives carries over:
+ * it re-renders at the top of the new turn, while the prior turn's node
+ * freezes at its last-known state.
+ *
+ * The ONLY timestamp this module reads is tk's own `created` (from the
+ * enrichment table), used solely to order pending placeholders among
+ * themselves. Grouping and the positioning of any transitioned step read
+ * transcript order alone.
  */
 
 import type {
@@ -20,654 +32,458 @@ import type {
   AssistantMessageEvent,
   UserMessageEvent,
   ToolResultEvent,
+  ToolCall,
   TaskEventStatus,
 } from "../models/Response";
-import { isStopHookFeedback } from "./user-message-classification";
+import { isNonBoundaryUserMessage, isStopHookFeedback } from "./user-message-classification";
 
-export type TaskUiStatus = "pending" | "active" | "done";
+export type StepStatus = "pending" | "active" | "done";
 
-const STATUS_RANK: Record<TaskEventStatus, number> = {
-  open: 0,
-  in_progress: 1,
-  closed: 2,
-};
-
-/** Folded view of a tk ticket's full event history. */
-export interface TaskRecord {
-  ticket_id: string;
+/** Per-id enrichment: the canonical text and roster facts tk owns. Joined
+ *  onto the transcript-derived skeleton by ticket id. */
+export interface StepEnrichment {
   title: string;
-  created_at: string;
-  started_at: string | null;
-  closed_at: string | null;
   summary: string | null;
-  final_status: TaskEventStatus;
-  step: boolean;
-  parent_id: string;
-  assignee: string;
-  first_observed_at: string;
+  /** Global tk status; used only to identify pending (never-started) steps
+   *  for the roster. Positioned steps take their status from the walk. */
+  status: TaskEventStatus;
+  /** tk's own creation timestamp; used ONLY to order pending placeholders. */
+  created_at: string;
 }
 
-/** A step as it should be rendered. */
-export interface StepView {
+/** A step as it should render in one section. The same ticket id can produce
+ *  two independent nodes across two sections (carryover); each holds its own
+ *  state and never updates the other. */
+export interface StepNode {
   ticket_id: string;
   title: string;
-  status: TaskUiStatus;
+  status: StepStatus;
+  /** Close summary, shown when done. */
   summary: string | null;
-  created_at: string;
-  started_at: string | null;
-  /** Inclusive lower bound of the active window for tool-call attribution. */
-  active_window_start: string | null;
-  /** Inclusive upper bound of the active window. null = still active. */
-  active_window_end: string | null;
-  is_step: boolean;
-  parent_id: string;
-  children: StepView[];
-  /** Live status caption: latest text-only assistant_message in the
-   *  step's active window. Null when no text has landed yet. */
+  /** Latest in-step prose that was followed by more work in the same step. */
   narration: string | null;
-  /** True when this step is no longer actively being worked on.
-   *  The UI uses this to swap the live spinner for a static icon. */
-  is_settled: boolean;
+  /** True when this node carried over from a prior section (re-rendered at the
+   *  top of this section because it was still open at the boundary). */
+  is_carryover: boolean;
+  /** True when this is the live step the agent is currently on -- the only one
+   *  that may show a spinner. False once settled (idle, past section, or
+   *  superseded by a later step). */
+  is_frontier: boolean;
+  /** The grouped real-work events (assistant text + non-tk tool calls) that
+   *  occurred while this step was the open step in this section. */
+  events: AssistantMessageEvent[];
 }
 
-/** Fold task_event events into per-ticket TaskRecord. Latest status
- *  (by STATUS_RANK) wins; transitions track each timestamp. */
-export function buildTaskRecords(events: TranscriptEvent[]): Map<string, TaskRecord> {
-  const records = new Map<string, TaskRecord>();
+/** One item on a section's timeline, in transcript order. */
+export type TimelineItem =
+  | { kind: "step"; step: StepNode }
+  /** Real work (and/or prose) that happened while no step was open. Rendered
+   *  inline, exactly like a no-steps plain-chat turn. */
+  | { kind: "ungrouped"; key: string; events: AssistantMessageEvent[] }
+  /** A non-boundary user message shown inline (e.g. a stop-hook chip). */
+  | { kind: "chip"; event: UserMessageEvent };
+
+/** A turn: the user message, its timeline, and the wrap-up reply below it. */
+export interface SectionView {
+  /** The boundary user message that opened this section, or null for content
+   *  that precedes the first user message. */
+  user_event: UserMessageEvent | null;
+  key: string;
+  items: TimelineItem[];
+  /** Text after the last real (non-tk) tool activity: the user-facing reply,
+   *  rendered below the timeline. */
+  trailing_reply: AssistantMessageEvent[];
+}
+
+const STATUS_RANK: Record<TaskEventStatus, number> = { open: 0, in_progress: 1, closed: 2 };
+
+/** Detects a `tk`/`ticket` lifecycle invocation in a Bash tool call's input
+ *  preview. The verb sits at the front of the command, so this survives the
+ *  200-char input_preview truncation. `super` is the plugin-bypassing form. */
+const TK_LIFECYCLE_RE = /\b(?:tk|ticket)\s+(?:super\s+)?(?:create|start|close)\b/;
+
+/** A status transition line printed by tk on every state change:
+ *  `Updated <id> -> <status>` (see vendor/tk/ticket). Global so a batched
+ *  command that flips several tickets is read in order. */
+const TK_UPDATED_RE = /Updated\s+(\S+)\s+->\s+(open|in_progress|closed)/g;
+
+/** Fold the task_event stream into a per-id enrichment table (latest status
+ *  wins). Only step records are kept -- regular tickets do not render. This is
+ *  the temporary in-stream enrichment source; the backend will later deliver
+ *  the same table as a snapshot, but the shape consumed here is unchanged. */
+export function buildEnrichment(events: TranscriptEvent[]): Map<string, StepEnrichment> {
+  const table = new Map<string, StepEnrichment>();
+  const rank = new Map<string, number>();
   for (const e of events) {
-    if (e.type !== "task_event" || !e.ticket_id || !e.status) continue;
-    const existing = records.get(e.ticket_id);
+    if (e.type !== "task_event" || !e.ticket_id || !e.step) continue;
+    const existing = table.get(e.ticket_id);
     if (existing === undefined) {
-      records.set(e.ticket_id, {
-        ticket_id: e.ticket_id,
+      table.set(e.ticket_id, {
         title: e.title,
-        // created_at may be the empty string (missing frontmatter); fall
-        // back to the event timestamp so the record always sorts sensibly.
-        created_at: e.created_at || e.timestamp,
-        started_at: e.status === "in_progress" ? e.timestamp : null,
-        closed_at: e.status === "closed" ? e.timestamp : null,
         summary: e.status === "closed" ? e.summary : null,
-        final_status: e.status,
-        step: e.step,
-        parent_id: e.parent_id,
-        assignee: e.assignee,
-        first_observed_at: e.timestamp,
+        status: e.status,
+        created_at: e.created_at || e.timestamp,
       });
+      rank.set(e.ticket_id, STATUS_RANK[e.status]);
       continue;
     }
-
-    if (e.status === "in_progress" && existing.started_at === null) {
-      existing.started_at = e.timestamp;
+    existing.title = e.title || existing.title;
+    if (e.created_at) existing.created_at = e.created_at;
+    if (e.status === "closed" && e.summary !== null) existing.summary = e.summary;
+    if (STATUS_RANK[e.status] >= (rank.get(e.ticket_id) ?? 0)) {
+      existing.status = e.status;
+      rank.set(e.ticket_id, STATUS_RANK[e.status]);
     }
-    if (e.status === "closed") {
-      existing.closed_at = e.timestamp;
-      if (e.summary !== null) {
-        existing.summary = e.summary;
-      }
-    }
-    if (STATUS_RANK[e.status] >= STATUS_RANK[existing.final_status]) {
-      existing.final_status = e.status;
-    }
-    if (e.timestamp < existing.first_observed_at) {
-      existing.first_observed_at = e.timestamp;
-    }
-    if (e.assignee !== "") {
-      existing.assignee = e.assignee;
-    }
-    if (e.parent_id !== "") {
-      existing.parent_id = e.parent_id;
-    }
-    existing.step = e.step;
   }
-  return records;
+  return table;
 }
 
-/** Detects a `tk create` invocation inside a Bash tool call's input preview
- *  (the JSON-encoded command). Matches `tk create`, `ticket create`, and the
- *  plugin-bypassing `tk super create`. */
-const TK_CREATE_RE = /\b(?:tk|ticket)\s+(?:super\s+)?create\b/;
+/** True when a tool call is a tk lifecycle command (consumed as a structural
+ *  marker, not rendered as work). */
+function isTkLifecycleCall(tc: ToolCall): boolean {
+  return TK_LIFECYCLE_RE.test(tc.input_preview);
+}
 
-/** A tk ticket id as printed by `tk create`: a short alphanumeric prefix, a
- *  hyphen, and a 4-character suffix (see `generate_id` in vendor/tk/ticket).
- *  Global so we can read every id a batched create printed, in order. */
-const TICKET_ID_RE = /\b[a-z0-9]{2,}-[a-z0-9]{4}\b/g;
+interface ParsedMessage {
+  /** Start/close transitions this message caused, in order. (Creates are not
+   *  positioned here -- pending steps come from the enrichment roster.) */
+  transitions: { id: string; status: "in_progress" | "closed" }[];
+  /** The renderable remainder: the message stripped of its tk lifecycle calls.
+   *  Null when nothing renderable remains (a pure tk command). */
+  render: AssistantMessageEvent | null;
+}
 
-/** Map each step/ticket id to its **plan position**: the order in which the
- *  agent issued the `tk create` calls that produced it.
- *
- *  This is recovered from the transcript -- the ordered `tool_calls` within
- *  each assistant message -- rather than from timestamps, because agents
- *  frequently issue several `tk create` calls as *parallel* tool calls whose
- *  execution order (and thus the resulting file mtime / `created` timestamp
- *  order) is nondeterministic. The `tool_calls` array, by contrast, faithfully
- *  records the order the model chose to create them. Each create call's printed
- *  id(s) are read from its `tool_result` output (a parallel create runs in its
- *  own fresh shell, so it must print the id to stdout rather than capture it
- *  into a variable -- exactly the case this needs to cover).
- *
- *  Ids that can't be recovered this way -- e.g. a serial `VAR=$(tk create ...)`
- *  capture that prints nothing -- are simply absent from the map; the sort
- *  falls back to the (now sub-second) `created` timestamp for those, which is
- *  correct precisely because that form runs serially. The walk is global
- *  across the whole event stream so the ordinal is stable across redraws. */
-export function buildStepPlanOrder(
+/** Split an assistant message into the tk transitions it caused and the
+ *  renderable remainder (text + non-tk tool calls). */
+function parseMessage(e: AssistantMessageEvent, toolResults: Map<string, ToolResultEvent>): ParsedMessage {
+  const tkCalls = e.tool_calls.filter(isTkLifecycleCall);
+  const realCalls = e.tool_calls.filter((tc) => !isTkLifecycleCall(tc));
+
+  const transitions: { id: string; status: "in_progress" | "closed" }[] = [];
+  for (const tc of tkCalls) {
+    const output = toolResults.get(tc.tool_call_id)?.output ?? "";
+    TK_UPDATED_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = TK_UPDATED_RE.exec(output)) !== null) {
+      const status = match[2];
+      if (status === "in_progress" || status === "closed") {
+        transitions.push({ id: match[1], status });
+      }
+    }
+  }
+
+  if (tkCalls.length === 0) {
+    return { transitions, render: e };
+  }
+  // Pure tk command (no text, no real work): fully consumed.
+  if (!e.text && realCalls.length === 0) {
+    return { transitions, render: null };
+  }
+  return { transitions, render: { ...e, tool_calls: realCalls } };
+}
+
+/** True when a renderable message represents real work (issues a non-tk tool
+ *  call), as opposed to prose. */
+function isWork(e: AssistantMessageEvent): boolean {
+  return e.tool_calls.length > 0;
+}
+
+/** True when a renderable message is prose (has text, no tool calls). */
+function isProse(e: AssistantMessageEvent): boolean {
+  return !!e.text && e.tool_calls.length === 0;
+}
+
+// --- Section assembly ---
+
+/** A routed message plus where it landed: under a step (by id) or ungrouped. */
+interface Placement {
+  event: AssistantMessageEvent;
+  step_id: string | null;
+}
+
+interface SectionBuilder {
+  user_event: UserMessageEvent | null;
+  key: string;
+  /** Step nodes in first-appearance (transcript) order. */
+  steps: Map<string, StepNode>;
+  step_order: string[];
+  placements: Placement[];
+  /** Non-boundary user-message chips, with the index into `placements` they
+   *  follow, so they render at their chronological spot. */
+  chips: { event: UserMessageEvent; after: number }[];
+  /** Ordered record of step/ungrouped openings so items can be rebuilt in
+   *  transcript order. Each entry is a step id or null (ungrouped run break). */
+  current_step_id: string | null;
+}
+
+function newSection(user_event: UserMessageEvent | null, key: string): SectionBuilder {
+  return {
+    user_event,
+    key,
+    steps: new Map(),
+    step_order: [],
+    placements: [],
+    chips: [],
+    current_step_id: null,
+  };
+}
+
+/** Walk the visible transcript into ordered sections. `toolResults` resolves
+ *  tk command outputs (and is reused by the renderer). `enrichment` supplies
+ *  titles, summaries, and the pending roster. `agentIsIdle` settles the
+ *  spinner on the tail section. */
+export function buildSections(
   events: TranscriptEvent[],
   toolResults: Map<string, ToolResultEvent>,
-): Map<string, number> {
-  const order = new Map<string, number>();
-  let next = 0;
+  enrichment: Map<string, StepEnrichment>,
+  agentIsIdle: boolean,
+): SectionView[] {
+  const builders: SectionBuilder[] = [];
+  let current: SectionBuilder | null = null;
+  // Steps open at the end of the prior section, to re-open as carryover.
+  let carryover: string[] = [];
+
+  const ensureSection = (user_event: UserMessageEvent | null, key: string): SectionBuilder => {
+    const section = newSection(user_event, key);
+    // Re-open carried-over steps at the top of the new section.
+    for (const id of carryover) {
+      openStep(section, id, /* is_carryover */ true);
+    }
+    carryover = [];
+    builders.push(section);
+    return section;
+  };
+
   for (const e of events) {
-    if (e.type !== "assistant_message" || !e.tool_calls) continue;
-    for (const tc of e.tool_calls) {
-      if (!TK_CREATE_RE.test(tc.input_preview)) continue;
-      const result = toolResults.get(tc.tool_call_id);
-      if (result === undefined) continue;
-      const ids = result.output.match(TICKET_ID_RE);
-      if (ids === null) continue;
-      for (const id of ids) {
-        if (!order.has(id)) order.set(id, next++);
+    if (e.type === "user_message") {
+      if (isNonBoundaryUserMessage(e.content ?? "")) {
+        // Stop-hook feedback and the like: a chip inside the current section.
+        if (current !== null && isStopHookFeedback(e.content ?? "")) {
+          current.chips.push({ event: e, after: current.placements.length - 1 });
+        }
+        // Hidden non-boundary messages (skill expansions, /welcome) are dropped.
+        continue;
       }
+      // Real user turn: close the prior section (carrying open steps) and open
+      // a new one.
+      carryover = current === null ? [] : openStepsAtEnd(current);
+      current = ensureSection(e, `section-${e.event_id}`);
+      continue;
     }
-  }
-  return order;
-}
-
-/** A step's status *as of* a partition's end boundary.
- *
- *  `buildTaskRecords` folds a ticket's whole history into one record whose
- *  `final_status` is the LATEST status seen anywhere. Rendering that global
- *  status in an *earlier* partition is wrong: a step that was still
- *  in_progress at this partition's boundary, but closes in a later one,
- *  would retroactively show as "done" here -- and its future `closed_at`
- *  would leak backwards (moving the reply boundary, collapsing the
- *  end-of-turn reply). Clamp to the status that was actually true at
- *  `partition_end`. `partition_end === ""` is the open tail: no clamp. */
-function statusAsOf(record: TaskRecord, partition_end: string): TaskEventStatus {
-  if (partition_end === "") return record.final_status;
-  if (record.closed_at !== null && record.closed_at < partition_end) return "closed";
-  if (record.started_at !== null && record.started_at < partition_end) return "in_progress";
-  return "open";
-}
-
-/** Build a StepView from a TaskRecord, clamped to `partition_end` (see
- *  `statusAsOf`). `partition_end === ""` (the default) renders the latest
- *  known status, for the open tail partition. */
-export function makeStepView(record: TaskRecord, is_settled: boolean, partition_end: string = ""): StepView {
-  const effective = statusAsOf(record, partition_end);
-  const status: TaskUiStatus = effective === "closed" ? "done" : effective === "in_progress" ? "active" : "pending";
-  return {
-    ticket_id: record.ticket_id,
-    title: record.title,
-    status,
-    summary: status === "done" ? record.summary : null,
-    created_at: record.created_at,
-    started_at: record.started_at,
-    active_window_start: status === "pending" ? null : (record.started_at ?? record.created_at),
-    active_window_end: status === "done" ? record.closed_at : null,
-    is_step: record.step,
-    parent_id: record.parent_id,
-    children: [],
-    narration: null,
-    is_settled,
-  };
-}
-
-/** True when a step record is active during a time window: either
- *  it was first observed in the window, or it was already active when
- *  the window started and hasn't closed before it. */
-export function stepActiveInWindow(record: TaskRecord, start_ts: string, end_ts: string): boolean {
-  const attribution_ts = record.first_observed_at || record.created_at;
-  if (attribution_ts >= start_ts && (end_ts === "" || attribution_ts < end_ts)) {
-    return true;
-  }
-  if (attribution_ts < start_ts) {
-    if (record.closed_at === null || record.closed_at >= start_ts) {
-      return true;
+    if (e.type === "assistant_message") {
+      if (current === null) current = ensureSection(null, "section-pre");
+      const parsed = parseMessage(e, toolResults);
+      for (const t of parsed.transitions) applyTransition(current, t);
+      if (parsed.render !== null && (parsed.render.text || parsed.render.tool_calls.length > 0)) {
+        routeMessage(current, parsed.render);
+      }
+      continue;
     }
+    // tool_result events are resolved by id via toolResults; no routing needed.
   }
-  return false;
+
+  return builders.map((b) => finalizeSection(b, enrichment, agentIsIdle, b === builders[builders.length - 1]));
 }
 
-/** Whether a step's first_observed_at precedes the given timestamp
- *  (i.e. it carried over from a prior partition). */
-export function isStepCarryover(record: TaskRecord, partition_start: string): boolean {
-  const attr = record.first_observed_at || record.created_at;
-  return attr < partition_start;
-}
-
-/** Order two steps by the declared plan: their `plan_order` index when both
- *  are known, otherwise the (now sub-second) `created` timestamp, finally the
- *  ticket id for full determinism. A step with a known plan position sorts
- *  before one without -- a later mid-turn addition that printed no id is the
- *  realistic "unknown" case and belongs after the up-front plan. */
-function comparePlanOrder(a: StepView, b: StepView, plan_order: Map<string, number>): number {
-  const pa = plan_order.get(a.ticket_id);
-  const pb = plan_order.get(b.ticket_id);
-  if (pa !== undefined && pb !== undefined) return pa - pb;
-  if (pa !== undefined) return -1;
-  if (pb !== undefined) return 1;
-  const byCreated = a.created_at.localeCompare(b.created_at);
-  return byCreated !== 0 ? byCreated : a.ticket_id.localeCompare(b.ticket_id);
-}
-
-/** Sort steps for the timeline. Carryovers (steps that began in an earlier
- *  partition) render first, then this partition's own steps. Within each group:
- *  steps that have started sort before not-yet-started ones and are ordered by
- *  when they actually started (`started_at`) -- so a step the agent starts out
- *  of plan order moves to its real start position; not-yet-started steps, and
- *  any tie on start time, fall back to plan order (see `comparePlanOrder`).
- *  Both keys are reliable: `started_at` is sub-second precise and `plan_order`
- *  reflects the order the agent created the steps regardless of parallel
- *  execution -- so this sort no longer depends on the arbitrary tie-breaks
- *  (id order) that made the old timestamp-only sort unstable. */
-export function sortSteps(
-  steps: StepView[],
-  records: Map<string, TaskRecord>,
-  partition_start: string,
-  plan_order: Map<string, number>,
-): StepView[] {
-  const byStart = (a: StepView, b: StepView) => {
-    if (a.started_at !== null && b.started_at !== null) {
-      const byStarted = a.started_at.localeCompare(b.started_at);
-      return byStarted !== 0 ? byStarted : comparePlanOrder(a, b, plan_order);
-    }
-    if (a.started_at !== null) return -1;
-    if (b.started_at !== null) return 1;
-    return comparePlanOrder(a, b, plan_order);
-  };
-  const carry = steps.filter((s) => isStepCarryover(records.get(s.ticket_id)!, partition_start)).sort(byStart);
-  const own = steps.filter((s) => !isStepCarryover(records.get(s.ticket_id)!, partition_start)).sort(byStart);
-  return [...carry, ...own];
-}
-
-/** ticket_id of the live "frontier" step in a partition: the most
- *  recently-*started* step as of `partition_end`, whatever its status now.
- *  This is the step the agent is actually on -- the only one that may show a
- *  live spinner. Crucially the frontier is chosen across both in_progress and
- *  already-closed steps: once a *later* step has started (even one that has
- *  since finished), any earlier still-open step was left behind and must not
- *  keep spinning above it. When the frontier is a done step, no in_progress
- *  step matches it, so every lingering open step settles. Returns null when
- *  no step has started yet. */
-function frontierStepId(records: TaskRecord[], partition_end: string, plan_order: Map<string, number>): string | null {
-  const rank = (r: TaskRecord) => plan_order.get(r.ticket_id) ?? -1;
-  let frontier: TaskRecord | null = null;
-  let frontierStart = "";
-  for (const r of records) {
-    if (statusAsOf(r, partition_end) === "open") continue; // not started as of this boundary
-    const started = r.started_at ?? r.created_at;
-    // Most recently started wins; on a (now rare, sub-second) tie the
-    // later-created step -- higher plan order -- is the frontier.
-    if (frontier === null || started > frontierStart || (started === frontierStart && rank(r) > rank(frontier))) {
-      frontier = r;
-      frontierStart = started;
-    }
+/** Open (or re-open) a step node as the current step. */
+function openStep(section: SectionBuilder, id: string, is_carryover: boolean): void {
+  if (!section.steps.has(id)) {
+    section.steps.set(id, {
+      ticket_id: id,
+      title: id,
+      status: "active",
+      summary: null,
+      narration: null,
+      is_carryover,
+      is_frontier: false,
+      events: [],
+    });
+    section.step_order.push(id);
   }
-  return frontier === null ? null : frontier.ticket_id;
+  section.current_step_id = id;
 }
 
-/** Build the sorted, partition-clamped StepViews for one section window.
- *
- *  - Status / summary / active window are clamped to `partition_end` so a
- *    step that closes in a *later* partition still renders as active here
- *    (see `statusAsOf`): a global close must not retroactively flip an
- *    earlier block to "done", nor leak its future `closed_at` into the
- *    earlier block's reply-boundary scan.
- *  - `is_settled` is computed per step, not once per partition: an active
- *    step shows the live spinner only when it is the frontier (the agent's
- *    current step) AND the partition is the still-running tail. A non-tail
- *    or idle partition settles every step; a superseded earlier step (a
- *    later step has since started) settles even in the running tail, so it
- *    can't spin above a step that already finished. */
-export function buildSectionSteps(
-  records: Map<string, TaskRecord>,
-  partition_start: string,
-  partition_end: string,
-  partition_is_settled: boolean,
-  plan_order: Map<string, number>,
-): StepView[] {
-  const active = Array.from(records.values()).filter(
-    (r) => r.step && stepActiveInWindow(r, partition_start, partition_end),
-  );
-  const frontier = frontierStepId(active, partition_end, plan_order);
-  const views = active.map((r) => {
-    const effective = statusAsOf(r, partition_end);
-    // is_settled only governs the active-step icon (spinner vs static ring);
-    // done/pending steps carry false, matching the prior behavior.
-    const settled = effective !== "in_progress" ? false : partition_is_settled || r.ticket_id !== frontier;
-    return makeStepView(r, settled, partition_end);
-  });
-  return sortSteps(views, records, partition_start, plan_order);
-}
-
-/** True when `e` is a text-only assistant message (prose, no tool calls). */
-function isTextOnlyAssistant(e: TranscriptEvent): e is AssistantMessageEvent {
-  return e.type === "assistant_message" && !!e.text && !(e.tool_calls && e.tool_calls.length > 0);
-}
-
-/** True when `e` represents tool activity: an assistant message that issues
- *  one or more tool calls, or a tool_result coming back. */
-function isToolActivity(e: TranscriptEvent): boolean {
-  if (e.type === "tool_result") return true;
-  return e.type === "assistant_message" && !!(e.tool_calls && e.tool_calls.length > 0);
-}
-
-/** Whether tool activity occurs later in the same step's window as `ts`. */
-function hasLaterToolActivityInStep(
-  ts: string,
-  step: StepView,
-  body_events: TranscriptEvent[],
-  steps: StepView[],
-): boolean {
-  for (const e of body_events) {
-    if (e.timestamp <= ts) continue;
-    if (!isToolActivity(e)) continue;
-    if (findContainingStep(e.timestamp, steps) === step) return true;
+function applyTransition(section: SectionBuilder, t: { id: string; status: "in_progress" | "closed" }): void {
+  if (t.status === "in_progress") {
+    openStep(section, t.id, /* is_carryover */ false);
+    return;
   }
-  return false;
-}
-
-/** Attribute mid-work narration to steps. A step's narration is the latest
- *  text-only assistant message in its window that was *followed by tool
- *  activity* within the same window -- i.e. the agent spoke and then kept
- *  working, so the text is progress narration rather than a wrap-up reply.
- *
- *  This is decoupled from `is_settled`: an unclosed step that goes idle
- *  still surfaces its mid-work narration (rendered static, not shimmering).
- *  Done steps are skipped -- their close summary owns the caption slot. A
- *  trailing message not followed by any tool activity is left for the
- *  reply-detection / positional logic, never absorbed here. */
-export function attributeNarration(steps: StepView[], body_events: TranscriptEvent[]): void {
-  for (const e of body_events) {
-    if (!isTextOnlyAssistant(e)) continue;
-    const containing = findContainingStep(e.timestamp, steps);
-    if (containing === null) continue;
-    if (containing.status === "done") continue;
-    if (!hasLaterToolActivityInStep(e.timestamp, containing, body_events, steps)) continue;
-    containing.narration = e.text ?? null;
-  }
-}
-
-// --- Internal helpers for step window queries ---
-
-function collectSortedSteps(steps: StepView[]): StepView[] {
-  const result: StepView[] = [];
-  const visit = (s: StepView): void => {
-    if (s.is_step && s.active_window_start !== null) result.push(s);
-    for (const child of s.children) visit(child);
-  };
-  for (const s of steps) visit(s);
-  result.sort((a, b) => (a.active_window_start ?? "").localeCompare(b.active_window_start ?? ""));
-  return result;
-}
-
-function computeEffectiveEnd(step: StepView, sortedSteps: StepView[]): string | null {
-  const idx = sortedSteps.indexOf(step);
-  const nextStart = idx >= 0 && idx + 1 < sortedSteps.length ? sortedSteps[idx + 1].active_window_start : null;
-  let effectiveEnd: string | null = step.active_window_end;
-  if (nextStart !== null && (effectiveEnd === null || nextStart < effectiveEnd)) {
-    effectiveEnd = nextStart;
-  }
-  return effectiveEnd;
-}
-
-/** Find the step whose active window contains `ts`. */
-export function findContainingStep(ts: string, steps: StepView[]): StepView | null {
-  const sorted = collectSortedSteps(steps);
-  for (let i = 0; i < sorted.length; i++) {
-    const step = sorted[i];
-    const start = step.active_window_start!;
-    if (ts < start) continue;
-    const effectiveEnd = computeEffectiveEnd(step, sorted);
-    if (effectiveEnd !== null && ts > effectiveEnd) continue;
-    return step;
-  }
-  return null;
-}
-
-/** Events that fall inside a step's active window. Enforces the
- *  serial-step invariant when sibling steps are provided. Pulls in
- *  trailing tool_results whose tool_use was in-window. */
-export function eventsInTaskWindow(
-  task: StepView,
-  body_events: TranscriptEvent[],
-  tasks?: StepView[],
-): TranscriptEvent[] {
-  const start = task.active_window_start ?? "";
-  if (start === "") return [];
-  let end: string;
-  if (tasks !== undefined && task.is_step) {
-    const sortedSteps = collectSortedSteps(tasks);
-    const effective = computeEffectiveEnd(task, sortedSteps);
-    end = effective ?? "";
+  // closed
+  const node = section.steps.get(t.id);
+  if (node !== undefined) {
+    node.status = "done";
   } else {
-    end = task.active_window_end ?? "";
+    // A close with no preceding start in this section (e.g. created and closed
+    // before any start was observed): still surface it as a done node.
+    section.steps.set(t.id, {
+      ticket_id: t.id,
+      title: t.id,
+      status: "done",
+      summary: null,
+      narration: null,
+      is_carryover: false,
+      is_frontier: false,
+      events: [],
+    });
+    section.step_order.push(t.id);
   }
-  const inWindow = body_events.filter((e) => {
-    if (e.timestamp < start) return false;
-    if (end !== "" && e.timestamp > end) return false;
-    return true;
-  });
-  if (end === "") return inWindow;
-  const inWindowCallIds = new Set<string>();
-  for (const e of inWindow) {
-    if (e.type === "assistant_message" && e.tool_calls) {
-      for (const tc of e.tool_calls) {
-        inWindowCallIds.add(tc.tool_call_id);
+  if (section.current_step_id === t.id) section.current_step_id = null;
+}
+
+function routeMessage(section: SectionBuilder, e: AssistantMessageEvent): void {
+  const step_id = section.current_step_id;
+  section.placements.push({ event: e, step_id });
+  if (step_id !== null) {
+    section.steps.get(step_id)!.events.push(e);
+  }
+}
+
+/** Ids of steps still open (active, not done) at the end of a section, in
+ *  first-appearance order -- the carryover set. */
+function openStepsAtEnd(section: SectionBuilder): string[] {
+  return section.step_order.filter((id) => section.steps.get(id)!.status === "active");
+}
+
+/** Finalize a section: pull out the trailing reply, attribute narration, join
+ *  enrichment, append the pending roster, and emit items in transcript order. */
+function finalizeSection(
+  section: SectionBuilder,
+  enrichment: Map<string, StepEnrichment>,
+  agentIsIdle: boolean,
+  is_tail: boolean,
+): SectionView {
+  // 1. Trailing reply: prose after the last real-work placement.
+  let lastWorkIdx = -1;
+  for (let i = 0; i < section.placements.length; i++) {
+    if (isWork(section.placements[i].event)) lastWorkIdx = i;
+  }
+  const trailingIdx = new Set<number>();
+  const trailing_reply: AssistantMessageEvent[] = [];
+  for (let i = lastWorkIdx + 1; i < section.placements.length; i++) {
+    const p = section.placements[i];
+    if (isProse(p.event)) {
+      trailing_reply.push(p.event);
+      trailingIdx.add(i);
+      // Remove promoted prose from its step's grouped events.
+      if (p.step_id !== null) {
+        const node = section.steps.get(p.step_id);
+        if (node !== undefined) node.events = node.events.filter((ev) => ev.event_id !== p.event.event_id);
       }
     }
   }
-  if (inWindowCallIds.size === 0) return inWindow;
-  const trailingResults = body_events.filter(
-    (e) => e.type === "tool_result" && e.timestamp > end && !!e.tool_call_id && inWindowCallIds.has(e.tool_call_id),
-  );
-  if (trailingResults.length === 0) return inWindow;
-  return [...inWindow, ...trailingResults].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-}
 
-/** An inter-step message plus the id of the step it interrupts before.
- *  Always a text-only assistant message (the only thing classified into a
- *  placement). */
-export interface InterStepMessage {
-  event: AssistantMessageEvent;
-  /** ticket_id of the step whose node renders immediately after this block. */
-  before_step_id: string;
-}
-
-/** Positionally-classified top-level messages for a section. All entries are
- *  text-only assistant messages -- the only events `classifyTopLevelMessages`
- *  places. */
-export interface PlacedMessages {
-  /** Prose emitted before the first step started -> above the timeline. */
-  leading: AssistantMessageEvent[];
-  /** Prose in a gap between a closed step and the next step's start ->
-   *  interrupts the timeline inline at that point. */
-  inter_step: InterStepMessage[];
-  /** The user-facing reply (backward-scan run) -> below the timeline. */
-  trailing: AssistantMessageEvent[];
-}
-
-/** Top-level steps that have an active window, sorted by window start. */
-function sortedWindowedSteps(steps: StepView[]): StepView[] {
-  return steps
-    .filter((s) => s.active_window_start !== null)
-    .slice()
-    .sort((a, b) => (a.active_window_start ?? "").localeCompare(b.active_window_start ?? ""));
-}
-
-/** ticket_id of the first step (in window-start order) that starts strictly
- *  after `ts`, or "" when none does. Positions a timeline interrupt (woven
- *  prose or a stop-hook chip): it renders immediately before that step, or at
- *  the end of the timeline when nothing starts later. `sorted` must be the
- *  output of `sortedWindowedSteps`. */
-function firstStepStartingAfter(sorted: StepView[], ts: string): string {
-  const next = sorted.find((s) => (s.active_window_start ?? "") > ts);
-  return next ? next.ticket_id : "";
-}
-
-/** Timestamps of the stop-hook feedback messages in the section, sorted.
- *  Each one ends the agent's prior reply segment and starts a new one: a
- *  Stop hook fires when the agent thinks its turn is over, so a wrap-up reply
- *  written before it and a reply written after it are two distinct replies,
- *  detected independently. Skill expansions and ordinary chips are NOT
- *  segment boundaries -- they happen mid-work. */
-function replySegmentBoundaries(body_events: TranscriptEvent[]): string[] {
-  return body_events
-    .filter((e) => e.type === "user_message" && isStopHookFeedback(e.content ?? ""))
-    .map((e) => e.timestamp)
-    .sort((a, b) => a.localeCompare(b));
-}
-
-/** The reply segment [start, end) that contains `ts`. start === "" means the
- *  pre-hook segment (no lower bound); end === "" means the final segment (no
- *  upper bound). */
-function segmentFor(ts: string, boundaries: string[]): { start: string; end: string } {
-  let start = "";
-  let end = "";
-  for (const b of boundaries) {
-    if (b <= ts) {
-      start = b;
-    } else {
-      end = b;
-      break;
+  // 2. Narration: latest in-step prose followed by more work in the same step.
+  for (const id of section.step_order) {
+    const node = section.steps.get(id)!;
+    let narration: string | null = null;
+    for (let i = 0; i < node.events.length; i++) {
+      const ev = node.events[i];
+      if (!isProse(ev)) continue;
+      const followedByWork = node.events.slice(i + 1).some(isWork);
+      if (followedByWork) narration = ev.text;
     }
+    node.narration = narration;
   }
-  return { start, end };
-}
 
-/** The last "stop boundary" for the backward reply scan *within one reply
- *  segment*: the latest tool activity OR step close in [seg_start, seg_end).
- *  Text strictly after this (and before the segment end) is that segment's
- *  trailing reply. Null when the segment has neither. Passing
- *  seg_start = seg_end = "" scans the whole section (the no-stop-hook case),
- *  matching the original single-boundary behavior. */
-function segmentReplyBoundary(
-  body_events: TranscriptEvent[],
-  steps: StepView[],
-  seg_start: string,
-  seg_end: string,
-): string | null {
-  const inSegment = (ts: string): boolean => ts >= seg_start && (seg_end === "" || ts < seg_end);
-  let last: string | null = null;
-  const bump = (ts: string | null): void => {
-    if (ts !== null && inSegment(ts) && (last === null || ts > last)) last = ts;
+  // 3. Frontier: the live step the agent is on -- only on the tail section,
+  //    only when not idle, only the current open step.
+  const frontierId = is_tail && !agentIsIdle ? section.current_step_id : null;
+
+  // 4. Join enrichment onto each node.
+  for (const id of section.step_order) {
+    const node = section.steps.get(id)!;
+    const enrich = enrichment.get(id);
+    if (enrich !== undefined) {
+      node.title = enrich.title || node.title;
+      if (node.status === "done") node.summary = enrich.summary;
+    }
+    node.is_frontier = node.ticket_id === frontierId && node.status === "active";
+  }
+
+  // 5. Build items in transcript order: walk placements, emitting each step
+  //    node at its first appearance and coalescing ungrouped prose/work runs.
+  const items: TimelineItem[] = [];
+  const emittedSteps = new Set<string>();
+  let ungrouped: AssistantMessageEvent[] = [];
+  let ungroupedKey = 0;
+  const flushUngrouped = (): void => {
+    if (ungrouped.length > 0) {
+      items.push({ kind: "ungrouped", key: `${section.key}-ung-${ungroupedKey++}`, events: ungrouped });
+      ungrouped = [];
+    }
   };
-  for (const e of body_events) {
-    if (isToolActivity(e)) bump(e.timestamp);
+
+  // Carryover steps that were re-opened render at the very top, before any
+  // placement (they carry no new events until the agent acts).
+  for (const id of section.step_order) {
+    const node = section.steps.get(id)!;
+    if (node.is_carryover && !emittedSteps.has(id)) {
+      items.push({ kind: "step", step: node });
+      emittedSteps.add(id);
+    }
   }
-  for (const s of steps) {
-    if (s.status === "done") bump(s.active_window_end);
+
+  const chipsAfter = new Map<number, UserMessageEvent[]>();
+  for (const c of section.chips) {
+    const arr = chipsAfter.get(c.after) ?? [];
+    arr.push(c.event);
+    chipsAfter.set(c.after, arr);
   }
-  return last;
-}
+  // A chip that fires before any placement (after === -1) renders at the top.
+  for (const c of chipsAfter.get(-1) ?? []) items.push({ kind: "chip", event: c });
 
-type Located = { kind: "in_step" } | { kind: "gap"; before_step_id: string };
-
-/** Locate a (non-leading, non-trailing) timestamp against the sorted step
- *  windows: inside a step's window, or in an inter-step gap (after a closed
- *  step, before the next step starts). */
-function locate(ts: string, sorted: StepView[]): Located {
-  for (let i = 0; i < sorted.length; i++) {
-    const start = sorted[i].active_window_start!;
-    if (ts < start) continue;
-    const nextStart = i + 1 < sorted.length ? sorted[i + 1].active_window_start : null;
-    // done step -> window ends at its close; open step -> extends to the
-    // next step's start (an abandoned step) or stays open to the end.
-    const end = sorted[i].active_window_end ?? nextStart;
-    if (end === null || ts < end) return { kind: "in_step" };
-    if (nextStart !== null && ts < nextStart) return { kind: "gap", before_step_id: sorted[i + 1].ticket_id };
-  }
-  // Past the last step's end with no successor: not a gap, leave in-step
-  // (it would already be the trailing reply if it were after the boundary).
-  return { kind: "in_step" };
-}
-
-/**
- * Classify the section's text-only assistant messages into top-level
- * placements, never hiding any under a step:
- *
- *   - **trailing**: the backward-scan reply -- text strictly after the last
- *     tool activity or step close. Rendered below the timeline.
- *   - **leading**: text before the first step started. Rendered above.
- *   - **inter_step**: text in a gap between a closed step and the next
- *     step's start. Interrupts the timeline inline before that next step.
- *
- * Text that falls inside a step's window and is *not* trailing stays in
- * the step (as narration / expandable body) and is not returned here.
- *
- * The backward reply scan is **per reply segment**, where a stop-hook
- * feedback message splits the section into segments. This makes the scan
- * robust to stop hooks: post-hook tool activity can no longer bury the
- * genuine pre-hook wrap-up reply, and a reply the agent writes *in response
- * to* a stop hook surfaces too rather than collapsing or replacing the
- * pre-hook one. Only the **final** segment's reply renders below the timeline
- * (trailing); a reply from an *earlier* segment is woven into the timeline at
- * its chronological position (inter_step), so the whole turn reads top-to-
- * bottom in time and the earlier reply stays visible instead of being yanked
- * to the bottom or collapsed under a step.
- */
-export function classifyTopLevelMessages(body_events: TranscriptEvent[], steps: StepView[]): PlacedMessages {
-  const result: PlacedMessages = { leading: [], inter_step: [], trailing: [] };
-  const textOnly = body_events.filter(isTextOnlyAssistant);
-  if (textOnly.length === 0) return result;
-
-  const sorted = sortedWindowedSteps(steps);
-  const firstStart = sorted.length > 0 ? sorted[0].active_window_start : null;
-  const segmentBounds = replySegmentBoundaries(body_events);
-  // The final reply segment begins at the last stop-hook (or at section start
-  // when there are none). A reply detected before this point belongs to an
-  // earlier segment and is woven in chronologically rather than rendered below.
-  const finalSegmentStart = segmentBounds.length > 0 ? segmentBounds[segmentBounds.length - 1] : "";
-
-  for (const ev of textOnly) {
-    const ts = ev.timestamp;
-    const segment = segmentFor(ts, segmentBounds);
-    const boundary = segmentReplyBoundary(body_events, steps, segment.start, segment.end);
-    const isReplyRun = boundary !== null ? ts > boundary : firstStart !== null && ts >= firstStart;
-    if (isReplyRun) {
-      // The final segment's reply renders below the timeline; an earlier
-      // segment's reply is woven in at its chronological spot (never collapsed
-      // -- it was detected as a reply, so it must stay visible).
-      if (ts >= finalSegmentStart) {
-        result.trailing.push(ev);
-      } else {
-        result.inter_step.push({ event: ev, before_step_id: firstStepStartingAfter(sorted, ts) });
+  for (let i = 0; i < section.placements.length; i++) {
+    if (trailingIdx.has(i)) continue;
+    const p = section.placements[i];
+    if (p.step_id !== null) {
+      flushUngrouped();
+      if (!emittedSteps.has(p.step_id)) {
+        items.push({ kind: "step", step: section.steps.get(p.step_id)! });
+        emittedSteps.add(p.step_id);
       }
-      continue;
+    } else {
+      ungrouped.push(p.event);
     }
-    if (firstStart === null || ts < firstStart) {
-      result.leading.push(ev);
-      continue;
+    for (const c of chipsAfter.get(i) ?? []) {
+      flushUngrouped();
+      items.push({ kind: "chip", event: c });
     }
-    const located = locate(ts, sorted);
-    if (located.kind === "gap") {
-      result.inter_step.push({ event: ev, before_step_id: located.before_step_id });
-    }
-    // kind === "in_step": stays in the step, not promoted.
   }
-  return result;
-}
+  flushUngrouped();
 
-/** A stop-hook chip plus the id of the step it should render immediately
- *  before in the timeline. `before_step_id === ""` means render after the
- *  last step (the hook fired after all step activity in the section). */
-export interface PlacedChip {
-  event: UserMessageEvent;
-  before_step_id: string;
-}
-
-/** Position each stop-hook feedback message at its chronological spot in the
- *  section's timeline: immediately before the first step that *starts after*
- *  the hook fired, or after the last step when none do. The chat panel emits
- *  the chip mid-section but renders the whole section as one progress block,
- *  so without this the chip floats above the entire turn instead of sitting
- *  where the hook actually interrupted the work. */
-export function placeStopHookChips(body_events: TranscriptEvent[], steps: StepView[]): PlacedChip[] {
-  const sorted = sortedWindowedSteps(steps);
-  const placed: PlacedChip[] = [];
-  for (const e of body_events) {
-    if (e.type !== "user_message" || !isStopHookFeedback(e.content ?? "")) continue;
-    placed.push({ event: e, before_step_id: firstStepStartingAfter(sorted, e.timestamp) });
+  // Any step that transitioned but never received a placement (e.g. created
+  // and closed with no work) still needs to render, in its declared order.
+  for (const id of section.step_order) {
+    if (!emittedSteps.has(id)) {
+      items.push({ kind: "step", step: section.steps.get(id)! });
+      emittedSteps.add(id);
+    }
   }
-  return placed;
+
+  // 6. Pending roster (tail section only): steps in enrichment that never
+  //    started anywhere, as dashed placeholders at the tail, in tk `created`
+  //    order. The lone timestamp read in this module, and only among pending.
+  if (is_tail) {
+    const seen = new Set(section.step_order);
+    const pending = Array.from(enrichment.entries())
+      .filter(([id, en]) => en.status === "open" && !seen.has(id))
+      .sort((a, b) => a[1].created_at.localeCompare(b[1].created_at) || a[0].localeCompare(b[0]));
+    for (const [id, en] of pending) {
+      items.push({
+        kind: "step",
+        step: {
+          ticket_id: id,
+          title: en.title || id,
+          status: "pending",
+          summary: null,
+          narration: null,
+          is_carryover: false,
+          is_frontier: false,
+          events: [],
+        },
+      });
+    }
+  }
+
+  return { user_event: section.user_event, key: section.key, items, trailing_reply };
 }

@@ -9,7 +9,6 @@
 
 import m from "mithril";
 import { isSlotClaimed } from "../slots";
-import type { TranscriptEvent } from "../models/Response";
 import {
   fetchEvents,
   fetchBackfillEvents,
@@ -31,15 +30,7 @@ import {
   computeAuthErrorHiddenEventIds,
 } from "./message-renderers";
 import { getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import {
-  buildTaskRecords,
-  buildStepPlanOrder,
-  buildSectionSteps,
-  attributeNarration,
-  classifyTopLevelMessages,
-  placeStopHookChips,
-} from "./turn-grouping";
-import { isNonBoundaryUserMessage, isStopHookFeedback } from "./user-message-classification";
+import { buildEnrichment, buildSections } from "./turn-grouping";
 import { ProgressBlock } from "./ProgressBlock";
 import { ActivityIndicator } from "./ActivityIndicator";
 
@@ -409,97 +400,53 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
     const visibleEvents = events.filter((e) => !hiddenEventIds.has(e.event_id));
 
-    const taskRecords = buildTaskRecords(visibleEvents);
-    // Plan order (the sequence in which the agent created its steps) is
-    // recovered from the transcript's tool-call order, robust to steps created
-    // as parallel tool calls. Computed once over the whole stream so the
-    // ordinal is stable; threaded into every section's step sort.
-    const planOrder = buildStepPlanOrder(visibleEvents, toolResults);
+    // tk is an enrichment side-table (titles, summaries, pending roster),
+    // joined onto the transcript-derived structure by id. Structure -- which
+    // steps exist, their order, grouping -- comes purely from the transcript
+    // walk; enrichment never decides order or grouping.
+    const enrichment = buildEnrichment(visibleEvents);
     const agent = getAgentById(agentId);
     const agentIsIdle = agent?.activity_state === "IDLE";
 
+    // A single in-order walk of the transcript produces the turn sections:
+    // each carries its timeline items (steps, ungrouped runs, chips) and its
+    // wrap-up reply. There is no timestamp-based grouping or sorting.
+    const sections = buildSections(visibleEvents, toolResults, enrichment, agentIsIdle);
+
     const messageNodes: m.Children[] = [];
-    let sectionUserEvent: TranscriptEvent | null = null;
-    let sectionStart = "";
-    let bodyEvents: TranscriptEvent[] = [];
+    for (const section of sections) {
+      if (section.user_event !== null) {
+        const userNode = renderUserMessage(section.user_event);
+        if (userNode !== null) messageNodes.push(userNode);
+      }
 
-    function flushSection(nextBoundaryTs: string): void {
-      if (sectionUserEvent === null) return;
-      const endTs = nextBoundaryTs;
-      const isTail = endTs === "";
-      const isSettled = !isTail || agentIsIdle;
-
-      const steps = buildSectionSteps(taskRecords, sectionStart, endTs, isSettled, planOrder);
-      attributeNarration(steps, bodyEvents);
-
-      if (steps.length > 0) {
-        const placed = classifyTopLevelMessages(bodyEvents, steps);
+      const hasSteps = section.items.some((i) => i.kind === "step");
+      if (hasSteps) {
         messageNodes.push(
           m(ProgressBlock, {
-            key: `progress-${sectionUserEvent.event_id}`,
-            tasks: steps,
-            body_events: bodyEvents,
+            key: `progress-${section.key}`,
+            items: section.items,
+            trailing_reply: section.trailing_reply,
             toolResults,
-            leading_messages: placed.leading,
-            interstep_messages: placed.inter_step,
-            trailing_messages: placed.trailing,
-            stophook_messages: placeStopHookChips(bodyEvents, steps),
             agentId,
           }),
         );
-      } else if (bodyEvents.length > 0) {
-        // No step records were declared for this turn. Render the body as
-        // plain chat -- the agent's prose and tool-call blocks inline, the
-        // same way assistant messages render outside a progress section --
-        // rather than wrapping it in a pseudo-progress "ungrouped work"
-        // block. Tool_result events are looked up via the prebuilt
-        // toolResults map by renderAssistantMessage, so only the
-        // assistant_messages need to be emitted here. Stop-hook chips are
-        // interleaved at their chronological position (bodyEvents is ordered).
-        for (const e of bodyEvents) {
-          if (e.type === "assistant_message") {
-            messageNodes.push(renderAssistantMessage(e, toolResults, agentId));
-          } else if (e.type === "user_message" && isStopHookFeedback(e.content ?? "")) {
-            const chipNode = renderUserMessage(e);
-            if (chipNode !== null) messageNodes.push(chipNode);
-          }
-        }
+        continue;
       }
-    }
 
-    for (const event of visibleEvents) {
-      if (event.type === "user_message") {
-        if (isNonBoundaryUserMessage(event.content ?? "")) {
-          if (sectionUserEvent === null) {
-            // No section open yet to attach it to -- render at top level.
-            const chipNode = renderUserMessage(event);
-            if (chipNode !== null) messageNodes.push(chipNode);
-          } else {
-            // Defer rendering: flushSection places the chip at its
-            // chronological position inside the section (woven into the
-            // timeline, or interleaved in the no-steps plain-chat fallback)
-            // so it no longer floats above the whole turn.
-            bodyEvents.push(event);
-          }
-        } else {
-          flushSection(event.timestamp);
-          sectionUserEvent = event;
-          sectionStart = event.timestamp;
-          bodyEvents = [];
-          const userNode = renderUserMessage(event);
-          if (userNode !== null) messageNodes.push(userNode);
+      // No steps this turn: render the body as plain chat -- prose and
+      // tool-call blocks inline, the same as assistant messages outside a
+      // progress section. Items are already in transcript order.
+      for (const item of section.items) {
+        if (item.kind === "ungrouped") {
+          for (const e of item.events) messageNodes.push(renderAssistantMessage(e, toolResults, agentId));
+        } else if (item.kind === "chip") {
+          const chipNode = renderUserMessage(item.event);
+          if (chipNode !== null) messageNodes.push(chipNode);
         }
-      } else if (event.type === "assistant_message") {
-        if (sectionUserEvent === null) {
-          messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
-        } else {
-          bodyEvents.push(event);
-        }
-      } else if (event.type === "tool_result") {
-        bodyEvents.push(event);
       }
+      for (const e of section.trailing_reply) messageNodes.push(renderAssistantMessage(e, toolResults, agentId));
     }
-    flushSection("");
 
     return m("div", { class: "message-list-wrapper" }, [
       m(

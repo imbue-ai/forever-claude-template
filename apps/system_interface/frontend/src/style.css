@@ -1826,6 +1826,17 @@ body {
   background: var(--color-bg);
 }
 
+/* Ungrouped work/prose: real work the agent did with no step open (e.g.
+   before declaring the first step, or in a gap between steps). Rendered
+   inline as plain chat-style messages, sitting above the timeline thread
+   (opaque background + z-index) so the thread doesn't draw through it. */
+.pv-ungrouped {
+  position: relative;
+  z-index: 2;
+  margin: 6px 0 14px 0;
+  background: var(--color-bg);
+}
+
 /* ─────────────────────────────────────────────────────────────────────
    ACTIVITY INDICATOR (replaces the generic "Running tool..." strip)
    ─────────────────────────────────────────────────────────────────── */
