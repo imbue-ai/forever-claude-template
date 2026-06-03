@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from imbue.mngr.errors import AgentStartError
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
@@ -389,3 +390,52 @@ def test_destroy_rejects_is_primary_agent(client: TestClient, app: FastAPI) -> N
     # The guard runs *before* the destroy subprocess, so the agent is still
     # present in the agent manager's state.
     assert services_agent.id in agent_manager._agents
+
+
+def _register_agent(app: FastAPI, agent_id: str, name: str, state: str) -> None:
+    """Insert an agent into the AgentManager's state for endpoint tests."""
+    agent_manager: AgentManager = app.state.agent_manager
+    agent_manager._agents[agent_id] = AgentStateItem(
+        id=agent_id,
+        name=name,
+        state=state,
+        labels={},
+        work_dir="/code",
+    )
+
+
+def test_start_unknown_agent_returns_404(client: TestClient) -> None:
+    """POST /api/agents/<id>/start returns 404 for an unknown agent."""
+    response = client.post("/api/agents/nonexistent/start")
+    assert response.status_code == 404
+
+
+def test_start_invokes_in_process_start_with_agent_name(client: TestClient, app: FastAPI) -> None:
+    """The endpoint delegates to the in-process ``start_agent`` keyed by name.
+
+    Opening a terminal must go through the same in-process mngr start path that
+    messaging an agent uses, so the two cannot diverge. The endpoint therefore
+    calls ``start_agent(<name>)`` rather than shelling out to ``mngr start``.
+    """
+    _register_agent(app, "agent-running", "running-agent", "RUNNING")
+
+    with patch("imbue.system_interface.server.start_agent") as mock_start:
+        response = client.post("/api/agents/agent-running/start")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    mock_start.assert_called_once_with("running-agent")
+
+
+def test_start_failure_returns_500(client: TestClient, app: FastAPI) -> None:
+    """A failed start surfaces as a 500 carrying the mngr error message."""
+    _register_agent(app, "agent-stopped", "stopped-agent", "STOPPED")
+
+    with patch(
+        "imbue.system_interface.server.start_agent",
+        side_effect=AgentStartError("stopped-agent", "boom"),
+    ):
+        response = client.post("/api/agents/agent-stopped/start")
+
+    assert response.status_code == 500
+    assert "boom" in response.json()["detail"]
