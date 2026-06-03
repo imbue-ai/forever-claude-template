@@ -106,9 +106,10 @@ def test_happy_path_no_artifacts(tmp_path: Path) -> None:
         ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
         [
             "mngr",
-            "rsync",
-            f"{runtime}/",
+            "push",
             f"demo-worker:{runtime}/",
+            "--source",
+            f"{runtime}/",
             "--uncommitted-changes=merge",
         ],
         ["mngr", "message", "demo-worker", "--message-file", str(task)],
@@ -131,20 +132,22 @@ def test_source_artifacts_dir_pushed_after_runtime(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    rsync_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "rsync"]]
-    assert rsync_calls == [
+    push_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "push"]]
+    assert push_calls == [
         [
             "mngr",
-            "rsync",
-            f"{runtime}/",
+            "push",
             f"demo-worker:{runtime}/",
+            "--source",
+            f"{runtime}/",
             "--uncommitted-changes=merge",
         ],
         [
             "mngr",
-            "rsync",
-            f"{artifacts}/",
+            "push",
             f"demo-worker:{artifacts}/",
+            "--source",
+            f"{artifacts}/",
             "--uncommitted-changes=merge",
         ],
     ]
@@ -213,13 +216,14 @@ def test_malformed_frontmatter_does_not_abort_launch(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    rsync_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "rsync"]]
-    assert rsync_calls == [
+    push_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "push"]]
+    assert push_calls == [
         [
             "mngr",
-            "rsync",
-            f"{runtime}/",
+            "push",
             f"demo-worker:{runtime}/",
+            "--source",
+            f"{runtime}/",
             "--uncommitted-changes=merge",
         ],
     ]
@@ -356,9 +360,10 @@ def test_common_transcript_flushed_before_message_send(tmp_path: Path) -> None:
         ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
         [
             "mngr",
-            "rsync",
-            f"{runtime}/",
+            "push",
             f"demo-worker:{runtime}/",
+            "--source",
+            f"{runtime}/",
             "--uncommitted-changes=merge",
         ],
         [expected_script, "--single-pass"],
