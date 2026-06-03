@@ -66,6 +66,10 @@ def _normalize_iso(ts: str) -> str:
         parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return ts
+    if parsed.tzinfo is None:
+        # A timestamp with no offset is assumed UTC (tk stamps `Z`); otherwise
+        # astimezone() would read it as machine-local time and shift it.
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).strftime(_ISO_MICROS_FORMAT)
 
 

@@ -316,3 +316,17 @@ def test_concurrent_reads_do_not_decouple_broadcast_from_change(tmp_path: Path) 
         seen = list(broadcasts)
     for i in range(1, len(seen)):
         assert seen[i] != seen[i - 1], f"consecutive duplicate broadcast at {i}: {seen}"
+
+
+def test_created_without_timezone_is_assumed_utc(tmp_path: Path) -> None:
+    """A `created` value lacking a timezone offset is normalised as UTC, not
+    shifted by the machine's local offset (which is what a naive
+    astimezone() would do on a non-UTC host)."""
+    tickets_dir = tmp_path / ".tickets"
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    (tickets_dir / "tt-naive.md").write_text(
+        _ticket_text("tt-naive", "open", title="Naive", created="2026-04-28T01:00:00")
+    )
+    _calls, cb = _capture()
+    watcher = AgentTicketsWatcher("agent-1", "agent-1-name", tickets_dir, cb)
+    assert watcher.get_enrichment()["tt-naive"]["created_at"] == "2026-04-28T01:00:00.000000Z"
