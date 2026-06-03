@@ -333,12 +333,15 @@ export function renderAssistantMessageChildren(
       continue;
     }
     const result = toolResults.get(toolCall.tool_call_id) ?? null;
+    // Always render the tool-call block, then append the button when this is a
+    // successful permission request. Appending (rather than replacing the
+    // block) keeps the block in place so the layout doesn't jump when the
+    // result arrives.
+    children.push(renderToolCallBlock(toolCall, result));
     const permissionRequest = parsePermissionRequest(toolCall, result);
     if (permissionRequest) {
       children.push(renderPermissionRequestCard(permissionRequest.requestId));
-      continue;
     }
-    children.push(renderToolCallBlock(toolCall, result));
   }
   return children;
 }
