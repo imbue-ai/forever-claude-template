@@ -256,6 +256,18 @@ post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 # Leased pool hosts must never auto-shutdown -- the host is borrowed for a
 # whole user session, not a one-shot job.
 idle_mode = "disabled"
+# The agent workspace lives on the persistent volume at /mngr/code/. The fast
+# (adopt) path ignores this -- it reuses the pre-baked agent's recorded
+# work_dir -- but the slow (rebuild) path rebuilds the container from scratch
+# and needs the standard target_path so the FCT workspace lands in the right
+# place, exactly like the vultr/ovh templates.
+target_path = "/mngr/code/"
+# Docker build args forwarded verbatim to the delegated vps_docker build that
+# the imbue_cloud SLOW path runs (it tears down the leased pool host's baked
+# container and rebuilds it from this Dockerfile). The FAST path adopts the
+# pre-baked image and ignores these (the imbue_cloud provider treats them as
+# pass-through and only the slow path consumes them). Mirrors the ovh template.
+build_arg__extend = ["--file=Dockerfile", "."]
 # Forward the LiteLLM-minted ANTHROPIC creds + the minds-side MNGR_PREFIX
 # + an optional GH_TOKEN from minds' subprocess env onto the host's
 # ``/mngr/env``. minds writes these into the subprocess env it hands
@@ -263,6 +275,11 @@ idle_mode = "disabled"
 # ``vendor/mngr/apps/minds/imbue/minds/desktop_client/agent_creator.py``)
 # so the host actually has them at the moment ``--pass-host-env`` reads.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX", "GH_TOKEN"]
+# Seed /mngr/code from the baked image on first boot (idempotent warm-boot
+# fast path). Runs after create_host for both paths; on the fast path the
+# code is already present so fct-seed is a no-op. Same as the vultr/ovh
+# templates.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 ## and these templates are for sub-agents created within the sandbox
 
