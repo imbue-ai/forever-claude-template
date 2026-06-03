@@ -216,6 +216,70 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode
   ]);
 }
 
+/**
+ * Detect a *successful* latchkey permission-request creation call and pull the
+ * resulting request id out of the tool result.
+ *
+ * An agent asks the user for permission by POSTing to the reserved
+ * `latchkey-self.invalid/permission-requests` host (see the latchkey skill).
+ * The created request's JSON -- including a `request_id` -- is echoed back on
+ * stdout, so the tool result output contains a `"request_id": "..."` field.
+ *
+ * Returns the request id when the tool call is such a creation POST and it
+ * succeeded; otherwise null (in which case the caller renders the raw tool
+ * block, so failures/errors stay visible and debuggable).
+ */
+export function parsePermissionRequest(
+  toolCall: ToolCall,
+  toolResult: TranscriptEvent | null,
+): { requestId: string } | null {
+  // The command is JSON-encoded inside input_preview; the reserved host is
+  // short enough to survive the 200-char preview truncation.
+  const input = toolCall.input_preview || "";
+  if (!input.includes("latchkey-self.invalid/permission-requests")) {
+    return null;
+  }
+  // Only a creation (POST) yields a request_id; reads of existing permissions
+  // hit different endpoints and are excluded by the host check above anyway.
+  if (!/-X\s*POST|--request\s*POST/i.test(input)) {
+    return null;
+  }
+  if (!toolResult || toolResult.is_error === true) {
+    return null;
+  }
+  const output = toolResult.output || "";
+  const match = output.match(/"request_id"\s*:\s*"([^"]+)"/);
+  if (!match) {
+    return null;
+  }
+  return { requestId: match[1] };
+}
+
+/**
+ * Ask the outer Minds app to open its permission-request modal. The chat UI
+ * runs inside an iframe, so we hand the request id to the parent via
+ * postMessage rather than rendering the modal ourselves.
+ */
+export function openPermissionRequest(requestId: string): void {
+  window.parent.postMessage({ type: "minds:open-request-modal", requestId }, "*");
+}
+
+export function renderPermissionRequestCard(requestId: string): m.Vnode {
+  return m(
+    "button",
+    {
+      class: "permission-request-button",
+      type: "button",
+      onclick(e: Event) {
+        e.preventDefault();
+        e.stopPropagation();
+        openPermissionRequest(requestId);
+      },
+    },
+    "Permission request",
+  );
+}
+
 export function renderToolCallBlock(toolCall: ToolCall, toolResult: TranscriptEvent | null): m.Vnode {
   const headerText = `Tool: ${toolCall.tool_name}`;
   const inputText = toolCall.input_preview || "";
@@ -266,10 +330,15 @@ export function renderAssistantMessageChildren(
   for (const toolCall of toolCalls) {
     if (toolCall.tool_name === "Agent" && toolCall.subagent_metadata) {
       children.push(renderSubagentCard(toolCall, agentId));
-    } else {
-      const result = toolResults.get(toolCall.tool_call_id) ?? null;
-      children.push(renderToolCallBlock(toolCall, result));
+      continue;
     }
+    const result = toolResults.get(toolCall.tool_call_id) ?? null;
+    const permissionRequest = parsePermissionRequest(toolCall, result);
+    if (permissionRequest) {
+      children.push(renderPermissionRequestCard(permissionRequest.requestId));
+      continue;
+    }
+    children.push(renderToolCallBlock(toolCall, result));
   }
   return children;
 }

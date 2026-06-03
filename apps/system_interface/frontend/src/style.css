@@ -853,6 +853,31 @@ body {
   text-decoration: underline;
 }
 
+/* ── Permission request button ── */
+.permission-request-button {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-accent);
+  background: var(--color-accent-light);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-base);
+  padding: 5px 12px;
+  cursor: pointer;
+  transition:
+    background 120ms,
+    color 120ms;
+}
+
+.permission-request-button:hover {
+  color: var(--color-accent-hover);
+  background: var(--color-bg-hover);
+}
+
 /* ── Dockview workspace ── */
 .dockview-workspace {
   position: relative;
