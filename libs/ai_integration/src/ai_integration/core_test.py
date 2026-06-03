@@ -1,10 +1,16 @@
 import functools
+import subprocess
 from pathlib import Path
 
 import anyio
 import pytest
 
-from ai_integration.core import run_agent, run_completion, run_task
+from ai_integration.core import (
+    _run_create_worker_blocking,
+    run_agent,
+    run_completion,
+    run_task,
+)
 from ai_integration.data_types import AgentOutcome, BillingPath, CompletionResult, Usage
 from ai_integration.errors import CredentialsUnavailableError
 from ai_integration.spend import SpendTracker
@@ -199,3 +205,42 @@ def test_run_agent_maps_report_name_to_outcome(
     assert result.branch == "mngr/demo"
     # The injected runner is handed the resolved repo_root, not the process cwd.
     assert captured["repo_root"] == Path("/repo")
+
+
+def test_create_worker_subprocess_runs_in_repo_root(tmp_path) -> None:
+    """The ``uv run create_worker`` subprocess must execute with ``cwd=repo_root``.
+
+    ``uv run`` resolves its project from the working directory, not the script
+    path, so a ``repo_root`` that differs from the process cwd is only honored if
+    cwd is set explicitly. Regression test for that.
+    """
+    seen_argv: list[str] = []
+    seen_cwd: list[object] = []
+    repo_root = tmp_path / "checkout"
+
+    def fake_subprocess_run(
+        argv: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen_argv.extend(argv)
+        seen_cwd.append(kwargs.get("cwd"))
+        # create_worker writes the result JSON to the ``--result-json`` path; mimic
+        # that so the blocking helper can read a collected report back.
+        result_path = Path(argv[argv.index("--result-json") + 1])
+        result_path.write_text('{"timed_out": false, "name": "done", "branch": "mngr/x"}')
+        return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
+
+    payload = _run_create_worker_blocking(
+        name="x",
+        template="worker",
+        runtime_dir=tmp_path / "runtime",
+        task_file=tmp_path / "runtime" / "task.md",
+        timeout="30m",
+        poll_interval="5s",
+        keep_agent=False,
+        repo_root=repo_root,
+        subprocess_run=fake_subprocess_run,
+    )
+    assert seen_cwd == [str(repo_root)]
+    # The script path is also anchored to repo_root, matching the cwd.
+    assert str(repo_root) in seen_argv[2]
+    assert payload["name"] == "done"

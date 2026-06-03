@@ -39,6 +39,10 @@ _CREATE_WORKER_REL = ".agents/skills/launch-task/scripts/create_worker.py"
 # Type aliases for the injectable backends (tests pass fakes).
 _ApiBackend = Callable[..., Awaitable[CompletionResult]]
 _CliBackend = Callable[..., Awaitable[CompletionResult]]
+# The subprocess runner is injectable so the ``create_worker`` launch boundary
+# can be exercised without spawning a real ``uv run`` (mirrors the api/cli
+# backend and ``runner`` injection seams used elsewhere in this module).
+_SubprocessRun = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def _log_keyless_savings(result: CompletionResult, prompt: str, model: str) -> None:
@@ -224,6 +228,7 @@ def _run_create_worker_blocking(
     poll_interval: str,
     keep_agent: bool,
     repo_root: Path,
+    subprocess_run: _SubprocessRun = subprocess.run,
 ) -> Mapping[str, object]:
     # Collect the result from a dedicated ``--result-json`` file rather than
     # scraping stdout: create_worker's ``run`` interleaves human-readable launch
@@ -253,7 +258,14 @@ def _run_create_worker_blocking(
         ]
         if keep_agent:
             argv.append("--keep-agent")
-        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+        # ``cwd=repo_root`` so ``uv run`` resolves the uv project from the same
+        # root the ``create_worker.py`` script path is anchored to. ``uv run``
+        # picks its project by the working directory, not the script path, so a
+        # caller running from elsewhere (the reason ``repo_root`` is a parameter)
+        # would otherwise get the wrong project or none at all.
+        proc = subprocess_run(
+            argv, capture_output=True, text=True, check=False, cwd=str(repo_root)
+        )
         # create_worker.py exits 0 on a collected report and 124 on await
         # timeout; both write the JSON payload to ``--result-json``. Any other
         # exit code means it failed before producing a result.
