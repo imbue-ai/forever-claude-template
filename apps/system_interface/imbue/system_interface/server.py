@@ -26,11 +26,13 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
+from imbue.mngr.errors import BaseMngrError
 from imbue.system_interface import claude_auth_endpoints
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.system_interface.agent_discovery import send_message
+from imbue.system_interface.agent_discovery import start_agent
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
@@ -47,6 +49,7 @@ from imbue.system_interface.models import ErrorResponse
 from imbue.system_interface.models import RandomNameResponse
 from imbue.system_interface.models import SendMessageRequest
 from imbue.system_interface.models import SendMessageResponse
+from imbue.system_interface.models import StartAgentResponse
 from imbue.system_interface.plugins import get_plugin_manager
 from imbue.system_interface.request_writer import write_refresh_request
 from imbue.system_interface.service_dispatcher import register_service_routes
@@ -720,6 +723,40 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
     return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
 
 
+async def _start_agent(agent_id: str, request: Request) -> JSONResponse:
+    """Ensure an agent is running so its terminal session is attachable.
+
+    Opening an agent's terminal attaches to that agent's tmux session; while
+    the agent is STOPPED that session does not exist, so the attach fails
+    immediately. The frontend calls this endpoint before opening a terminal
+    tab -- both for the chat-page "Open agent terminal" link and for terminal
+    tabs restored from a saved dockview layout.
+
+    This goes through the exact same in-process mngr start path that sending a
+    message to the agent uses (see ``agent_discovery.start_agent``), so opening
+    a terminal and messaging the agent succeed or fail together rather than
+    diverging. mngr's own lifecycle check makes the start a no-op for an
+    already-running agent, so this is cheap in the common case.
+    """
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    def _run_start() -> str | None:
+        try:
+            start_agent(agent_info.name)
+            return None
+        except BaseMngrError as e:
+            return str(e)
+
+    error_message = await run_in_threadpool(_run_start)
+    if error_message is not None:
+        error = ErrorResponse(detail=f"Failed to start agent '{agent_info.name}': {error_message}")
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    return JSONResponse(content=StartAgentResponse(status="ok").model_dump())
+
+
 async def _refresh_service_request_endpoint(service_name: str) -> JSONResponse:
     """Append a refresh-service event to the agent's refresh events file.
 
@@ -807,6 +844,7 @@ def create_application(
     application.add_api_route("/api/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
+    application.add_api_route("/api/agents/{agent_id}/start", _start_agent, methods=["POST"])
     claude_auth_endpoints.register_routes(application)
     application.add_api_route(
         "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
