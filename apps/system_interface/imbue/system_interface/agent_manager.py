@@ -28,7 +28,7 @@ from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.utils.name_generator import generate_agent_name
