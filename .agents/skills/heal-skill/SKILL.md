@@ -42,29 +42,25 @@ Use `$TARGET` for the skill you are healing (e.g. `migrate-config`). Then:
 - Worker agent name: `heal-$TARGET`
 - Worker branch: `mngr/heal-$TARGET`
 - Runtime path: `runtime/heal/$TARGET/`
-- Task file: `runtime/heal/$TARGET/task.md` (sits alongside `turn.jsonl`
-  so the existing Step 4 `mngr push` syncs it to the worker for free)
+- Task file: `runtime/heal/$TARGET/task.md` (the Step 3 push syncs it to
+  the worker)
 
 ## Step 1: Open a tracking ticket
 
 ```bash
 TICKET_ID=$(tk create "heal $TARGET" -t bug \
-    --acceptance "incident captured; task file written; worker launched; worker DONE; branch merged")
+    --acceptance "task file written; worker launched; worker DONE; branch merged")
 tk start "$TICKET_ID"
 ```
 
-## Step 2: Capture the incident transcript
+## Step 2: Write the task file
 
-See `.agents/shared/references/lead-proxy.md` for the `extract_turn.py`
-invocation contract.
-
-```bash
-uv run .agents/shared/scripts/extract_turn.py \
-    --nth 1 \
-    --output runtime/heal/$TARGET/turn.jsonl
-```
-
-## Step 3: Write the task file
+The worker will explore your transcript via `mngr transcript` to find
+the incident. Your job here is to write a task body that describes the
+failure and anchors the worker's search with verbatim quotes (the
+user's request, the failing command or error message, any tool output
+that exposed the misbehavior). Without anchors the worker will scan the
+wrong region of your transcript.
 
 The task file's YAML frontmatter follows the schema in
 `.agents/shared/references/worker-reporting.md`.
@@ -75,22 +71,29 @@ mkdir -p runtime/heal/$TARGET
 cat << FRONTMATTER_EOF
 ---
 lead_agent: $MNGR_AGENT_NAME
-lead_report_dir: runtime/heal/$TARGET/reports/
-transcript_path: runtime/heal/$TARGET/turn.jsonl
+finish_report_path: runtime/heal/$TARGET/reports/report.md
 ---
 FRONTMATTER_EOF
 cat << BODY_EOF
 
 # Task: heal the \`$TARGET\` skill
 
-## Incident
-The turn where \`$TARGET\` misbehaved is at the path given by the
-\`transcript_path\` frontmatter field.
+## Incident summary
+<2-5 sentences: what the user asked for, how \`$TARGET\` was invoked,
+how it failed, what you did to work around it.>
+
+## Anchors (verbatim quotes)
+The worker will use these to locate the incident in your transcript via
+\`mngr transcript\`. Include:
+- The user's request that invoked \`$TARGET\` (verbatim).
+- The failing output, exception, or wrong result (verbatim).
+- Any clarifying quote from the user about expected behavior.
+<paste quotes here, one per bullet.>
 
 ## What the fixed skill must do
 <state the contract the healed skill must honor — what input shapes
-should work, what outputs are correct. Read the incident transcript
-for how it failed; here, describe only what success looks like.>
+should work, what outputs are correct. Describe only what success
+looks like; the incident itself is captured above.>
 
 ## What to do
 Use the \`heal-skill-worker\` sub-skill to replicate the problem, find
@@ -103,7 +106,7 @@ single gate -- no outline gate.
 When you reach the final-artifact gate or a terminal status, write a
 report file and push it to the lead per the sub-skill's reporting
 protocol; the destination is given by \`lead_agent\` /
-\`lead_report_dir\` in frontmatter.
+\`finish_report_path\` in frontmatter.
 
 ## Success criteria
 - The incident reproduces against the current skill before the fix.
@@ -115,29 +118,22 @@ BODY_EOF
 } > runtime/heal/$TARGET/task.md
 ```
 
-## Step 4: Launch the worker
+Fill in the `## Incident summary` and `## Anchors` sections with real
+content drawn from your conversation -- do not leave the placeholders.
+
+## Step 3: Launch the worker
 
 ```bash
-mngr create heal-$TARGET -t crystallize-worker \
-    --label workspace=$MINDS_WORKSPACE_NAME \
-    --message-file runtime/heal/$TARGET/task.md
+uv run .agents/skills/launch-task/scripts/create_worker.py launch \
+    --name heal-$TARGET \
+    --template crystallize-worker \
+    --runtime-dir runtime/heal/$TARGET/ \
+    --task-file runtime/heal/$TARGET/task.md
 ```
 
-The `crystallize-worker` template pre-installs `heal-skill-worker`
-alongside the other worker sub-skills.
+The `crystallize-worker` template pre-installs `heal-skill-worker`.
 
-Push the runtime dir (task file + transcript) into the worker's worktree
--- see `.agents/shared/references/lead-proxy.md` § "mngr push rationale"
-for why the directory form and `--uncommitted-changes=merge` are
-required:
-
-```bash
-mngr push heal-$TARGET:runtime/heal/$TARGET/ \
-    --source runtime/heal/$TARGET/ \
-    --uncommitted-changes=merge
-```
-
-## Step 5: Proxy the final-artifact gate, then merge
+## Step 4: Proxy the final-artifact gate, then merge
 
 Follow `.agents/shared/references/lead-proxy.md` for polling, gate
 decisions, the "do not interrupt more recent user work" rule, and
@@ -147,7 +143,9 @@ Flow-specific substitutions:
 
 - Worker name: `heal-$TARGET`
 - Branch: `mngr/heal-$TARGET`
-- Poll path: `runtime/heal/$TARGET/reports/report.md`
+- Task file (pass to `create_worker.py await --task-file`): `runtime/heal/$TARGET/task.md`
+- `finish_report_path` / poll path: `runtime/heal/$TARGET/reports/report.md`
+- Reports dir (`<REPORTS_DIR>` = `dirname finish_report_path`): `runtime/heal/$TARGET/reports/`
 - Consumed path: `runtime/heal/$TARGET/reports/consumed/`
 - The only user-approval gate is `type: gate, name: final-artifact`.
   A heal has no outline gate.

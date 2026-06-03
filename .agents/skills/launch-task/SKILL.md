@@ -31,7 +31,7 @@ tk close "$ID" "Briefed a sub-agent on the <task> and reviewed its result."
 
 Write a clear task file with YAML frontmatter (so the worker can address
 reports back to you) followed by the human-readable task description.
-The frontmatter contains `lead_agent` and `lead_report_dir`.
+The frontmatter contains `lead_agent` and `finish_report_path`.
 
 ```bash
 mkdir -p runtime/launch-task/$NAME
@@ -39,7 +39,7 @@ mkdir -p runtime/launch-task/$NAME
 cat << FRONTMATTER_EOF
 ---
 lead_agent: $MNGR_AGENT_NAME
-lead_report_dir: runtime/launch-task/$NAME/reports/
+finish_report_path: runtime/launch-task/$NAME/reports/report.md
 ---
 FRONTMATTER_EOF
 cat << 'BODY_EOF'
@@ -56,88 +56,55 @@ cat << 'BODY_EOF'
 <what "done" looks like -- be specific>
 
 ## Reporting back
-When you reach a terminal state (success or stuck) or have a
-mid-flight question that blocks progress, write a single
-`report.md` to the directory given by the `lead_report_dir`
-frontmatter field above (resolved relative to your worktree --
-the lead has already pushed that directory into your worktree
-before sending this task; create the directory yourself with
-`mkdir -p` if it does not yet exist). Frontmatter shape:
+Follow `.agents/shared/references/worker-reporting.md` for the full
+report procedure: it has you parse this task's frontmatter to get
+`LEAD_AGENT` / `FINISH_REPORT_PATH`, then write the report file and push
+its parent directory back to the lead. Substitutions for this task:
 
-    ---
-    type: status   # or `gate` for a mid-flight question
-    name: done     # or `stuck` for a terminal failure; or `question` for a gate
-    ---
+- `<TASK_FILE_GLOB>` -> `runtime/launch-task/*/task.md`
+- `<RUNTIME_REPORTS_DIR>` -> the directory part of `finish_report_path`,
+  i.e. `dirname "$FINISH_REPORT_PATH"` (your worktree path matches the
+  lead's destination for this flow)
+- Valid `name:` values: `question` (mid-flight gate), `done` / `stuck`
+  (terminal).
 
-    <body: address the user directly; one short paragraph for terminal
-    statuses, the question itself for gate reports>
-
-Then push the report directory back to the lead:
-
-    mngr push <lead_agent>:<lead_report_dir> \
-        --source <lead_report_dir> \
-        --uncommitted-changes=merge
-
-(Substitute the actual values from the frontmatter; the trailing
-slashes matter, and `--uncommitted-changes=merge` is required because
-the lead's worktree usually has uncommitted state.) For a mid-flight
-gate, stop your turn after pushing -- the lead will reply via
-`mngr message` and you resume. For terminal statuses, the run ends.
+For a mid-flight `question` gate, stop your turn after pushing -- the
+lead replies via `mngr message` and you resume. For terminal statuses,
+the run ends.
 BODY_EOF
 } > runtime/launch-task/$NAME/task.md
 ```
 
-## 2. Create the sub-agent
+## 2. Launch the worker
+
+`scripts/create_worker.py launch` runs the worker lifecycle: `mngr create`,
+the runtime-dir push, and the task message. Run it in the foreground so a
+failed launch surfaces immediately.
 
 ```bash
-mngr create $NAME -t worker \
-    --label workspace=$MINDS_WORKSPACE_NAME
+uv run .agents/skills/launch-task/scripts/create_worker.py launch \
+    --name $NAME \
+    --template worker \
+    --runtime-dir runtime/launch-task/$NAME/ \
+    --task-file runtime/launch-task/$NAME/task.md
 ```
 
-Omit `--message-file` here. Sending the task message at create time
-races with the runtime-dir push in Step 3 -- the worker could read the
-message and try to find `runtime/launch-task/$NAME/` before it has been
-pushed into its worktree. Send the task as a follow-up in Step 4
-instead.
+If the task references gitignored files outside the runtime dir, set
+`source_artifacts_dir: <dir>` in the task frontmatter; `launch`
+pushes that directory into the worker's worktree automatically.
 
-## 3. Push the runtime dir to the worker
+## 3. Background-poll for the worker's report
 
-The worker's worktree is a fresh checkout that does not see your
-gitignored `runtime/`. Push the runtime dir so the worker has the task
-file (and a writable home for its `report.md`) at the path the
-frontmatter names.
-
-```bash
-mngr push $NAME:runtime/launch-task/$NAME/ \
-    --source runtime/launch-task/$NAME/ \
-    --uncommitted-changes=merge
-```
-
-If the task references other gitignored files (datasets, credentials,
-extra transcripts), push them now too with the same pattern.
-
-## 4. Send the task message
-
-Now that the runtime dir is in place, send the task file as the
-worker's first message:
-
-```bash
-mngr message $NAME --message-file runtime/launch-task/$NAME/task.md
-```
-
-## 5. Background-poll for the worker's report
-
-Launch the poll as a background task (`run_in_background: true`) and
-continue with whatever else you were doing. The report file appears at
-`runtime/launch-task/$NAME/reports/report.md` once the worker pushes
-back.
+Poll with `create_worker.py await` as a background task
+(`run_in_background: true`) and continue with whatever else you were doing. It
+reads `finish_report_path` from the task file
+(`runtime/launch-task/$NAME/reports/report.md`), blocks until the worker pushes
+back, then prints the report.
 
 ```bash
 # Run with Bash run_in_background: true
-timeout 30m bash -c '
-  while [ ! -f runtime/launch-task/'"$NAME"'/reports/report.md ]; do sleep 5; done
-  cat runtime/launch-task/'"$NAME"'/reports/report.md
-'
+uv run .agents/skills/launch-task/scripts/create_worker.py await \
+    --task-file runtime/launch-task/$NAME/task.md
 ```
 
 You own this poll for the lifetime of the dispatch. Without it, gate
@@ -145,7 +112,7 @@ reports never reach the user and the worker deadlocks waiting for a
 reply. Reports surface as task notifications when the background job
 completes; handle them at that point, not by blocking on the poll.
 
-## 6. Handle the report
+## 4. Handle the report
 
 Follow `.agents/shared/references/lead-proxy.md` for parsing the
 report's frontmatter (`type` + `name`), deciding whether to answer a
@@ -159,7 +126,9 @@ Flow-specific substitutions when reading `lead-proxy.md`:
 
 - Worker name: `$NAME`
 - Branch: `mngr/$NAME`
-- Reports dir: `runtime/launch-task/$NAME/reports/`
+- Task file (pass to `create_worker.py await --task-file`): `runtime/launch-task/$NAME/task.md`
+- `finish_report_path`: `runtime/launch-task/$NAME/reports/report.md`
+- Reports dir (for `<REPORTS_DIR>`, i.e. `dirname finish_report_path`): `runtime/launch-task/$NAME/reports/`
 - Consumed dir: `runtime/launch-task/$NAME/reports/consumed/`
 - Gate names: `question` (mid-flight; default-escalate to the user
   unless you can answer from context).
@@ -180,5 +149,6 @@ Flow-specific substitutions when reading `lead-proxy.md`:
   <worker>` and message it to continue -- the worktree is preserved
   across restart. See `references/dead-worker-recovery.md` for the
   manual salvage fallback when restart isn't viable.
-- If the task references gitignored files beyond the runtime dir, push
-  them with `mngr push` before sending the task message (see Step 3).
+- If the task references gitignored files outside the runtime dir,
+  declare them with `source_artifacts_dir: <dir>` in the task
+  frontmatter -- `create_worker.py launch` pushes that directory automatically.
