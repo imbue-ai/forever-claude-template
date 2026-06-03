@@ -192,7 +192,7 @@ def start_agent(agent_name: str) -> None:
     running, so this is cheap in the common case (opening the terminal of an
     agent that is already up).
 
-    Raises ``BaseMngrError`` (e.g. ``AgentNotFoundError`` if the agent does
+    Raises ``MngrError`` (e.g. ``AgentNotFoundError`` if the agent does
     not exist, or a start failure) -- callers surface these to the user.
     """
     mngr_ctx, cg = _get_mngr_context()
