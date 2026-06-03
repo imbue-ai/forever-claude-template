@@ -23,17 +23,18 @@ host_env__extend = [
     "ENABLE_CLAUDEAI_MCP_SERVERS=false",
     # Tickets live inside runtime/ so they ride the runtime-backup branch.
     # tk reads TICKETS_DIR if set; absolute path so it works from worktree
-    # subdirs too. /code/ is the container WORKDIR (set by the Dockerfile).
-    "TICKETS_DIR=/code/runtime/tickets",
+    # subdirs too. /mngr/code/ is the container WORKDIR (set by the Dockerfile);
+    # a /code -> /mngr/code symlink is kept in the image as a safety net.
+    "TICKETS_DIR=/mngr/code/runtime/tickets",
 ]
-worktree_base_folder = "/worktree/"
+worktree_base_folder = "/mngr/worktree/"
 # claude_subagent_proxy is upstream mngr's experimental Claude-Code-Task ->
 # mngr-managed-subagent proxy. It is not used here. Without this disable, when
 # the proxy plugin is present in the system-tool mngr install it gets the
 # on_after_provisioning hook fired, which installs a PreToolUse:Agent hook
 # (spawn.py) into each new agent's .claude/settings.local.json -- and that
 # hook then wedges parent agents in a Haiku retry loop whenever it hits a
-# permanent error (e.g. the proxy package isn't in /code/.venv, or
+# permanent error (e.g. the proxy package isn't in /mngr/code/.venv, or
 # `mngr-proxy-child` isn't a registered agent type in the resolved mngr).
 # The disable is non-strict (commands.create.disable_plugin path), so this is
 # safe even on installs that don't include the proxy plugin at all.
@@ -51,7 +52,7 @@ include__extend = ["""has(labels.workspace)"""]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode"""
-settings_overrides = {model = "opus[1m]", fastMode = false}
+settings_overrides__extend = {model = "opus[1m]", fastMode = false}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
@@ -63,17 +64,15 @@ version = "2.1.141"
 # the per-agent config dir that everyone else points at.
 use_env_config_dir = true
 
-# The "main" (services) agent type. The repo at the requested git ref is the
-# canonical workspace definition, so the bulky user-local sync paths stay
-# off -- large ~/.claude skill/plugin trees and ~/.claude.json make
-# provisioning slow and flaky. Claude credentials are the deliberate
-# exception: sync_claude_credentials is on so a workspace is authenticated
-# out of the box (on macOS, converted from the host keychain).
+# The "main" (services) agent type -- inherits everything from claude, then
+# disables every path that pulls user-local content into the workspace. The
+# repo at the requested git ref is the canonical workspace definition;
+# nothing from the invoking user's ~/.claude/ or ~/.mngr/ should leak in.
 [agent_types.main]
 parent_type = "claude"
 sync_home_settings = false
 sync_claude_json = false
-sync_claude_credentials = true
+sync_claude_credentials = false
 sync_credentials_on_login = false
 # Keep this agent's per-agent CLAUDE_CONFIG_DIR (don't inherit the parent's
 # new shared-mode default). Every other agent in the workspace points at
@@ -100,6 +99,7 @@ is_enabled = false
 
 [providers.docker]
 is_enabled = false
+isolate_host_volumes = true
 
 # --- Create templates ---
 
@@ -118,7 +118,7 @@ extra_window = [
     "telegram='uv run telegram-bot'",
     "terminal='bash scripts/run_ttyd.sh'",
     "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'",
-    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && git config --global core.hooksPath /code/scripts/git_hooks && gh auth setup-git'"
+    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && git config --global core.hooksPath /mngr/code/scripts/git_hooks && gh auth setup-git'"
 ]
 # Write a sane default tmux config on every minds host. tuple-typed
 # `extra_provision_command` stacks across templates (see
@@ -131,7 +131,7 @@ extra_provision_command__extend = [
 # template for docker provider
 [create_templates.docker]
 provider = "docker"
-target_path = "/code/"
+target_path = "/mngr/code/"
 setting__extend = ["providers.docker.is_enabled=true"]
 build_arg__extend = ["--file=Dockerfile", "."]
 # `--cap-add=SYS_PTRACE` is a `docker run` flag (not `docker build`), so it
@@ -146,42 +146,61 @@ idle_mode = "disabled"
 # this is what gives the agent its ANTHROPIC_API_KEY (etc.) in
 # non-IMBUE_CLOUD compute modes.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
-# I guess it can pass a volume in too if you want
+# Seed /mngr/code from /docker_build_code (baked into the image) onto the
+# per-host volume. Runs synchronously after the host is online but
+# before any agent work_dir setup, so the workspace is in place by the
+# time the user's git refs land on top. See scripts/fct_seed.sh.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 # template for lima VM provider
 [create_templates.lima]
 provider = "lima"
-target_path = "/code/"
+target_path = "/mngr/code/"
 idle_mode = "disabled"
 start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
+# Back host_dir with an in-VM btrfs additional disk instead of a 9p bind
+# mount, so the minds workspace data lives on a snapshottable filesystem
+# (towards consistent backups). This drops the host-side `volumes/<host_id>/`
+# bind mount; offline reads via `mngr event` / `mngr transcript` against
+# a stopped Lima host stop working in this mode until the host is started.
+# See vendor/mngr/specs/lima-btrfs-host-volume/concise.md for the design.
+setting__extend = ["providers.lima.is_host_data_volume_exposed=false"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 extra_provision_command__extend = [
-    # Single bash script with explicit DAG via background subshells +
-    # `wait`. Three phases:
-    #   A) apt sources + big apt install   ||  uv installer
-    #   B) npm latchkey                    ||  frontend npm ci+build  ||  uv tool install (vendor/mngr + system_interface + plugins)
-    #   C) uv sync + playwright install (needs uv tools from B)
-    #
-    # apt holds /var/lib/dpkg/lock so all apt work stays inside ONE
-    # subshell; the uv-installer runs in parallel because it's a
-    # self-contained curl-to-binary download. Phase B's three tracks
-    # touch disjoint package-manager trees (/usr/lib/node_modules vs
-    # apps/system_interface/frontend/node_modules vs
-    # ~/.local/share/uv/tools/) so they don't lock against each other.
-    # Per-track stderr/stdout goes to /tmp/prov-*.log; on subshell
-    # failure we dump the relevant log so the cause is obvious.
-    # The whole script is piped through `bash -s` because mngr's
-    # execute_idempotent_command runs under sh (dash on Ubuntu) and
-    # dash rejects `set -o pipefail`, plus we want bash's stricter
-    # subshell error propagation.
-    "echo IyEvYmluL2Jhc2gKc2V0IC1ldW8gcGlwZWZhaWwKCiMgVHJpdmlhbCBob3N0LXNldHVwIHdvcmsgdGhhdCBpcyBlZmZlY3RpdmVseSBmcmVlCnN1ZG8gbWtkaXIgLXAgL3dvcmt0cmVlICYmIHN1ZG8gY2hvd24gJCh3aG9hbWkpIC93b3JrdHJlZQpta2RpciAtcCAkSE9NRS8ubG9jYWwvYmluICYmIGxuIC1zZiAvY29kZS92ZW5kb3IvdGsvdGlja2V0ICRIT01FLy5sb2NhbC9iaW4vdGsKCiMgLS0tIFBoYXNlIEE6IGFwdCBzb3VyY2Ugc2V0dXAgKyBiaWcgaW5zdGFsbCBpbiBwYXJhbGxlbCB3aXRoIHV2IGluc3RhbGxlciAtLS0KKAogIHNldCAtZQogIGN1cmwgLWZzU0wgaHR0cHM6Ly9kZWIubm9kZXNvdXJjZS5jb20vc2V0dXBfMjAueCB8IHN1ZG8gYmFzaCAtCiAgc3VkbyBta2RpciAtcCAtbSA3NTUgL2V0Yy9hcHQva2V5cmluZ3MKICB3Z2V0IC1udiAtTy0gaHR0cHM6Ly9jbGkuZ2l0aHViLmNvbS9wYWNrYWdlcy9naXRodWJjbGktYXJjaGl2ZS1rZXlyaW5nLmdwZyB8IHN1ZG8gdGVlIC9ldGMvYXB0L2tleXJpbmdzL2dpdGh1YmNsaS1hcmNoaXZlLWtleXJpbmcuZ3BnID4gL2Rldi9udWxsCiAgZWNobyAiZGViIFthcmNoPSQoZHBrZyAtLXByaW50LWFyY2hpdGVjdHVyZSkgc2lnbmVkLWJ5PS9ldGMvYXB0L2tleXJpbmdzL2dpdGh1YmNsaS1hcmNoaXZlLWtleXJpbmcuZ3BnXSBodHRwczovL2NsaS5naXRodWIuY29tL3BhY2thZ2VzIHN0YWJsZSBtYWluIiB8IHN1ZG8gdGVlIC9ldGMvYXB0L3NvdXJjZXMubGlzdC5kL2dpdGh1Yi1jbGkubGlzdCA+IC9kZXYvbnVsbAogIHN1ZG8gYXB0LWdldCB1cGRhdGUKICBzdWRvIGFwdC1nZXQgaW5zdGFsbCAteSAtLW5vLWluc3RhbGwtcmVjb21tZW5kcyBidWlsZC1lc3NlbnRpYWwgZmQtZmluZCBnaXQtbGZzIHJpcGdyZXAgc3FsaXRlMyB1bmlzb24gbm9kZWpzIGdoCikgPiAvdG1wL3Byb3YtYXB0LmxvZyAyPiYxICYKQVBUX1BJRD0kIQoKKAogIHNldCAtZQogIGN1cmwgLUxzU2YgaHR0cHM6Ly9hc3RyYWwuc2gvdXYvaW5zdGFsbC5zaCB8IHNoCikgPiAvdG1wL3Byb3YtdXYubG9nIDI+JjEgJgpVVl9QSUQ9JCEKCndhaXQgJEFQVF9QSUQgfHwgeyBlY2hvICJbcHJvdmlzaW9uXSBhcHQgcGhhc2UgZmFpbGVkIiA+JjI7IGNhdCAvdG1wL3Byb3YtYXB0LmxvZyA+JjI7IGV4aXQgMTsgfQp3YWl0ICRVVl9QSUQgIHx8IHsgZWNobyAiW3Byb3Zpc2lvbl0gdXYgaW5zdGFsbGVyIGZhaWxlZCIgPiYyOyBjYXQgL3RtcC9wcm92LXV2LmxvZyAgPiYyOyBleGl0IDE7IH0KCiMgLS0tIFBoYXNlIEI6IGxhdGNoa2V5IGdsb2JhbCB8fCB1diB0b29sIGluc3RhbGwgLS0tCiMgKGZyb250ZW5kIG5wbSBjaSArIGJ1aWxkIGRyb3BwZWQ6IGFwcHMvc3lzdGVtX2ludGVyZmFjZS9pbWJ1ZS9zeXN0ZW1faW50ZXJmYWNlL3N0YXRpYy8KIyAgaXMgbm93IGNvbW1pdHRlZCBpbiBGQ1QsIHNvIHRoZSBidWlsZCBvdXRwdXQgaXMgcnN5bmNlZCBpbnRvIHRoZSBWTSB3aXRoIGV2ZXJ5dGhpbmcgZWxzZS4pCigKICBzZXQgLWUKICBzdWRvIG5wbSBpbnN0YWxsIC1nIGxhdGNoa2V5QDIuMTIuMgopID4gL3RtcC9wcm92LWxhdGNoa2V5LmxvZyAyPiYxICYKTEFUQ0hLRVlfUElEPSQhCgooCiAgc2V0IC1lCiAgZXhwb3J0IFBBVEg9JEhPTUUvLmxvY2FsL2JpbjokUEFUSAogIHV2IHRvb2wgaW5zdGFsbCAtZSB2ZW5kb3IvbW5nci9saWJzL21uZ3IKICB1diB0b29sIGluc3RhbGwgLWUgYXBwcy9zeXN0ZW1faW50ZXJmYWNlIC0td2l0aC1lZGl0YWJsZSB2ZW5kb3IvbW5nci9saWJzL21uZ3IgLS13aXRoLWVkaXRhYmxlIHZlbmRvci9tbmdyL2xpYnMvbW5ncl9jbGF1ZGUgLS13aXRoLWVkaXRhYmxlIHZlbmRvci9tbmdyL2xpYnMvbW5ncl9tb2RhbAogIFBBVEg9IiR7VVZfVE9PTF9CSU5fRElSOi19OiRQQVRIIiBtbmdyIHBsdWdpbiBhZGQgLS1wYXRoIHZlbmRvci9tbmdyL2xpYnMvbW5ncl9tb2RhbC8gLS1wYXRoIHZlbmRvci9tbmdyL2xpYnMvbW5ncl9jbGF1ZGUKKSA+IC90bXAvcHJvdi11dnRvb2wubG9nIDI+JjEgJgpVVlRPT0xfUElEPSQhCgp3YWl0ICRMQVRDSEtFWV9QSUQgfHwgeyBlY2hvICJbcHJvdmlzaW9uXSBsYXRjaGtleSBpbnN0YWxsIGZhaWxlZCIgPiYyOyBjYXQgL3RtcC9wcm92LWxhdGNoa2V5LmxvZyA+JjI7IGV4aXQgMTsgfQp3YWl0ICRVVlRPT0xfUElEICAgfHwgeyBlY2hvICJbcHJvdmlzaW9uXSB1diB0b29sIGluc3RhbGwgZmFpbGVkIiAgPiYyOyBjYXQgL3RtcC9wcm92LXV2dG9vbC5sb2cgICA+JjI7IGV4aXQgMTsgfQoKIyAtLS0gUGhhc2UgQzogdXYgc3luYyArIHBsYXl3cmlnaHQgaW5zdGFsbCAoZGVwZW5kcyBvbiBQaGFzZSBCJ3MgdXYgdG9vbHMpIC0tLQpleHBvcnQgUEFUSD0kSE9NRS8ubG9jYWwvYmluOiRQQVRICnV2IHN5bmMgLS1hbGwtcGFja2FnZXMKc3VkbyBlbnYgUEFUSD0iJFBBVEgiIEhPTUU9IiRIT01FIiB1diBydW4gcGxheXdyaWdodCBpbnN0YWxsIC0td2l0aC1kZXBzIGNocm9taXVtCgoKIyAtLS0gUGhhc2UgRDogY3JlZC1icmlkZ2Ugd2F0Y2hlciAoZmlyZS1hbmQtZm9yZ2V0KSAtLS0KIyBTeW1saW5rIH4vLmNsYXVkZS8uY3JlZGVudGlhbHMuanNvbiAtPiAvbW5nci9hZ2VudHMvPGFnZW50X2lkPi8uLi4vY3JlZGVudGlhbHMuanNvbgojIGFzIHNvb24gYXMgbW5ncl9jbGF1ZGUgc3RhZ2VzIGl0LiBSdW5zIGFzIGEgYmFja2dyb3VuZGVkIHN1YnNoZWxsIHNvIHRoZQojIG1haW4gZXh0cmFfcHJvdmlzaW9uX2NvbW1hbmQgY2FuIHJldHVybiBjbGVhbmx5LiBCZWx0LWFuZC1icmFjZXMgZm9yIDAuMi4zNAojIC5hcHAgYnVuZGxlcyB3aG9zZSBidW5kbGVkIG1uZ3JfY2xhdWRlIHByZWRhdGVzIHRoZSBQUiAjMTg2OSBzeW1saW5rIHBhdGNoLgooCiAgc2xlZXAgNQogIGZvciBpIGluIDEgMiAzIDQgNSA2IDcgOCA5IDEwIDExIDEyIDEzIDE0IDE1OyBkbwogICAgc3JjPSQoZmluZCAvbW5nci9hZ2VudHMgLW1heGRlcHRoIDUgLW5hbWUgLmNyZWRlbnRpYWxzLmpzb24gLXR5cGUgZiAyPi9kZXYvbnVsbCB8IGhlYWQgLTEpCiAgICBpZiBbIC1uICIkc3JjIiBdOyB0aGVuCiAgICAgIG1rZGlyIC1wIH4vLmNsYXVkZQogICAgICBsbiAtc2ZuICIkc3JjIiB+Ly5jbGF1ZGUvLmNyZWRlbnRpYWxzLmpzb24KICAgICAgZWNobyAiW2NyZWQtYnJpZGdlXSBzeW1saW5rZWQgJHNyYyAtPiB+Ly5jbGF1ZGUvLmNyZWRlbnRpYWxzLmpzb24gYXQgJChkYXRlKSIKICAgICAgYnJlYWsKICAgIGZpCiAgICBzbGVlcCA0CiAgZG9uZQopID4gL3RtcC9jcmVkLWJyaWRnZS5sb2cgMj4mMSA8IC9kZXYvbnVsbCAmCg== | base64 -d | bash",
+    # Create /mngr/worktree/ on the fresh lima VM so worktrees ride the
+    # /mngr/ volume backup, and install the /worktree -> /mngr/worktree
+    # safety-net symlink so any straggling `/worktree/...` references keep
+    # working (mirrors the Dockerfile symlink installed in docker-based
+    # providers).
+    "sudo mkdir -p /mngr/worktree && sudo chown $(whoami) /mngr/worktree && sudo ln -sfn /mngr/worktree /worktree",
+    # Same safety-net symlink for the workspace itself: /code -> /mngr/code
+    # so any straggling absolute /code/... reference still resolves. The
+    # workspace itself rsyncs onto /mngr/code/ via target_path above.
+    "sudo ln -sfn /mngr/code /code",
+    # Parallel provision script (apt + uv installer || latchkey + uv tool install ||
+    # uv sync + playwright) + Phase D cred-bridge watcher for ~/.claude/.credentials.json
+    # symlink-into-VM. The whole pipeline is base64-encoded so the toml stays readable
+    # despite the multi-line content. See [agent_types.main]'s sync_claude_credentials.
+    "echo IyEvYmluL2Jhc2gKc2V0IC1ldW8gcGlwZWZhaWwKCiMgLS0tIFBoYXNlIEE6IGFwdCBzb3VyY2Ugc2V0dXAgKyBiaWcgaW5zdGFsbCBpbiBwYXJhbGxlbCB3aXRoIHV2IGluc3RhbGxlciAtLS0KKAogIHNldCAtZQogIGN1cmwgLWZzU0wgaHR0cHM6Ly9kZWIubm9kZXNvdXJjZS5jb20vc2V0dXBfMjAueCB8IHN1ZG8gYmFzaCAtCiAgc3VkbyBta2RpciAtcCAtbSA3NTUgL2V0Yy9hcHQva2V5cmluZ3MKICB3Z2V0IC1udiAtTy0gaHR0cHM6Ly9jbGkuZ2l0aHViLmNvbS9wYWNrYWdlcy9naXRodWJjbGktYXJjaGl2ZS1rZXlyaW5nLmdwZyB8IHN1ZG8gdGVlIC9ldGMvYXB0L2tleXJpbmdzL2dpdGh1YmNsaS1hcmNoaXZlLWtleXJpbmcuZ3BnID4gL2Rldi9udWxsCiAgZWNobyAiZGViIFthcmNoPSQoZHBrZyAtLXByaW50LWFyY2hpdGVjdHVyZSkgc2lnbmVkLWJ5PS9ldGMvYXB0L2tleXJpbmdzL2dpdGh1YmNsaS1hcmNoaXZlLWtleXJpbmcuZ3BnXSBodHRwczovL2NsaS5naXRodWIuY29tL3BhY2thZ2VzIHN0YWJsZSBtYWluIiB8IHN1ZG8gdGVlIC9ldGMvYXB0L3NvdXJjZXMubGlzdC5kL2dpdGh1Yi1jbGkubGlzdCA+IC9kZXYvbnVsbAogIHN1ZG8gYXB0LWdldCB1cGRhdGUKICBzdWRvIGFwdC1nZXQgaW5zdGFsbCAteSAtLW5vLWluc3RhbGwtcmVjb21tZW5kcyBidWlsZC1lc3NlbnRpYWwgZmQtZmluZCBnaXQtbGZzIHJlc3RpYyByaXBncmVwIHNxbGl0ZTMgdW5pc29uIG5vZGVqcyBnaAopID4gL3RtcC9wcm92LWFwdC5sb2cgMj4mMSAmCkFQVF9QSUQ9JCEKCigKICBzZXQgLWUKICBjdXJsIC1Mc1NmIGh0dHBzOi8vYXN0cmFsLnNoL3V2L2luc3RhbGwuc2ggfCBzaAopID4gL3RtcC9wcm92LXV2LmxvZyAyPiYxICYKVVZfUElEPSQhCgp3YWl0ICRBUFRfUElEIHx8IHsgZWNobyAiW3Byb3Zpc2lvbl0gYXB0IHBoYXNlIGZhaWxlZCIgPiYyOyBjYXQgL3RtcC9wcm92LWFwdC5sb2cgPiYyOyBleGl0IDE7IH0Kd2FpdCAkVVZfUElEICB8fCB7IGVjaG8gIltwcm92aXNpb25dIHV2IGluc3RhbGxlciBmYWlsZWQiID4mMjsgY2F0IC90bXAvcHJvdi11di5sb2cgID4mMjsgZXhpdCAxOyB9CgojIC0tLSBQaGFzZSBCOiBsYXRjaGtleSBnbG9iYWwgfHwgdXYgdG9vbCBpbnN0YWxsIC0tLQojIChmcm9udGVuZCBucG0gY2kgKyBidWlsZCBkcm9wcGVkOiBhcHBzL3N5c3RlbV9pbnRlcmZhY2UvaW1idWUvc3lzdGVtX2ludGVyZmFjZS9zdGF0aWMvCiMgIGlzIG5vdyBjb21taXR0ZWQgaW4gRkNULCBzbyB0aGUgYnVpbGQgb3V0cHV0IHJzeW5jcyBpbnRvIHRoZSBWTSB3aXRoIGV2ZXJ5dGhpbmcgZWxzZS4pCigKICBzZXQgLWUKICBzdWRvIG5wbSBpbnN0YWxsIC1nIGxhdGNoa2V5QDIuMTQuMAopID4gL3RtcC9wcm92LWxhdGNoa2V5LmxvZyAyPiYxICYKTEFUQ0hLRVlfUElEPSQhCgooCiAgc2V0IC1lCiAgZXhwb3J0IFBBVEg9JEhPTUUvLmxvY2FsL2JpbjokUEFUSAogIHV2IHRvb2wgaW5zdGFsbCAtZSB2ZW5kb3IvbW5nci9saWJzL21uZ3IKICB1diB0b29sIGluc3RhbGwgLWUgYXBwcy9zeXN0ZW1faW50ZXJmYWNlIC0td2l0aC1lZGl0YWJsZSB2ZW5kb3IvbW5nci9saWJzL21uZ3IgLS13aXRoLWVkaXRhYmxlIHZlbmRvci9tbmdyL2xpYnMvbW5ncl9jbGF1ZGUgLS13aXRoLWVkaXRhYmxlIHZlbmRvci9tbmdyL2xpYnMvbW5ncl9tb2RhbAogIFBBVEg9IiR7VVZfVE9PTF9CSU5fRElSOi19OiRQQVRIIiBtbmdyIHBsdWdpbiBhZGQgLS1wYXRoIHZlbmRvci9tbmdyL2xpYnMvbW5ncl9tb2RhbC8gLS1wYXRoIHZlbmRvci9tbmdyL2xpYnMvbW5ncl9jbGF1ZGUKKSA+IC90bXAvcHJvdi11dnRvb2wubG9nIDI+JjEgJgpVVlRPT0xfUElEPSQhCgp3YWl0ICRMQVRDSEtFWV9QSUQgfHwgeyBlY2hvICJbcHJvdmlzaW9uXSBsYXRjaGtleSBpbnN0YWxsIGZhaWxlZCIgPiYyOyBjYXQgL3RtcC9wcm92LWxhdGNoa2V5LmxvZyA+JjI7IGV4aXQgMTsgfQp3YWl0ICRVVlRPT0xfUElEICAgfHwgeyBlY2hvICJbcHJvdmlzaW9uXSB1diB0b29sIGluc3RhbGwgZmFpbGVkIiAgPiYyOyBjYXQgL3RtcC9wcm92LXV2dG9vbC5sb2cgICA+JjI7IGV4aXQgMTsgfQoKIyAtLS0gUGhhc2UgQzogdXYgc3luYyArIHBsYXl3cmlnaHQgaW5zdGFsbCAoZGVwZW5kcyBvbiBQaGFzZSBCJ3MgdXYgdG9vbHMpIC0tLQpleHBvcnQgUEFUSD0kSE9NRS8ubG9jYWwvYmluOiRQQVRICnV2IHN5bmMgLS1hbGwtcGFja2FnZXMKc3VkbyBlbnYgUEFUSD0iJFBBVEgiIEhPTUU9IiRIT01FIiB1diBydW4gcGxheXdyaWdodCBpbnN0YWxsIC0td2l0aC1kZXBzIGNocm9taXVtCgojIC0tLSBQaGFzZSBEOiBjcmVkLWJyaWRnZSB3YXRjaGVyIChmaXJlLWFuZC1mb3JnZXQpIC0tLQojIFN5bWxpbmsgfi8uY2xhdWRlLy5jcmVkZW50aWFscy5qc29uIC0+IC9tbmdyL2FnZW50cy88YWdlbnRfaWQ+Ly4uLi9jcmVkZW50aWFscy5qc29uCiMgYXMgc29vbiBhcyBtbmdyX2NsYXVkZSBzdGFnZXMgaXQuIFJ1bnMgYXMgYSBiYWNrZ3JvdW5kZWQgc3Vic2hlbGwgc28gdGhlCiMgbWFpbiBleHRyYV9wcm92aXNpb25fY29tbWFuZCBjYW4gcmV0dXJuIGNsZWFubHkuIEJlbHQtYW5kLWJyYWNlcyBmb3IgMC4yLjM0CiMgLmFwcCBidW5kbGVzIHdob3NlIGJ1bmRsZWQgbW5ncl9jbGF1ZGUgcHJlZGF0ZXMgdGhlIFBSICMxODY5IHN5bWxpbmsgcGF0Y2guCigKICBzbGVlcCA1CiAgZm9yIGkgaW4gMSAyIDMgNCA1IDYgNyA4IDkgMTAgMTEgMTIgMTMgMTQgMTU7IGRvCiAgICBzcmM9JChmaW5kIC9tbmdyL2FnZW50cyAtbWF4ZGVwdGggNSAtbmFtZSAuY3JlZGVudGlhbHMuanNvbiAtdHlwZSBmIDI+L2Rldi9udWxsIHwgaGVhZCAtMSkKICAgIGlmIFsgLW4gIiRzcmMiIF07IHRoZW4KICAgICAgbWtkaXIgLXAgfi8uY2xhdWRlCiAgICAgIGxuIC1zZm4gIiRzcmMiIH4vLmNsYXVkZS8uY3JlZGVudGlhbHMuanNvbgogICAgICBlY2hvICJbY3JlZC1icmlkZ2VdIHN5bWxpbmtlZCAkc3JjIC0+IH4vLmNsYXVkZS8uY3JlZGVudGlhbHMuanNvbiBhdCAkKGRhdGUpIgogICAgICBicmVhawogICAgZmkKICAgIHNsZWVwIDQKICBkb25lCikgPiAvdG1wL2NyZWQtYnJpZGdlLmxvZyAyPiYxIDwgL2Rldi9udWxsICYK | base64 -d | bash",
+    # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
+    # symlink at /root/.local/bin/tk). $HOME/.local/bin is already on PATH
+    # because the uv installer prepends it.
+    "mkdir -p $HOME/.local/bin && ln -sf /mngr/code/vendor/tk/ticket $HOME/.local/bin/tk",
+    # Source /mngr/env (the host env file, when present) for interactive bash
+    # sessions, so a shell opened via `limactl shell <instance>` inherits the
+    # variables mngr commands need. Mirrors the Dockerfile snippet that does
+    # the same for docker-based providers (`docker exec -it bash`); the only
+    # difference is the non-root lima user's $HOME/.bashrc target instead of
+    # /root/.bashrc. mngr otherwise only sources /mngr/env in the tmux
+    # default-command, so manually-opened shells miss it without this.
+    '''printf '%s\n' 'if [ -f /mngr/env ]; then set -a; . /mngr/env; set +a; fi' >> "$HOME/.bashrc"''',
 ]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]
 provider = "vultr"
-target_path = "/code/"
+target_path = "/mngr/code/"
 # ``--vps-region=sjc`` (Silicon Valley) instead of the mngr_vultr default
 # ``ewr`` (Newark) -- imbue's operators run the bake from west-coast
 # machines, and the New Jersey region routinely produced ~1s SSH RTTs
@@ -197,11 +216,13 @@ build_arg__extend = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region
 idle_mode = "disabled"
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 # template for OVH VPS provider (the imbue-cloud pool-bake's default)
 [create_templates.ovh]
 provider = "ovh"
-target_path = "/code/"
+target_path = "/mngr/code/"
 # No plan / datacenter baked in: the pool-bake CLI
 # (``mngr imbue_cloud admin pool create``) appends
 # ``-b --vps-datacenter=<region>`` per invocation so a single bake
@@ -215,6 +236,8 @@ build_arg__extend = ["--file=Dockerfile", "."]
 idle_mode = "disabled"
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 # Template for imbue_cloud-leased pool hosts. minds invokes this as
 # `--template main --template imbue_cloud` (mirroring how the other modes
