@@ -4,13 +4,15 @@ interface IframePanelAttrs {
   url: string;
   title: string;
   serviceName?: string;
+  panelId?: string;
 }
 
 export const IFRAME_PANEL_SERVICE_NAME_ATTR = "data-service-name";
+export const IFRAME_PANEL_PANEL_ID_ATTR = "data-panel-id";
 
 export const IframePanel: m.Component<IframePanelAttrs> = {
   view(vnode) {
-    const { url, title, serviceName } = vnode.attrs;
+    const { url, title, serviceName, panelId } = vnode.attrs;
     const attrs: Record<string, string> = {
       src: url,
       title,
@@ -19,6 +21,9 @@ export const IframePanel: m.Component<IframePanelAttrs> = {
     };
     if (serviceName) {
       attrs[IFRAME_PANEL_SERVICE_NAME_ATTR] = serviceName;
+    }
+    if (panelId) {
+      attrs[IFRAME_PANEL_PANEL_ID_ATTR] = panelId;
     }
     return m("iframe", attrs);
   },
