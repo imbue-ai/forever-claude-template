@@ -52,6 +52,13 @@ selection, logging, and spend control.
   inherited `MAIN_CLAUDE_SESSION_ID` makes a child `claude -p` look like the managed main session.
 - `launch-task` is extended (not forked) with a synchronous create -> wait -> collect -> destroy
   path and clearer, gate-agnostic `await` docs, since this PR adds a new gate-less usage.
+- The skill steers agents to **measure cost on a small sample before building a high-volume flow**,
+  and to **surface the cost/approach tradeoff to the user** with real numbers — prose guidance, not a
+  template. Grounded in the observed `claude -p` cost profile: each invocation reloads the full
+  Claude Code agent (~127k tokens of cached context), so cost is dominated by *per-call* overhead.
+  Two consequences the guidance names explicitly: (a) batch rather than parallelize (fewer, larger
+  calls amortize the overhead), and (b) when no agency is needed, the direct Anthropic API skips that
+  overhead and is roughly an order of magnitude cheaper.
 
 ## Expected behavior
 
@@ -74,13 +81,20 @@ selection, logging, and spend control.
   is unset), fixing the mngr bug.
 - A service awaiting a launched agent reads `await` as a plain poll-until-report primitive — no gate
   semantics implied.
+- Before committing to a high-volume processing flow, the agent runs a small metered sample
+  (measuring per-item cost and latency), recognizes when `claude -p` per-call overhead dominates, and
+  presents the user a concrete choice (e.g. "stay on `claude -p`, batched, ~$X" vs "switch to the
+  direct API, ~$Y, needs a key") rather than silently scaling up the expensive path.
 
 ## Changes
 
 - **New skill `.agents/skills/use-ai-integration/`** (symlinked into `.claude/skills/`): SKILL.md
   (decision tree, three-pattern playbook, billing/credentialing model with the post-Jun-15 two-pool
-  table, the `MAIN_CLAUDE_SESSION_ID` rationale, tight-scoping guidance for launched agents) +
-  `references/` for the billing/credentialing reference and worked per-pattern sketches.
+  table, the `MAIN_CLAUDE_SESSION_ID` rationale, tight-scoping guidance for launched agents, and the
+  **measure-cost-on-a-sample-then-surface-the-tradeoff** practice — including the `claude -p` per-call
+  overhead profile, "batch over parallelize," and "direct API is ~10x cheaper when no agency is
+  needed") + `references/` for the billing/credentialing reference (carrying the empirical cost
+  numbers) and worked per-pattern sketches.
 - **New lib `libs/ai_integration/`** (uv workspace member, registered in root `pyproject.toml`):
   the three async `run_*` functions plus shared internals — credential resolution (+ loud failure),
   `claude -p` child-env construction (unset `MAIN_CLAUDE_SESSION_ID`; optional `MNGR_*` strip),
