@@ -120,22 +120,25 @@ On `type: status`:
 In every status case, consume the report (move to `<REPORTS_DIR>/consumed/`) so
 the directory is clean for future runs.
 
-## `mngr push` rationale
+## `mngr rsync` rationale
 
-When pushing reports (or the initial runtime dir to the worker):
+When syncing reports (or the initial runtime dir to the worker):
 
 ```bash
-mngr push <WORKER>:<DEST_DIR> \
-    --source <SOURCE_DIR> \
+mngr rsync <SOURCE_DIR>/ <WORKER>:<DEST_DIR>/ \
     --uncommitted-changes=merge
 ```
 
-- Use the directory form (trailing slash on both sides). Pushing a single file
-  via `--source .../file.txt` fails: rsync interprets the source as a directory
-  and errors with `change_dir`.
+- `mngr rsync` takes `SOURCE DESTINATION` (positional): the local source dir
+  first, then the `<WORKER>:<PATH>` agent endpoint. Exactly one side must
+  reference an agent or remote host.
+- Use the directory form (trailing slash on both sides). mngr passes the paths
+  through to rsync verbatim, so the trailing slash is load-bearing: it makes
+  rsync copy directory *contents* into the destination instead of nesting the
+  dir under it. Syncing a single file fails -- rsync wants a directory.
 - `--uncommitted-changes=merge` is required. The worker's worktree has
   uncommitted changes immediately after creation (the installed worker
   sub-skills under `.agents/skills/`), so the default `fail` mode would refuse
-  the push.
-- There is no `mngr file put` subcommand -- `mngr push` is the correct
+  the sync.
+- There is no `mngr file put` subcommand -- `mngr rsync` is the correct
   mechanism.

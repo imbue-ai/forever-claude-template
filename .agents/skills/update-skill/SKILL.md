@@ -75,14 +75,14 @@ correctly; the marker is required.
 - **verify:** follow `references/lead-verify.md`.
 
 Each reference walks you through capturing the artifact, writing the task
-file, running `mngr create`, and running any needed `mngr push`. Return
+file, running `mngr create`, and running any needed `mngr rsync`. Return
 here afterwards.
 
 ## Step 3: Proxy gates, then merge
 
 Follow `.agents/shared/references/lead-proxy.md` for polling, gate
 decisions, the "do not interrupt more recent user work" rule, and `mngr
-push` rationale.
+rsync` rationale.
 
 Flow-specific substitutions:
 
