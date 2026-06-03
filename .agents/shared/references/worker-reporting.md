@@ -38,27 +38,28 @@ At each gate or terminal status:
    <body: the message the user needs to see, addressing the user directly>
    ```
 
-2. Push the report directory to the lead:
+2. Sync the report directory to the lead:
 
    ```bash
-   mngr push "$LEAD_AGENT:$(dirname "$FINISH_REPORT_PATH")/" \
-       --source <RUNTIME_REPORTS_DIR>/ \
+   mngr rsync <RUNTIME_REPORTS_DIR>/ \
+       "$LEAD_AGENT:$(dirname "$FINISH_REPORT_PATH")/" \
        --uncommitted-changes=merge
    ```
 
-   `LEAD_AGENT` / `FINISH_REPORT_PATH` come from the `eval` above;
-   `<RUNTIME_REPORTS_DIR>` is your worker SKILL.md's local reports dir. You push
-   the report's *parent directory* (`dirname`) rather than the file itself: the
-   trailing slashes matter (rsync directory semantics) and rsync cannot push a
-   single file. `--uncommitted-changes=merge` is required because the lead's
-   worktree usually has uncommitted local state.
+   `mngr rsync` takes `SOURCE DESTINATION`: your local `<RUNTIME_REPORTS_DIR>/`
+   first, then the lead endpoint. `LEAD_AGENT` / `FINISH_REPORT_PATH` come from
+   the `eval` above; `<RUNTIME_REPORTS_DIR>` is your worker SKILL.md's local
+   reports dir. You sync the report's *parent directory* (`dirname`) rather than
+   the file itself: the trailing slashes matter (rsync directory semantics) and
+   rsync cannot transfer a single file. `--uncommitted-changes=merge` is
+   required because the lead's worktree usually has uncommitted local state.
 
 3. Stop your turn. For gate reports, the lead sends the user's reply via
    `mngr message` and you resume; for terminal reports, the lead acts on the
    report and the run ends.
 
-The push is the ready signal -- it only happens once you are finished writing.
-Do not push a partial report.
+The sync is the ready signal -- it only happens once you are finished writing.
+Do not sync a partial report.
 
 ## Terminal status report bodies
 
