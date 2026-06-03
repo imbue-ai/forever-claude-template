@@ -4,6 +4,112 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-01
+
+# Offline agent field generators
+
+Updated the provider's `get_host_and_agent_details` override (and its lease-only `_build_offline_details_from_lease` fallback) to accept and forward the new `offline_field_generators` parameter, so offline plugin fields (see the mngr changelog entry) are populated for leased hosts that fall back to offline/lease-only data.
+
+## 2026-05-29
+
+# Fix OAuth CLI hang after successful browser sign-in
+
+- Fixed a bug in `mngr imbue_cloud auth oauth` where the local callback listener would hang until the 300s timeout after the browser had already returned the OAuth code. The handler now only records query params when the request is for `/oauth/callback` and carries non-empty params, so secondary browser GETs (favicon, prefetches, etc.) can no longer overwrite the captured callback with `{}`.
+
+Added R2 bucket support: a new `mngr imbue_cloud bucket` command group for
+creating, listing, inspecting, and destroying R2 buckets (one per host, paid
+accounts only), plus `bucket keys create/list/destroy` for minting and revoking
+scoped S3 keys (read-only or read-write) to hand to different agents.
+
+`bucket create` returns S3-compatible credentials (access key id, secret access
+key, endpoint, bucket name) as JSON; the secret is shown only once and is never
+stored by the service. `bucket destroy` refuses a non-empty bucket and, on
+success, revokes all of that bucket's keys.
+
+`mngr destroy <agent>` against an imbue_cloud-leased pool host is now
+*terminal* rather than a soft `docker stop`. The new flow on the leased
+VPS:
+
+1. Stops + removes the workspace container, drops the per-host docker named
+   volume, deletes the per-host btrfs subvolume under `/mngr-btrfs/`, runs
+   `docker system prune -a -f --volumes`, and wipes `/root` + `/tmp`
+   (preserving only `/root/.ssh/authorized_keys` so the pool-management ssh
+   path still works through `cleanup_released_hosts.py`).
+2. Releases the lease back to the pool (the `/hosts/{id}/release` connector
+   call -- same as `mngr imbue_cloud hosts release`).
+3. Cleans up local per-host state (ssh keys, known_hosts, cached records).
+
+Privacy-first ordering: the agent's data is gone before the connector flips
+the row to `released`, so the eventual VPS-destroy by
+`cleanup_released_hosts.py` is belt-and-suspenders rather than the only
+barrier.
+
+To stop the container without releasing the lease (i.e. you intend to
+resume the workspace later on the same VPS), use `mngr stop <agent>`
+instead.
+
+`mngr delete <agent>` (the GC path) now also runs this same flow; it's a
+safe no-op for an already-released lease and acts as a recovery path if a
+prior `destroy` crashed mid-wipe.
+
+The wipe script (`build_pool_host_wipe_script`) is exposed as a pure free
+function in `mngr_imbue_cloud.instance` so the rendered shell can be unit
+tested without standing up an SSH transport.
+
+The minds app now consumes the `mngr imbue_cloud bucket` capability: when a
+workspace is created with the `imbue_cloud` backup provider, minds calls
+`mngr imbue_cloud bucket create` / `bucket keys create` to provision a
+per-workspace R2 bucket (named after the host id) and a scoped readwrite key,
+then points the workspace's restic backups at it.
+
+(This integration PR adds no code in this project; it wires the existing
+bucket commands into the minds workspace-creation flow. The bucket commands
+themselves are covered by the `mngr-cloud-bucket` changelog entry.)
+
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Ratchet count tightening
+
+- Tightened the violation counts recorded in `test_ratchets.py` to their current exact values (via `uv run pytest --inline-snapshot=trim`), locking in previously-unrecorded reductions. No source-code or behavior change.
+
+## 2026-05-26
+
+# Delete the dead imbue_cloud inject helpers
+
+`build_combined_inject_command` and `normalize_inject_args` (and the
+`_sed_replace_env_line` / `_ensure_no_quote_chars` helpers that only
+they called) were added to support a "claim CLI" pattern that never
+landed. Trimming the `minds_api_key` argument earlier in this branch
+left them with no caller anywhere in the monorepo except their own
+test file; the central `MINDS_API_KEY` is now injected by the
+latchkey gateway's `minds-api-proxy` extension on the fly, not
+pushed down onto a leased pool host.
+
+This change deletes those four functions and the entire `host_test.py`
+file. The live `provision_agent` path on `ImbueCloudHost` still uses
+`_build_patch_claude_config_command`, which stays.
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
 ## 2026-05-22
 
 ## No more silent auto-disable on auth errors

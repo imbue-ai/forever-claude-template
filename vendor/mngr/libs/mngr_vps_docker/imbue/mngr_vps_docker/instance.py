@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
+from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -84,6 +85,7 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -235,10 +237,37 @@ HOST_DIR_SUBPATH: Final[str] = "host_dir"
 # until SIGTERM arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
 CONTAINER_ENTRYPOINT_CMD: Final[str] = "trap 'exit 0' TERM; tail -f /dev/null & wait"
 
+# In-container path the host_backup service writes / reads snapshot
+# request and result JSON to. Backed by the per-host docker volume
+# ``mngr-snapshot-trigger-<host_id_hex>`` which is also bind-mounted on the
+# outer at ``/var/lib/mngr-snapshot/`` so the outer-side snapshot helper
+# can watch it.
+SNAPSHOT_TRIGGER_MOUNT_PATH: Final[str] = "/mngr-snapshot"
+
+# In-container path that exposes the outer's <btrfs-mount>/snapshots/
+# directory read-only. host_backup reads ``<this>/current`` after the
+# outer helper produces a snapshot there.
+SNAPSHOT_READ_MOUNT_PATH: Final[str] = "/mngr-snapshots"
+
+# Outer-host paths for the snapshot-helper protocol files. Must match
+# what ``resources/snapshot_helper.sh`` watches.
+OUTER_SNAPSHOT_TRIGGER_DIR: Final[Path] = Path("/var/lib/mngr-snapshot")
+
+# Outer-host install paths for the helper script + systemd unit + env file.
+OUTER_HELPER_SCRIPT_PATH: Final[Path] = Path("/usr/local/sbin/snapshot_helper.sh")
+OUTER_HELPER_SERVICE_PATH: Final[Path] = Path("/etc/systemd/system/snapshot_helper.service")
+OUTER_HELPER_ENV_PATH: Final[Path] = Path("/etc/mngr-snapshot-helper.env")
+OUTER_HELPER_SERVICE_NAME: Final[str] = "snapshot_helper.service"
+
 
 def _host_volume_name_for(host_id: HostId) -> str:
     """Return the unified Docker volume name for a host."""
     return f"mngr-host-vol-{host_id.get_uuid().hex}"
+
+
+def _snapshot_trigger_volume_name_for(host_id: HostId) -> str:
+    """Return the per-host snapshot-trigger Docker volume name."""
+    return f"mngr-snapshot-trigger-{host_id.get_uuid().hex}"
 
 
 def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
@@ -508,6 +537,141 @@ def _remove_container(outer: OuterHostInterface, container_name: str, force: boo
 def _remove_volume(outer: OuterHostInterface, volume_name: str) -> None:
     """Remove a Docker named volume (force)."""
     _run_docker(outer, ["volume", "rm", "-f", volume_name])
+
+
+def _load_resource_text(resource_name: str) -> str:
+    """Read a bundled package resource as text (e.g. snapshot_helper.sh)."""
+    return importlib_resources.files("imbue.mngr_vps_docker.resources").joinpath(resource_name).read_text()
+
+
+def _provision_snapshot_helper_on_outer(
+    outer: OuterHostInterface,
+    cg: ConcurrencyGroup,
+    *,
+    host_id: HostId,
+    btrfs_mount_path: Path,
+    subvolume_path: Path,
+    trigger_volume_name: str,
+) -> None:
+    """Install the snapshot helper systemd unit + the trigger docker volume on the outer.
+
+    Two-phase pipeline (parallelized within each phase via ``cg`` so
+    independent SSH operations don't serialize, since each one round-trips
+    over the WAN):
+
+    1. Phase A -- 5 parallel ops: write the 3 helper files + ``mkdir -p``
+       the trigger dir + ``mkdir -p`` the snapshots dir.
+    2. Phase B -- 2 parallel ops: ``systemctl daemon-reload && systemctl
+       enable --now snapshot_helper.service`` (chained into one SSH RTT)
+       and ``docker volume create`` for the trigger volume (lazy bind, so
+       safe to run in parallel with the systemctl step now that the trigger
+       dir exists).
+
+    Idempotent: rewriting the script / unit / env file is harmless; the
+    ``systemctl enable --now`` re-runs are no-ops when the unit is already
+    enabled and active; the ``docker volume create`` is no-op-with-warning
+    when the volume already exists.
+
+    Assumes ``inotify-tools`` and ``jq`` are already installed (cloud-init
+    installs them; OVH installs them via ``_REQUIRED_OUTER_PACKAGES``).
+    """
+    helper_script = _load_resource_text("snapshot_helper.sh")
+    helper_service = _load_resource_text("snapshot_helper.service")
+    helper_env = (
+        f"MNGR_BTRFS_MOUNT_PATH={btrfs_mount_path}\n"
+        f"MNGR_HOST_SUBVOLUME={subvolume_path}\n"
+        f"MNGR_TRIGGER_DIR={OUTER_SNAPSHOT_TRIGGER_DIR}\n"
+    )
+    snapshots_dir = btrfs_mount_path / "snapshots"
+
+    with log_span("Provisioning snapshot helper on outer (host_id={})", host_id):
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg,
+            name="snapshot_helper_phase_a",
+            max_workers=5,
+        ) as phase_a:
+            phase_a_futures = [
+                phase_a.submit(
+                    _write_outer_file,
+                    outer,
+                    path=OUTER_HELPER_SCRIPT_PATH,
+                    content=helper_script,
+                    mode="0755",
+                ),
+                phase_a.submit(
+                    _write_outer_file,
+                    outer,
+                    path=OUTER_HELPER_SERVICE_PATH,
+                    content=helper_service,
+                    mode="0644",
+                ),
+                phase_a.submit(
+                    _write_outer_file,
+                    outer,
+                    path=OUTER_HELPER_ENV_PATH,
+                    content=helper_env,
+                    mode="0644",
+                ),
+                phase_a.submit(_ensure_outer_dir, outer, OUTER_SNAPSHOT_TRIGGER_DIR),
+                phase_a.submit(_ensure_outer_dir, outer, snapshots_dir),
+            ]
+        for future in phase_a_futures:
+            future.result()
+
+        with ConcurrencyGroupExecutor(
+            parent_cg=cg,
+            name="snapshot_helper_phase_b",
+            max_workers=2,
+        ) as phase_b:
+            phase_b_futures = [
+                phase_b.submit(_enable_snapshot_helper_unit, outer),
+                phase_b.submit(
+                    _create_bind_volume_on_outer,
+                    outer,
+                    volume_name=trigger_volume_name,
+                    device_path=OUTER_SNAPSHOT_TRIGGER_DIR,
+                ),
+            ]
+        for future in phase_b_futures:
+            future.result()
+
+
+def _enable_snapshot_helper_unit(outer: OuterHostInterface) -> None:
+    """`systemctl daemon-reload && systemctl enable --now snapshot_helper.service`.
+
+    Chained into a single SSH round-trip so this step costs one RTT
+    instead of two. The combined command is idempotent: daemon-reload
+    re-reads unit files (no effect if nothing changed) and ``enable --now``
+    is a no-op when the unit is already enabled + active.
+    """
+    result = outer.execute_idempotent_command(
+        f"systemctl daemon-reload && systemctl enable --now {OUTER_HELPER_SERVICE_NAME}",
+        timeout_seconds=20.0,
+    )
+    if not result.success:
+        raise VpsProvisioningError(
+            f"systemctl daemon-reload && systemctl enable --now "
+            f"{OUTER_HELPER_SERVICE_NAME} failed: stderr={result.stderr.strip()!r}"
+        )
+
+
+def _write_outer_file(
+    outer: OuterHostInterface,
+    *,
+    path: Path,
+    content: str,
+    mode: str,
+) -> None:
+    """Atomically write `content` to `path` on the outer with the given chmod."""
+    _ensure_outer_dir(outer, path.parent)
+    outer.write_file(path, content.encode("utf-8"), mode=mode, is_atomic=True)
+
+
+def _ensure_outer_dir(outer: OuterHostInterface, path: Path) -> None:
+    """`mkdir -p` on the outer; raises VpsProvisioningError on failure."""
+    result = outer.execute_idempotent_command(f"mkdir -p {shlex.quote(str(path))}", timeout_seconds=10.0)
+    if not result.success:
+        raise VpsProvisioningError(f"Failed to create outer dir {path}: stderr={result.stderr.strip()!r}")
 
 
 def _create_bind_volume_on_outer(
@@ -1059,7 +1223,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 if existing is not None:
                     updated = existing.model_copy(update={"certified_host_data": certified_data})
                     host_store.write_host_record(updated)
-        except (HostConnectionError, MngrError) as e:
+        except MngrError as e:
             logger.warning("Failed to sync certified data to VPS host volume: {}", e)
 
     # =========================================================================
@@ -1176,11 +1340,8 @@ class VpsDockerProvider(BaseProviderInstance):
         host_id = HostId.generate()
         logger.info("Creating VPS Docker host {} ({}) ...", name, host_id)
 
-        base_image = str(image) if image else self.config.default_image
-        effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
         parsed = self._parse_build_args(build_args)
         region, plan, os_id = parsed.region, parsed.plan, parsed.os_id
-        docker_build_args = parsed.docker_build_args
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
@@ -1204,43 +1365,24 @@ class VpsDockerProvider(BaseProviderInstance):
             )
 
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                # The unified host volume is provisioned at the top of
-                # ``_setup_container_on_vps`` -- that runs before the
-                # (potentially slow and failure-prone) image pull/build so the
-                # volume still exists by the time ``_finalize_host_creation``
-                # writes ``host_state.json``.
-                container_name, container_id, volume_name = self._setup_container_on_vps(
+                host = self.create_host_on_existing_vps(
                     outer=outer,
                     host_id=host_id,
                     name=name,
                     vps_ip=vps_ip,
-                    base_image=base_image,
-                    effective_start_args=effective_start_args,
-                    docker_build_args=docker_build_args,
-                    git_depth=parsed.git_depth,
-                    tags=tags,
-                    known_hosts=known_hosts,
-                    authorized_keys=authorized_keys,
-                )
-
-                host = self._finalize_host_creation(
-                    host_id=host_id,
-                    name=name,
-                    vps_ip=vps_ip,
-                    outer=outer,
-                    container_name=container_name,
-                    container_id=container_id,
-                    volume_name=volume_name,
-                    base_image=base_image,
-                    effective_start_args=effective_start_args,
-                    tags=tags,
-                    lifecycle=lifecycle,
-                    region=region,
-                    plan=plan,
-                    os_id=os_id,
                     vps_instance_id=vps_instance_id,
                     vps_ssh_key_id=vps_ssh_key_id,
                     vps_host_public_key=vps_host_public_key,
+                    region=region,
+                    plan=plan,
+                    os_id=os_id,
+                    image=image,
+                    tags=tags,
+                    build_args=build_args,
+                    start_args=start_args,
+                    lifecycle=lifecycle,
+                    known_hosts=known_hosts,
+                    authorized_keys=authorized_keys,
                 )
 
             logger.info("VPS Docker host {} created successfully (VPS: {}, IP: {})", name, vps_instance_id, vps_ip)
@@ -1267,6 +1409,118 @@ class VpsDockerProvider(BaseProviderInstance):
                 except Exception as cleanup_err:
                     logger.warning("Failed to clean up SSH key: {}", cleanup_err)
             raise
+
+    def create_host_on_existing_vps(
+        self,
+        *,
+        outer: OuterHostInterface,
+        host_id: HostId,
+        name: HostName,
+        vps_ip: str,
+        vps_instance_id: VpsInstanceId,
+        vps_ssh_key_id: str,
+        vps_host_public_key: str,
+        region: str,
+        plan: str,
+        os_id: int | str,
+        image: ImageReference | None,
+        tags: Mapping[str, str] | None,
+        build_args: Sequence[str] | None,
+        start_args: Sequence[str] | None,
+        lifecycle: HostLifecycleOptions | None,
+        known_hosts: Sequence[str] | None,
+        authorized_keys: Sequence[str] | None,
+    ) -> Host:
+        """Build the container and finalize host state on an already-reachable VPS.
+
+        This is the single canonical "set up the host after the VPS exists"
+        code path. ``create_host`` calls it once it has ordered (or recycled)
+        a VPS and opened an outer; other providers that operate on a VPS they
+        did not order themselves (e.g. ``mngr_imbue_cloud``'s slow path, which
+        rebuilds the container on a leased pool VPS) call it directly with
+        their own ``outer``. It makes no VPS-client (ordering) calls.
+
+        The unified host volume is provisioned at the top of
+        ``_setup_container_on_vps`` -- that runs before the (potentially slow
+        and failure-prone) image pull/build so the volume still exists by the
+        time ``_finalize_host_creation`` writes ``host_state.json``.
+        """
+        base_image = str(image) if image else self.config.default_image
+        effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
+        parsed = self._parse_build_args(build_args)
+
+        container_name, container_id, volume_name = self._setup_container_on_vps(
+            outer=outer,
+            host_id=host_id,
+            name=name,
+            vps_ip=vps_ip,
+            base_image=base_image,
+            effective_start_args=effective_start_args,
+            docker_build_args=parsed.docker_build_args,
+            git_depth=parsed.git_depth,
+            tags=tags,
+            known_hosts=known_hosts,
+            authorized_keys=authorized_keys,
+        )
+
+        return self._finalize_host_creation(
+            host_id=host_id,
+            name=name,
+            vps_ip=vps_ip,
+            outer=outer,
+            container_name=container_name,
+            container_id=container_id,
+            volume_name=volume_name,
+            base_image=base_image,
+            effective_start_args=effective_start_args,
+            tags=tags,
+            lifecycle=lifecycle,
+            region=region,
+            plan=plan,
+            os_id=os_id,
+            vps_instance_id=vps_instance_id,
+            vps_ssh_key_id=vps_ssh_key_id,
+            vps_host_public_key=vps_host_public_key,
+        )
+
+    def teardown_container_on_existing_vps(self, outer: OuterHostInterface, host_id: HostId) -> None:
+        """Remove the container + per-host volumes/subvolume for ``host_id`` on a reachable VPS.
+
+        The VPS itself is left running (no VPS-client calls). Used to clear a
+        pre-existing container before rebuilding on the same VPS -- e.g. the
+        imbue_cloud slow path reclaiming a leased pool host whose baked
+        container must be torn down before ``create_host_on_existing_vps``
+        rebuilds it under the same ``host_id``. Each step is best-effort and
+        logged; a missing resource is a no-op.
+        """
+        # Remove every workspace container identified by its host-id label.
+        list_result = outer.execute_idempotent_command(
+            f"docker ps -aq --filter label={LABEL_HOST_ID}={shlex.quote(str(host_id))}"
+        )
+        if list_result.success:
+            for container_id in list_result.stdout.split():
+                try:
+                    _remove_container(outer, container_id, force=True)
+                except (HostConnectionError, MngrError) as e:
+                    logger.warning("Failed to remove container {} for host {}: {}", container_id, host_id, e)
+        else:
+            logger.warning("Failed to list containers for host {}: {}", host_id, list_result.stderr.strip())
+
+        # Delete the per-host btrfs subvolume (the bind source for the unified
+        # volume) so the rebuild can recreate it cleanly.
+        subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
+        try:
+            _delete_btrfs_subvolume_on_outer(outer, subvolume_path)
+        except (HostConnectionError, MngrError) as e:
+            logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+
+        # Remove the named docker volumes so a recreate with the same names
+        # doesn't collide.
+        for volume_name in (_host_volume_name_for(host_id), _snapshot_trigger_volume_name_for(host_id)):
+            try:
+                _remove_volume(outer, volume_name)
+            except (HostConnectionError, MngrError) as e:
+                logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
 
     def _provision_vps(
         self,
@@ -1357,11 +1611,30 @@ class VpsDockerProvider(BaseProviderInstance):
         later step in this method fails.
         """
         volume_name = _host_volume_name_for(host_id)
+        snapshot_trigger_volume_name = _snapshot_trigger_volume_name_for(host_id)
 
         with log_span("Provisioning unified host volume on btrfs subvolume"):
             subvolume_path = self._prepare_btrfs_on_outer(outer, host_id)
             _seed_host_volume_layout_on_outer(outer, subvolume_path)
             _create_bind_volume_on_outer(outer, volume_name=volume_name, device_path=subvolume_path)
+
+        # Snapshot helper: lets the in-container host_backup service request
+        # `btrfs subvolume snapshot` against the per-host subvolume via a
+        # request.json / result.json file protocol in a dedicated docker
+        # volume. Both the systemd unit on the outer and the docker volume
+        # mounted at /mngr-snapshot/ in the container need to exist before
+        # the agent boots. The helper provisioning is internally a 2-phase
+        # parallel pipeline (see _provision_snapshot_helper_on_outer) so
+        # the ~7 SSH round-trips it would otherwise serialize collapse to
+        # the latency of 2.
+        _provision_snapshot_helper_on_outer(
+            outer,
+            self.mngr_ctx.concurrency_group,
+            host_id=host_id,
+            btrfs_mount_path=self.config.btrfs_mount_path,
+            subvolume_path=subvolume_path,
+            trigger_volume_name=snapshot_trigger_volume_name,
+        )
 
         if docker_build_args:
             base_image = self._build_image_on_vps(outer, host_id, base_image, docker_build_args, git_depth)
@@ -1378,13 +1651,24 @@ class VpsDockerProvider(BaseProviderInstance):
             LABEL_TAGS: json.dumps(dict(tags) if tags else {}),
         }
         logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
+        snapshots_dir_on_outer = self.config.btrfs_mount_path / "snapshots"
         with log_span("Starting Docker container"):
             container_id = _run_container(
                 outer,
                 image=base_image,
                 name=container_name,
                 port_mappings={f"0.0.0.0:{self.config.container_ssh_port}": "22"},
-                volumes=[f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw"],
+                volumes=[
+                    f"{volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw",
+                    # Snapshot helper IPC volume (bind-shared with the outer
+                    # at OUTER_SNAPSHOT_TRIGGER_DIR via the named volume created
+                    # above; host_backup writes request.json / reads result.json).
+                    f"{snapshot_trigger_volume_name}:{SNAPSHOT_TRIGGER_MOUNT_PATH}:rw",
+                    # Read-only view of the outer's <btrfs-mount>/snapshots/
+                    # directory so restic-in-container can read the snapshot
+                    # the outer helper produced at <btrfs-mount>/snapshots/current.
+                    f"{snapshots_dir_on_outer}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
+                ],
                 labels=labels,
                 extra_args=list(effective_start_args),
                 entrypoint_cmd=CONTAINER_ENTRYPOINT_CMD,
@@ -1569,7 +1853,8 @@ class VpsDockerProvider(BaseProviderInstance):
                 if git_depth is not None:
                     clone_cmd.extend(["--depth", str(git_depth)])
                 # Use file:// so --depth is honored for local repos
-                clone_cmd.extend([f"file://{local_context}", str(local_clone_dir / "repo")])
+                clone_target = local_clone_dir / "repo"
+                clone_cmd.extend([f"file://{local_context}", str(clone_target)])
                 cg = ConcurrencyGroup(name="git-clone-build-context")
                 with cg:
                     clone_result = cg.run_process_to_completion(
@@ -1577,9 +1862,25 @@ class VpsDockerProvider(BaseProviderInstance):
                         is_checked_after=False,
                         timeout=120.0,
                     )
-                if clone_result.returncode != 0:
-                    raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
-                context_args[-1] = str(local_clone_dir / "repo")
+                    if clone_result.returncode != 0:
+                        raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
+                    # Overlay the worktree's working tree on top of the
+                    # fresh clone so uncommitted edits (e.g. a locally-
+                    # rsynced ``vendor/mngr/`` from
+                    # ``mngr imbue_cloud admin pool create --mngr-source``,
+                    # or any in-flight FCT edits the operator hasn't
+                    # committed yet) actually reach the docker build.
+                    # ``git clone`` alone only carries committed files,
+                    # which silently rolls the build context back to
+                    # HEAD and produces "Unknown field" / "wrong code"
+                    # surprises at image-build time. Mirrors the
+                    # corresponding overlay step in minds' agent_creator
+                    # (Apr 12 fix, commit a3dc008b4); the shared helper
+                    # in ``imbue.mngr.utils.git_utils`` keeps the two
+                    # call sites in lockstep.
+                    if is_worktree:
+                        rsync_worktree_over_clone(local_context, clone_target, cg=cg)
+                context_args[-1] = str(clone_target)
 
         try:
             logger.log(
@@ -1755,7 +2056,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 # will fail otherwise because the container still holds it open.
                 try:
                     _remove_container(outer, vps_config.container_name, force=True)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to remove container: {}", e)
 
                 # Delete the per-host btrfs subvolume before the named volume.
@@ -1766,7 +2067,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
                 try:
                     _delete_btrfs_subvolume_on_outer(outer, subvolume_path)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
 
                 # Remove the unified host volume. With bind options the volume
@@ -1775,8 +2076,16 @@ class VpsDockerProvider(BaseProviderInstance):
                 # volume name doesn't collide.
                 try:
                     _remove_volume(outer, vps_config.volume_name)
-                except (HostConnectionError, MngrError) as e:
+                except MngrError as e:
                     logger.warning("Failed to remove host volume: {}", e)
+
+                # Remove the per-host snapshot-trigger volume (the named entry;
+                # the bind source at OUTER_SNAPSHOT_TRIGGER_DIR is shared across
+                # all containers on this outer and is left alone).
+                try:
+                    _remove_volume(outer, _snapshot_trigger_volume_name_for(host_id))
+                except MngrError as e:
+                    logger.warning("Failed to remove snapshot trigger volume: {}", e)
 
         # Destroy the VPS instance
         with log_span("Destroying VPS instance"):
@@ -1944,7 +2253,7 @@ class VpsDockerProvider(BaseProviderInstance):
                             self._container_running_cache[container_name] = _docker_inspect_running(
                                 outer, container_name
                             )
-                    except (HostConnectionError, MngrError) as exc:
+                    except MngrError as exc:
                         logger.warning(
                             "Failed to inspect container status for host {} on VPS {}: {}",
                             host_id,
@@ -2044,7 +2353,7 @@ class VpsDockerProvider(BaseProviderInstance):
                     return [], {}
                 agent_data = host_store.list_persisted_agent_data()
                 return [record], {host_id: agent_data}
-        except (HostConnectionError, MngrError) as e:
+        except MngrError as e:
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
                 logger.warning(
@@ -2131,6 +2440,8 @@ class VpsDockerProvider(BaseProviderInstance):
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
@@ -2141,13 +2452,25 @@ class VpsDockerProvider(BaseProviderInstance):
 
         # For offline hosts or hosts without a record, fall back to default
         if host_record is None or host_record.vps_ip is None or host_record.config is None:
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
 
         try:
             host = self.get_host(host_ref.host_id)
 
             if not isinstance(host, Host):
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                return super().get_host_and_agent_details(
+                    host_ref,
+                    agent_refs,
+                    field_generators=field_generators,
+                    offline_field_generators=offline_field_generators,
+                    on_error=on_error,
+                )
 
             # Collect all data in one SSH command
             script = build_listing_collection_script(str(self.host_dir), self.mngr_ctx.config.prefix)
@@ -2170,7 +2493,13 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_ref.host_id,
                 e,
             )
-            return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+            return super().get_host_and_agent_details(
+                host_ref,
+                agent_refs,
+                field_generators=field_generators,
+                offline_field_generators=offline_field_generators,
+                on_error=on_error,
+            )
         except MngrError as e:
             if on_error:
                 on_error(host_ref, e)

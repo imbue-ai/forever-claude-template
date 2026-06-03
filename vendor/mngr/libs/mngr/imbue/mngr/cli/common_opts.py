@@ -288,6 +288,11 @@ def setup_command_context(
     # so AliasAwareGroup.invoke() can check them when catching exceptions
     if ctx.parent is not None:
         ctx.parent.meta["is_interactive"] = is_interactive
+        # Expose the resolved output format on the group context so
+        # AliasAwareGroup.invoke() can emit a structured JSONL error event
+        # (with the exception's class name) when a command fails -- letting
+        # subprocess callers detect the error *type* without parsing text.
+        ctx.parent.meta["output_format"] = output_opts.output_format
         if mngr_ctx.config.is_error_reporting_enabled and is_interactive:
             ctx.parent.meta["is_error_reporting_enabled"] = True
 
@@ -436,9 +441,22 @@ def apply_settings_to_config(
 
     resolved = resolve_extends(config, raw)
     settings_config = parse_config(resolved, disabled_plugins=disabled_plugins, strict=True)
+    # The settings-narrowing guard runs while the settings files and env vars are
+    # loaded, before --setting is applied, so its opt-in flag would be silently
+    # ineffective there. A non-None value here means the user tried to set it via
+    # --setting, so reject it with a pointer to where it actually works rather
+    # than accepting it as a no-op.
+    if settings_config.allow_settings_key_assignment_narrowing is not None:
+        raise UserInputError(
+            "`allow_settings_key_assignment_narrowing` cannot be set with --setting. It "
+            "controls the settings-narrowing guard, which runs while the settings files and "
+            "env vars are loaded (before --setting is applied). Set "
+            "`allow_settings_key_assignment_narrowing = true` in a settings.toml, or set "
+            "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true."
+        )
     # Apply the same narrowing guard used by the config-file merge path so
     # ``--setting`` cannot silently drop entries from the merged config either.
-    # Honor the existing setting on ``config`` -- ``--setting`` runs after
+    # Honor the existing setting on ``config``, since ``--setting`` runs after
     # config-file loading, so the resolved value is already known here.
     if not config.allow_settings_key_assignment_narrowing:
         violations = detect_settings_narrowing(config, settings_config)
