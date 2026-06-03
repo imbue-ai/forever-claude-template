@@ -33,7 +33,6 @@ async def complete_via_api(
     API parameter (tools, response formats, temperature, etc.) is usable. The
     system prompt is sent as a cache-controlled block to enable prompt caching.
     """
-    client = AsyncAnthropic(api_key=api_key)
     kwargs: dict[str, object] = dict(options or {})
     kwargs.setdefault("model", model)
     kwargs.setdefault("max_tokens", max_tokens)
@@ -42,7 +41,11 @@ async def complete_via_api(
         kwargs["system"] = [
             {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
         ]
-    response = await client.messages.create(**kwargs)  # type: ignore[arg-type]
+    # ``async with`` so the client's httpx connection pool is always released --
+    # a new client is built per call, and leaking the pool would accumulate open
+    # connections across a high-volume completion flow.
+    async with AsyncAnthropic(api_key=api_key) as client:
+        response = await client.messages.create(**kwargs)  # type: ignore[arg-type]
     text = "".join(
         getattr(block, "text", "")
         for block in response.content
