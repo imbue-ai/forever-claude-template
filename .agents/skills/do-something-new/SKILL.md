@@ -179,6 +179,11 @@ Once it seems like they're reasonably satisfied, you should:
    interface the user named in their original prompt (if they did) or
    ask how they'd like to interact with the thing.
 
+Crystallization is an essential part of this process: your work up to this point was potentially ad-hoc,
+with rounds of revisions and deviations. And any scripts you created (if you created any) to perform fetching or other processing
+may not have appropriate testing and have not been code reviewed. And that's fine! Because now you'll delegate that
+work to a background agent while, in the meantime, you move on to building other surfaces for the user.
+
 The skill's *flow* responsibility ends here; lead-proxy ownership for
 the dispatched worker continues until that worker reports terminal
 status. Interface design happens in subsequent turns.
