@@ -56,7 +56,7 @@ settings_overrides__extend = {model = "opus[1m]", fastMode = false}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
-version = "2.1.141"
+version = "2.1.160"
 # Share the services agent's CLAUDE_CONFIG_DIR across every other agent so
 # auth, plugins, marketplaces, and settings are configured exactly once
 # (inside the services agent) and inherited via the host env file the

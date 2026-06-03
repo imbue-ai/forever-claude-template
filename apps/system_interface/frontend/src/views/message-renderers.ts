@@ -178,6 +178,15 @@ export function countResolvedToolResults(
   return count;
 }
 
+export function countSubagentCards(toolCalls: ToolCall[] | undefined): number {
+  if (!toolCalls) return 0;
+  let count = 0;
+  for (const tc of toolCalls) {
+    if (tc.subagent_metadata) count++;
+  }
+  return count;
+}
+
 export function StableAssistantMessage(): m.Component<{
   event: AssistantMessageEvent;
   toolResults: Map<string, ToolResultEvent>;
@@ -185,11 +194,21 @@ export function StableAssistantMessage(): m.Component<{
 }> {
   let renderedEventId: string | null = null;
   let renderedToolResultCount = 0;
+  let renderedSubagentCardCount = 0;
   return {
     onbeforeupdate(vnode) {
       const { event, toolResults } = vnode.attrs;
       const currentToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
-      return event.event_id !== renderedEventId || currentToolResultCount !== renderedToolResultCount;
+      // A subagent card can appear after the message was first rendered: the
+      // backend re-broadcasts the parent with subagent_metadata once a running
+      // subagent's linkage lands. Repaint when that count grows so the plain
+      // tool-call block upgrades to the rich card.
+      const currentSubagentCardCount = countSubagentCards(event.tool_calls);
+      return (
+        event.event_id !== renderedEventId ||
+        currentToolResultCount !== renderedToolResultCount ||
+        currentSubagentCardCount !== renderedSubagentCardCount
+      );
     },
     view(vnode) {
       const event = vnode.attrs.event;
@@ -197,6 +216,7 @@ export function StableAssistantMessage(): m.Component<{
       const agentId = vnode.attrs.agentId;
       renderedEventId = event.event_id;
       renderedToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
+      renderedSubagentCardCount = countSubagentCards(event.tool_calls);
 
       return m("div", renderAssistantMessageChildren(event, toolResults, agentId));
     },
@@ -221,31 +241,35 @@ export function renderAssistantMessage(
 
 export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode {
   const metadata = toolCall.subagent_metadata;
-  if (!metadata) {
-    return renderToolCallBlock(toolCall, null);
-  }
-
-  const description = metadata.description || "Sub-agent";
-  const agentType = metadata.agent_type || "";
+  // Description and agent type come from the tool call itself, so the card renders fully
+  // even before the subagent session is linked; fall back to metadata if the tool input
+  // fields are absent (older events).
+  const description = toolCall.description || metadata?.description || "Sub-agent";
+  const agentType = toolCall.subagent_type || metadata?.agent_type || "";
+  const sessionId = metadata?.session_id;
 
   return m("div", { class: "subagent-card" }, [
     m("div", { class: "subagent-card-header" }, [
       m("span", { class: "subagent-card-description" }, description),
       agentType ? m("span", { class: "subagent-card-type-badge" }, agentType) : null,
     ]),
-    m(
-      "a",
-      {
-        class: "subagent-card-link",
-        href: "javascript:void(0)",
-        onclick(e: Event) {
-          e.preventDefault();
-          e.stopPropagation();
-          openSubagentTab(agentId, metadata.session_id, description);
-        },
-      },
-      "View conversation",
-    ),
+    // The click-through needs the subagent session_id, which only arrives once the call is
+    // linked. Until then show a non-clickable "running" state so the card is still rich.
+    sessionId
+      ? m(
+          "a",
+          {
+            class: "subagent-card-link",
+            href: "javascript:void(0)",
+            onclick(e: Event) {
+              e.preventDefault();
+              e.stopPropagation();
+              openSubagentTab(agentId, sessionId, description);
+            },
+          },
+          "View conversation",
+        )
+      : m("span", { class: "subagent-card-link subagent-card-link--pending" }, "Running…"),
   ]);
 }
 
@@ -394,7 +418,10 @@ export function renderAssistantMessageChildren(
     children.push(m(MarkdownContent, { content: textContent }));
   }
   for (const toolCall of toolCalls) {
-    if (toolCall.tool_name === "Agent" && toolCall.subagent_metadata) {
+    // Render the rich card as soon as we have the Agent call's description (from the tool
+    // input), even before its subagent session is linked; the card shows a non-clickable
+    // "Running…" state until subagent_metadata.session_id arrives.
+    if (toolCall.tool_name === "Agent" && (toolCall.subagent_metadata || toolCall.description)) {
       children.push(renderSubagentCard(toolCall, agentId));
       continue;
     }

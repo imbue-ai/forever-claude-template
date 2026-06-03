@@ -853,6 +853,19 @@ body {
   text-decoration: underline;
 }
 
+/* Shown while the subagent is still running and not yet linked to its session,
+   so there is no conversation to open yet. Muted and non-interactive. */
+.subagent-card-link--pending {
+  color: var(--color-text-secondary);
+  font-style: italic;
+  cursor: default;
+}
+
+.subagent-card-link--pending:hover {
+  color: var(--color-text-secondary);
+  text-decoration: none;
+}
+
 /* ── Permission request footer (inside the tool-call block) ── */
 .tool-call-block--permission-request {
   border-color: var(--color-accent);
