@@ -132,12 +132,19 @@ extra_provision_command__extend = [
 [create_templates.docker]
 provider = "docker"
 target_path = "/mngr/code/"
-setting__extend = ["providers.docker.is_enabled=true"]
+# Run the agent container under the gVisor (`runsc`) runtime to shrink the host
+# kernel attack surface for untrusted agents. `runsc` must be installed and
+# registered with the local Docker daemon (see CLAUDE.md); container creation
+# fails with Docker's native "unknown runtime" error otherwise. Override back to
+# the default runtime where gVisor is unavailable (e.g. CI, Modal) with
+# MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
+setting__extend = ["providers.docker.is_enabled=true", "providers.docker.docker_runtime=runsc"]
 build_arg__extend = ["--file=Dockerfile", "."]
-# `--cap-add=SYS_PTRACE` is a `docker run` flag (not `docker build`), so it
-# rides on `start_arg` rather than `build_arg`. Lets us attach gdb / strace
-# inside the container for debugging without rebuilding the image.
-start_arg__extend = ["--cap-add=SYS_PTRACE"]
+# Security hardening for `docker run`: block privilege escalation via setuid
+# binaries. `--cap-add=SYS_PTRACE` was removed deliberately -- gVisor is the
+# isolation boundary now, and the extra capability widened the container's
+# privileges with no upside for untrusted agents.
+start_arg__extend = ["--security-opt=no-new-privileges"]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
@@ -164,6 +171,11 @@ start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
 # bind mount; offline reads via `mngr event` / `mngr transcript` against
 # a stopped Lima host stop working in this mode until the host is started.
 # See vendor/mngr/specs/lima-btrfs-host-volume/concise.md for the design.
+# NOTE: gVisor runsc install/enable for lima is implemented in mngr
+# (providers.lima.install_gvisor_runtime / docker_runtime) but intentionally not
+# turned on here yet -- it lands once the vendored mngr is synced to a release
+# carrying the lima docker-mode + gVisor support. See the docker template above
+# for the first provider running under runsc.
 setting__extend = ["providers.lima.is_host_data_volume_exposed=false"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
@@ -220,6 +232,8 @@ build_arg__extend = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
+# gVisor runsc install for VPS is implemented in mngr_vps_docker but not enabled
+# here yet -- it lands with the next vendored-mngr sync (see the docker template).
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
@@ -240,6 +254,8 @@ build_arg__extend = ["--file=Dockerfile", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
+# gVisor runsc install for VPS is implemented in mngr_vps_docker but not enabled
+# here yet -- it lands with the next vendored-mngr sync (see the docker template).
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.

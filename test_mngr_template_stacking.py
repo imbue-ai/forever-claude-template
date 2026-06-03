@@ -111,10 +111,17 @@ def test_main_extra_provision_command_present_for_docker_mode() -> None:
     assert any(_TMUX_MARKER in cmd for cmd in commands)
 
 
-def test_docker_template_adds_sys_ptrace_cap_via_start_arg() -> None:
-    """`main` + `docker`: SYS_PTRACE cap is on `start_arg` (passed to `docker run`), not `build_arg`."""
+def test_docker_template_runs_under_gvisor_and_drops_sys_ptrace() -> None:
+    """`main` + `docker`: hardened for untrusted agents -- runs under gVisor (runsc),
+    blocks privilege escalation, and no longer grants the SYS_PTRACE capability."""
     result = _apply(("main", "docker"))
-    assert "--cap-add=SYS_PTRACE" in result["start_arg"]
+    # gVisor runtime is selected via a provider-config setting (not a start_arg),
+    # so it can be overridden back to runc in CI via MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME.
+    assert "providers.docker.docker_runtime=runsc" in result["setting"]
+    # no-new-privileges hardening rides on start_arg (a `docker run` flag).
+    assert "--security-opt=no-new-privileges" in result["start_arg"]
+    # The SYS_PTRACE capability grant was removed (gVisor is the boundary now).
+    assert "--cap-add=SYS_PTRACE" not in result["start_arg"]
     assert "--cap-add=SYS_PTRACE" not in result["build_arg"]
 
 
