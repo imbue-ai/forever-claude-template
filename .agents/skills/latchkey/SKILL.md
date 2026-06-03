@@ -66,7 +66,7 @@ latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
 The body must be a JSON object with exactly four fields:
 `agent_id` (use `$MNGR_AGENT_ID`), `type` (use "predefined"), `payload`, and `rationale`.
 
-`payload` must be an object with exactly two fields: `scope` (string) and `permissions` (array of strings). `scope` needs to be the scope specified in the response to the `/permissions/available/<service_name>` call.
+`payload` must be an object with exactly two fields: `scope` (string) and `permissions` (array of strings). `scope` needs to be one of the scopes specified in the response to the `/permissions/available/<service_name>` call.
 
 When not sure (and if applicable), prefer the `*-read-all` permission variants as they are relatively safe and obvious.
 

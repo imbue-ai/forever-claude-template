@@ -26,6 +26,16 @@ restart = "on-failure"
 command = "uv run runtime-backup"
 restart = "on-failure"
 
+# Continuous restic-based backup of the full host_dir (/mngr/) to a remote
+# repository (Cloudflare R2 by default). Distinct from runtime-backup: this
+# captures the entire workspace state (code, worktrees, agent state) on an
+# hourly cadence to an encrypted off-site repo. Configured via
+# runtime/backup.toml + runtime/secrets/restic.env, both seeded by bootstrap
+# on first boot. See libs/host_backup/README.md.
+[services.host-backup]
+command = "uv run host-backup"
+restart = "on-failure"
+
 # Idempotently installs deferred packages on first container boot
 # (currently just Playwright + Chromium + its apt system libs). Skips
 # work when /var/lib/minds/deferred-install/done.<package> is present,

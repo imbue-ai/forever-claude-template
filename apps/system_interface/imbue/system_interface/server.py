@@ -26,11 +26,13 @@ from starlette.websockets import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
+from imbue.system_interface import claude_auth_endpoints
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.system_interface.agent_discovery import send_message
 from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.events import BufferBehavior
@@ -49,6 +51,7 @@ from imbue.system_interface.plugins import get_plugin_manager
 from imbue.system_interface.request_writer import write_refresh_request
 from imbue.system_interface.service_dispatcher import register_service_routes
 from imbue.system_interface.session_watcher import AgentSessionWatcher
+from imbue.system_interface.welcome_resend import WelcomeResender
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 _LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -764,6 +767,8 @@ def create_application(
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
     agent_manager: AgentManager | None = None,
+    claude_auth_service: ClaudeAuthService | None = None,
+    welcome_resender: WelcomeResender | None = None,
 ) -> FastAPI:
     application = FastAPI(lifespan=_lifespan)
 
@@ -781,6 +786,10 @@ def create_application(
     application.state.provider_names = provider_names
     application.state.include_filters = include_filters
     application.state.exclude_filters = exclude_filters
+    # One long-lived ClaudeAuthService per app so the in-flight OAuth
+    # subprocess survives between the /start and /submit-code requests.
+    application.state.claude_auth_service = claude_auth_service or ClaudeAuthService()
+    application.state.welcome_resender = welcome_resender or WelcomeResender()
 
     plugin_manager = get_plugin_manager()
     plugin_manager.hook.endpoint(app=application)
@@ -798,6 +807,7 @@ def create_application(
     application.add_api_route("/api/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/destroy", _destroy_agent, methods=["POST"])
+    claude_auth_endpoints.register_routes(application)
     application.add_api_route(
         "/api/refresh-service/{service_name}", _refresh_service_request_endpoint, methods=["POST"]
     )

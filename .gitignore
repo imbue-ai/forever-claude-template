@@ -13,6 +13,15 @@
 # the rest of runtime/.
 **/runtime/
 
+# Sculptor local config (per-checkout, not shared).
+**/.sculptor/
+
+# Login-modal reshape mocks (design exploration, not shipped).
+specs/login-modal-reshape/
+
+# Playwright MCP session artifacts.
+**/.playwright-mcp/
+
 # tk tickets (tracker is vendored at vendor/tk; the tickets themselves are local state)
 **/.tickets/
 

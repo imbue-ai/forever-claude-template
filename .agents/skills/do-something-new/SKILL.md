@@ -55,8 +55,15 @@ running any `latchkey` command), then run:
 
 ```bash
 latchkey services list --viable
-latchkey services info <svc>   # for any obviously-involved service
+latchkey services info <svc>   # REQUIRED for each obviously-involved service
 ```
+
+Running `info` on the involved service(s) is essential -- `list --viable`
+only shows services that *could* be authenticated (either credentials exist
+*or* a browser auth flow is available); it does not tell you whether the
+specific service the user needs is already set up. You must run `info` on
+each involved service to see the actual current credential state (and to
+know whether you'll need to trigger an auth flow in Step 4).
 
 For services not covered by latchkey, do 1-2 web/docs searches. Stop as soon
 as you have enough to propose a plausible plan.
@@ -106,6 +113,15 @@ latency without de-risking. If no, validate it now.
 For multi-service asks, validate each uncontrolled dependency independently
 *first*, then the combined operation.
 
+**If latchkey is involved in any component of the task, authenticate and test
+it first -- before anything else.** Even if the latchkey-backed piece is a
+small part of a larger pipeline, get it working end-to-end (auth flow
+completed, a real API call succeeds) before building any other component.
+Latchkey auth is the single most common source of late-stage failure in this
+flow; failing fast on it avoids wasted work on downstream components that
+would have to be discarded if auth turns out to be unavailable for that
+service.
+
 - Latchkey setup is part of the normal flow, NOT a failure. Follow the
   `latchkey` skill for auth/permission handling -- load it if you haven't
   already.
@@ -152,20 +168,11 @@ Apply by default to any batch step -- don't try to judge in advance
 whether it's "long enough" to need this. Sampling is cheap when the
 operation is fast and load-bearing when it's slow.
 
-## Step 6: Deliver remaining surfaces one at a time
+## Step 6: Crystallize in the background and hand off to interface design
 
-Once the user approves the Step 5 sample, additional surfaces (scheduling,
-persistence, history, live integration with a forwarded service, etc.) each
-get their *own* delivery and feedback gate. Don't bundle them. Build one,
-ship it, ask "want me to add scheduling next, or stop here?", wait, then
-build the next.
-
-This applies even when the user's original prompt enumerated several
-surfaces -- a single approval on the sample is not blanket approval for the
-rest. The user needs to be able to thumbs-up / thumbs-down each surface
-independently, which is impossible if four of them land at once.
-
-## Step 7: Crystallize in the background and hand off to interface design
+It may take several rounds of iteration before the user is satisfied with the sample.
+That's expected, and you should confirm they like it before moving on.
+Once it seems like they're reasonably satisfied, you should:
 
 1. **Kick off `crystallize-task`** with `source_artifacts_dir:
    runtime/do-something-new/$SLUG/`.
@@ -180,9 +187,27 @@ independently, which is impossible if four of them land at once.
    interface the user named in their original prompt (if they did) or
    ask how they'd like to interact with the thing.
 
+Crystallization is an essential part of this process: your work up to this point was potentially ad-hoc,
+with rounds of revisions and deviations. And any scripts you created (if you created any) to perform fetching or other processing
+may not have appropriate testing and have not been code reviewed. And that's fine! Because now you'll delegate that
+work to a background agent while, in the meantime, you move on to building other surfaces for the user.
+
 The skill's *flow* responsibility ends here; lead-proxy ownership for
 the dispatched worker continues until that worker reports terminal
 status. Interface design happens in subsequent turns.
+
+## Step 7: Deliver remaining surfaces one at a time
+
+Once the user approves the Step 5 sample and you've kicked off crystallization in the background, additional surfaces (scheduling,
+persistence, history, live integration with a forwarded service, etc.) each
+get their *own* delivery and feedback gate. Don't bundle them. Build one,
+ship it, ask "want me to add scheduling next, or stop here?", wait, then
+build the next.
+
+This applies even when the user's original prompt enumerated several
+surfaces -- a single approval on the sample is not blanket approval for the
+rest. The user needs to be able to thumbs-up / thumbs-down each surface
+independently, which is impossible if four of them land at once.
 
 ## Re-fetch while crystallize is running
 
@@ -197,7 +222,9 @@ matter), send a short note to the worker:
 mngr message crystallize-$SLUG -m "<short note about what changed>"
 ```
 
-Otherwise stay silent -- no automatic post-every-refetch ping.
+This way the crystallized skill stays up-to-date with the user's requirements.
+When you review crystallization gates, you can check to make sure the worker
+incorporated the newer requirements in its design.
 
 ## Background crystallize gates
 

@@ -3,6 +3,8 @@
 import json
 from typing import Any
 
+import pytest
+
 from imbue.system_interface.session_parser import parse_session_lines
 
 
@@ -192,6 +194,55 @@ def test_tool_output_truncation() -> None:
     events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
     assert events[0]["output"].endswith("...")
     assert len(events[0]["output"]) <= 2003
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("Here is the file contents.", False, id="plain-assistant-text"),
+        pytest.param("", False, id="empty-text"),
+        pytest.param(
+            "Not logged in \u00b7 Please run /login to authenticate.",
+            True,
+            id="not-logged-in",
+        ),
+        pytest.param(
+            "I received an error: Invalid API key. Please update your credentials.",
+            True,
+            id="invalid-api-key",
+        ),
+        pytest.param(
+            "OAuth token has been revoked; re-authentication required.",
+            True,
+            id="oauth-revoked",
+        ),
+        pytest.param("Error: OAuth token has expired.", True, id="oauth-expired"),
+        pytest.param(
+            "OAuth token does not meet scope requirements for this operation.",
+            True,
+            id="oauth-scope",
+        ),
+        pytest.param(
+            'API returned: {"type": "authentication_error", "message": "..."}',
+            True,
+            id="authentication-error-type",
+        ),
+        pytest.param("API Error: 401 Unauthorized", True, id="api-401"),
+        pytest.param(
+            "Invalid authentication credentials provided.", True, id="invalid-credentials"
+        ),
+        pytest.param(
+            "Your credit balance is too low to make this request.",
+            True,
+            id="credit-balance-too-low",
+        ),
+        pytest.param("This organization has been disabled.", True, id="org-disabled"),
+    ],
+)
+def test_assistant_message_auth_error_flag(text: str, expected: bool) -> None:
+    lines = [_make_assistant_line("uuid-1", "2026-01-01T00:00:00Z", text)]
+    events = parse_session_lines(lines)
+    assert events[0]["is_auth_error"] is expected
 
 
 def test_user_message_with_array_content() -> None:

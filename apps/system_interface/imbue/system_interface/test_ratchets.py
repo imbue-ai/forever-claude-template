@@ -38,7 +38,7 @@ def test_prevent_time_sleep() -> None:
 
 
 def test_prevent_global_keyword() -> None:
-    rc.check_global_keyword(_DIR, snapshot(1))
+    rc.check_global_keyword(_DIR, snapshot(0))
 
 
 def test_prevent_bare_print() -> None:
@@ -225,6 +225,12 @@ def test_prevent_monkeypatch_setattr() -> None:
     # require plumbing a flag through every call site of
     # create_application, which is a much larger blast radius for a
     # test-only workaround.
+    #
+    # The in-UI Claude login modal tests use no `monkeypatch.setattr`:
+    # `ClaudeAuthService` and `WelcomeResender` take their outside-world
+    # dependencies (subprocess runner, pexpect spawner, transcript reader,
+    # message sender, welcome-skill path) as constructor arguments, so
+    # tests construct isolated instances with deterministic fakes.
     rc.check_monkeypatch_setattr(_DIR, snapshot(1))
 
 

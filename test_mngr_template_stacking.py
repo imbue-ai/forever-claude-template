@@ -99,7 +99,7 @@ def test_main_extra_provision_command_stacks_with_lima() -> None:
     assert any(_TMUX_MARKER in cmd for cmd in commands)
     # Spot-check several distinct lima provisioning commands to confirm the
     # entire list (not just the first entry) is concatenated.
-    assert any("sudo mkdir -p /worktree" in cmd for cmd in commands)
+    assert any("sudo mkdir -p /mngr/worktree" in cmd for cmd in commands)
     assert any("npm install -g latchkey" in cmd for cmd in commands)
     assert any("playwright install" in cmd for cmd in commands)
 
@@ -122,4 +122,4 @@ def test_scalar_template_options_override_rather_than_stack() -> None:
     """Scalar-typed options (e.g. provider) get overridden by the latter template."""
     result = _apply(("main", "docker"))
     assert result["provider"] == "docker"
-    assert result["target_path"] == "/code/"
+    assert result["target_path"] == "/mngr/code/"

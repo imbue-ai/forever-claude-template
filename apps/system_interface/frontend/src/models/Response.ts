@@ -43,6 +43,9 @@ export interface TranscriptEvent {
     cache_write_tokens?: number | null;
   } | null;
 
+  // assistant_message: true when the text matches a known Claude auth-error pattern
+  is_auth_error?: boolean;
+
   // tool_result fields
   tool_call_id?: string;
   tool_name?: string;
