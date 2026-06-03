@@ -58,14 +58,17 @@ def _mtime_iso(mtime: float) -> str:
     return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(_ISO_MICROS_FORMAT)
 
 
-def _normalize_iso(ts: str) -> str:
+def _normalize_iso(ts: str) -> str | None:
     """Reformat an ISO-8601 UTC timestamp to fixed-width microsecond precision.
-    Returns the input unchanged if it can't be parsed, so a malformed field
-    never crashes the scan."""
+    Returns None if the value can't be parsed, so the caller can fall back to
+    the file mtime instead of feeding a malformed string into the snapshot --
+    where it would silently break the lexicographic `created_at` sort the
+    frontend relies on to order pending steps."""
     try:
         parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
-        return ts
+        logger.debug("Malformed `created` timestamp {!r}; falling back to file mtime", ts)
+        return None
     if parsed.tzinfo is None:
         # A timestamp with no offset is assumed UTC (tk stamps `Z`); otherwise
         # astimezone() would read it as machine-local time and shift it.
@@ -210,7 +213,14 @@ class AgentTicketsWatcher:
             if self._should_skip_for_agent(state):
                 continue
 
-            created_at = _normalize_iso(state.created_at) if state.created_at else _mtime_iso(stat.st_mtime)
+            # Fall back to the file mtime when `created` is absent *or* malformed
+            # -- either way the snapshot needs a sortable timestamp, never a raw
+            # unparseable string.
+            created_at = _mtime_iso(stat.st_mtime)
+            if state.created_at:
+                normalized = _normalize_iso(state.created_at)
+                if normalized is not None:
+                    created_at = normalized
             new_enrichment[state.ticket_id] = {
                 "title": state.title,
                 "summary": state.summary if state.status == "closed" else None,

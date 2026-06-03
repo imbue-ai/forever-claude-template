@@ -293,8 +293,11 @@ export async function fetchBackfillEvents(agentId: string): Promise<void> {
     } else {
       prependEvents(agentId, result.events);
     }
-  } catch {
-    // Backfill failure is non-fatal
+  } catch (error) {
+    // Backfill failure is non-fatal: the older history just isn't loaded, and
+    // `backfillComplete` stays unset so the next scroll retries. Log it so a
+    // persistent failure is diagnosable instead of vanishing silently.
+    console.warn(`Failed to backfill older events for agent ${agentId}`, error);
   }
 }
 

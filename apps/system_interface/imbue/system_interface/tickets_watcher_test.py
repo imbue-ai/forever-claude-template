@@ -194,6 +194,25 @@ def test_created_at_falls_back_to_mtime_when_field_absent(tmp_path: Path) -> Non
     assert watcher.get_enrichment()["tt-nocreate"]["created_at"] == expected
 
 
+def test_created_at_falls_back_to_mtime_when_field_malformed(tmp_path: Path) -> None:
+    """A malformed `created:` value must not reach the snapshot verbatim: it would
+    break the lexicographic `created_at` sort the frontend uses to order pending
+    steps. The watcher falls back to the file mtime, same as the absent case."""
+    tickets_dir = tmp_path / ".tickets"
+    tickets_dir.mkdir(parents=True, exist_ok=True)
+    path = tickets_dir / "tt-badts.md"
+    path.write_text(
+        "---\nid: tt-badts\nstatus: open\nstep: true\ncreated: not-a-timestamp\n---\n# Bad created field\n"
+    )
+    mtime = 1_777_000_000.123456
+    os.utime(path, (mtime, mtime))
+
+    _calls, cb = _capture()
+    watcher = AgentTicketsWatcher("agent-1", "agent-1-name", tickets_dir, cb)
+    expected = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    assert watcher.get_enrichment()["tt-badts"]["created_at"] == expected
+
+
 def test_regular_tickets_are_dropped(tmp_path: Path) -> None:
     """Regular (non-step) tickets are a separate construct and never appear in
     the progress view's enrichment."""

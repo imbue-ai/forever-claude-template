@@ -333,9 +333,15 @@ class AgentSessionWatcher:
                 self._known_session_ids.append(sub_id)
                 if self._observer is not None:
                     try:
-                        self._observer.schedule(WakeOnChangeHandler(self._wake_event), str(subagents_dir), recursive=False)
+                        self._observer.schedule(
+                            WakeOnChangeHandler(self._wake_event), str(subagents_dir), recursive=False
+                        )
                     except OSError:
-                        pass
+                        # Watch scheduling failed (inotify limits, fs quirk). The poll
+                        # loop still picks up subagent changes at POLL_INTERVAL, just
+                        # without sub-second latency -- log so the degraded watch is
+                        # diagnosable rather than silently dropped.
+                        logger.debug("Failed to schedule watchdog for %s", subagents_dir)
 
             # Cache .meta.json. Retry on each pass while the read fails with OSError
             # (transient: mid-write, momentary permission glitch). Give up after a
