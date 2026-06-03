@@ -199,6 +199,12 @@ update_yaml_field() {
 # before the next `## ` heading (or EOF). Lets `tk close` replace a prior
 # close summary instead of appending a duplicate when a ticket is re-closed.
 # No-op when there is no summary section.
+#
+# Trailing blank lines left behind by the removal are also dropped (blank lines
+# are buffered and only emitted once a non-blank line follows). Without this,
+# the blank line that preceded the stripped `## Summary` heading would survive
+# and `cmd_close`'s leading `\n` would prepend another on the next close, so
+# repeated re-closes would accumulate blank lines before the heading.
 _strip_summary_section() {
     local file="$1"
     _grep -q '^## Summary' "$file" || return 0
@@ -206,7 +212,9 @@ _strip_summary_section() {
     awk '
         /^## Summary[[:space:]]*$/ { in_summary = 1; next }
         in_summary && /^## / { in_summary = 0 }
-        !in_summary { print }
+        in_summary { next }
+        /^[[:space:]]*$/ { blanks++; next }
+        { while (blanks > 0) { print ""; blanks-- } print }
     ' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
