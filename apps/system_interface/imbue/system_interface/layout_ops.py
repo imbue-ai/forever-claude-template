@@ -419,7 +419,10 @@ def layout_list(
     """Enumerate everything addressable in the workspace.
 
     Each entry: ``{ref, kind, display_name, is_open, is_running}``.
-    ``kind`` is one of ``service`` / ``agent``.
+    ``kind`` is one of ``service`` / ``agent`` / ``agent-terminal``. Every
+    agent yields both a ``chat:<name>`` (``agent``) entry and its
+    separately-addressable ``chat-terminal:<name>`` (``agent-terminal``)
+    entry.
     """
     open_refs = _collect_open_refs(layout_json_path, agent_name_by_id)
     entries: list[dict[str, Any]] = []
