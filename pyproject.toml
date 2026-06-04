@@ -68,6 +68,28 @@ concurrency-group = { path = "vendor/mngr/libs/concurrency_group", editable = tr
 
 [tool.pytest.ini_options]
 testpaths = ["."]
+# pytest's default norecursedirs excludes all dot-directories (the ".*" pattern),
+# which would skip the Python tests under .agents/shared/scripts (e.g.
+# test_skill_mngr_references.py). Override it to keep the standard exclusions but
+# enumerate the dot-directories to skip explicitly, so .agents is still recursed into.
+norecursedirs = [
+    "*.egg",
+    ".git",
+    ".claude",
+    ".github",
+    ".mngr",
+    ".pytest_cache",
+    ".reviewer",
+    ".ruff_cache",
+    ".venv",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "node_modules",
+    "venv",
+    "{arch}",
+]
 timeout_func_only = true
 addopts = [
     "--timeout=10",
