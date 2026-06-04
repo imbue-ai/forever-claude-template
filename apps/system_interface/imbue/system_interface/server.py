@@ -217,16 +217,22 @@ def _get_or_create_tickets_watcher(request: Request, agent_info: AgentInfo) -> A
     if agent_info.id in tickets_watchers:
         return tickets_watchers[agent_info.id]
 
-    # The tickets watcher emits a single `step_enrichment` snapshot message whenever
-    # ticket state changes. ``broadcast_all_ignored`` delivers it live without buffering:
-    # it is a full snapshot recomputed on every GET /events (via get_enrichment()), so
-    # buffering successive snapshots would grow unboundedly for no benefit. The frontend
-    # replaces its enrichment table each time one arrives.
+    # The session watcher is the only place a step's session identity exists
+    # (synthesised from the transcript file location), so the tickets watcher
+    # leans on its attribution to scope each step to the main view or a subagent.
+    session_watcher = _get_or_create_watcher(request, agent_info)
+
+    # The tickets watcher emits a `step_enrichment` snapshot message per changed scope
+    # whenever ticket state changes. ``broadcast_all_ignored`` delivers it live without
+    # buffering: each snapshot is recomputed on every GET /events (via get_enrichment()),
+    # so buffering successive snapshots would grow unboundedly for no benefit. The
+    # frontend replaces its enrichment table for that scope each time one arrives.
     watcher = AgentTicketsWatcher(
         agent_id=agent_info.id,
         agent_name=agent_info.name,
         tickets_dir=read_tickets_dir_from_env_file(agent_info.agent_state_dir, Path(agent_info.work_dir)),
         on_events=event_queues.broadcast_all_ignored,
+        attribution_provider=session_watcher.get_step_attribution,
     )
     tickets_watchers[agent_info.id] = watcher
     watcher.start()
@@ -471,7 +477,13 @@ def _get_subagent_events(agent_id: str, subagent_session_id: str, request: Reque
     # Include metadata in the response
     metadata = watcher.get_subagent_metadata(subagent_session_id)
 
-    return JSONResponse(content={"events": events, "metadata": metadata})
+    # The subagent's own steps, scoped to its session, so its conversation
+    # renders a real progress timeline (titles, summaries) with the same code as
+    # the main chat -- not raw tk Bash calls.
+    tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
+    step_enrichment = tickets_watcher.get_enrichment(session_id=subagent_session_id) if tickets_watcher is not None else {}
+
+    return JSONResponse(content={"events": events, "metadata": metadata, "step_enrichment": step_enrichment})
 
 
 def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Request) -> Response:
@@ -481,6 +493,10 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
         return _agent_not_found_response(agent_id)
 
     _get_or_create_watcher(request, agent_info)
+    # Start the tickets watcher too, so this subagent's session-tagged
+    # step_enrichment messages get broadcast; the session_id filter below routes
+    # them to this stream (an untagged main-scope snapshot is dropped).
+    _get_or_create_tickets_watcher(request, agent_info)
 
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)

@@ -1,13 +1,13 @@
 import m from "mithril";
 import { apiUrl } from "../base-path";
-import type {
-  TranscriptEvent,
-  AssistantMessageEvent,
-  UserMessageEvent,
-  ToolResultEvent,
-  SubagentMetadata,
+import {
+  applyEnrichmentSnapshot,
+  getEnrichmentForAgent,
+  type TranscriptEvent,
+  type StepEnrichment,
+  type SubagentMetadata,
 } from "../models/Response";
-import { buildToolResultsWithSkillExpansions, renderAssistantMessageChildren } from "./message-renderers";
+import { renderConversation, isSubagentRunning } from "./conversation-render";
 
 interface SubagentViewAttrs {
   agentId: string;
@@ -17,26 +17,9 @@ interface SubagentViewAttrs {
 interface SubagentEventsResponse {
   events: TranscriptEvent[];
   metadata: SubagentMetadata | null;
-}
-
-function renderUserMessage(event: UserMessageEvent): m.Vnode {
-  return m("div", { class: "message message-user", key: event.event_id }, [
-    m("div", { class: "message-user-bubble" }, [
-      m("div", { class: "message-content whitespace-pre-wrap" }, event.content || ""),
-    ]),
-  ]);
-}
-
-function renderAssistantMessage(
-  event: AssistantMessageEvent,
-  toolResults: Map<string, ToolResultEvent>,
-  agentId: string,
-): m.Vnode {
-  return m(
-    "div",
-    { id: event.event_id, class: "message message-assistant", key: event.event_id },
-    m("div", renderAssistantMessageChildren(event, toolResults, agentId)),
-  );
+  // The subagent's own steps, scoped to its session, so its conversation
+  // renders a real progress timeline with the same code as the main chat.
+  step_enrichment?: Record<string, StepEnrichment>;
 }
 
 export function SubagentView(): m.Component<SubagentViewAttrs> {
@@ -59,6 +42,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
       });
       events = result.events;
       metadata = result.metadata ?? null;
+      applyEnrichmentSnapshot(agentId, result.step_enrichment, subagentSessionId);
       loading = false;
     } catch (error) {
       loading = false;
@@ -77,7 +61,17 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     eventSource = new EventSource(url);
 
     eventSource.onmessage = (messageEvent: MessageEvent) => {
-      const event = JSON.parse(messageEvent.data) as TranscriptEvent;
+      const raw = JSON.parse(messageEvent.data) as { type?: string };
+      // A step_enrichment message (tagged with this subagent's session id by
+      // the backend) is a full enrichment snapshot, not a transcript event --
+      // replace this subagent's table and redraw.
+      if (raw.type === "step_enrichment") {
+        const snapshot = raw as { enrichment?: Record<string, StepEnrichment> };
+        applyEnrichmentSnapshot(agentId, snapshot.enrichment, subagentSessionId);
+        m.redraw();
+        return;
+      }
+      const event = raw as TranscriptEvent;
       const existingIds = new Set(events.map((e) => e.event_id));
       if (!existingIds.has(event.event_id)) {
         events = [...events, event];
@@ -113,7 +107,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     },
 
     view(vnode) {
-      const { agentId } = vnode.attrs;
+      const { agentId, subagentSessionId } = vnode.attrs;
       const title = metadata?.description || "Sub-agent conversation";
       const agentType = metadata?.agent_type || "";
 
@@ -143,24 +137,10 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
           m("p", { class: "text-text-secondary" }, "No events yet."),
         );
       } else {
-        const toolResults = buildToolResultsWithSkillExpansions(events);
-
-        const messageNodes: m.Vnode[] = [];
-        for (const event of events) {
-          if (event.type === "user_message") {
-            messageNodes.push(renderUserMessage(event));
-          } else if (event.type === "assistant_message") {
-            messageNodes.push(renderAssistantMessage(event, toolResults, agentId));
-          }
-        }
-
-        content = m("div", { class: "message-list-wrapper" }, [
-          m(
-            "div",
-            { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
-            messageNodes,
-          ),
-        ]);
+        // Same renderer as the main chat. The subagent has no server-derived
+        // activity_state, so derive idleness from the transcript tail.
+        const enrichment = getEnrichmentForAgent(agentId, subagentSessionId);
+        content = renderConversation(events, enrichment, agentId, !isSubagentRunning(events));
       }
 
       return m("div", { class: "app-content-wrapper flex-1 flex flex-col min-h-0" }, [

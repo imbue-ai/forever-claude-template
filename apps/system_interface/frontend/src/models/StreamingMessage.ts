@@ -57,9 +57,12 @@ export function connectToStream(agentId: string): void {
   eventSource.onmessage = (messageEvent: MessageEvent) => {
     const raw = JSON.parse(messageEvent.data) as { type?: string };
     // A step_enrichment message is a full enrichment snapshot, not a
-    // transcript event -- replace the agent's table and redraw.
+    // transcript event -- replace the table for its scope and redraw. The main
+    // stream's snapshots are untagged (session_id absent) and key by agentId;
+    // a session_id, if present, scopes the snapshot to that subagent.
     if (raw.type === "step_enrichment") {
-      applyEnrichmentSnapshot(agentId, (raw as { enrichment?: Record<string, StepEnrichment> }).enrichment);
+      const snapshot = raw as { enrichment?: Record<string, StepEnrichment>; session_id?: string };
+      applyEnrichmentSnapshot(agentId, snapshot.enrichment, snapshot.session_id);
       m.redraw();
       return;
     }

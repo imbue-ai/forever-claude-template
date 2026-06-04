@@ -146,19 +146,32 @@ interface EventsResponse {
 const eventsByAgent: Record<string, TranscriptEvent[]> = {};
 const notFoundAgentIds = new Set<string>();
 const backfillComplete: Record<string, boolean> = {};
-// Per-agent step enrichment, keyed by ticket id. Replaced wholesale on each
-// snapshot (GET /events and the `step_enrichment` SSE message), never merged.
-const enrichmentByAgent: Record<string, Map<string, StepEnrichment>> = {};
+// Step enrichment keyed by ticket id, scoped per conversation. The main chat
+// keys by agentId; a subagent's conversation keys by agentId + its session id,
+// so a subagent's steps never collide with (or leak into) the main view's
+// table. Replaced wholesale on each snapshot (GET events + the `step_enrichment`
+// SSE message), never merged.
+const enrichmentByScope: Record<string, Map<string, StepEnrichment>> = {};
 
-export function getEnrichmentForAgent(agentId: string): Map<string, StepEnrichment> {
-  return enrichmentByAgent[agentId] ?? new Map();
+/** Storage key for an enrichment scope: agentId for the main view, or
+ *  agentId + session id for a subagent's conversation. */
+function enrichmentScopeKey(agentId: string, sessionId?: string): string {
+  return sessionId ? `${agentId}::${sessionId}` : agentId;
 }
 
-/** Replace an agent's enrichment table from a snapshot. Does not redraw --
- *  callers in a fetch/redraw flow already trigger one; the SSE path redraws
- *  explicitly. */
-export function applyEnrichmentSnapshot(agentId: string, snapshot: Record<string, StepEnrichment> | undefined): void {
-  enrichmentByAgent[agentId] = new Map(Object.entries(snapshot ?? {}));
+export function getEnrichmentForAgent(agentId: string, sessionId?: string): Map<string, StepEnrichment> {
+  return enrichmentByScope[enrichmentScopeKey(agentId, sessionId)] ?? new Map();
+}
+
+/** Replace an enrichment scope's table from a snapshot. `sessionId` selects a
+ *  subagent's scope; omit it for the main view. Does not redraw -- callers in a
+ *  fetch/redraw flow already trigger one; the SSE path redraws explicitly. */
+export function applyEnrichmentSnapshot(
+  agentId: string,
+  snapshot: Record<string, StepEnrichment> | undefined,
+  sessionId?: string,
+): void {
+  enrichmentByScope[enrichmentScopeKey(agentId, sessionId)] = new Map(Object.entries(snapshot ?? {}));
 }
 
 export function isConversationNotFound(agentId: string): boolean {

@@ -1,21 +1,23 @@
 """Unit tests for AgentTicketsWatcher.
 
 The watcher maintains a current ENRICHMENT snapshot of the agent's step
-records (ticket_id -> {title, summary, status, created_at}). It serves the
-snapshot via get_enrichment() and broadcasts a single `step_enrichment`
-message whenever the snapshot changes. Only step records surface; regular
-tickets are dropped.
+records (ticket_id -> {title, summary, status, created_at}), scoped per
+session. It serves a scope via get_enrichment(session_id) and broadcasts a
+`step_enrichment` message per changed scope (main untagged, subagents tagged).
+Only step records surface; regular tickets are dropped.
 """
 
 from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from imbue.system_interface.step_attribution import StepAttribution
 from imbue.system_interface.tickets_watcher import AgentTicketsWatcher
 from imbue.system_interface.tickets_watcher import ENRICHMENT_MESSAGE_TYPE
 
@@ -352,3 +354,91 @@ def test_created_without_timezone_is_assumed_utc(tmp_path: Path) -> None:
     _calls, cb = _capture()
     watcher = AgentTicketsWatcher("agent-1", "agent-1-name", tickets_dir, cb)
     assert watcher.get_enrichment()["tt-naive"]["created_at"] == "2026-04-28T01:00:00.000000Z"
+
+
+# --- Per-session scoping (subagent steps must not leak into the main view) ---
+
+
+def _fixed_attribution(attribution: StepAttribution) -> Callable[[], StepAttribution]:
+    """A provider returning a fixed attribution, standing in for the session
+    watcher in scoping tests so they don't need a live transcript."""
+
+    def provider() -> StepAttribution:
+        return attribution
+
+    return provider
+
+
+def test_subagent_steps_scoped_out_of_main_view(tmp_path: Path) -> None:
+    """Steps a subagent created (and started/closed) in the SHARED .tickets dir
+    under the SAME agent name must not appear in the main view's enrichment;
+    they surface only under the subagent session's scope. This is the core bug:
+    on `main`, all four steps commingle in one dir stamped with one agent name."""
+    tickets_dir = tmp_path / ".tickets"
+    # Two main steps (started/closed in the main session) and two subagent steps.
+    _write_ticket(tickets_dir, "cod-main1", "closed", title="Main work one", agent="wolf", summary="done1")
+    _write_ticket(tickets_dir, "cod-main2", "in_progress", title="Main work two", agent="wolf")
+    _write_ticket(tickets_dir, "cod-sub1", "closed", title="Sub work one", agent="wolf", summary="subdone1")
+    _write_ticket(tickets_dir, "cod-sub2", "open", title="Sub pending", agent="wolf")
+
+    attribution = StepAttribution(
+        transition_ids_by_session={
+            "main-sess": ("cod-main1", "cod-main2"),
+            "agent-sub": ("cod-sub1",),
+        },
+        # cod-sub2 is pending: matched to the subagent by its create title.
+        create_titles_by_session={"agent-sub": ("Sub pending",)},
+        main_session_ids=("main-sess",),
+    )
+
+    _calls, cb = _capture()
+    watcher = AgentTicketsWatcher("wolf-id", "wolf", tickets_dir, cb, attribution_provider=_fixed_attribution(attribution))
+
+    main = watcher.get_enrichment()
+    assert sorted(main.keys()) == ["cod-main1", "cod-main2"]
+
+    sub = watcher.get_enrichment(session_id="agent-sub")
+    assert sorted(sub.keys()) == ["cod-sub1", "cod-sub2"]
+    # Enrichment content still travels with whichever scope owns the step.
+    assert sub["cod-sub1"]["summary"] == "subdone1"
+    assert main["cod-main1"]["summary"] == "done1"
+
+
+def test_scope_broadcasts_are_tagged_per_session(tmp_path: Path) -> None:
+    """On change, the main scope broadcasts an untagged step_enrichment message
+    (so the existing main-stream filter keeps it) while a subagent scope is
+    tagged with its session id (so the per-subagent filter routes it)."""
+    tickets_dir = tmp_path / ".tickets"
+    _write_ticket(tickets_dir, "cod-main1", "in_progress", title="Main", agent="wolf")
+    _write_ticket(tickets_dir, "cod-sub1", "in_progress", title="Sub", agent="wolf")
+    attribution = StepAttribution(
+        transition_ids_by_session={"main-sess": ("cod-main1",), "agent-sub": ("cod-sub1",)},
+        create_titles_by_session={},
+        main_session_ids=("main-sess",),
+    )
+
+    calls, cb = _capture()
+    watcher = AgentTicketsWatcher("wolf-id", "wolf", tickets_dir, cb, attribution_provider=_fixed_attribution(attribution))
+    watcher.get_enrichment()
+
+    messages = [msg for _agent_id, events in calls for msg in events]
+    by_scope = {msg.get("session_id"): msg for msg in messages}
+    # Main scope: untagged (no session_id), carries only the main step.
+    assert None in by_scope
+    assert list(by_scope[None]["enrichment"].keys()) == ["cod-main1"]
+    # Subagent scope: tagged with its session id, carries only the subagent step.
+    assert "agent-sub" in by_scope
+    assert list(by_scope["agent-sub"]["enrichment"].keys()) == ["cod-sub1"]
+    assert by_scope["agent-sub"]["type"] == ENRICHMENT_MESSAGE_TYPE
+
+
+def test_no_attribution_provider_keeps_everything_in_main(tmp_path: Path) -> None:
+    """Without a provider (single-agent path, and the path tests without a
+    session watcher take), every step stays in the main scope and a subagent
+    query returns nothing."""
+    tickets_dir = tmp_path / ".tickets"
+    _write_ticket(tickets_dir, "cod-a", "open", title="A", agent="wolf")
+    _calls, cb = _capture()
+    watcher = AgentTicketsWatcher("wolf-id", "wolf", tickets_dir, cb)
+    assert list(watcher.get_enrichment().keys()) == ["cod-a"]
+    assert watcher.get_enrichment(session_id="agent-sub") == {}

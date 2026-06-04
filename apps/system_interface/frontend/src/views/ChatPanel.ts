@@ -24,15 +24,9 @@ import { openLoginModal } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import {
-  renderUserMessage,
-  renderAssistantMessage,
-  buildToolResultsWithSkillExpansions,
-  computeAuthErrorHiddenEventIds,
-} from "./message-renderers";
+import { computeAuthErrorHiddenEventIds } from "./message-renderers";
 import { buildAgentTerminalUrl, getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import { buildSections } from "./turn-grouping";
-import { ProgressBlock } from "./ProgressBlock";
+import { renderConversation } from "./conversation-render";
 import { ActivityIndicator } from "./ActivityIndicator";
 
 function getAgentTerminalUrl(agentId: string): string {
@@ -396,67 +390,22 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     startBackfill(agentId);
 
-    const toolResults = buildToolResultsWithSkillExpansions(events);
-
+    // Trim the pre-login auth-error prefix (hiding stays a frontend concern,
+    // see message-renderers). Everything else -- the transcript walk into turn
+    // sections, the progress timeline / plain-chat rendering -- is the shared
+    // conversation renderer, the SAME code the subagent view uses.
     const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
     const visibleEvents = events.filter((e) => !hiddenEventIds.has(e.event_id));
 
-    // tk is an enrichment side-table (titles, summaries, pending roster),
-    // joined onto the transcript-derived structure by id. It arrives as a
-    // separate snapshot (GET /events + the step_enrichment SSE message), kept
-    // current in the Response model; structure -- which steps exist, their
-    // order, grouping -- comes purely from the transcript walk.
+    // tk enrichment (titles, summaries, pending roster) is a side-table joined
+    // onto the transcript-derived structure by id; it arrives as a separate
+    // snapshot (GET /events + the step_enrichment SSE message), kept current in
+    // the Response model. Structure comes purely from the transcript walk.
     const enrichment = getEnrichmentForAgent(agentId);
     const agent = getAgentById(agentId);
     const agentIsIdle = agent?.activity_state === "IDLE";
 
-    // A single in-order walk of the transcript produces the turn sections:
-    // each carries its timeline items (steps, ungrouped runs, chips) and its
-    // wrap-up reply. There is no timestamp-based grouping or sorting.
-    const sections = buildSections(visibleEvents, toolResults, enrichment, agentIsIdle);
-
-    const messageNodes: m.Children[] = [];
-    for (const section of sections) {
-      if (section.user_event !== null) {
-        const userNode = renderUserMessage(section.user_event);
-        if (userNode !== null) messageNodes.push(userNode);
-      }
-
-      const hasSteps = section.items.some((i) => i.kind === "step");
-      if (hasSteps) {
-        messageNodes.push(
-          m(ProgressBlock, {
-            key: `progress-${section.key}`,
-            items: section.items,
-            trailing_reply: section.trailing_reply,
-            toolResults,
-            agentId,
-          }),
-        );
-        continue;
-      }
-
-      // No steps this turn: render the body as plain chat -- prose and
-      // tool-call blocks inline, the same as assistant messages outside a
-      // progress section. Items are already in transcript order.
-      for (const item of section.items) {
-        if (item.kind === "ungrouped") {
-          for (const e of item.events) messageNodes.push(renderAssistantMessage(e, toolResults, agentId));
-        } else if (item.kind === "chip") {
-          const chipNode = renderUserMessage(item.event);
-          if (chipNode !== null) messageNodes.push(chipNode);
-        }
-      }
-      for (const e of section.trailing_reply) messageNodes.push(renderAssistantMessage(e, toolResults, agentId));
-    }
-
-    return m("div", { class: "message-list-wrapper" }, [
-      m(
-        "div",
-        { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
-        messageNodes,
-      ),
-    ]);
+    return renderConversation(visibleEvents, enrichment, agentId, agentIsIdle);
   }
 
   return {
