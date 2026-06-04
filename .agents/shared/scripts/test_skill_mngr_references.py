@@ -25,7 +25,10 @@ from pathlib import Path
 
 from imbue.mngr.main import cli
 
-_REPO_ROOT = Path(__file__).parent
+# This test lives at .agents/shared/scripts/<file>, so the repo root is three
+# directories up; the two skill-doc roots it scans are .agents/skills and
+# .agents/shared.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _SKILL_MD_ROOTS = (_REPO_ROOT / ".agents" / "skills", _REPO_ROOT / ".agents" / "shared")
 
 # Subcommands provided by mngr plugins (mngr_file, mngr_wait, ...). These are
