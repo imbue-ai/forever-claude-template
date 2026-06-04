@@ -86,6 +86,13 @@ def _validate_run_py(skill_dir: Path) -> str | None:
     first_few = run_py.read_text(encoding="utf-8").splitlines()[:5]
     has_pep723 = any(line.strip().startswith(_PEP723_HEADER) for line in first_few)
     has_marker = any(line.strip().startswith(_WORKSPACE_MARKER) for line in first_few)
+    if has_pep723 and has_marker:
+        return (
+            f"{run_py} has both a PEP 723 `# /// script` header and a "
+            f"`{_WORKSPACE_MARKER}` marker; use exactly one. The PEP 723 header "
+            f"forces an isolated env, which defeats the marker's purpose "
+            f"(importing a workspace lib from the synced workspace venv)."
+        )
     if not (has_pep723 or has_marker):
         return (
             f"{run_py} must begin with a PEP 723 `# /// script` header "

@@ -43,12 +43,11 @@ def _write_skill(
     if include_run_py:
         scripts = skill / "scripts"
         scripts.mkdir()
+        header = ""
         if run_py_has_pep723:
-            header = "# /// script\n# requires-python = \">=3.11\"\n# ///\n"
-        elif run_py_has_workspace_marker:
-            header = "# workspace-script: runs in the monorepo uv workspace venv\n"
-        else:
-            header = ""
+            header += "# /// script\n# requires-python = \">=3.11\"\n# ///\n"
+        if run_py_has_workspace_marker:
+            header += "# workspace-script: runs in the monorepo uv workspace venv\n"
         (scripts / "run.py").write_text(f"#!/usr/bin/env python3\n{header}print('hi')\n")
     return skill
 
@@ -129,6 +128,21 @@ def test_run_py_with_workspace_marker_is_ok(tmp_path: Path) -> None:
         run_py_has_workspace_marker=True,
     )
     assert validate_skill.validate(skill) is None
+
+
+def test_run_py_with_both_header_and_marker_is_invalid(tmp_path: Path) -> None:
+    """A run.py carrying both a PEP 723 header and the workspace marker is
+    invalid -- the header would force isolation and defeat the marker."""
+    skill = _write_skill(
+        tmp_path,
+        "s",
+        metadata_crystallized=True,
+        run_py_has_pep723=True,
+        run_py_has_workspace_marker=True,
+    )
+    error = validate_skill.validate(skill)
+    assert error is not None
+    assert "both" in error and "workspace-script" in error
 
 
 def test_crystallized_with_pep723_ok(tmp_path: Path) -> None:

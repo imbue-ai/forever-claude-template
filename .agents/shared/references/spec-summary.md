@@ -149,8 +149,9 @@ opt-in via a `[services.<name>.ai_spend]` table in `services.toml`; see
     #!/usr/bin/env python3
     # workspace-script: <which workspace lib it imports and why>
     ```
-  The validator requires one or the other. Prefer the self-contained form
-  whenever the script does not need a workspace lib.
+  The validator requires *exactly one* (carrying both is rejected -- a PEP
+  723 header would force isolation and defeat the marker). Prefer the
+  self-contained form whenever the script does not need a workspace lib.
 - `argparse` entry point; no interactive prompts.
 - Stateless by default. If persisted state is genuinely needed, flag it at
   Gate 2 -- don't invent a persistence scheme unilaterally.
