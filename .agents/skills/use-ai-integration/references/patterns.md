@@ -12,7 +12,6 @@ result = await run_completion(
     service_name="my-service",
     model="claude-haiku-4-5",
     anthropic_options={"temperature": 0},   # any Messages API param
-    spend_tracker=tracker,
 )
 text = result.text
 ```
@@ -26,6 +25,10 @@ text = result.text
   non-bare). It must be a real instruction -- an empty system prompt lets the
   auto-loaded CLAUDE.md hijack the non-bare fallback. See
   [billing-and-credentialing.md](billing-and-credentialing.md#why-claude--p-costs-more-and-the-three-cost-levers).
+- **Spend ceiling is optional and config-driven.** No tracker is passed; if
+  `[services.<service_name>.ai_spend]` exists in `services.toml` it is enforced
+  automatically (and aggregated across all calls). Same for `run_task`. See
+  the "Cost control" section of the skill.
 
 ## Pattern 2 -- `run_task` (one-shot agentic)
 
@@ -37,7 +40,6 @@ result = await run_task(
     "Read runtime/x/input.json and write runtime/x/output.json with ...",
     service_name="my-service",
     append_system="Only touch files under runtime/x/.",  # optional, layered on default
-    spend_tracker=tracker,
 )
 ```
 

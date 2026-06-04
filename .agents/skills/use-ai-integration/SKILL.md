@@ -15,7 +15,6 @@ Import what you need:
 
 ```python
 from ai_integration.core import run_completion, run_task, run_agent
-from ai_integration.spend import SpendTracker
 ```
 
 The functions are `async` (services here are async FastAPI). The `claude -p`
@@ -46,10 +45,9 @@ See [references/patterns.md](references/patterns.md) for a worked sketch of each
 ```python
 result = await run_completion(
     "Classify this email's intent:\n\n" + email_body,
-    service_name="email-triage",
+    service_name="email-triage",       # used to resolve the spend ceiling, if any
     model="claude-haiku-4-5",          # cheap default; override as needed
     system="You are an email triage classifier.",
-    spend_tracker=tracker,             # optional; see "Cost control" below
 )
 print(result.text, result.billing_path, result.cost_usd)
 ```
@@ -144,19 +142,26 @@ The live concern is **cost**, so:
 - **Confirm the billing path with the user at setup.** When wiring up a service
   that will do volume, surface which path it will use and roughly what it will
   cost, and get their OK before turning it on.
-- **Set a spend ceiling.** Pass a `SpendTracker` so cumulative spend is bounded:
+- **Offer the user a spend ceiling (optional, set in `services.toml`).** There is
+  no tracker to construct or pass -- spend tracking is resolved automatically from
+  the service's config and keyed by `service_name`, so spend aggregates across
+  *every* call for that service (persisted under `runtime/<service>/`). To enable
+  it, add an `[services.<name>.ai_spend]` table:
 
-  ```python
-  tracker = SpendTracker(
-      service_name="email-triage",
-      ceiling_usd=5.0,          # per rolling window (default 24h)
-      escalate=notify_user,     # called when the ceiling is hit
-  )
+  ```toml
+  [services.email-triage.ai_spend]
+  ceiling_usd = 5.0          # rolling-window budget
+  window_seconds = 86400     # optional; default 24h
   ```
 
-  Each call records its cost; once the window's spend hits the ceiling the next
-  call raises `SpendCeilingExceededError` and `escalate` fires (route it through
-  the `send-user-message` skill) instead of spending silently.
+  With this set, each call checks the ceiling first and records its cost after;
+  once the window's spend reaches the ceiling, the next call raises
+  `SpendCeilingExceededError` (and logs) instead of spending silently -- the
+  service can catch that to notify the user (e.g. via `send-user-message`). With
+  no `ai_spend` table the calls run unbounded. **This is opt-in: tell the user a
+  spend ceiling is available and let them decide whether to set one** (it does not
+  require the service to be a running background process -- a spend-tracking-only
+  `[services.<name>.ai_spend]` table with no `command` works too).
 
 ## What the library guarantees (so you don't have to)
 

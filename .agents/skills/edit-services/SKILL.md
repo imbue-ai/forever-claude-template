@@ -37,6 +37,36 @@ Each `[services.<name>]` entry defines a service that will run in its own tmux w
 - `never` (default): the service runs once. If it exits, it stays stopped.
 - `on-failure`: the service is restarted if it exits with a non-zero exit code.
 
+## AI spend ceiling (optional)
+
+A service that calls Claude through the `ai_integration` library (see the
+`use-ai-integration` skill) can declare an optional per-service spend ceiling.
+Add an `[services.<name>.ai_spend]` sub-table:
+
+```toml
+[services.email-triage]
+command = "uv run email-triage"
+
+[services.email-triage.ai_spend]
+ceiling_usd = 5.0          # rolling-window budget in USD
+window_seconds = 86400     # optional; default 24h
+```
+
+The library reads this by `service_name` and enforces it automatically (spend is
+aggregated across every call and persisted under `runtime/<name>/`). Omit the
+table to leave AI calls unbounded.
+
+This is the one part of a service entry that is **independent of `command`**: a
+service that needs a spend ceiling but is not a continuously-running background
+process can declare *only* the `ai_spend` table, with no `command`. The bootstrap
+manager skips command-less entries (so nothing is launched), while the spend
+loader still finds the ceiling by name:
+
+```toml
+[services.on-demand-classifier.ai_spend]
+ceiling_usd = 2.0
+```
+
 ## Important
 
 - Service names must be valid tmux window names (no spaces or special characters).

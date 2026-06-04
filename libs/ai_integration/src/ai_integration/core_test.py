@@ -45,6 +45,7 @@ def test_run_completion_prefers_direct_api_when_key_present() -> None:
             env={"ANTHROPIC_API_KEY": "sk"},
             api_backend=fake_api,
             cli_backend=fake_cli,
+            spend_loader=lambda _name: None,
         )
     )
     assert result.billing_path is BillingPath.DIRECT_API
@@ -78,6 +79,7 @@ def test_run_completion_falls_back_to_cli_without_key(tmp_path) -> None:
             env=env,
             api_backend=fake_api,
             cli_backend=fake_cli,
+            spend_loader=lambda _name: None,
         )
     )
     assert result.billing_path is BillingPath.CLAUDE_CLI
@@ -110,6 +112,7 @@ def test_run_completion_raises_without_any_credentials(tmp_path) -> None:
                 env=env,
                 api_backend=fake_api,
                 cli_backend=fake_cli,
+                spend_loader=lambda _name: None,
             )
         )
 
@@ -136,7 +139,7 @@ def test_run_completion_records_spend(tmp_path) -> None:
             system="You are terse.",
             service_name="svc",
             env={"ANTHROPIC_API_KEY": "sk"},
-            spend_tracker=tracker,
+            spend_loader=lambda _name: tracker,
             api_backend=fake_api,
             cli_backend=fake_cli,
         )
@@ -161,6 +164,7 @@ def test_run_task_forwards_append_system_and_keeps_tools_enabled(tmp_path) -> No
             env=env,
             append_system="Extra task instructions.",
             cli_backend=fake_cli,
+            spend_loader=lambda _name: None,
         )
     )
     assert seen["append_system"] == "Extra task instructions."
@@ -226,7 +230,9 @@ def test_create_worker_subprocess_runs_in_repo_root(tmp_path) -> None:
         # create_worker writes the result JSON to the ``--result-json`` path; mimic
         # that so the blocking helper can read a collected report back.
         result_path = Path(argv[argv.index("--result-json") + 1])
-        result_path.write_text('{"timed_out": false, "name": "done", "branch": "mngr/x"}')
+        result_path.write_text(
+            '{"timed_out": false, "name": "done", "branch": "mngr/x"}'
+        )
         return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
 
     payload = _run_create_worker_blocking(

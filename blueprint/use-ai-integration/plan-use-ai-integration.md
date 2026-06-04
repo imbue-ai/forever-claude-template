@@ -36,10 +36,15 @@ selection, logging, and spend control.
 > `claude -p` through the lib.
 >
 > **Cost (chat is protected post Jun-15 split; cost is the live concern):** always log the active
-> billing path; the authoring agent confirms the billing path with the user at setup; a runtime
-> spend tracker estimates cost ($) from token usage per-service (persisted under `runtime/<service>/`,
-> rolling configurable window), enforces a ceiling, and escalates via `send-user-message` on breach
-> instead of spending silently. Document the `ANTHROPIC_API_KEY`-means-full-API-billing footgun.
+> billing path; the authoring agent confirms the billing path with the user at setup. The spend
+> ceiling is **optional and configured in `services.toml`** (`[services.<name>.ai_spend]` with
+> `ceiling_usd` + optional `window_seconds`), not a tracker object threaded through calls: the library
+> resolves it by `service_name`, estimates cost ($) from token usage, persists the ledger under
+> `runtime/<service>/` (a rolling window, so spend aggregates across every call/restart), and on breach
+> raises `SpendCeilingExceededError` (which the service can catch to notify via `send-user-message`)
+> instead of spending silently. The `ai_spend` table is independent of `command`, so a non-running /
+> on-demand service can have a ceiling too. The skill instructs the agent to *inform the user a ceiling
+> is available* rather than requiring one. Document the `ANTHROPIC_API_KEY`-means-full-API-billing footgun.
 >
 > **`launch-task` changes (in scope):** add the synchronous launch -> await -> collect-structured-
 > result -> destroy path + structured terminal-report extraction + a destroy step; reword
@@ -107,8 +112,10 @@ selection, logging, and spend control.
   structured result, and destroys the agent; applying that result (e.g. self-edit merge) is left to
   a future skill.
 - Every paid call logs which billing path it used; the active path is confirmed with the user at
-  service-authoring time; cumulative estimated spend is tracked per-service and, on exceeding the
-  configured ceiling, further paid calls stop and the user is notified rather than silently billed.
+  service-authoring time. When a service opts into a ceiling via `services.toml`, cumulative estimated
+  spend is tracked per-service (aggregated across every call) and, on exceeding the configured ceiling,
+  further paid calls stop (raise) rather than being silently billed; with no ceiling configured, calls
+  run unbounded.
 - Credentialing "just works" inside a deployed minds agent (env inherited) and fails *loudly with a
   clear message* when no credential path resolves.
 - A child `claude -p` never engages mngr's stop/readiness-hook machinery (its `MAIN_CLAUDE_SESSION_ID`
@@ -148,8 +155,9 @@ selection, logging, and spend control.
   exact `claude -p` cost/usage field names at implementation.
   Also: `claude -p` child-env construction (unset `MAIN_CLAUDE_SESSION_ID`;
   optional `MNGR_*` strip), direct-Anthropic-API client factory (cheap-model default, prompt caching,
-  structured-output support), billing-path logging, and the per-service spend tracker/ceiling with
-  `send-user-message` escalation. Frozen data types, README, zero-count ratchet test.
+  structured-output support), billing-path logging, and the per-service spend ceiling resolved from
+  `services.toml` (`load_spend_tracker(service_name)`; optional, off when unconfigured; raises on
+  breach). Frozen data types, README, zero-count ratchet test.
 - **Extend `launch-task`**: add a synchronous launch -> await -> collect-structured-result ->
   destroy path + structured terminal-report extraction + a destroy step in `create_worker.py`; and
   reword its `await` docstring + subparser help and the `lead-proxy.md` framing so `await` reads as a
@@ -158,7 +166,8 @@ selection, logging, and spend control.
   service needs to call Claude."
 - **Tests**: unit coverage for `run_completion()` fallback selection (key present vs absent),
   `claude -p` child-env construction (asserting `MAIN_CLAUDE_SESSION_ID` is unset), spend-ceiling
-  enforcement/escalation, and the new `launch-task` synchronous wrapper + result extraction. No
+  enforcement and `services.toml` resolution (`load_spend_tracker`: present / absent / command-less /
+  missing-ceiling), and the new `launch-task` synchronous wrapper + result extraction. No
   string-constant tests; no tests of the decision-tree prose.
 - **Changelog**: per-project entries for the projects this PR touches (the `dev/` synthetic project
   for the new skill/lib + root registration, and `libs/mngr` if the launch-task script lives there —

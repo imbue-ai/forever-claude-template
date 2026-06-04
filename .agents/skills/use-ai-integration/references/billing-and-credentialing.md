@@ -20,6 +20,34 @@ Consequence: **the live concern is cost, not chat availability.** That is why th
 library logs the billing path and supports a spend ceiling, rather than gating
 calls to protect the chat.
 
+## The spend ceiling (optional, `services.toml`-driven)
+
+Spend tracking is **opt-in and configured in `services.toml`**, not in code -- the
+`run_*` functions take no tracker object. The library resolves the ceiling from
+`[services.<service_name>.ai_spend]` (the `service_name` every call already
+passes):
+
+```toml
+[services.email-triage.ai_spend]
+ceiling_usd = 5.0          # rolling-window budget
+window_seconds = 86400     # optional; default 24h
+```
+
+When present, each `run_completion` / `run_task` call checks the ceiling before
+spending and records the cost after; spend is **aggregated per service across
+every call** via the persisted ledger at `runtime/<service_name>/ai_spend.json`
+(so it survives restarts and spans all usages, not just one process). Once the
+window's spend reaches the ceiling, the next call raises
+`SpendCeilingExceededError` and logs, instead of spending silently; a service can
+catch that to route a notice through `send-user-message`. With no `ai_spend`
+table, calls run unbounded.
+
+The `ai_spend` table is independent of `command` / `restart`: a service that
+needs a budget but isn't a continuously-running background process (e.g. one
+invoked on demand) can declare `[services.<name>.ai_spend]` with no `command` --
+the bootstrap manager skips command-less entries, so nothing is launched, while
+the spend loader still finds the budget by name.
+
 ## Why `claude -p` costs more, and the three cost levers
 
 `claude -p` is pricier than a direct API call not because of the model but because

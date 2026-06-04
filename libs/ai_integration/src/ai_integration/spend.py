@@ -12,6 +12,7 @@ service restarts.
 
 import json
 import time
+import tomllib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -23,6 +24,10 @@ from ai_integration.errors import SpendCeilingExceededError
 
 # Default rolling window: 24 hours.
 DEFAULT_WINDOW_SECONDS = 86_400.0
+
+# Where service definitions (and their optional spend config) live. Relative to
+# the repo root, which is the cwd convention for services in this repo.
+DEFAULT_SERVICES_TOML = Path("services.toml")
 
 _Record = tuple[float, float]  # (timestamp, cost_usd)
 
@@ -132,3 +137,64 @@ class SpendTracker(MutableModel):
             )
             self.escalate(message)
             raise SpendCeilingExceededError(message)
+
+
+def load_spend_tracker(
+    service_name: str,
+    *,
+    services_toml_path: Path = DEFAULT_SERVICES_TOML,
+    state_root: Path = Path("runtime"),
+) -> SpendTracker | None:
+    """Build a ``SpendTracker`` from a service's ``services.toml`` config, or ``None``.
+
+    Spend tracking is **opt-in**: a service enables it by adding an
+    ``[services.<name>.ai_spend]`` table with at least ``ceiling_usd`` (and an
+    optional ``window_seconds``, defaulting to 24h). Returns ``None`` when the
+    file, the service entry, or the ``ai_spend`` table is absent -- so an
+    unconfigured service simply runs without a ceiling.
+
+    The ``ai_spend`` table is independent of ``command`` / ``restart``: a service
+    that needs spend tracking but is *not* a continuously-running background
+    process (e.g. one invoked on demand) can declare ``[services.<name>.ai_spend]``
+    with no ``command`` at all. The bootstrap manager skips command-less entries,
+    so nothing is launched, while this loader still finds the spend config by name.
+    """
+    if not services_toml_path.is_file():
+        return None
+    try:
+        data = tomllib.loads(services_toml_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "ai_integration spend: could not read {}; spend tracking disabled: {}",
+            services_toml_path,
+            exc,
+        )
+        return None
+    services = data.get("services")
+    if not isinstance(services, dict):
+        return None
+    service = services.get(service_name)
+    if not isinstance(service, dict):
+        return None
+    ai_spend = service.get("ai_spend")
+    if not isinstance(ai_spend, dict):
+        return None
+    ceiling = ai_spend.get("ceiling_usd")
+    # ``bool`` is an ``int`` subclass; exclude it so ``ceiling_usd = true`` is not
+    # silently treated as a $1 ceiling.
+    if isinstance(ceiling, bool) or not isinstance(ceiling, (int, float)):
+        logger.warning(
+            "ai_integration spend: [services.{}.ai_spend] has no numeric ceiling_usd; "
+            "spend tracking disabled for this service",
+            service_name,
+        )
+        return None
+    window = ai_spend.get("window_seconds", DEFAULT_WINDOW_SECONDS)
+    if isinstance(window, bool) or not isinstance(window, (int, float)):
+        window = DEFAULT_WINDOW_SECONDS
+    return SpendTracker(
+        service_name=service_name,
+        ceiling_usd=float(ceiling),
+        state_root=state_root,
+        window_seconds=float(window),
+    )

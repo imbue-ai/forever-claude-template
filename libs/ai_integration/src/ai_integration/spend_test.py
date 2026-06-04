@@ -1,7 +1,17 @@
 import pytest
 
 from ai_integration.errors import SpendCeilingExceededError
-from ai_integration.spend import SpendTracker
+from ai_integration.spend import (
+    DEFAULT_WINDOW_SECONDS,
+    SpendTracker,
+    load_spend_tracker,
+)
+
+
+def _write_toml(tmp_path, body: str):
+    path = tmp_path / "services.toml"
+    path.write_text(body, encoding="utf-8")
+    return path
 
 
 class _Clock:
@@ -101,3 +111,84 @@ def test_spend_persists_across_instances(tmp_path) -> None:
         clock=clock,
     )
     assert second.spent_in_window() == 3.0
+
+
+def test_load_spend_tracker_reads_ceiling_and_window(tmp_path) -> None:
+    toml = _write_toml(
+        tmp_path,
+        """
+[services.triage]
+command = "uv run triage"
+
+[services.triage.ai_spend]
+ceiling_usd = 7.5
+window_seconds = 3600
+""",
+    )
+    tracker = load_spend_tracker("triage", services_toml_path=toml, state_root=tmp_path)
+    assert tracker is not None
+    assert tracker.ceiling_usd == 7.5
+    assert tracker.window_seconds == 3600
+    assert tracker.service_name == "triage"
+
+
+def test_load_spend_tracker_works_without_command(tmp_path) -> None:
+    # A service that needs spend tracking but is not a continuously-running
+    # background process can declare only the ai_spend table (no command).
+    toml = _write_toml(
+        tmp_path,
+        """
+[services.batch-job.ai_spend]
+ceiling_usd = 2.0
+""",
+    )
+    tracker = load_spend_tracker(
+        "batch-job", services_toml_path=toml, state_root=tmp_path
+    )
+    assert tracker is not None
+    assert tracker.ceiling_usd == 2.0
+    # window_seconds omitted -> defaults to 24h.
+    assert tracker.window_seconds == DEFAULT_WINDOW_SECONDS
+
+
+def test_load_spend_tracker_none_when_unconfigured(tmp_path) -> None:
+    toml = _write_toml(
+        tmp_path,
+        """
+[services.triage]
+command = "uv run triage"
+""",
+    )
+    # No ai_spend table -> spend tracking off for that service.
+    assert (
+        load_spend_tracker("triage", services_toml_path=toml, state_root=tmp_path)
+        is None
+    )
+    # Unknown service -> None.
+    assert (
+        load_spend_tracker("ghost", services_toml_path=toml, state_root=tmp_path)
+        is None
+    )
+    # Missing file -> None.
+    assert (
+        load_spend_tracker(
+            "triage", services_toml_path=tmp_path / "nope.toml", state_root=tmp_path
+        )
+        is None
+    )
+
+
+def test_load_spend_tracker_none_when_ceiling_missing(tmp_path) -> None:
+    # An ai_spend table without a numeric ceiling_usd is a misconfiguration; it
+    # disables tracking (and logs) rather than guessing a ceiling.
+    toml = _write_toml(
+        tmp_path,
+        """
+[services.triage.ai_spend]
+window_seconds = 3600
+""",
+    )
+    assert (
+        load_spend_tracker("triage", services_toml_path=toml, state_root=tmp_path)
+        is None
+    )

@@ -15,5 +15,10 @@ bug fix), billing-path logging, and per-service spend control handled for you.
 - `run_agent(...)` -- a full agent via the `launch-task` synchronous
   launch -> await -> collect -> destroy path.
 
+Spend control is **opt-in via `services.toml`**, not a tracker passed in code: add
+`[services.<service_name>.ai_spend]` with `ceiling_usd` (and optional
+`window_seconds`) and `run_completion` / `run_task` enforce it automatically,
+keyed by `service_name` and aggregated across every call. No table -> unbounded.
+
 See the `use-ai-integration` skill for when to pick each pattern and the billing
 model.

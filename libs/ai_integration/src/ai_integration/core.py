@@ -32,13 +32,16 @@ from ai_integration.credentials import (
 from ai_integration.data_types import AgentOutcome, AgentResult, CompletionResult
 from ai_integration.errors import AgentRunError
 from ai_integration.pricing import DEFAULT_MODEL, counterfactual_direct_api_cost_usd
-from ai_integration.spend import SpendTracker
+from ai_integration.spend import SpendTracker, load_spend_tracker
 
 _CREATE_WORKER_REL = ".agents/skills/launch-task/scripts/create_worker.py"
 
 # Type aliases for the injectable backends (tests pass fakes).
 _ApiBackend = Callable[..., Awaitable[CompletionResult]]
 _CliBackend = Callable[..., Awaitable[CompletionResult]]
+# Resolves the per-service spend tracker from services.toml by service_name.
+# Injectable so tests can supply a tracker (or None) without a real services.toml.
+_SpendLoader = Callable[[str], SpendTracker | None]
 # The subprocess runner is injectable so the ``create_worker`` launch boundary
 # can be exercised without spawning a real ``uv run`` (mirrors the api/cli
 # backend and ``runner`` injection seams used elsewhere in this module).
@@ -77,13 +80,13 @@ async def run_completion(
     service_name: str,
     model: str = DEFAULT_MODEL,
     max_tokens: int = 1024,
-    spend_tracker: SpendTracker | None = None,
     env: Mapping[str, str] | None = None,
     anthropic_options: Mapping[str, object] | None = None,
     strip_mngr_agent_vars: bool = False,
     claude_cli_args: Sequence[str] | None = None,
     api_backend: _ApiBackend = backends.complete_via_api,
     cli_backend: _CliBackend = backends.complete_via_cli,
+    spend_loader: _SpendLoader = load_spend_tracker,
 ) -> CompletionResult:
     """Pattern 3: one non-agentic completion, direct API if keyed else ``claude -p``.
 
@@ -97,8 +100,16 @@ async def run_completion(
     user's prompt. Requiring ``system`` makes the neutralizing prompt mandatory by
     construction, so both backends share the same ``system`` and behave consistently
     even though the CLI fallback can't be made fully context-free.
+
+    Spend tracking is automatic and **opt-in via ``services.toml``**: the spend
+    tracker is resolved from ``[services.<service_name>.ai_spend]`` (no tracker
+    object to thread through calls). If the service configured a ceiling, this
+    checks it before the call and records the cost after; if not, the call runs
+    unbounded. Spend aggregates per service across every call via the persisted
+    ledger.
     """
     resolved_env = os.environ if env is None else env
+    spend_tracker = spend_loader(service_name)
     if spend_tracker is not None:
         spend_tracker.check_ceiling()
 
@@ -144,11 +155,11 @@ async def run_task(
     model: str = DEFAULT_MODEL,
     system: str | None = None,
     append_system: str | None = None,
-    spend_tracker: SpendTracker | None = None,
     env: Mapping[str, str] | None = None,
     strip_mngr_agent_vars: bool = False,
     claude_cli_args: Sequence[str] | None = None,
     cli_backend: _CliBackend = backends.complete_via_cli,
+    spend_loader: _SpendLoader = load_spend_tracker,
 ) -> CompletionResult:
     """Pattern 2: one-shot agentic task via headless ``claude -p`` (tools/file access).
 
@@ -158,8 +169,12 @@ async def run_task(
     (``--append-system-prompt``) layers task instructions on top of that default;
     pass ``system`` (``--system-prompt``) only to fully replace it. ``--bare`` is
     not used -- it would strip the agent and, keyless, can't authenticate.
+
+    Spend tracking is automatic and opt-in via ``services.toml`` (resolved from
+    ``[services.<service_name>.ai_spend]``), the same as ``run_completion``.
     """
     resolved_env = os.environ if env is None else env
+    spend_tracker = spend_loader(service_name)
     if spend_tracker is not None:
         spend_tracker.check_ceiling()
     require_credentials(resolved_env)
