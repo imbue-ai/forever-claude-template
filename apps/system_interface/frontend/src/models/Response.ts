@@ -25,39 +25,101 @@ export interface ToolCall {
   subagent_metadata?: SubagentMetadata;
 }
 
-export interface TranscriptEvent {
+/**
+ * Status vocabulary mirrored from the tk ticket tracker:
+ *   - "open"        -> rendered as "pending" in the chat progress UI
+ *   - "in_progress" -> rendered as "active"
+ *   - "closed"      -> rendered as "done"
+ * There is no failed state by design (every ticket terminates as closed
+ * with a summary; see CLAUDE.md "Task management" in the FCT side).
+ */
+export type TaskEventStatus = "open" | "in_progress" | "closed";
+
+/**
+ * Fields shared by every event, regardless of `type`. The `/events` stream is
+ * the session transcript (user/assistant/tool_result); these are the only
+ * transport-level fields guaranteed on all variants. (tk step state is not in
+ * this stream -- it ships as a separate enrichment snapshot, see
+ * StepEnrichment.)
+ */
+export interface BaseTranscriptEvent {
   timestamp: string;
-  type: "user_message" | "assistant_message" | "tool_result";
   event_id: string;
   source: string;
-  message_uuid: string;
+  // message_uuid is always set for transcript events; session_id is set only
+  // when the backend knows which session file an event came from, so it is
+  // conditional on every variant.
+  message_uuid?: string;
   session_id?: string;
+}
 
-  // user_message fields
-  role?: string;
-  content?: string;
+/**
+ * A message from the user (or a hook/system message rendered as one).
+ * session_parser only emits this event when there is real user text, so
+ * `content` is always present and non-empty.
+ */
+export interface UserMessageEvent extends BaseTranscriptEvent {
+  type: "user_message";
+  role: string;
+  content: string;
+}
 
-  // assistant_message fields
-  model?: string;
-  text?: string;
-  tool_calls?: ToolCall[];
-  stop_reason?: string | null;
-  usage?: {
+/**
+ * A model turn: prose text and/or tool calls. Every field below is always
+ * present in the backend's emit (`session_parser._parse_assistant_message`);
+ * `text` may be empty and `tool_calls` may be empty, but the keys are always
+ * there, and `stop_reason` / `usage` are present-but-nullable.
+ */
+export interface AssistantMessageEvent extends BaseTranscriptEvent {
+  type: "assistant_message";
+  model: string;
+  text: string;
+  tool_calls: ToolCall[];
+  stop_reason: string | null;
+  usage: {
     input_tokens: number;
     output_tokens: number;
-    cache_read_tokens?: number | null;
-    cache_write_tokens?: number | null;
+    cache_read_tokens: number | null;
+    cache_write_tokens: number | null;
   } | null;
-
-  // assistant_message: true when the text matches a known Claude auth-error pattern
-  is_auth_error?: boolean;
-
-  // tool_result fields
-  tool_call_id?: string;
-  tool_name?: string;
-  output?: string;
-  is_error?: boolean;
+  // True when the text matches a known Claude auth-error pattern.
+  is_auth_error: boolean;
 }
+
+/**
+ * The result of a single tool call, keyed back by `tool_call_id`.
+ * session_parser skips emitting a tool_result with no tool_use_id, so when
+ * one exists `tool_call_id` is always a non-empty string.
+ */
+export interface ToolResultEvent extends BaseTranscriptEvent {
+  type: "tool_result";
+  tool_call_id: string;
+  tool_name: string;
+  output: string;
+  is_error: boolean;
+}
+
+/**
+ * Per-step enrichment, keyed by ticket id, delivered as a snapshot alongside
+ * the transcript (the `step_enrichment` field on the events response and the
+ * `step_enrichment` SSE message). tk owns this side-table: canonical title,
+ * close summary, current status, and the creation timestamp (used only to
+ * order not-yet-started steps). The progress view derives all structure from
+ * the transcript and joins this in by id; it never determines order or
+ * grouping.
+ */
+export interface StepEnrichment {
+  title: string;
+  summary: string | null;
+  status: TaskEventStatus;
+  created_at: string;
+}
+
+/**
+ * A single entry in the transcript event stream, discriminated by `type`.
+ * Narrow on `event.type` before touching variant-specific fields.
+ */
+export type TranscriptEvent = UserMessageEvent | AssistantMessageEvent | ToolResultEvent;
 
 // For hook compatibility
 export interface ResponseItem {
@@ -75,11 +137,29 @@ export interface ResponseItem {
 
 interface EventsResponse {
   events: TranscriptEvent[];
+  // Full, unpaginated snapshot of the agent's step enrichment keyed by ticket
+  // id. Always complete regardless of where the transcript window is, so a
+  // freshly-loaded tail still has titles/summaries for every visible step.
+  step_enrichment?: Record<string, StepEnrichment>;
 }
 
 const eventsByAgent: Record<string, TranscriptEvent[]> = {};
 const notFoundAgentIds = new Set<string>();
 const backfillComplete: Record<string, boolean> = {};
+// Per-agent step enrichment, keyed by ticket id. Replaced wholesale on each
+// snapshot (GET /events and the `step_enrichment` SSE message), never merged.
+const enrichmentByAgent: Record<string, Map<string, StepEnrichment>> = {};
+
+export function getEnrichmentForAgent(agentId: string): Map<string, StepEnrichment> {
+  return enrichmentByAgent[agentId] ?? new Map();
+}
+
+/** Replace an agent's enrichment table from a snapshot. Does not redraw --
+ *  callers in a fetch/redraw flow already trigger one; the SSE path redraws
+ *  explicitly. */
+export function applyEnrichmentSnapshot(agentId: string, snapshot: Record<string, StepEnrichment> | undefined): void {
+  enrichmentByAgent[agentId] = new Map(Object.entries(snapshot ?? {}));
+}
 
 export function isConversationNotFound(agentId: string): boolean {
   return notFoundAgentIds.has(agentId);
@@ -180,6 +260,7 @@ export async function fetchEvents(agentId: string): Promise<TranscriptEvent[]> {
       params: { agentId },
     });
     eventsByAgent[agentId] = result.events;
+    applyEnrichmentSnapshot(agentId, result.step_enrichment);
     return result.events;
   } catch (error) {
     const requestError = error as { code?: number; message?: string };
@@ -212,8 +293,11 @@ export async function fetchBackfillEvents(agentId: string): Promise<void> {
     } else {
       prependEvents(agentId, result.events);
     }
-  } catch {
-    // Backfill failure is non-fatal
+  } catch (error) {
+    // Backfill failure is non-fatal: the older history just isn't loaded, and
+    // `backfillComplete` stays unset so the next scroll retries. Log it so a
+    // persistent failure is diagnosable instead of vanishing silently.
+    console.warn(`Failed to backfill older events for agent ${agentId}`, error);
   }
 }
 

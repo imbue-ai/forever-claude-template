@@ -16,9 +16,23 @@ from imbue.system_interface.claude_auth_patterns import is_auth_error_text
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
+# tk lifecycle commands print `Updated <id> -> <status>` on each transition; the
+# chat progress view reads these from tool output to position a step's
+# open/close. They must survive output truncation (e.g. when a tk command is
+# batched after a verbose one whose output pushes the line past the limit), so a
+# step transition is never lost to truncation -- see `_truncate_tool_output`.
+_TK_TRANSITION_PATTERN = re.compile(r"Updated \S+ -> (?:open|in_progress|closed)")
+
 _SOURCE = "claude/common_transcript"
 
 _AGENT_ID_PATTERN = re.compile(r"agentId:\s*(\S+)")
+
+# Sentinel text Claude writes to the user channel when the user interrupts a
+# turn (e.g. presses Esc mid-tool-use). It is a control marker, not real user
+# input -- emitting it as a ``user_message`` event would pin the activity
+# indicator on "Thinking..." after every interrupt, since the transcript-tail
+# heuristic would treat it as "user just spoke, Claude hasn't replied yet."
+_INTERRUPT_SENTINEL_TEXT = "[Request interrupted by user]"
 
 # Claude Code's resume bookkeeping. Whenever ``claude --resume`` reloads a
 # session whose previous turn did not finish cleanly (the turn was interrupted,
@@ -96,6 +110,20 @@ def _extract_subagent_id(structured_agent_id: str | None, result_content: str) -
 def _make_event_id(uuid: str, suffix: str) -> str:
     """Derive a deterministic event_id from the source UUID and a suffix."""
     return f"{uuid}-{suffix}"
+
+
+def _truncate_tool_output(content: str) -> str:
+    """Truncate a tool result to the head limit, but keep any tk transition
+    lines (`Updated <id> -> <status>`) that fall past the cut, appended after
+    the truncation marker. This preserves the progress view's step-transition
+    signal even when a tk command's output is pushed past the limit."""
+    if len(content) <= _MAX_OUTPUT_LENGTH:
+        return content
+    head = content[:_MAX_OUTPUT_LENGTH]
+    preserved = [m.group(0) for m in _TK_TRANSITION_PATTERN.finditer(content) if m.end() > _MAX_OUTPUT_LENGTH]
+    if preserved:
+        return head + "...\n" + "\n".join(preserved)
+    return head + "..."
 
 
 def _is_resume_continuation_marker(raw: dict[str, Any]) -> bool:
@@ -301,8 +329,7 @@ def _parse_user_message(
         event_id = _make_event_id(uuid, "user")
         if event_id not in existing_event_ids:
             text = _extract_text_content(content)
-            # Drop Claude Code's resume bookkeeping -- its own UI hides it, so do we.
-            if text and not _is_resume_continuation_marker(raw):
+            if text and text.strip() != _INTERRUPT_SENTINEL_TEXT and not _is_resume_continuation_marker(raw):
                 event: dict[str, Any] = {
                     "timestamp": timestamp,
                     "type": "user_message",
@@ -352,8 +379,7 @@ def _parse_user_message(
             if tool_name == "Agent":
                 extracted_subagent_id = _extract_subagent_id(structured_agent_id, result_content)
 
-            if len(result_content) > _MAX_OUTPUT_LENGTH:
-                result_content = result_content[:_MAX_OUTPUT_LENGTH] + "..."
+            result_content = _truncate_tool_output(result_content)
 
             event = {
                 "timestamp": timestamp,

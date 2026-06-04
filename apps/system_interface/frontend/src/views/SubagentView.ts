@@ -1,7 +1,13 @@
 import m from "mithril";
 import { apiUrl } from "../base-path";
-import type { TranscriptEvent, SubagentMetadata } from "../models/Response";
-import { renderAssistantMessageChildren } from "./message-renderers";
+import type {
+  TranscriptEvent,
+  AssistantMessageEvent,
+  UserMessageEvent,
+  ToolResultEvent,
+  SubagentMetadata,
+} from "../models/Response";
+import { buildToolResultsWithSkillExpansions, renderAssistantMessageChildren } from "./message-renderers";
 
 interface SubagentViewAttrs {
   agentId: string;
@@ -13,7 +19,7 @@ interface SubagentEventsResponse {
   metadata: SubagentMetadata | null;
 }
 
-function renderUserMessage(event: TranscriptEvent): m.Vnode {
+function renderUserMessage(event: UserMessageEvent): m.Vnode {
   return m("div", { class: "message message-user", key: event.event_id }, [
     m("div", { class: "message-user-bubble" }, [
       m("div", { class: "message-content whitespace-pre-wrap" }, event.content || ""),
@@ -22,8 +28,8 @@ function renderUserMessage(event: TranscriptEvent): m.Vnode {
 }
 
 function renderAssistantMessage(
-  event: TranscriptEvent,
-  toolResults: Map<string, TranscriptEvent>,
+  event: AssistantMessageEvent,
+  toolResults: Map<string, ToolResultEvent>,
   agentId: string,
 ): m.Vnode {
   return m(
@@ -137,12 +143,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
           m("p", { class: "text-text-secondary" }, "No events yet."),
         );
       } else {
-        const toolResults = new Map<string, TranscriptEvent>();
-        for (const event of events) {
-          if (event.type === "tool_result" && event.tool_call_id) {
-            toolResults.set(event.tool_call_id, event);
-          }
-        }
+        const toolResults = buildToolResultsWithSkillExpansions(events);
 
         const messageNodes: m.Vnode[] = [];
         for (const event of events) {

@@ -6,8 +6,15 @@
  * independently; each agent gets its own EventSource.
  */
 
+import m from "mithril";
 import { apiUrl } from "../base-path";
-import { appendEvents, fetchEvents, type TranscriptEvent } from "./Response";
+import {
+  appendEvents,
+  applyEnrichmentSnapshot,
+  fetchEvents,
+  type StepEnrichment,
+  type TranscriptEvent,
+} from "./Response";
 import { openLoginModal } from "./ClaudeAuth";
 
 const activeStreams = new Map<string, EventSource>();
@@ -48,7 +55,15 @@ export function connectToStream(agentId: string): void {
   activeStreams.set(agentId, eventSource);
 
   eventSource.onmessage = (messageEvent: MessageEvent) => {
-    const event = JSON.parse(messageEvent.data) as TranscriptEvent;
+    const raw = JSON.parse(messageEvent.data) as { type?: string };
+    // A step_enrichment message is a full enrichment snapshot, not a
+    // transcript event -- replace the agent's table and redraw.
+    if (raw.type === "step_enrichment") {
+      applyEnrichmentSnapshot(agentId, (raw as { enrichment?: Record<string, StepEnrichment> }).enrichment);
+      m.redraw();
+      return;
+    }
+    const event = raw as TranscriptEvent;
     const pending = inFlightSnapshotBuffersByAgent.get(agentId);
     if (pending !== undefined) {
       pending.push(event);

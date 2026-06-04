@@ -63,21 +63,36 @@ but **do not delete it yet** -- section 5 below still needs to read
 `ticket_id.txt`. Section 6's commit cleanup removes it after the
 ticket is closed.
 
-## 3. Note breaking changes the worker introduced
+## 3. Reconcile shape changes the worker introduced
 
-Skim the worker's commits (`git log <merge-base>..HEAD`) for renames
-or semantic changes the worker landed during its autofix loop that
-weren't in the original sample. Common kinds:
+The worker is *encouraged* to improve the output shape during
+crystallization -- it's the moment to reconsider how the task should
+be done (see its Gate 2 "Shape changes from the sample" line and the
+worker skill). So the merged skill's output may legitimately differ
+from the sample the user confirmed; that's expected, not a defect.
+Skim the worker's commits (`git log <merge-base>..HEAD`) and its Gate 2
+summary for renames or semantic changes. Common kinds:
 
-- **Field renames** in the output JSON (e.g. `mention_count` →
-  `channel_mention_count` because the original name was misleading).
+- **Field renames / restructuring** in the output JSON (e.g.
+  `mention_count` → `channel_mention_count`, or a flat list becoming
+  grouped).
 - **Exit code changes** (e.g. tightening a generic non-zero into a
   documented `2 = auth missing`, `1 = other` split).
 - **CLI flag renames** or default changes.
 
-Update consumers to match the new contract. If a consumer was already
-keying on a field name or exit code, the rename will break it
-silently -- grep for the old names and update.
+Two kinds of consumer to update:
+
+- **Code consumers** keying on a field name or exit code -- the rename
+  breaks them silently; grep for the old names and update.
+- **Surfaces** built during `do-something-new` Step 7 (web views, etc.)
+  that render the sample/pipeline output. Point them at the new output
+  and update their rendering to the new shape.
+
+**If the shape changed, re-confirm with the user.** They signed off on
+the sample's shape, not the worker's revised one -- so after updating a
+surface, show them the result (or at least describe what changed) and
+let them react, rather than silently swapping in a different-looking
+output.
 
 ## 4. Restart any service that consumed the old path
 

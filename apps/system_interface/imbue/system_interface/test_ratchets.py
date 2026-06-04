@@ -93,7 +93,7 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(1))
+    rc.check_getattr(_DIR, snapshot(0))
 
 
 def test_prevent_setattr() -> None:
@@ -262,7 +262,7 @@ def test_prevent_if_elif_without_else() -> None:
 
 
 def test_prevent_inline_functions() -> None:
-    rc.check_inline_functions(_DIR, snapshot(3))
+    rc.check_inline_functions(_DIR, snapshot(1))
 
 
 def test_prevent_underscore_imports() -> None:
@@ -270,11 +270,19 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
+    # +1 since the introduction of the tickets pipeline:
+    # AgentTicketsWatcher.__init__ (stateful background watcher, mirroring
+    # AgentSessionWatcher's __init__ pattern -- a classmethod factory
+    # wouldn't help). The watchdog file-change handler's __init__ is
+    # already counted toward the project's existing total (it lived in
+    # session_watcher.py before the tickets pipeline arrived; it now
+    # lives in watcher_common.py as the shared WakeOnChangeHandler
+    # consumed by both watchers).
     # +1 for layout_ops.LayoutMutex.__init__. The mutex holds runtime state
     # (a ``threading.Lock`` and a holder dict mutated under that lock) that
     # is not a natural fit for a Pydantic model, matching the precedent
     # already set by session_watcher / event_queues entries here.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(5))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
 
 
 def test_prevent_cast_usage() -> None:

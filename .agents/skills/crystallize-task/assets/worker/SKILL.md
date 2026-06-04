@@ -72,6 +72,16 @@ Produce a short outline with:
 - 2-3 evaluation scenarios you plan to hand-craft (happy path + edge cases).
 - Any edge cases you foresaw but chose not to handle (and why).
 
+**You are not bound to the sample's data shape.** The lead may hand you sample
+data or scratch scripts (via `source_artifacts_dir`) that fix a particular
+output schema, but crystallization is exactly the moment to reconsider how the
+task should be done -- including improving the output shape, field names, or
+structure. Changing it is allowed and expected; reliability and a clean design
+win over matching the scratch shape. When your planned output differs from the
+sample the lead handed off, **call that out explicitly in the outline** (and
+again at Gate 2): the lead may have surfaces built on the old shape that need
+reconciling, and they can only do that if you flag the delta.
+
 ### Gate 1: outline approval
 
 Write a report with `type: gate`, `name: outline-approval`, and a body
@@ -179,6 +189,8 @@ Built `<name>`:
 - SKILL.md: <one-line summary>
 - Scripts: <one-line summary per script, or "none -- pure prose skill">
 - Scenarios run: <list, with pass/fail>
+- Shape changes from the sample: <none, or list the output-schema / field /
+  CLI / exit-code deltas a consumer or surface would need to adapt to>
 
 Approve and save? (yes / no with notes)
 ```

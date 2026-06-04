@@ -3,9 +3,13 @@
 ## [Unreleased]
 
 ### Changed
+- Step records (`tk create --step`) now get an id with a literal `-step-` segment (e.g. `cod-step-f1zl`) instead of the plain `cod-f1zl`, so a step is distinguishable from a regular ticket by its id alone -- without reading the file's `step: true` frontmatter. Regular ticket ids are unchanged. (Lets a downstream progress view keep a step's grouping after its `.tickets/` file is deleted, when the frontmatter is no longer readable.)
+- `tk close <id> "summary"` now stores the close summary in a dedicated, untimestamped `## Summary` section (printf-appended, so arbitrary text is escaping-safe) instead of a timestamped `## Notes` entry; a re-close replaces the prior summary rather than appending a duplicate
 - Extracted `edit`, `ls`, `query`, and `migrate-beads` commands to plugins (ticket-extras)
+- Timestamps (`created`, note timestamps) now carry microsecond precision where the platform's `date` supports it (GNU `%N`), with a `.000000` fallback elsewhere; the fixed-width format keeps lexicographic order equal to chronological order
 
 ### Added
+- `tk start` stamps a `started:` frontmatter timestamp and `tk close` stamps a `closed:` timestamp, so consumers can order tickets by when work began and completed (used by downstream progress views)
 - Plugin system: executables named `tk-<cmd>` or `ticket-<cmd>` in PATH are invoked automatically
 - `super` command to bypass plugins and run built-in commands directly
 - `TICKETS_DIR` and `TK_SCRIPT` environment variables exported for plugins

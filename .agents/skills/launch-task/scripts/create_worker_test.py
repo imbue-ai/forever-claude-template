@@ -67,7 +67,7 @@ def _make_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     """Create runtime_dir / task_file / artifacts_dir under tmp_path.
 
     The task file has plain frontmatter (no ``source_artifacts_dir``); tests
-    that exercise the artifacts push overwrite it via ``_write_task``.
+    that exercise the artifacts sync overwrite it via ``_write_task``.
     """
     runtime = tmp_path / "runtime" / "launch-task" / "demo"
     runtime.mkdir(parents=True)
@@ -106,18 +106,17 @@ def test_happy_path_no_artifacts(tmp_path: Path) -> None:
         ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
         [
             "mngr",
-            "push",
-            f"demo-worker:{runtime}/",
-            "--source",
+            "rsync",
             f"{runtime}/",
+            f"demo-worker:{runtime}/",
             "--uncommitted-changes=merge",
         ],
         ["mngr", "message", "demo-worker", "--message-file", str(task)],
     ]
 
 
-def test_source_artifacts_dir_pushed_after_runtime(tmp_path: Path) -> None:
-    """A frontmatter ``source_artifacts_dir`` is pushed right after the runtime dir."""
+def test_source_artifacts_dir_synced_after_runtime(tmp_path: Path) -> None:
+    """A frontmatter ``source_artifacts_dir`` is synced right after the runtime dir."""
     runtime, task, artifacts = _make_layout(tmp_path)
     _write_task(task, str(artifacts))
     runner = _RecordingRunner()
@@ -132,22 +131,20 @@ def test_source_artifacts_dir_pushed_after_runtime(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    push_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "push"]]
-    assert push_calls == [
+    rsync_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "rsync"]]
+    assert rsync_calls == [
         [
             "mngr",
-            "push",
-            f"demo-worker:{runtime}/",
-            "--source",
+            "rsync",
             f"{runtime}/",
+            f"demo-worker:{runtime}/",
             "--uncommitted-changes=merge",
         ],
         [
             "mngr",
-            "push",
-            f"demo-worker:{artifacts}/",
-            "--source",
+            "rsync",
             f"{artifacts}/",
+            f"demo-worker:{artifacts}/",
             "--uncommitted-changes=merge",
         ],
     ]
@@ -221,7 +218,7 @@ def test_invalid_frontmatter_yaml_raises(tmp_path: Path) -> None:
 
 def test_malformed_frontmatter_does_not_abort_launch(tmp_path: Path) -> None:
     """A task file with no/broken frontmatter launches normally with no artifacts
-    push -- frontmatter schema validation is the worker's job, not launch's."""
+    sync -- frontmatter schema validation is the worker's job, not launch's."""
     runtime, task, _ = _make_layout(tmp_path)
     task.write_text("no frontmatter here, just a body\n")
     runner = _RecordingRunner()
@@ -236,14 +233,13 @@ def test_malformed_frontmatter_does_not_abort_launch(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    push_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "push"]]
-    assert push_calls == [
+    rsync_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "rsync"]]
+    assert rsync_calls == [
         [
             "mngr",
-            "push",
-            f"demo-worker:{runtime}/",
-            "--source",
+            "rsync",
             f"{runtime}/",
+            f"demo-worker:{runtime}/",
             "--uncommitted-changes=merge",
         ],
     ]
@@ -380,10 +376,9 @@ def test_common_transcript_flushed_before_message_send(tmp_path: Path) -> None:
         ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
         [
             "mngr",
-            "push",
-            f"demo-worker:{runtime}/",
-            "--source",
+            "rsync",
             f"{runtime}/",
+            f"demo-worker:{runtime}/",
             "--uncommitted-changes=merge",
         ],
         [expected_script, "--single-pass"],

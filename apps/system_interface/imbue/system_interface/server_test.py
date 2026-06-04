@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from imbue.mngr.errors import AgentStartError
+from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
@@ -19,6 +20,7 @@ from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import _stream_filtered_events
 from imbue.system_interface.server import create_application
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 # Placeholder client-side port used by the layout broadcast tests. Only the
 # host portion of the TestClient ``client`` tuple is inspected by the
@@ -399,6 +401,84 @@ def test_layout_broadcast_rejects_non_loopback(app: FastAPI) -> None:
             json={"op": "open", "args": {"ref": "service:web"}, "agent_id": "agent-42"},
         )
     assert response.status_code == 403
+
+
+def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hitting /api/agents/{id}/events for a Claude session with an unmatched tool_use
+    seeds the AgentManager's transcript-derived signals so the activity indicator
+    reads ``TOOL_RUNNING`` immediately.
+    """
+    agent_id = "agent-pending-tool"
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", agent_id)
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path / "work"))
+
+    state_dir = tmp_path / "agents" / agent_id
+    state_dir.mkdir(parents=True)
+
+    claude_config_dir = tmp_path / "claude_config"
+    projects_dir = claude_config_dir / "projects" / "hash123"
+    projects_dir.mkdir(parents=True)
+    session_id = "test-session-id"
+    session_file = projects_dir / f"{session_id}.jsonl"
+    # An assistant message that includes a tool_use, with no matching tool_result.
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "uuid-1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [
+                        {"type": "text", "text": "running a command"},
+                        {"type": "tool_use", "id": "call_a", "name": "Bash", "input": {"command": "ls"}},
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            }
+        )
+        + "\n"
+    )
+    (state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
+
+    broadcaster = WebSocketBroadcaster()
+    manager = AgentManager.build(broadcaster)
+    with manager._lock:
+        manager._agents[agent_id] = AgentStateItem(
+            id=agent_id,
+            name="seed-agent",
+            state="RUNNING",
+            labels={},
+            work_dir=str(tmp_path / "work"),
+        )
+    manager._ensure_activity_tracking(agent_id)
+
+    app = create_application(agent_manager=manager)
+    agent_info = AgentInfo(
+        id=agent_id,
+        name="seed-agent",
+        state="RUNNING",
+        agent_state_dir=state_dir,
+        claude_config_dir=claude_config_dir,
+    )
+
+    try:
+        with TestClient(app) as test_client:
+            with patch("imbue.system_interface.server._find_agent", return_value=agent_info):
+                response = test_client.get(f"/api/agents/{agent_id}/events")
+            assert response.status_code == 200
+
+        # The watcher creation path seeds transcript-derived state
+        # synchronously. Assert before ``stop()``, which clears these
+        # caches alongside the marker watchers.
+        with manager._lock:
+            assert manager._has_unmatched_tool_use_by_agent[agent_id] is True
+            assert manager._activity_state_by_agent[agent_id] == ActivityState.TOOL_RUNNING
+    finally:
+        manager.stop()
 
 
 def test_layout_broadcast_rejects_unknown_op(app: FastAPI) -> None:

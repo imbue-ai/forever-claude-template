@@ -16,30 +16,38 @@ from typing import Any
 from typing import Callable
 
 from loguru import logger as _loguru_logger
-from watchdog.events import FileSystemEvent
-from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from imbue.system_interface.session_parser import parse_session_lines
+from imbue.system_interface.watcher_common import POLL_INTERVAL_SECONDS
+from imbue.system_interface.watcher_common import WakeOnChangeHandler
 
 logger = _loguru_logger
 
-_NON_CHANGE_EVENT_TYPES = frozenset({"opened", "closed", "closed_no_write"})
-
-_POLL_INTERVAL_SECONDS = 1.0
 _BRIEF_WAIT_SECONDS = 0.5
 
 
-class _ChangeHandler(FileSystemEventHandler):
-    """Watchdog handler that wakes the watcher on actual file changes."""
+def read_complete_lines_since_offset(file_path: Path, byte_offset: int) -> tuple[int, list[str]]:
+    """Read newly-appended, newline-terminated lines from ``file_path`` starting at ``byte_offset``.
 
-    def __init__(self, wake_event: threading.Event) -> None:
-        self._wake_event = wake_event
+    Returns the advanced byte offset and the decoded complete lines. Only complete,
+    newline-terminated lines are consumed: a trailing partial line means the file was
+    caught mid-write (Claude may split a single JSONL record across flushes that a poll
+    lands between), so its bytes are left unread and the returned offset stays aligned to
+    a line boundary -- the next read reparses the full line once it lands. When there are
+    no new bytes or no complete line yet, the offset is returned unchanged with an empty
+    list. Raises ``OSError`` if the file cannot be read.
+    """
+    with open(file_path, "rb") as f:
+        f.seek(byte_offset)
+        new_data = f.read()
 
-    def on_any_event(self, event: FileSystemEvent) -> None:
-        if event.event_type in _NON_CHANGE_EVENT_TYPES:
-            return
-        self._wake_event.set()
+    last_newline = new_data.rfind(b"\n")
+    if last_newline == -1:
+        return byte_offset, []
+    complete_data = new_data[: last_newline + 1]
+    new_offset = byte_offset + len(complete_data)
+    return new_offset, complete_data.decode("utf-8", errors="replace").splitlines()
 
 
 class SessionFileState:
@@ -163,24 +171,6 @@ class AgentSessionWatcher:
         self._enrich_subagent_metadata(all_events)
         return all_events
 
-    def get_backfill_events(
-        self, before_event_id: str, limit: int = 50, session_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Get events before a given event_id for backfill pagination."""
-        all_events = self.get_all_events(session_id=session_id)
-
-        target_idx = -1
-        for i, event in enumerate(all_events):
-            if event["event_id"] == before_event_id:
-                target_idx = i
-                break
-
-        if target_idx <= 0:
-            return []
-
-        start_idx = max(0, target_idx - limit)
-        return all_events[start_idx:target_idx]
-
     def get_subagent_metadata(self, subagent_session_id: str) -> dict[str, str] | None:
         """Get metadata for a subagent by its session ID."""
         self._discover_sessions()
@@ -264,7 +254,7 @@ class AgentSessionWatcher:
         self._read_initial_offsets()
 
         while not self._stop_event.is_set():
-            self._wake_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+            self._wake_event.wait(timeout=POLL_INTERVAL_SECONDS)
             self._wake_event.clear()
 
             if self._stop_event.is_set():
@@ -320,7 +310,7 @@ class AgentSessionWatcher:
             if self._observer is not None:
                 parent_dir = str(file_path.parent)
                 try:
-                    self._observer.schedule(_ChangeHandler(self._wake_event), parent_dir, recursive=False)
+                    self._observer.schedule(WakeOnChangeHandler(self._wake_event), parent_dir, recursive=False)
                 except OSError:
                     logger.debug("Failed to schedule watchdog for %s", parent_dir)
 
@@ -343,9 +333,15 @@ class AgentSessionWatcher:
                 self._known_session_ids.append(sub_id)
                 if self._observer is not None:
                     try:
-                        self._observer.schedule(_ChangeHandler(self._wake_event), str(subagents_dir), recursive=False)
+                        self._observer.schedule(
+                            WakeOnChangeHandler(self._wake_event), str(subagents_dir), recursive=False
+                        )
                     except OSError:
-                        pass
+                        # Watch scheduling failed (inotify limits, fs quirk). The poll
+                        # loop still picks up subagent changes at POLL_INTERVAL, just
+                        # without sub-second latency -- log so the degraded watch is
+                        # diagnosable rather than silently dropped.
+                        logger.debug("Failed to schedule watchdog for {}", subagents_dir)
 
             # Cache .meta.json. Retry on each pass while the read fails with OSError
             # (transient: mid-write, momentary permission glitch). Give up after a
@@ -403,7 +399,7 @@ class AgentSessionWatcher:
 
         try:
             observer = Observer()
-            handler = _ChangeHandler(self._wake_event)
+            handler = WakeOnChangeHandler(self._wake_event)
             for dir_path in watched_dirs:
                 observer.schedule(handler, dir_path, recursive=False)
             observer.start()
@@ -449,16 +445,11 @@ class AgentSessionWatcher:
             if current_size <= state.byte_offset:
                 continue
 
-            # Read new bytes
             try:
-                with open(state.file_path, "rb") as f:
-                    f.seek(state.byte_offset)
-                    new_data = f.read()
-                state.byte_offset = state.byte_offset + len(new_data)
+                new_offset, new_lines = read_complete_lines_since_offset(state.file_path, state.byte_offset)
             except OSError:
                 continue
-
-            new_lines = new_data.decode("utf-8", errors="replace").splitlines()
+            state.byte_offset = new_offset
             if not new_lines:
                 continue
 
