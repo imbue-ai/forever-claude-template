@@ -55,6 +55,7 @@ from imbue.system_interface.models import CreateChatRequest
 from imbue.system_interface.models import CreateWorktreeRequest
 from imbue.system_interface.models import DestroyAgentResponse
 from imbue.system_interface.models import ErrorResponse
+from imbue.system_interface.models import InterruptAgentResponse
 from imbue.system_interface.models import RandomNameResponse
 from imbue.system_interface.models import SendMessageRequest
 from imbue.system_interface.models import SendMessageResponse
@@ -442,6 +443,62 @@ def _send_message_endpoint(agent_id: str, send_message_request: SendMessageReque
         return JSONResponse(content=error.model_dump(), status_code=500)
 
     return JSONResponse(content=SendMessageResponse(status="ok").model_dump())
+
+
+async def _interrupt_agent_endpoint(agent_id: str, request: Request) -> JSONResponse:
+    """Interrupt an agent's current turn by restarting it.
+
+    Runs ``mngr start <agent> --restart --no-resume``, which stops the agent
+    (ending any in-progress turn) and starts it fresh without sending a resume
+    message. Returns 404 if the agent is unknown, 400 if the agent carries the
+    ``is_primary=true`` label, 500 if the restart command fails, 200 otherwise.
+
+    Refuses to interrupt agents carrying the ``is_primary=true`` label: that's
+    the services agent for the workspace, and restarting it would stop the
+    bootstrap, telegram, web, cloudflared, and runtime-backup services. The
+    frontend already hides ``is_primary=true`` agents from the visible agent
+    list; this is defense-in-depth for callers that hit the endpoint directly
+    (curl, scripted use, etc.).
+    """
+    agent_info = _find_agent(agent_id, request)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    if agent_info.labels.get("is_primary") == "true":
+        error = ErrorResponse(
+            detail=(
+                f"Refusing to interrupt agent '{agent_info.name}': it carries "
+                "the is_primary=true label (services agent for this workspace)"
+            )
+        )
+        return JSONResponse(content=error.model_dump(), status_code=400)
+
+    agent_name = agent_info.name
+
+    def _run_restart() -> tuple[bool, str]:
+        result = run_local_command_modern_version(
+            command=["mngr", "start", agent_name, "--restart", "--no-resume"],
+            cwd=None,
+            is_checked=False,
+            timeout=60.0,
+        )
+        succeeded = result.returncode == 0
+        output = result.stdout.strip() if succeeded else result.stderr.strip()
+        return succeeded, output
+
+    success, output = await run_in_threadpool(_run_restart)
+    if not success:
+        error = ErrorResponse(detail=f"Failed to interrupt agent '{agent_name}': {output}")
+        return JSONResponse(content=error.model_dump(), status_code=500)
+
+    # The restart abandons the session transcript mid-turn, so the
+    # transcript-derived activity state would stay pinned at THINKING /
+    # TOOL_RUNNING until the user sends another message. Reset it to IDLE
+    # now so the activity indicator clears immediately after the stop.
+    agent_manager: AgentManager = request.app.state.agent_manager
+    agent_manager.reset_activity_state(agent_id)
+
+    return JSONResponse(content=InterruptAgentResponse(status="ok").model_dump())
 
 
 def _get_subagent_events(agent_id: str, subagent_session_id: str, request: Request) -> Response:
@@ -1000,6 +1057,7 @@ def create_application(
     application.add_api_route("/api/agents/{agent_id}/events", _get_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/stream", _stream_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])
+    application.add_api_route("/api/agents/{agent_id}/interrupt", _interrupt_agent_endpoint, methods=["POST"])
     application.add_api_route("/api/layout", _get_layout, methods=["GET"])
     application.add_api_route("/api/layout", _save_layout, methods=["POST"])
     application.add_api_route("/api/agents/{agent_id}/screen", _get_screen_capture, methods=["GET"])

@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.errors import AgentStartError
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.agent_discovery import AgentInfo
@@ -249,6 +250,108 @@ def test_send_message_success(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     mock_send.assert_called_once_with("test-agent", "hello")
+
+
+def test_interrupt_agent_returns_404_for_unknown_agent(client: TestClient) -> None:
+    """Interrupting a nonexistent agent returns 404."""
+    with patch("imbue.system_interface.server._find_agent", return_value=None):
+        response = client.post("/api/agents/nonexistent/interrupt")
+    assert response.status_code == 404
+
+
+def test_interrupt_agent_success(client: TestClient) -> None:
+    """Interrupting an agent restarts it via mngr and returns 200."""
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="claude-agent",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    fake_result = FinishedProcess(
+        returncode=0,
+        stdout="Restarted agent: claude-agent",
+        stderr="",
+        command=("mngr", "start", "claude-agent", "--restart", "--no-resume"),
+        is_output_already_logged=False,
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=agent_info),
+        patch(
+            "imbue.system_interface.server.run_local_command_modern_version",
+            return_value=fake_result,
+        ) as mock_run,
+        patch.object(AgentManager, "reset_activity_state") as mock_reset,
+    ):
+        response = client.post("/api/agents/agent-123/interrupt")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert mock_run.call_args.kwargs["command"] == [
+        "mngr",
+        "start",
+        "claude-agent",
+        "--restart",
+        "--no-resume",
+    ]
+    # After a successful restart the endpoint resets the agent's activity
+    # state so the indicator clears instead of staying pinned at THINKING.
+    mock_reset.assert_called_once_with("agent-123")
+
+
+def test_interrupt_agent_rejects_is_primary_agent(client: TestClient) -> None:
+    """POST /api/agents/<id>/interrupt returns 400 for the services agent.
+
+    Restarting the is_primary agent would stop the workspace services. The
+    frontend hides such agents; this server-side guard protects direct callers.
+    """
+    services_agent = AgentInfo(
+        id="services-1",
+        name="system-services",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+        labels={"is_primary": "true", "workspace": "my-ws"},
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=services_agent),
+        patch("imbue.system_interface.server.run_local_command_modern_version") as mock_run,
+    ):
+        response = client.post("/api/agents/services-1/interrupt")
+
+    assert response.status_code == 400
+    assert "is_primary" in response.json()["detail"]
+    # The guard runs before the restart subprocess, so mngr is never invoked.
+    mock_run.assert_not_called()
+
+
+def test_interrupt_agent_returns_500_on_failure(client: TestClient) -> None:
+    """If the mngr restart command exits non-zero, return 500 with its stderr."""
+    agent_info = AgentInfo(
+        id="agent-123",
+        name="claude-agent",
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/test"),
+        claude_config_dir=Path("/tmp/.claude"),
+    )
+    fake_result = FinishedProcess(
+        returncode=1,
+        stdout="",
+        stderr="mngr start failed",
+        command=("mngr", "start", "claude-agent", "--restart", "--no-resume"),
+        is_output_already_logged=False,
+    )
+    with (
+        patch("imbue.system_interface.server._find_agent", return_value=agent_info),
+        patch(
+            "imbue.system_interface.server.run_local_command_modern_version",
+            return_value=fake_result,
+        ),
+    ):
+        response = client.post("/api/agents/agent-123/interrupt")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Failed to interrupt agent 'claude-agent': mngr start failed"
 
 
 def test_get_layout_returns_404_when_no_layout_saved(

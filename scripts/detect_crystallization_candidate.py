@@ -89,7 +89,7 @@ _COMMON_TRANSCRIPT_SCRIPT_REL = Path("commands/common_transcript.sh")
 _COMMON_TRANSCRIPT_EVENTS_REL = Path("events/claude/common_transcript/events.jsonl")
 
 REMINDER_MESSAGE: str = (
-    "The turn that just finished used {count} non-read tool calls.\n"
+    "The turn that just finished used {count} non-read tool calls{interrupt_note}.\n"
     "\n"
     "Quick check: would repeating this task with new inputs follow a "
     "largely similar process -- same sources, same steps, same criteria, "
@@ -108,6 +108,49 @@ REMINDER_MESSAGE: str = (
     "If the task seems like a potential crystallization candidate, ask the user whether they "
     "expect to ever run it again; if so, you should crystallize it."
 )
+
+# Claude Code's post-interrupt resume bookkeeping. When ``claude --resume``
+# reloads a session whose previous turn was cut off (e.g. by the stop button's
+# ``mngr start --restart``), the framework injects an ``isMeta`` user message
+# with exactly this text to close the dangling turn. The common-transcript
+# converter reclassifies that isMeta user message into a ``tool_result`` event
+# with ``tool_name == "meta"`` and the text in ``output`` (see the converter's
+# isMeta branch). This literal mirrors ``_RESUME_CONTINUATION_TEXT`` in the
+# system_interface ``session_parser``: both are independent consumers of the
+# same Claude Code behavior, and there is no common module either side can
+# import, so the string is duplicated by design.
+RESUME_CONTINUATION_TEXT = "Continue from where you left off."
+
+
+def is_resume_continuation_marker(event: dict[str, Any]) -> bool:
+    """True if ``event`` is Claude Code's post-interrupt resume marker.
+
+    In the common transcript the marker is a ``tool_result`` event with
+    ``tool_name == "meta"`` whose ``output`` is exactly the resume-continuation
+    sentinel (see ``RESUME_CONTINUATION_TEXT``). A Stop-hook re-injection is
+    also a ``meta`` tool_result but carries different output, so gating on the
+    exact text distinguishes the two.
+    """
+    if event.get("type") != "tool_result" or event.get("tool_name") != "meta":
+        return False
+    output = event.get("output")
+    return isinstance(output, str) and output.strip() == RESUME_CONTINUATION_TEXT
+
+
+def _interrupt_note(interrupt_count: int) -> str:
+    """Concise parenthetical for a turn that spanned stop-button interrupts.
+
+    Empty when the turn was not interrupted. Otherwise it flags that the count
+    spans pre- and post-interrupt work and gives the escape hatch for the case
+    where the resumed work was actually an unrelated task.
+    """
+    if interrupt_count <= 0:
+        return ""
+    times = "once" if interrupt_count == 1 else f"{interrupt_count} times"
+    return (
+        f" (interrupted by the stop button {times}; the count spans the work "
+        "before and after -- ignore this if those were unrelated tasks)"
+    )
 
 
 def _read_common_transcript(path: Path) -> list[dict[str, Any]]:
@@ -367,18 +410,24 @@ def _write_nudge_state(path: Path, transcript_id: str, commit_count: int) -> Non
         pass
 
 
-def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
-    """Index of the event that prompted the agent's most recent response.
+def _previous_response_boundary(
+    events: list[dict[str, Any]], before: int
+) -> int | None:
+    """Index of the most recent response boundary before ``before``.
 
-    Either:
+    A response boundary is either:
     - A ``user_message`` (a real user input), or
     - A ``tool_result`` event with ``tool_name == "meta"`` (Claude Code's
-      Stop-hook re-injections, which the common-transcript converter
-      reclassifies from isMeta user events). Both kinds prompt a fresh
-      assistant response, so the tool-call count for "the turn that just
-      finished" should reset at them.
+      isMeta injections -- Stop-hook re-injections and post-interrupt resume
+      markers alike -- which the common-transcript converter reclassifies from
+      isMeta user events). Both kinds prompt a fresh assistant response, so the
+      tool-call count for "the turn that just finished" resets at them.
+
+    The backward scan starts at ``before - 1``; pass ``len(events)`` to scan
+    the whole transcript. Used both for the latest boundary and to fold
+    interrupted-and-resumed turns.
     """
-    for index in range(len(events) - 1, -1, -1):
+    for index in range(before - 1, -1, -1):
         event = events[index]
         ev_type = event.get("type")
         if ev_type == "user_message":
@@ -386,6 +435,41 @@ def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
         if ev_type == "tool_result" and event.get("tool_name") == "meta":
             return index
     return None
+
+
+def _latest_response_boundary(events: list[dict[str, Any]]) -> int | None:
+    """Index of the event that prompted the agent's most recent response."""
+    return _previous_response_boundary(events, len(events))
+
+
+def _logical_turn_start(events: list[dict[str, Any]]) -> int | None:
+    """Index of the event that begins the logical turn that just finished.
+
+    Starts from ``_latest_response_boundary`` and folds backward across Claude
+    Code's post-interrupt resume markers. When the stop button interrupts a
+    turn, ``claude --resume`` injects a resume-continuation marker before the
+    user's next message; that next message continues the interrupted work
+    rather than starting a fresh turn. Folding past the marker makes the
+    pre-interrupt tool calls count toward the same turn. The loop collapses
+    multiple interrupts within one logical turn.
+
+    A Stop-hook re-injection (a ``meta`` tool_result with different output) is
+    NOT folded: it still resets the count, preserving per-response semantics.
+    """
+    boundary = _latest_response_boundary(events)
+    if boundary is None:
+        return None
+    while True:
+        previous = _previous_response_boundary(events, boundary)
+        if previous is None or not is_resume_continuation_marker(events[previous]):
+            return boundary
+        # events[previous] is the framework's resume marker, so the user
+        # message at `boundary` continues an interrupted turn. Fold back to
+        # the boundary that started that interrupted turn.
+        before_marker = _previous_response_boundary(events, previous)
+        if before_marker is None:
+            return boundary
+        boundary = before_marker
 
 
 def evaluate(
@@ -402,10 +486,11 @@ def evaluate(
 
     "The turn that just finished" is the agent's most recent response --
     everything after the most recent ``user_message`` or
-    ``tool_result(tool_name="meta")`` event. If the agent replied
-    without tools, the count is zero and the hook stays silent, which
-    is what we want when the Stop hook re-fires after a tool-free
-    acknowledgement.
+    ``tool_result(tool_name="meta")`` event, with one exception: a turn the
+    stop button interrupted and the user resumed is folded back into one turn
+    (see ``_logical_turn_start``). If the agent replied without tools, the
+    count is zero and the hook stays silent, which is what we want when the
+    Stop hook re-fires after a tool-free acknowledgement.
 
     ``transcript_id`` is the stable identifier under which we persist
     the nudge state -- typically the agent's state dir. When it changes
@@ -415,7 +500,7 @@ def evaluate(
     if not events:
         return False, ""
 
-    boundary = _latest_response_boundary(events)
+    boundary = _logical_turn_start(events)
     turn_events = events if boundary is None else events[boundary + 1 :]
     if not turn_events:
         return False, ""
@@ -451,7 +536,12 @@ def evaluate(
         return False, ""
 
     _write_nudge_state(nudge_state_path, transcript_id, len(commit_indices))
-    return True, REMINDER_MESSAGE.format(count=count)
+    interrupt_count = sum(
+        1 for event in turn_events if is_resume_continuation_marker(event)
+    )
+    return True, REMINDER_MESSAGE.format(
+        count=count, interrupt_note=_interrupt_note(interrupt_count)
+    )
 
 
 def _workspace_root() -> Path:
