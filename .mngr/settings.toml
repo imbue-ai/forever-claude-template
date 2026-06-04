@@ -100,6 +100,13 @@ is_enabled = false
 [providers.docker]
 is_enabled = false
 isolate_host_volumes = true
+# Run agent containers under the gVisor (`runsc`) runtime to shrink the host
+# kernel attack surface for untrusted agents. `runsc` must be installed and
+# registered with the local Docker daemon (see CLAUDE.md); container creation
+# fails with Docker's native "unknown runtime" error otherwise. Override back to
+# the default runtime where gVisor is unavailable (e.g. CI, Modal) with
+# MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
+docker_runtime = "runsc"
 
 # --- Create templates ---
 
@@ -132,13 +139,10 @@ extra_provision_command__extend = [
 [create_templates.docker]
 provider = "docker"
 target_path = "/mngr/code/"
-# Run the agent container under the gVisor (`runsc`) runtime to shrink the host
-# kernel attack surface for untrusted agents. `runsc` must be installed and
-# registered with the local Docker daemon (see CLAUDE.md); container creation
-# fails with Docker's native "unknown runtime" error otherwise. Override back to
-# the default runtime where gVisor is unavailable (e.g. CI, Modal) with
-# MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
-setting__extend = ["providers.docker.is_enabled=true", "providers.docker.docker_runtime=runsc"]
+# gVisor runtime selection lives in the [providers.docker] block above
+# (docker_runtime), not here -- provider config belongs on the provider, and
+# template `--setting` entries don't reliably reach the provider config anyway.
+setting__extend = ["providers.docker.is_enabled=true"]
 build_arg__extend = ["--file=Dockerfile", "."]
 # Security hardening for `docker run`: block privilege escalation via setuid
 # binaries. `--cap-add=SYS_PTRACE` was removed deliberately -- gVisor is the
