@@ -21,11 +21,14 @@
 - The mechanism for that safety is **mandatory delegation**: all `system_interface` changes go through a `launch-task` worker that builds, tests (Playwright against an isolated instance), and passes review gates on its own branch before the lead merges and reveals the change.
 - Two missing primitives are added so the lead can reveal a change cleanly: a documented backend restart (`mngr start --restart system-services`) and a new **full-UI reload** broadcast op (the existing `refresh` only reloads inner panels, not the shell).
 - The whole flow is crystallized into an `update-system-interface` skill so it is the single canonical path, with the README documenting the two reveal commands.
+- The worker needs no separate install of the live tool: it runs the edited code in-process from its own worktree (editable workspace member) via `uv run`, never touching the global `system-interface` tool or the `svc-system_interface` service that serve the live UI.
 
 ## Expected behavior
 
 - A user asking the lead to change the `system_interface` UI (frontend or backend) causes the lead to delegate the work to a worker rather than editing directly; the lead's progress view shows it as one delegation step.
-- The worker, on its own branch, makes the change, builds the frontend if touched (`npm run build`), and verifies it actually works by driving an isolated instance with Playwright (reusing the `test_e2e.py` harness), plus running frontend lint/unit tests and backend `pytest`, plus the repo review gates. It reports `done` only when all of that passes.
+- The worker, on its own branch and its own git worktree (the `worker` template does not share the work_dir), makes the change, builds the frontend if touched (`npm run build`), and verifies it actually works by driving an isolated instance with Playwright (reusing the `test_e2e.py` harness), plus running frontend lint/unit tests and backend `pytest`, plus the repo review gates. It reports `done` only when all of that passes.
+- The worker exercises the backend entirely in-process: `cd apps/system_interface && uv run pytest` imports `create_application` and runs uvicorn in-process, so the edited `.py` is picked up with no reinstall and no service restart. A fresh worktree has no `.venv` (gitignored), so the worker runs `uv sync --all-packages` once before `uv run`. Any ad-hoc manual instance the worker launches is a throwaway on an alternate port (e.g. `SYSTEM_INTERFACE_PORT=<alt> uv run system-interface`) against fixture data — never the live service.
+- The worker never touches the global `system-interface` tool or the `svc-system_interface` service (both pinned to `/mngr/code`, serving the live UI). Those are only acted on by the lead's post-merge reveal step.
 - The lead merges the worker's branch only after a clean `done`. A `stuck` report or timeout is surfaced to the user, never silently retried, and nothing is revealed to the user.
 - After merging, the lead inspects the merged diff to classify the change:
   - Backend files (`imbue/system_interface/**/*.py`) changed → lead runs `mngr start --restart system-services`; the running UI reconnects on the restarted backend.
@@ -45,6 +48,7 @@
 - **New `update-system-interface` agent skill (`.agents/skills/update-system-interface/SKILL.md`, symlinked into `.claude/skills/`):**
   - States the hard rule: the lead must never edit `system_interface` directly — always delegate via `launch-task`.
   - Specifies the worker brief: where source lives (backend `imbue/system_interface/`, frontend `frontend/src/`), how to build the frontend, and the testing contract — extend the existing `test_e2e.py` Playwright harness for crystallized e2e coverage, run frontend `npm run lint` + `npm run test` and backend `pytest`, and run the repo review gates; for each test type use exactly one of crystallized-e2e vs ad-hoc-manual (no duplicate coverage); report `done` only when all pass.
+  - Specifies the worker's run/test environment: it works in its own worktree, runs `uv sync --all-packages` once (fresh worktree has no `.venv`), and exercises the backend in-process via `uv run pytest` / a throwaway `uv run system-interface` on an alternate port — it must not install or restart the live tool/service.
   - Specifies the lead's post-merge steps: merge the worker branch on clean `done`; classify the merged diff as FE / BE / both; for BE run `mngr start --restart system-services`; for FE run `npm run build` then `reload_interface.py`; for both, restart then build + reload.
   - References `launch-task` for the delegation/merge mechanics rather than restating them.
 - **Documentation (`apps/system_interface/README.md`):**
