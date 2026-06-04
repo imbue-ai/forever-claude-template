@@ -100,7 +100,9 @@ Then for **each step in order**, one at a time:
    ```
 4. Move on to the next step. Only one is `in_progress` at a time.
 
-If during the work you discover a sub-problem that warrants its own step, `tk create --step` a new one (it'll appear at the bottom of the timeline). If you discover a previously-planned step is no longer needed, `tk close <id> "No longer needed — covered by the previous step."`.
+**Run `tk start` and `tk close` as the ONLY command in their tool call.** Nothing else in the same Bash call: no `cd`, no `&&`/`;`/`|`/`&`, no second command on a new line, and never redirect their output (no `>`, `>>`, `2>`, `&>`, `>/dev/null`). The progress view reconstructs each step from that command's *visible output* (the `Updated <id> -> <status>` line) and its *position* in the transcript; chaining the command, prefixing a `cd`, or swallowing its output makes the step's open/close invisible or mis-placed, so the step stops grouping the work done under it (and its close can leak into the timeline as a loose block). tk reads `TICKETS_DIR` and works from any directory, so you never need to `cd` to the repo root first — just run `tk start <id>` or `tk close <id> "<summary>"` on its own. A PreToolUse hook enforces this and will block a chained or redirected start/close. (This applies only to `start`/`close`; you may still batch several `S1=$(tk create --step "...")` in one call when declaring the plan up front.)
+
+If during the work you discover a sub-problem that warrants its own step, `tk create --step` a new one (it'll appear at the bottom of the timeline). If you discover a previously-planned step is no longer needed, `tk close <id> "No longer needed — covered by the previous step."` (as its own command).
 
 Summary rules: ONE concise line, plain English, describing **the work you did in this step** — what the user would see if they expanded the block. Think of it as a high-level non-technical caption for the raw tool calls inside.
 
