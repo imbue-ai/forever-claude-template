@@ -17,6 +17,14 @@ crystallize the process in the background while the conversation continues.
   fetches) *first*, before any other work. Fail fast on those.
 - Scripts written during this flow can be simple. Polish belongs in the
   crystallized version, not here.
+- **Demonstrate, don't assert.** Every claim about how the data will be
+  processed must be *shown* in a sample, never just promised in prose.
+- **The confirmed sample is the single source of truth.** It gates
+  crystallization, seeds the first surface, and defines the shape the
+  pipeline must reproduce. Nothing downstream may invent a second, different
+  way of producing the data.
+- **Confirm before you build.** No crystallization and no surfaces until the
+  user has explicitly confirmed a sample that covers every data shape.
 
 ## Conventions
 
@@ -124,47 +132,79 @@ service.
 Keep validation code simple -- inline bash, `uv run python -c`, or short
 scripts under `runtime/do-something-new/$SLUG/` if substantive.
 
-## Step 5: Generate and present a small minimum-viable sample
+## Step 5: The sample loop -- iterate until the user confirms
 
-Generate and present a *small* sample (5-10 items, or one representative slice
-for non-list outputs) in the user's intended delivery channel -- not the full
-production pipeline. The point is a fast feedback gate on shape / tone /
-density / layout before any long-running step runs at full scale.
+Produce a *small* sample and put it in front of the user in their intended
+delivery channel. The sample is a **feedback instrument, not the product**:
+its job is to let the user confirm the process is right *before* you build or
+automate anything.
 
-This is especially important when doing anything involving LLMs - don't spend a ton of the user's money without having confirmed they will like the result!
+**Keep this phase throwaway.** No production scripts, services, tests, or
+commits yet. Producing the sample by hand -- you, the agent, doing the
+processing in-context -- is completely fine; what matters is that the *output*
+is real. (Polish, scripts, and tests come later, in the crystallized version
+and the surfaces.)
 
-Default presentation: a brief natural-language summary, e.g.
+**Demonstrate, don't assert.** Every claim about how the data will be
+processed must be visible in the sample, never just promised in prose. If you
+say "I'll resolve tracking links" or "newsletters become article lists," the
+sample must *show* a resolved link and an extracted article list. A sentence
+describing what will happen is not a sample.
 
-> "Fetched 5 emails: 'Re: Q3 plan' from Alex, 'Lunch?' from Maya, ..."
+**Cover every shape, not the first N.** The sample must exercise every
+distinct data shape the task involves -- both the kinds the user named (e.g.
+"newsletters, action items, GitHub, events" are four *different* processing
+paths) and structural edge cases (an empty/edge variant, a malformed or
+plain-text-only record, a single-item vs multi-item case). Sample the
+*shape-space*; do not just grab the most recent N records, which silently
+omits whatever didn't happen to appear recently. **A path not shown is a path
+not verified** -- and the newest/most-novel path is usually the riskiest one.
 
-Save the raw JSON to `runtime/do-something-new/$SLUG/sample.json` so the user
-can ask to see it. Pick a different format (table, raw JSON inline, structured
-prose) if the data shape or the user's apparent technical preference makes it
-more useful.
+**Missing shape -> flag, demonstrate, invite.** If a shape the task implies
+has no real instance available (e.g. the user asked about newsletters but the
+inbox currently has none), do NOT silently skip it. Tell the user that path is
+unverified, show what your processing *would* produce for it based on your
+expectation of the input, and give them the chance to supply a real example
+(they may go find one or hand you search criteria). An unflagged missing shape
+propagates -- the crystallized pipeline and every surface inherit an untested
+path and nobody knows to look.
 
-If the user rejects the sample ("this isn't what I wanted"), go back to Step 3
-and re-propose. Re-run Step 2 only if the new ask requires fresh research.
+**Iterate every feedback round.** Each time the user gives feedback, produce
+an *updated sample that visibly applies it* and put it back in front of them.
+Do not accept feedback and move on having only asserted you'll apply it. Loop
+-- present, feedback, updated sample -- until the user **explicitly confirms**
+the sample looks right across all shapes. Only that confirmation unlocks
+Step 6. If the user rejects the sample outright, go back to Step 3 and
+re-propose (re-run Step 2 only if the new ask needs fresh research).
 
-### Sample-first for batch operations
+Save the raw sample to `runtime/do-something-new/$SLUG/sample.json` so the
+user can ask to see it and so it can **seed the first surface** (Step 7).
+Default presentation is a brief natural-language summary; pick a table /
+inline JSON / structured prose if the data or the user's preference makes it
+clearer.
 
-The same gate applies to *any* batch step, not just the Step 5 sample --
-LLM summarization, transformations across many records, generation calls,
-large fetches, including batch steps that come up later in Step 6
-surfaces. Run on the small sample first, then surface measured cost and
-runtime alongside it with an extrapolation to the full set
-("summarizing 5 items took 12s and cost $0.013 -- extrapolated to 150
-items, ~$0.40 and ~6 min"). Only scale to the full set after the user
-thumbs-up.
+### Cost gate for metered batch steps
 
-Apply by default to any batch step -- don't try to judge in advance
-whether it's "long enough" to need this. Sampling is cheap when the
-operation is fast and load-bearing when it's slow.
+When the real processing method is a *metered* automated call (an LLM
+completion, a paid API) -- as opposed to you doing it in-context -- measure
+its cost and runtime on the small sample and report an extrapolation to the
+full set before scaling ("classifying 5 items took 12s and cost $0.013 --
+extrapolated to 150 items, ~$0.40 and ~6 min"). Only scale after a thumbs-up.
+Apply by default to any metered batch step, whether it comes up here or later
+in a Step 6/7 surface -- don't pre-judge whether it's "long enough" to need
+this.
 
-## Step 6: Crystallize in the background and hand off to interface design
+## Step 6: After confirmation -- crystallize (background) and start surfaces (foreground)
 
-It may take several rounds of iteration before the user is satisfied with the sample.
-That's expected, and you should confirm they like it before moving on.
-Once it seems like they're reasonably satisfied, you should:
+**Hard gate: do not begin this step until the user has explicitly confirmed
+the sample (Step 5) across every data shape.** Crystallizing or building a
+surface on an unconfirmed process bakes the wrong process into code *and* into
+a background worker that cannot see the corrections the user hasn't made yet.
+The confirmation is what unlocks everything below. If you are tempted to
+crystallize "to save time" while the sample is still changing, don't -- you
+will be crystallizing a moving target.
+
+Once the user has confirmed, do all of the following:
 
 1. **Kick off `crystallize-task`** with `source_artifacts_dir:
    runtime/do-something-new/$SLUG/`.
@@ -174,10 +214,12 @@ Once it seems like they're reasonably satisfied, you should:
    returning to the user. The poll does not block subsequent steps.
    Without it, Gate 1 / Gate 2 reports never reach the user and the
    worker deadlocks waiting for approval.
-3. **Hand off to interface design.** Acknowledge that the worker is
-   now formalizing the capability, then either follow up on the
-   interface the user named in their original prompt (if they did) or
-   ask how they'd like to interact with the thing.
+3. **Begin surfaces (Step 7).** The first surface renders the *confirmed
+   sample data* directly (see Step 7) -- you do not need to wait for the
+   crystallized pipeline to exist, and you must not re-implement the
+   processing a second (cheaper) way to feed it. Either follow up on the
+   interface the user named in their original prompt, or ask how they'd like
+   to interact with the thing.
 
 Crystallization is an essential part of this process: your work up to this point was potentially ad-hoc,
 with rounds of revisions and deviations. And any scripts you created (if you created any) to perform fetching or other processing
@@ -188,9 +230,21 @@ The skill's *flow* responsibility ends here; lead-proxy ownership for
 the dispatched worker continues until that worker reports terminal
 status. Interface design happens in subsequent turns.
 
-## Step 7: Deliver remaining surfaces one at a time
+## Step 7: Deliver surfaces -- one at a time, all from the single source of truth
 
-Once the user approves the Step 5 sample and you've kicked off crystallization in the background, additional surfaces (scheduling,
+**Single source of truth.** Every surface renders the *confirmed sample data*
+(`sample.json`) and, once it lands, the crystallized pipeline's output --
+never a parallel re-implementation of the processing. The first version of a
+surface is literally `render(sample.json)`: it shows exactly what the user
+approved, so there is structurally *no gap* to fill with a cheaper stand-in
+(heuristics, regex, a stub classifier). When the crystallized pipeline is
+ready, point the surface at its output; the shape is identical, so the surface
+code does not change and fidelity is automatic. **If you ever feel the urge to
+write a second, different way of producing the data to feed a surface, stop**
+-- that divergence (the surface showing something the user never confirmed) is
+the exact bug this rule exists to prevent.
+
+Once the surface is seeded from the confirmed sample, additional surfaces (scheduling,
 persistence, history, live integration with a forwarded service, etc.) each
 get their *own* delivery and feedback gate. Don't bundle them. Build one,
 ship it, ask "want me to add scheduling next, or stop here?", wait, then
