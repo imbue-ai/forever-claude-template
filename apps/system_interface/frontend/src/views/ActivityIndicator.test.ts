@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEvent } from "../models/Response";
-import { labelForActivityState } from "./ActivityIndicator";
+import { isWorkingActivityState, labelForActivityState } from "./ActivityIndicator";
 
 function userMsg(ts: string): TranscriptEvent {
   return { timestamp: ts, type: "user_message", event_id: `u-${ts}`, source: "test", role: "user", content: "hi" };
@@ -197,5 +197,25 @@ describe("labelForActivityState — TOOL_RUNNING transcript enrichment", () => {
     // stream hasn't surfaced it yet, or every visible tool_use has been
     // matched by a tool_result on the frontend's side.
     expect(labelForActivityState("TOOL_RUNNING", [userMsg("2026-04-28T01:00:00Z")])).toBe("Running tool…");
+  });
+});
+
+describe("isWorkingActivityState — stop-button visibility gate", () => {
+  it("treats THINKING / TOOL_RUNNING as an interruptible turn", () => {
+    expect(isWorkingActivityState("THINKING")).toBe(true);
+    expect(isWorkingActivityState("TOOL_RUNNING")).toBe(true);
+  });
+
+  it("treats IDLE as not working (nothing to interrupt)", () => {
+    expect(isWorkingActivityState("IDLE")).toBe(false);
+  });
+
+  it("treats null / undefined (no activity tracking) as not working", () => {
+    expect(isWorkingActivityState(null)).toBe(false);
+    expect(isWorkingActivityState(undefined)).toBe(false);
+  });
+
+  it("treats an unknown / future state value as not working", () => {
+    expect(isWorkingActivityState("SOMETHING_NEW")).toBe(false);
   });
 });

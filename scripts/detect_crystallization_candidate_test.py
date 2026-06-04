@@ -308,6 +308,74 @@ def test_evaluate_tool_results_do_not_reset_count(tmp_path: Path) -> None:
     assert "8 non-read tool calls" in message
 
 
+def _resume_marker() -> dict[str, Any]:
+    """Claude Code's post-interrupt resume marker in common-transcript form.
+
+    An isMeta user message whose text is the resume-continuation sentinel; the
+    converter reclassifies it to a ``meta`` tool_result with the text in
+    ``output``."""
+    return _meta_injection("Continue from where you left off.")
+
+
+def test_evaluate_folds_interrupted_and_resumed_turn(tmp_path: Path) -> None:
+    """A turn the stop button interrupted and the user resumed counts as one
+    turn: pre- and post-interrupt tool calls sum toward the threshold. Neither
+    half alone (5 calls) crosses the threshold of 8."""
+    events = [
+        _user("do the thing"),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(5))),
+        # Stop button interrupts; on resume Claude Code injects the marker.
+        _resume_marker(),
+        _user("continue"),
+        _assistant(*(_tool_call("Bash", f"v{i}") for i in range(5))),
+    ]
+    should_warn, message = detect.evaluate(
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
+    )
+    assert should_warn is True
+    assert "10 non-read tool calls" in message
+    assert "interrupted by the stop button once" in message
+
+
+def test_evaluate_folds_multiple_interrupts_into_one_turn(tmp_path: Path) -> None:
+    """Several stop-button interrupts within one logical turn all collapse."""
+    events = [
+        _user("start"),
+        _assistant(*(_tool_call("Bash", f"a{i}") for i in range(3))),
+        _resume_marker(),
+        _user("continue"),
+        _assistant(*(_tool_call("Bash", f"b{i}") for i in range(3))),
+        _resume_marker(),
+        _user("continue again"),
+        _assistant(*(_tool_call("Bash", f"c{i}") for i in range(3))),
+    ]
+    should_warn, message = detect.evaluate(
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
+    )
+    assert should_warn is True
+    assert "9 non-read tool calls" in message
+    assert "interrupted by the stop button 2 times" in message
+
+
+def test_evaluate_does_not_fold_when_resume_text_is_a_human_message(
+    tmp_path: Path,
+) -> None:
+    """A human who types the resume-continuation words sends an ordinary
+    ``user_message`` (not a ``meta`` tool_result), so it starts a real new turn
+    -- the prior turn's tool calls must not fold in."""
+    events = [
+        _user("first task"),
+        _assistant(*(_tool_call("Bash", f"u{i}") for i in range(20))),
+        # A human literally typing the same words -- an ordinary user message.
+        _user("Continue from where you left off."),
+        _assistant(_tool_call("Bash", "v0")),
+    ]
+    should_warn, _ = detect.evaluate(
+        events, _empty_skills_root(tmp_path), _workdir(tmp_path), _AGENT_ID
+    )
+    assert should_warn is False
+
+
 def test_skill_is_crystallized_handles_missing_file(tmp_path: Path) -> None:
     assert detect._skill_is_crystallized(tmp_path / "does-not-exist.md") is False
 
