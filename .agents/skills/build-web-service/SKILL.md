@@ -152,6 +152,25 @@ agentic task, or launch a full agent), use the `use-ai-integration` skill and th
 handles credentialing, the `claude -p` environment fix, billing-path selection,
 and spend control for you.
 
+### Always surface the raw data and its source
+
+When a view renders data *derived* from underlying records (a summary,
+a reformatted list, extracted fields), include -- by default, without
+the user asking -- a clean affordance to see the raw record the view
+was built from and/or jump to its source. Concretely: a "view raw"
+control that shows the original record (e.g. the full email rendered),
+and, when the record came from an external service, an "open in
+<source>" link back to the origin (e.g. open the email in Gmail).
+This is the surfacing half of the preserve-and-surface principle in
+CLAUDE.md: the derived view inevitably leaves gaps (a field the agent
+didn't extract, a rendering it didn't anticipate), and a raw/source
+affordance lets the user bridge that gap immediately instead of waiting
+for a rebuild. Design it in from the first version -- it depends on the
+data layer having persisted the raw payload and source reference (see
+the crystallize data-capture guidance), so confirm that's available and
+flag it if it isn't. Keep it unobtrusive (a small per-record control,
+not clutter), but always present.
+
 ### File-path conventions
 
 Two cases, two patterns:

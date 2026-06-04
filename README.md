@@ -42,5 +42,3 @@ The main agent can promote ad-hoc work into reusable deterministic skills, heal 
 Each of these spawns a `crystallize-worker` sub-agent that runs a matching build / heal / update sub-skill bundled under each parent skill's `assets/worker/` directory (`.agents/skills/crystallize-task/assets/worker/`, `.agents/skills/heal-skill/assets/worker/`, `.agents/skills/update-skill/assets/worker/`). Workers commit to `mngr/<task-name>` branches; main merges on user approval.
 
 Crystallized skills are marked with `metadata.crystallized: true` in their SKILL.md frontmatter and follow the [agentskills.io](https://agentskills.io/specification) layout (`scripts/run.py` as a PEP 723 script, companion SKILL.md, optional `references/` and `assets/`).
-
-Note: If you ever have need to run `claude -p` to create a one-shot agent and get output, you MUST unset the `MAIN_CLAUDE_SESSION_ID` environment variable for that process.
