@@ -548,7 +548,7 @@ def _normalize_restart_policy(name: str, restart: str | None) -> str:
     return restart
 
 
-def _build_service_keystrokes(command: str) -> str:
+def _build_service_keystrokes(command: str, window_target: str) -> str:
     """Build the keystrokes typed into a service window's shell.
 
     Runs the service command, then records its exit status into the window's
@@ -557,11 +557,20 @@ def _build_service_keystrokes(command: str) -> str:
     service that has exited; the window itself stays open at an idle shell, so
     its existence alone is not a liveness signal.
 
+    The ``set-option`` is given an explicit ``-t {window_target}``: a service
+    window runs in the background, and a ``tmux set-option -w`` with no target
+    applies to the session's *currently active* window, not the window the
+    command runs in -- so without the explicit target the status would be
+    written to the wrong window and the manager would never see the exit.
+
     ``$?`` is captured immediately after the command, so it reflects the
     service's own exit status (128+signal if the service process was killed
     while its shell survived).
     """
-    return f'{command}; tmux set-option -w {SVC_EXIT_STATUS_OPTION} "$?"'
+    return (
+        f"{command}; tmux set-option -t {window_target} -w "
+        f'{SVC_EXIT_STATUS_OPTION} "$?"'
+    )
 
 
 def _start_service(session: str, name: str, command: str) -> None:
@@ -593,7 +602,7 @@ def _start_service(session: str, name: str, command: str) -> None:
             "send-keys",
             "-t",
             window_target,
-            _build_service_keystrokes(command),
+            _build_service_keystrokes(command, window_target),
             "Enter",
         ],
         check=False,

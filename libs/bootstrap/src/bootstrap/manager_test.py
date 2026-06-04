@@ -93,10 +93,19 @@ def test_build_service_keystrokes_runs_command_then_records_exit_status() -> Non
     # The service command must run first, then its exit status be recorded so
     # the manager can detect the service exiting. `$?` must be captured right
     # after the command so it reflects the service's own status.
-    keys = _build_service_keystrokes("my-server --flag")
+    keys = _build_service_keystrokes("my-server --flag", "sess:svc-foo")
     assert keys.startswith("my-server --flag;")
     assert SVC_EXIT_STATUS_OPTION in keys
     assert '"$?"' in keys
+
+
+def test_build_service_keystrokes_targets_its_own_window_explicitly() -> None:
+    # Regression: a service window runs in the background, so a `set-option -w`
+    # with no target lands on the session's *active* window, not the service's.
+    # The recorder must pass an explicit `-t <window_target>` so the exit status
+    # is written to the window the manager actually polls.
+    keys = _build_service_keystrokes("my-server", "sess:svc-foo")
+    assert "-t sess:svc-foo" in keys
 
 
 # --- Restart policy: _compute_restarts ---
