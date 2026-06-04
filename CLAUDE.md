@@ -388,3 +388,7 @@ If you get a failure when trying to commit the first time, just try committing a
 # Dealing with the unexpected
 
 If something unexpected happens -- errors, confusing state, things not working as documented -- use the `dealing-with-the-unexpected` skill for guidance.
+
+# claude -p
+
+If ever building AI-powered services and wanting to use `claude -p`, make sure to unset the MAIN_CLAUDE_SESSION_ID for the process. This prevents conversation rendering issues.
