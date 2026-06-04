@@ -868,7 +868,6 @@ body {
   color: #dc2626;
 }
 
-/* Notifications that carry an expandable body (a finished sub-agent's result). */
 /* Slash-command invocation: a normal user bubble tagged with the command name
    above the user's argument text. */
 .user-command-name {
