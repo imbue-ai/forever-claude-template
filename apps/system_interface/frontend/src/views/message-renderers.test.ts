@@ -6,8 +6,10 @@ import {
   renderPermissionRequestFooter,
   openPermissionRequest,
   renderSubagentCard,
+  renderUserMessage,
 } from "./message-renderers";
 import { isSkillExpansionUserMessage } from "./user-message-classification";
+import type { UserMessageEvent } from "../models/Response";
 
 // Avoid importing the heavy/DOM-dependent module graph (dockview, dompurify) at test time;
 // renderSubagentCard only needs openSubagentTab, and the card path never calls MarkdownContent.
@@ -333,6 +335,52 @@ describe("renderPermissionRequestFooter", () => {
     // Mithril wraps the label string in a text vnode (tag "#").
     const label = findVnode(button, (v) => v.tag === "#");
     expect(label?.children).toBe("Permission request");
+  });
+});
+
+function userEvent(content: string, id = "u-1"): UserMessageEvent {
+  return {
+    timestamp: "2026-01-01T00:00:00Z",
+    type: "user_message",
+    event_id: id,
+    source: "test",
+    role: "user",
+    content,
+  };
+}
+
+describe("renderUserMessage", () => {
+  function wrapperClass(content: string): string | null {
+    const vnode = renderUserMessage(userEvent(content)) as { attrs?: { className?: string } } | null;
+    return vnode?.attrs?.className ?? null;
+  }
+
+  it("hides /welcome and skill-expansion messages", () => {
+    expect(renderUserMessage(userEvent("<command-name>/welcome</command-name>"))).toBeNull();
+    expect(renderUserMessage(userEvent("Base directory for this skill: /x/skills/foo/"))).toBeNull();
+  });
+
+  it("centers background-task and local-command notifications as system events", () => {
+    const taskNotif =
+      '<task-notification>\n<status>completed</status>\n<summary>Background command "poll" completed (exit code 0)</summary>\n</task-notification>';
+    expect(wrapperClass(taskNotif)).toBe("message message-system-event");
+    expect(wrapperClass("<local-command-stdout>Login successful</local-command-stdout>")).toBe(
+      "message message-system-event",
+    );
+  });
+
+  it("collapses the stop-hook chip and the compaction summary on the system side", () => {
+    expect(wrapperClass("Stop hook feedback:\nblocked")).toBe("message message-system-collapsed");
+    expect(wrapperClass("This session is being continued from a previous conversation...")).toBe(
+      "message message-system-collapsed",
+    );
+  });
+
+  it("renders a slash command and a plain message as user-aligned", () => {
+    expect(wrapperClass("<command-name>/foo</command-name>\n<command-args>do X</command-args>")).toBe(
+      "message message-user",
+    );
+    expect(wrapperClass("just a normal message")).toBe("message message-user");
   });
 });
 
