@@ -12,6 +12,11 @@ export interface AgentState {
   state: string;
   labels: Record<string, string>;
   work_dir: string | null;
+  // Per-agent chat activity. THINKING/TOOL_RUNNING/IDLE, or null when the
+  // system interface has no per-agent activity tracking available (e.g.
+  // remote agents whose state directory is not present on this host,
+  // proto-agents, non-Claude agent types).
+  activity_state?: string | null;
 }
 
 export interface ApplicationEntry {

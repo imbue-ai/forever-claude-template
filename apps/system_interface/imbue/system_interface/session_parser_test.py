@@ -161,6 +161,38 @@ def test_tool_result_only_user_message_not_emitted_as_user_message() -> None:
     assert events[0]["type"] == "tool_result"
 
 
+def test_interrupt_sentinel_user_message_not_emitted() -> None:
+    """The ``[Request interrupted by user]`` sentinel must not surface as a user_message.
+
+    Claude writes this control text to the user channel when the user interrupts
+    a turn. Treating it as a real prompt would leave the activity indicator
+    pinned on "Thinking..." after every interrupt, since the indicator's tail-
+    event heuristic equates "tail = user_message" with "Claude is about to
+    reply." Verify both string content and array content forms.
+    """
+    string_form = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "[Request interrupted by user]"},
+        }
+    )
+    array_form = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-2",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "[Request interrupted by user]"}],
+            },
+        }
+    )
+    events = parse_session_lines([string_form, array_form])
+    assert events == []
+
+
 def test_events_sorted_by_timestamp() -> None:
     lines = [
         _make_assistant_line("uuid-2", "2026-01-01T00:00:02Z", "Second"),
@@ -457,3 +489,16 @@ def test_synthetic_api_error_message_is_still_shown() -> None:
     events = parse_session_lines([line])
     assert [e["type"] for e in events] == ["assistant_message"]
     assert events[0]["text"] == error_text
+
+
+def test_tool_output_preserves_tk_transition_past_truncation() -> None:
+    """A tk transition line (`Updated <id> -> <status>`) that falls past the
+    output truncation limit is preserved, so the progress view never loses a
+    step transition when a tk command is batched after verbose output."""
+    output = ("x" * 5000) + "\nUpdated s1 -> closed\n"
+    lines = [_make_tool_result_line("uuid-trunc", "2026-01-01T00:00:02Z", "toolu_1", output)]
+    events = parse_session_lines(lines)
+    assert events[0]["type"] == "tool_result"
+    assert "Updated s1 -> closed" in events[0]["output"]
+    # Still truncated overall (not the full verbose output).
+    assert len(events[0]["output"]) < len(output)

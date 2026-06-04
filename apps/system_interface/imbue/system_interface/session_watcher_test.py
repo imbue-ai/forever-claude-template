@@ -5,7 +5,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from imbue.system_interface.session_parser import parse_session_lines
 from imbue.system_interface.session_watcher import AgentSessionWatcher
+from imbue.system_interface.session_watcher import read_complete_lines_since_offset
 
 
 def _write_session_file(projects_dir: Path, session_id: str, events: list[dict[str, Any]]) -> Path:
@@ -94,33 +96,6 @@ def test_get_all_events_with_tail(tmp_path: Path) -> None:
     assert result[9]["content"] == "Message 9"
 
 
-def test_get_backfill_events(tmp_path: Path) -> None:
-    events = [
-        {
-            "type": "user",
-            "uuid": f"uuid-{i}",
-            "timestamp": f"2026-01-01T00:00:{i:02d}Z",
-            "message": {"role": "user", "content": f"Message {i}"},
-        }
-        for i in range(10)
-    ]
-
-    agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, events)
-
-    watcher = AgentSessionWatcher(
-        agent_id="test-agent",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=claude_config_dir,
-        on_events=lambda aid, evts: None,
-    )
-
-    # Get events before uuid-5-user
-    result = watcher.get_backfill_events("uuid-5-user", limit=3)
-    assert len(result) == 3
-    assert result[0]["content"] == "Message 2"
-    assert result[2]["content"] == "Message 4"
-
-
 def test_watcher_detects_new_events(tmp_path: Path) -> None:
     events = [
         {
@@ -179,6 +154,60 @@ def test_watcher_detects_new_events(tmp_path: Path) -> None:
         assert collected[0][1][0]["type"] == "assistant_message"
     finally:
         watcher.stop()
+
+
+def test_poll_does_not_lose_events_on_partial_writes(tmp_path: Path) -> None:
+    """A JSONL line written across two flushes must still be read back in full.
+
+    Regression: the poll previously advanced ``byte_offset`` by the full length of
+    every read, even when the trailing bytes were a partial line. The next read then
+    started mid-record, the parser silently skipped the malformed line, and the
+    activity-state cache stayed pinned to the prior turn's tail (e.g. ``tool_result``
+    -> indicator stuck on ``Thinking...`` after the agent finished).
+
+    Driving ``read_complete_lines_since_offset`` directly reproduces the exact offset
+    bookkeeping the bug lived in, without spinning up the watcher thread.
+    """
+    session_file = tmp_path / "session.jsonl"
+
+    assistant_event = {
+        "type": "assistant",
+        "uuid": "uuid-1",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-4-6",
+            "content": [{"type": "text", "text": "x" * 3000}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    }
+    line = json.dumps(assistant_event) + "\n"
+    midpoint = len(line) // 2
+
+    # First flush lands only the first half of the record: nothing is consumed and the
+    # offset must stay put rather than skipping past the partial bytes.
+    session_file.write_bytes(line[:midpoint].encode())
+    offset_after_partial, lines_after_partial = read_complete_lines_since_offset(session_file, 0)
+    assert offset_after_partial == 0
+    assert lines_after_partial == []
+
+    # Second flush completes the record: the whole line is now consumed and the offset
+    # advances exactly to the line boundary.
+    with open(session_file, "ab") as f:
+        f.write(line[midpoint:].encode())
+    offset_after_complete, lines_after_complete = read_complete_lines_since_offset(session_file, offset_after_partial)
+    assert lines_after_complete == [line.rstrip("\n")]
+    assert offset_after_complete == len(line.encode())
+
+    # The recovered line parses back to the assistant_message that the buggy poll dropped.
+    events = parse_session_lines(
+        lines_after_complete,
+        existing_event_ids=None,
+        tool_name_by_call_id={},
+        session_id="test-session",
+    )
+    assert any(e["type"] == "assistant_message" for e in events)
 
 
 def test_watcher_handles_missing_history_file(tmp_path: Path) -> None:

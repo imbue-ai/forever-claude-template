@@ -67,6 +67,16 @@ class AgentEventQueues:
         for event_queue in queues:
             event_queue.put_nowait(clean_event)
 
+    def broadcast_all_ignored(self, agent_id: str, events: list[dict[str, Any]]) -> None:
+        """Broadcast a batch of events with IGNORE buffering (delivered live, never stored).
+
+        Suitable as a watcher ``on_events`` callback for streams that are fully
+        recoverable via their REST endpoint, so buffering successive snapshots in the
+        in-memory replay buffer would only grow unboundedly for no benefit.
+        """
+        for event in events:
+            self.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
+
     def shutdown(self) -> None:
         with self._lock:
             self._shutdown = True

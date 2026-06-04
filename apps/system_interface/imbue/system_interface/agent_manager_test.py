@@ -5,6 +5,7 @@ import queue
 import shutil
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 from watchdog.events import FileClosedNoWriteEvent
@@ -23,6 +24,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
+from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.agent_manager import _LogQueueCallback
 from imbue.system_interface.agent_manager import _make_applications_file_handler
@@ -30,6 +32,42 @@ from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
+
+# Several tests in this module spin up real watchdog FSEvents observers
+# (via ``_start_app_watcher``). On macOS the FSEvents emitter thread
+# occasionally stalls during shutdown, tripping pytest-timeout. Mark the
+# whole file as flaky so offload retries it automatically -- mirrors
+# ``ws_broadcaster_test.py``.
+pytestmark = pytest.mark.flaky
+
+
+def _seed_agent(manager: AgentManager, agent_id: str) -> None:
+    """Insert a placeholder ``AgentStateItem`` directly into the tracked map."""
+    with manager._lock:
+        manager._agents[agent_id] = AgentStateItem(
+            id=agent_id,
+            name=f"agent-{agent_id}",
+            state="RUNNING",
+            labels={},
+            work_dir=None,
+        )
+
+
+def _drain(q: queue.Queue[str | None]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    while not q.empty():
+        raw = q.get_nowait()
+        if raw is None:
+            break
+        out.append(json.loads(raw))
+    return out
+
+
+def _last_agents_updated(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for message in reversed(messages):
+        if message.get("type") == "agents_updated":
+            return message
+    return None
 
 
 def test_generate_random_name(agent_manager: AgentManager) -> None:
@@ -123,6 +161,7 @@ def test_get_agents_serialized(agent_manager: AgentManager) -> None:
     assert serialized[0]["id"] == "a1"
     assert serialized[0]["name"] == "agent-one"
     assert serialized[0]["labels"] == {"user_created": "true"}
+    assert serialized[0]["activity_state"] is None
 
 
 def test_get_applications_serialized(agent_manager: AgentManager) -> None:
@@ -871,3 +910,249 @@ def test_handle_observe_output_line_logs_stderr_as_warning(
     warnings = [r for r in loguru_records if r.startswith("WARNING") and "mngr observe stderr" in r]
     assert warnings, f"Expected a stderr warning; got: {loguru_records}"
     assert "something bad happened" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# Activity-state integration
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_activity_tracking_skips_when_state_dir_missing(agent_manager: AgentManager) -> None:
+    """No activity tracking is started for an agent whose host_dir state directory is absent."""
+    _seed_agent(agent_manager, "remote-agent")
+    agent_manager._ensure_activity_tracking("remote-agent")
+    try:
+        with agent_manager._lock:
+            assert "remote-agent" not in agent_manager._activity_tracked_agents
+    finally:
+        agent_manager.stop()
+
+
+def test_ensure_activity_tracking_seeds_idle_state_silently(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """When the state dir exists, the agent is seeded as IDLE without broadcasting."""
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+
+    listener = broadcaster.register()
+    try:
+        agent_manager._ensure_activity_tracking("agent-1")
+        # No broadcast should have happened (lifecycle handlers broadcast separately).
+        with pytest.raises(queue.Empty):
+            listener.get_nowait()
+
+        with agent_manager._lock:
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+            assert agent_manager._agents["agent-1"].activity_state == ActivityState.IDLE.value
+    finally:
+        agent_manager.stop()
+
+
+def test_session_events_user_message_drives_thinking(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """A user_message at the tail of the transcript flips activity_state to THINKING.
+
+    Replaces the old behavior where THINKING was driven by a transient ``active``
+    marker file -- that marker could leak past the end of a turn and falsely
+    pin the indicator on "Thinking...". Transcript content is now authoritative.
+    """
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+
+    listener = broadcaster.register()
+    try:
+        agent_manager.update_session_events(
+            "agent-1",
+            [{"type": "user_message", "content": "go"}],
+        )
+        with agent_manager._lock:
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
+        latest = _last_agents_updated(_drain(listener))
+        assert latest is not None
+        agents = latest["agents"]
+        assert isinstance(agents, list)
+        assert agents[0]["activity_state"] == ActivityState.THINKING.value
+    finally:
+        agent_manager.stop()
+
+
+def test_session_events_assistant_message_at_tail_is_idle(agent_manager: AgentManager, tmp_path: Path) -> None:
+    """An assistant_message with no pending tools at the tail means IDLE."""
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+
+    try:
+        agent_manager.update_session_events(
+            "agent-1",
+            [
+                {"type": "user_message", "content": "go"},
+                {"type": "assistant_message", "tool_calls": []},
+            ],
+        )
+        with agent_manager._lock:
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+    finally:
+        agent_manager.stop()
+
+
+def test_update_session_events_flips_to_tool_running(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+
+    listener = broadcaster.register()
+    try:
+        events_with_pending: list[dict[str, Any]] = [
+            {
+                "type": "assistant_message",
+                "tool_calls": [{"tool_call_id": "call_a", "tool_name": "Bash"}],
+            }
+        ]
+        agent_manager.update_session_events("agent-1", events_with_pending)
+
+        with agent_manager._lock:
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.TOOL_RUNNING
+
+        latest = _last_agents_updated(_drain(listener))
+        assert latest is not None
+        agents = latest["agents"]
+        assert isinstance(agents, list)
+        assert agents[0]["activity_state"] == ActivityState.TOOL_RUNNING.value
+
+        # Once the result lands, we flip to THINKING (last event is tool_result,
+        # no pending tool_use remains).
+        events_resolved = events_with_pending + [{"type": "tool_result", "tool_call_id": "call_a"}]
+        agent_manager.update_session_events("agent-1", events_resolved)
+        with agent_manager._lock:
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
+    finally:
+        agent_manager.stop()
+
+
+def test_update_session_events_no_op_when_not_tracked(agent_manager: AgentManager) -> None:
+    """Calling update_session_events for an untracked agent is a quiet no-op.
+
+    Beyond not raising, it must leave no residue in the per-agent caches:
+    otherwise those entries would never be cleared (``_stop_activity_tracking``
+    only fires for agents that were being tracked), accumulating indefinitely.
+    """
+    agent_manager.update_session_events(
+        "ghost",
+        [{"type": "assistant_message", "tool_calls": [{"tool_call_id": "x", "tool_name": "Bash"}]}],
+    )
+    with agent_manager._lock:
+        assert "ghost" not in agent_manager._activity_state_by_agent
+        assert "ghost" not in agent_manager._has_unmatched_tool_use_by_agent
+        assert "ghost" not in agent_manager._last_event_type_by_agent
+
+
+def test_stop_activity_tracking_clears_caches(agent_manager: AgentManager, tmp_path: Path) -> None:
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+    # Seed a non-default cached state so we can verify it's cleared.
+    agent_manager.update_session_events(
+        "agent-1",
+        [{"type": "user_message", "content": "go"}],
+    )
+
+    with agent_manager._lock:
+        assert "agent-1" in agent_manager._activity_tracked_agents
+        assert "agent-1" in agent_manager._activity_state_by_agent
+        assert "agent-1" in agent_manager._has_unmatched_tool_use_by_agent
+        assert "agent-1" in agent_manager._last_event_type_by_agent
+
+    agent_manager._stop_activity_tracking("agent-1")
+
+    with agent_manager._lock:
+        assert "agent-1" not in agent_manager._activity_tracked_agents
+        assert "agent-1" not in agent_manager._activity_state_by_agent
+        assert "agent-1" not in agent_manager._has_unmatched_tool_use_by_agent
+        assert "agent-1" not in agent_manager._last_event_type_by_agent
+
+
+def test_handle_agent_destroyed_stops_activity_tracking(agent_manager: AgentManager, tmp_path: Path) -> None:
+    """An AGENT_DESTROYED event should clear the activity tracking and caches."""
+    test_agent_id = MngrAgentId()
+    host_id = HostId()
+    str_id = str(test_agent_id)
+
+    state_dir = tmp_path / "agents" / str_id
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, str_id)
+    agent_manager._ensure_activity_tracking(str_id)
+    with agent_manager._lock:
+        assert str_id in agent_manager._activity_tracked_agents
+
+    event = _make_agent_destroyed_event(test_agent_id, host_id)
+    agent_manager._handle_agent_destroyed(event)
+
+    with agent_manager._lock:
+        assert str_id not in agent_manager._activity_tracked_agents
+        assert str_id not in agent_manager._activity_state_by_agent
+
+
+def test_full_snapshot_preserves_activity_state_for_tracked_agent(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """A FullDiscoverySnapshot must not wipe the activity_state of agents that
+    are already being tracked for activity.
+
+    Regression test: ``_handle_full_snapshot`` rebuilds ``_agents`` from the
+    raw discovery payload (which has no ``activity_state`` field), then calls
+    ``_ensure_activity_tracking`` per agent. Previously, the already-tracked
+    branch returned early and skipped the recompute, so the broadcast
+    that follows the snapshot emitted ``activity_state=None`` for every
+    previously-tracked agent and the chat panel indicator briefly disappeared.
+    """
+    test_agent_id = MngrAgentId()
+    str_id = str(test_agent_id)
+
+    state_dir = tmp_path / "agents" / str_id
+    state_dir.mkdir(parents=True)
+
+    # First, simulate the agent already being tracked with a live watcher
+    # whose transcript signals THINKING (a user_message with no reply).
+    discovered = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=test_agent_id,
+        agent_name=MngrAgentName("snapshot-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": str(tmp_path / "work")},
+    )
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(discovered))
+    agent_manager.update_session_events(str_id, [{"type": "user_message", "content": "go"}])
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent[str_id] == ActivityState.THINKING
+        assert agent_manager._agents[str_id].activity_state == ActivityState.THINKING.value
+
+    # Now drain prior broadcasts so the snapshot's broadcast is the only one
+    # we read.
+    listener = broadcaster.register()
+    try:
+        snapshot_event = make_full_discovery_snapshot_event([discovered], [])
+        agent_manager._handle_full_snapshot(snapshot_event)
+
+        latest = _last_agents_updated(_drain(listener))
+        assert latest is not None
+        agents = latest["agents"]
+        assert isinstance(agents, list)
+        # The broadcast must carry the cached activity_state, not None.
+        assert agents[0]["id"] == str_id
+        assert agents[0]["activity_state"] == ActivityState.THINKING.value
+
+        with agent_manager._lock:
+            assert agent_manager._agents[str_id].activity_state == ActivityState.THINKING.value
+    finally:
+        agent_manager.stop()

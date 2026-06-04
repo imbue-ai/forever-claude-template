@@ -9,19 +9,26 @@ vi.hoisted(() => {
     setTimeout(() => cb(0), 0) as unknown as number) as typeof globalThis.requestAnimationFrame;
 });
 
-import { appendEvents, getEventsForAgent, type TranscriptEvent } from "./Response";
+import {
+  appendEvents,
+  getEventsForAgent,
+  type AssistantMessageEvent,
+  type ToolCall,
+  type TranscriptEvent,
+} from "./Response";
 
 function assistantWithAgentToolCall(
   eventId: string,
   toolCallId: string,
   metadata?: { agent_type: string; description: string; session_id: string },
-): TranscriptEvent {
+): AssistantMessageEvent {
   return {
     timestamp: "2026-01-01T00:00:01Z",
     type: "assistant_message",
     event_id: eventId,
     source: "claude/common_transcript",
     message_uuid: eventId,
+    model: "test-model",
     text: "",
     tool_calls: [
       {
@@ -31,7 +38,19 @@ function assistantWithAgentToolCall(
         ...(metadata ? { subagent_metadata: metadata } : {}),
       },
     ],
+    stop_reason: null,
+    usage: null,
+    is_auth_error: false,
   };
+}
+
+// getEventsForAgent returns the TranscriptEvent union; narrow to the assistant
+// variant before touching tool_calls (the discriminated-union contract).
+function toolCallsOf(event: TranscriptEvent): ToolCall[] {
+  if (event.type !== "assistant_message") {
+    throw new Error(`expected assistant_message, got ${event.type}`);
+  }
+  return event.tool_calls;
 }
 
 describe("appendEvents subagent_metadata merge", () => {
@@ -43,7 +62,7 @@ describe("appendEvents subagent_metadata merge", () => {
     appendEvents(agentId, [assistantWithAgentToolCall("ev-1", "toolu_1")]);
     const before = getEventsForAgent(agentId);
     expect(before).toHaveLength(1);
-    expect(before[0].tool_calls?.[0].subagent_metadata).toBeUndefined();
+    expect(toolCallsOf(before[0])[0].subagent_metadata).toBeUndefined();
 
     // Backend re-broadcasts the same event (same event_id) once linkage lands.
     appendEvents(agentId, [assistantWithAgentToolCall("ev-1", "toolu_1", metadata)]);
@@ -51,7 +70,7 @@ describe("appendEvents subagent_metadata merge", () => {
     const after = getEventsForAgent(agentId);
     // Still a single message -- the re-broadcast must not be appended as a duplicate.
     expect(after).toHaveLength(1);
-    expect(after[0].tool_calls?.[0].subagent_metadata).toEqual(metadata);
+    expect(toolCallsOf(after[0])[0].subagent_metadata).toEqual(metadata);
   });
 
   it("ignores a re-broadcast that carries no new metadata", () => {
@@ -61,7 +80,7 @@ describe("appendEvents subagent_metadata merge", () => {
 
     const events = getEventsForAgent(agentId);
     expect(events).toHaveLength(1);
-    expect(events[0].tool_calls?.[0].subagent_metadata).toBeUndefined();
+    expect(toolCallsOf(events[0])[0].subagent_metadata).toBeUndefined();
   });
 
   it("still appends genuinely new events", () => {
