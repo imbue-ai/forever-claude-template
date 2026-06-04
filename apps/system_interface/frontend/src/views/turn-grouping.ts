@@ -65,6 +65,12 @@ export interface StepNode {
   /** The grouped real-work events (assistant text + non-tk tool calls) that
    *  occurred while this step was the open step in this section. */
   events: AssistantMessageEvent[];
+  /** True when no enrichment entry backs this node -- the step's `.tickets/`
+   *  file is gone (the user cleared the directory), so its title fell back to
+   *  the raw id and its close summary is unavailable. The node only exists
+   *  because the id self-identifies as a step (see STEP_ID_RE). The UI flags
+   *  this with a "?" marker. Always false for a node that has enrichment. */
+  file_missing: boolean;
 }
 
 /** One item on a section's timeline, in transcript order. */
@@ -100,6 +106,20 @@ const TK_LIFECYCLE_RE = /"command"\s*:\s*"\s*(?:tk|ticket)\s+(?:super\s+)?(?:cre
  *  `Updated <id> -> <status>` (see vendor/tk/ticket). Global so a batched
  *  command that flips several tickets is read in order. */
 const TK_UPDATED_RE = /Updated\s+(\S+)\s+->\s+(open|in_progress|closed)/g;
+
+/** A step id (minted by `tk create --step`) carries a literal `-step-` segment,
+ *  e.g. `cod-step-f1zl`; a regular ticket id has none (`cod-f1zl`). The walk
+ *  uses this to recognise a step from its transition id alone -- so a step keeps
+ *  its tool-call grouping even after its `.tickets/` file is deleted and the
+ *  enrichment table no longer knows it. A regular ticket the agent picked up
+ *  never matches, so it stays filtered out of the timeline even with no
+ *  enrichment. (Only ids minted after this tk change carry the segment; an older
+ *  step whose file is deleted has no marker and is lost, which is acceptable.) */
+const STEP_ID_RE = /-step-[a-z0-9]+$/;
+
+function isStepId(id: string): boolean {
+  return STEP_ID_RE.test(id);
+}
 
 /** True when a tool call is a tk lifecycle command (consumed as a structural
  *  marker, not rendered as work). Restricted to Bash calls whose command
@@ -264,7 +284,14 @@ export function buildSections(
         // open (or renders inline if none was), exactly as if the tk verb
         // weren't there. (See the enrichment side-table, which the tickets
         // watcher builds from `step: true` frontmatter only.)
-        if (!enrichment.has(t.id)) continue;
+        //
+        // The id shape is a second, file-independent step signal: when the
+        // `.tickets/` directory was cleared, enrichment is empty, but a
+        // `-step-` id still self-identifies as a step, so the node (and its
+        // grouping) survives. A regular ticket id has no `-step-` segment, so it
+        // is still skipped -- the picked-up-ticket filter holds even with no
+        // enrichment.
+        if (!enrichment.has(t.id) && !isStepId(t.id)) continue;
         applyTransition(current, t);
         if (t.status === "in_progress") lastOpened = t.id;
       }
@@ -292,6 +319,7 @@ function openStep(section: SectionBuilder, id: string, is_carryover: boolean): v
       is_carryover,
       is_frontier: false,
       events: [],
+      file_missing: false,
     });
     section.step_order.push(id);
     section.entries.push({ kind: "step", id });
@@ -325,6 +353,7 @@ function applyTransition(section: SectionBuilder, t: { id: string; status: "in_p
       is_carryover: false,
       is_frontier: false,
       events: [],
+      file_missing: false,
     });
     section.step_order.push(t.id);
     section.entries.push({ kind: "step", id: t.id });
@@ -397,13 +426,18 @@ function finalizeSection(
   //    only when not idle, only the current open step.
   const frontierId = is_tail && !agentIsIdle ? section.current_step_id : null;
 
-  // 4. Join enrichment onto each node.
+  // 4. Join enrichment onto each node. A node with no enrichment entry exists
+  //    only because its id self-identifies as a step (STEP_ID_RE) -- its
+  //    `.tickets/` file is gone, so it keeps the raw id as its title, has no
+  //    summary, and is flagged file_missing for the "?" marker.
   for (const id of section.step_order) {
     const node = section.steps.get(id)!;
     const enrich = enrichment.get(id);
     if (enrich !== undefined) {
       node.title = enrich.title || node.title;
       if (node.status === "done") node.summary = enrich.summary;
+    } else {
+      node.file_missing = true;
     }
     node.is_frontier = node.ticket_id === frontierId && node.status === "active";
   }
@@ -479,6 +513,9 @@ function finalizeSection(
           is_carryover: false,
           is_frontier: false,
           events: [],
+          // Pending nodes come straight from the enrichment roster, so they
+          // always have a backing file.
+          file_missing: false,
         },
       });
     }

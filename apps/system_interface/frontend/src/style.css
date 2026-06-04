@@ -1603,6 +1603,25 @@ body {
   cursor: default;
 }
 
+/* "?" marker shown beside a step whose backing ticket file is missing. */
+.pv-tl-missing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 6px;
+  border: 1px solid var(--pv-fg-muted);
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--pv-fg-muted);
+  cursor: help;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
 /* Timeline thread + nodes */
 .pv.pv--timeline {
   position: relative;

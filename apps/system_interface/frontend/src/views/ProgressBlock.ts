@@ -130,6 +130,14 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
               : null,
           ],
         ),
+        // The step's backing .tickets file is gone (the directory was cleared),
+        // so the title fell back to the raw id and the summary is unavailable.
+        // A "?" marker with a hover tooltip signals this. Rendered as a sibling
+        // of the title button (not a child) so the native tooltip still fires
+        // when the button is disabled (a step with no expandable work).
+        step.file_missing
+          ? m("span.pv-tl-missing", { title: "The ticket file backing this step is missing." }, "?")
+          : null,
         renderStepCaption(step, isExpanded),
         isExpanded ? m("div.pv-tl-expanded", renderExpandedStepBody(step, toolResults, agentId)) : null,
       ]),

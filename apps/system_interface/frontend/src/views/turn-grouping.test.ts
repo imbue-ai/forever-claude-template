@@ -528,3 +528,84 @@ describe("batched transitions (bababa real transcript)", () => {
     expect(steps.map((s) => s.ticket_id)).toEqual(["cod-nzb4", "cod-p5jc", "cod-ts53"]);
   });
 });
+
+describe("missing tickets directory (step-id fallback)", () => {
+  // When the user clears the .tickets/ directory, the enrichment table goes
+  // empty. A step id minted by `tk create --step` carries a `-step-` segment
+  // (e.g. cod-step-aaaa), so the walk still recognises it as a step from the
+  // transition line alone -- the grouping survives, titled with the raw id and
+  // flagged file_missing. A regular ticket id has no marker and stays filtered.
+
+  it("keeps a step's grouping when its file is gone (empty enrichment)", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start cod-step-aaaa", "k1"),
+      result("2026-04-28T01:00:01Z", "k1", "Updated cod-step-aaaa -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      tkMsg("2026-04-28T01:00:03Z", "tk close cod-step-aaaa 'did it'", "k2"),
+      result("2026-04-28T01:00:03Z", "k2", "Updated cod-step-aaaa -> closed"),
+    ];
+    // No enrichment at all -- the directory was deleted.
+    const sections = run(events, new Map());
+    const steps = stepItems(sections[0].items);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].ticket_id).toBe("cod-step-aaaa");
+    expect(steps[0].status).toBe("done");
+    // Title falls back to the raw id; the node is flagged as file-missing.
+    expect(steps[0].title).toBe("cod-step-aaaa");
+    expect(steps[0].file_missing).toBe(true);
+    // The grouped work is still attributed to the step.
+    expect(steps[0].events.map((e) => e.event_id)).toEqual(["a-w1"]);
+  });
+
+  it("still filters a picked-up regular ticket when enrichment is empty", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start cod-step-aaaa", "k1"),
+      result("2026-04-28T01:00:01Z", "k1", "Updated cod-step-aaaa -> in_progress"),
+      // A regular ticket the agent picked up: not a recognised pure-tk call
+      // (begins with cd), so it renders as work; its output starts the ticket.
+      tkMsg("2026-04-28T01:00:02Z", "cd /code && tk start cod-oglc", "cr"),
+      result("2026-04-28T01:00:02Z", "cr", "Updated cod-oglc -> in_progress"),
+      workMsg("2026-04-28T01:00:03Z", "Bash", "w1"),
+      result("2026-04-28T01:00:03Z", "w1", "ok"),
+    ];
+    const sections = run(events, new Map(), /* idle */ false);
+    const steps = stepItems(sections[0].items);
+    // Only the step-shaped id becomes a node; the regular ticket is skipped
+    // even though enrichment is empty, and its command stays inside the step.
+    expect(steps.map((s) => s.ticket_id)).toEqual(["cod-step-aaaa"]);
+    expect(steps[0].events.map((e) => e.event_id)).toEqual(["a-cr", "a-w1"]);
+  });
+
+  it("does not flag a step as file-missing when enrichment still has it", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start cod-step-aaaa", "k1"),
+      result("2026-04-28T01:00:01Z", "k1", "Updated cod-step-aaaa -> in_progress"),
+    ];
+    const sections = run(events, enrich({ "cod-step-aaaa": { title: "Do the thing" } }), /* idle */ false);
+    const steps = stepItems(sections[0].items);
+    expect(steps).toHaveLength(1);
+    // File present: enriched title wins and the node is not flagged.
+    expect(steps[0].title).toBe("Do the thing");
+    expect(steps[0].file_missing).toBe(false);
+  });
+
+  it("drops an old marker-less step id once its file is gone (accepted limitation)", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "k1"),
+      result("2026-04-28T01:00:01Z", "k1", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+    ];
+    // An old-format step id (no `-step-`) with no enrichment cannot be told
+    // apart from a regular ticket, so it is skipped -- the work renders inline.
+    const sections = run(events, new Map(), /* idle */ false);
+    const steps = stepItems(sections[0].items);
+    expect(steps).toHaveLength(0);
+    expect(sections[0].items.some((i) => i.kind === "ungrouped")).toBe(true);
+  });
+});
