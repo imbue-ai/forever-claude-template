@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.errors import AgentStartError
@@ -19,6 +20,7 @@ from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.models import AgentStateItem
+from imbue.system_interface.server import _build_destroy_command
 from imbue.system_interface.server import _stream_filtered_events
 from imbue.system_interface.server import create_application
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
@@ -844,3 +846,10 @@ def test_start_failure_returns_500(client: TestClient, app: FastAPI) -> None:
 
     assert response.status_code == 500
     assert "boom" in response.json()["detail"]
+
+
+def test_destroy_argv_accepted_by_live_cli() -> None:
+    """Confront the ``mngr destroy`` argv with the live ``imbue.mngr.main.cli``
+    tree, so a vendor/mngr rename of that subcommand/flag fails here at merge
+    time rather than only surfacing at runtime."""
+    assert_mngr_argv_valid(_build_destroy_command("demo"))

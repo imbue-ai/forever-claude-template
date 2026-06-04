@@ -64,7 +64,7 @@ def _build_worktree_create_command(
 
     Pure: argv assembly only, so the repo<->mngr CLI contract is testable
     against the live CLI without constructing an ``AgentManager`` or running a
-    subprocess (see ``mngr_cli_argv_contract_test.py``).
+    subprocess (see ``agent_manager_test.py``).
     """
     cmd = [
         mngr_binary,

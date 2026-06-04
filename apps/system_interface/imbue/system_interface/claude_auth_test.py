@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from mngr_cli_contract.contract import assert_mngr_argv_valid
 from pydantic import SecretStr
 
 from imbue.system_interface import claude_auth
@@ -416,3 +417,21 @@ def test_submit_api_key_verifies_status_with_key_in_env(
     service = claude_auth.ClaudeAuthService(command_runner=_runner)
     status = service.submit_api_key(SecretStr(the_key))
     assert status.logged_in is True
+
+
+# --- mngr CLI argv contract ---
+# Confront each builder's argv with the live ``imbue.mngr.main.cli`` tree, so a
+# vendor/mngr subcommand/flag rename to list/stop/start fails here at merge time
+# rather than only surfacing at runtime.
+
+
+def test_list_argv_accepted_by_live_cli() -> None:
+    assert_mngr_argv_valid(claude_auth._build_list_command())
+
+
+def test_stop_argv_accepted_by_live_cli() -> None:
+    assert_mngr_argv_valid(claude_auth._build_stop_command("demo"))
+
+
+def test_start_argv_accepted_by_live_cli() -> None:
+    assert_mngr_argv_valid(claude_auth._build_start_command("demo"))

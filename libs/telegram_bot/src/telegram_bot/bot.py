@@ -59,7 +59,7 @@ def _format_agent_message(username: str, text: str, chat_id: int) -> str:
 def _build_message_command(agent_name: str, message: str) -> list[str]:
     """Build the ``mngr message`` argv. Pure: argv assembly only, so the
     repo<->mngr CLI contract is testable against the live CLI without spawning
-    a subprocess (see ``mngr_cli_argv_contract_test.py`` at the repo root)."""
+    a subprocess (see ``bot_test.py``)."""
     return ["mngr", "message", agent_name, "-m", message]
 
 

@@ -313,8 +313,7 @@ def _build_list_command() -> list[str]:
     """Build the ``mngr list`` argv used to enumerate agents.
 
     Pure: argv assembly only, so the repo<->mngr CLI contract is testable
-    against the live CLI without a subprocess (see
-    ``mngr_cli_argv_contract_test.py``).
+    against the live CLI without a subprocess (see ``claude_auth_test.py``).
     """
     return ["mngr", "list", "--format", "json"]
 

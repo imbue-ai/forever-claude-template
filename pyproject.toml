@@ -40,7 +40,8 @@ dev = [
     # install) avoids a cwd-dependent divergence.
     "imbue-mngr-claude",
     # Shared validator that checks mngr CLI argvs against the live mngr command
-    # tree; used by test_mngr_cli_argv_contract.py and create_worker_test.py.
+    # tree; used by the per-feature contract tests (bootstrap's manager_test,
+    # telegram_bot's bot_test, launch-task's create_worker_test).
     "mngr-cli-contract",
 ]
 

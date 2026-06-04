@@ -819,8 +819,7 @@ def _build_destroy_command(agent_name: str) -> list[str]:
     """Build the ``mngr destroy --force`` argv for one agent.
 
     Pure: argv assembly only, so the repo<->mngr CLI contract is testable
-    against the live CLI without a subprocess (see
-    ``mngr_cli_argv_contract_test.py``).
+    against the live CLI without a subprocess (see ``server_test.py``).
     """
     return ["mngr", "destroy", agent_name, "--force"]
 
