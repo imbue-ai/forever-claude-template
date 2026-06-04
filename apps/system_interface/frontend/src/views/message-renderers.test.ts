@@ -360,6 +360,14 @@ describe("renderUserMessage", () => {
     expect(renderUserMessage(userEvent("Base directory for this skill: /x/skills/foo/"))).toBeNull();
   });
 
+  it("hides a sub-agent completion notification (already shown as its own card)", () => {
+    const agentNotif =
+      "<task-notification>\n<status>completed</status>\n" +
+      '<summary>Agent "Verify conversation (incremental)" completed</summary>\n' +
+      "<result>No issues found.</result>\n</task-notification>";
+    expect(renderUserMessage(userEvent(agentNotif))).toBeNull();
+  });
+
   it("centers background-task and local-command notifications as system events", () => {
     const taskNotif =
       '<task-notification>\n<status>completed</status>\n<summary>Background command "poll" completed (exit code 0)</summary>\n</task-notification>';

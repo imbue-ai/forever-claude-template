@@ -159,31 +159,6 @@ function renderSystemEventRow(icon: string, label: string, toneClass: string): m
   ]);
 }
 
-/** A centered system-event block whose body (e.g. a finished sub-agent's
- *  result) expands on click. */
-function renderSystemEventBlock(icon: string, label: string, toneClass: string, body: string): m.Vnode {
-  return m("div", { class: `system-event-block${toneClass}` }, [
-    m(
-      "div",
-      {
-        class: "system-event-header",
-        onclick(e: Event) {
-          const block = (e.currentTarget as HTMLElement).parentElement;
-          if (block) {
-            block.classList.toggle("system-event-block--expanded");
-          }
-        },
-      },
-      [
-        m("span", { class: "tool-call-chevron" }, "\u25B8"),
-        m("span", { class: "system-event-icon" }, icon),
-        m("span", { class: "system-event-label" }, label),
-      ],
-    ),
-    m("div", { class: "system-event-details" }, [m("pre", m("code", body))]),
-  ]);
-}
-
 /** A slash-command invocation, rendered as the user's action: the args (their
  *  real request) read as a normal user bubble, tagged with the command name. */
 function renderSlashCommand(name: string, args: string): m.Vnode {
@@ -199,9 +174,7 @@ function renderUserMessageInner(display: UserMessageDisplay, content: string): m
     case "task-notification": {
       const { icon, toneClass } = taskNotificationVisual(display.status);
       const label = display.summary || `Background task ${display.status}`;
-      return display.result
-        ? renderSystemEventBlock(icon, label, toneClass, display.result)
-        : renderSystemEventRow(icon, label, toneClass);
+      return renderSystemEventRow(icon, label, toneClass);
     }
     case "local-command":
       return renderSystemEventRow("\u203A", display.text, " system-event--muted");

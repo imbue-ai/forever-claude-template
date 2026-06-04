@@ -39,9 +39,12 @@ export function isNonBoundaryUserMessage(content: string): boolean {
  * stay visible.
  */
 export function isInlineNotificationUserMessage(content: string): boolean {
-  return (
-    isStopHookFeedback(content) || parseTaskNotification(content) !== null || getLocalCommandStdout(content) !== null
-  );
+  if (isStopHookFeedback(content) || getLocalCommandStdout(content) !== null) {
+    return true;
+  }
+  // Background-command notifications render inline; a sub-agent completion is
+  // hidden (already shown as its own card), so it is not an inline notification.
+  return parseTaskNotification(content) !== null && !isSubagentTaskNotification(content);
 }
 
 /** True for the stop-hook feedback user_message Claude Code injects when a
@@ -104,6 +107,13 @@ export function isHiddenUserMessage(content: string): boolean {
   if (getLocalCommandStdout(content) === "") {
     return true;
   }
+  // A finished sub-agent already renders as its own card (with a link to its
+  // conversation) at the point it was launched, so its completion notification
+  // would be a redundant duplicate. Background *command* notifications have no
+  // such card and still render -- see isInlineNotificationUserMessage.
+  if (isSubagentTaskNotification(content)) {
+    return true;
+  }
   return false;
 }
 
@@ -112,8 +122,6 @@ export interface TaskNotificationInfo {
   status: string;
   /** Human-readable one-liner, e.g. `Background command "..." completed (exit code 0)`. */
   summary: string;
-  /** The finished agent's final text, when present (background *commands* have none). */
-  result: string | null;
 }
 
 /** Reads the inner text of the first `<tag>...</tag>` pair, or null. */
@@ -125,8 +133,8 @@ function readTag(content: string, tag: string): string | null {
 /**
  * Parse a `<task-notification>` user_message -- the event Claude Code injects
  * when a background command or sub-agent the agent launched finishes. Returns
- * the user-facing fields (status, summary, optional result), or null if the
- * content is not a task notification.
+ * the user-facing fields (status, summary), or null if the content is not a
+ * task notification.
  */
 export function parseTaskNotification(content: string): TaskNotificationInfo | null {
   if (!content.trimStart().startsWith("<task-notification>")) {
@@ -134,8 +142,20 @@ export function parseTaskNotification(content: string): TaskNotificationInfo | n
   }
   const status = (readTag(content, "status") ?? "").trim();
   const summary = (readTag(content, "summary") ?? "").trim();
-  const result = readTag(content, "result");
-  return { status, summary, result: result !== null ? result.trim() : null };
+  return { status, summary };
+}
+
+/**
+ * True when a task notification reports a finished *sub-agent* rather than a
+ * background shell command. Claude Code formats the summary as
+ * `Agent "<description>" <completed|was stopped>` for sub-agents and
+ * `Background command "<description>" ...` for shell commands. Sub-agents are
+ * rendered as their own card, so these notifications are hidden (see
+ * isHiddenUserMessage); only background-command notifications surface.
+ */
+export function isSubagentTaskNotification(content: string): boolean {
+  const info = parseTaskNotification(content);
+  return info !== null && info.summary.startsWith('Agent "');
 }
 
 /** Reads the inner text of a `<local-command-stdout>` wrapper, ANSI-stripped
@@ -177,7 +197,7 @@ export function parseSlashCommandInvocation(content: string): SlashCommandInfo |
  *  Callers must check isHiddenUserMessage first -- hidden messages never reach
  *  here. */
 export type UserMessageDisplay =
-  | { kind: "task-notification"; status: string; summary: string; result: string | null }
+  | { kind: "task-notification"; status: string; summary: string }
   | { kind: "local-command"; text: string }
   | { kind: "compact-summary" }
   | { kind: "stop-hook" }
@@ -187,7 +207,7 @@ export type UserMessageDisplay =
 export function classifyUserMessageForDisplay(content: string): UserMessageDisplay {
   const task = parseTaskNotification(content);
   if (task !== null) {
-    return { kind: "task-notification", status: task.status, summary: task.summary, result: task.result };
+    return { kind: "task-notification", status: task.status, summary: task.summary };
   }
   const stdout = getLocalCommandStdout(content);
   if (stdout !== null && stdout !== "") {

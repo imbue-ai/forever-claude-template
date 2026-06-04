@@ -5,6 +5,7 @@ import {
   isHiddenUserMessage,
   isInlineNotificationUserMessage,
   isNonBoundaryUserMessage,
+  isSubagentTaskNotification,
   parseSlashCommandInvocation,
   parseTaskNotification,
 } from "./user-message-classification";
@@ -39,20 +40,11 @@ const FAILED_NOTIFICATION = `<task-notification>
 </task-notification>`;
 
 describe("parseTaskNotification", () => {
-  it("extracts status and summary from a background-command notification (no result)", () => {
+  it("extracts status and summary from a background-command notification", () => {
     const info = parseTaskNotification(BACKGROUND_COMMAND);
     expect(info).not.toBeNull();
     expect(info?.status).toBe("completed");
     expect(info?.summary).toBe('Background command "Re-arm background poll for worker" completed (exit code 0)');
-    expect(info?.result).toBeNull();
-  });
-
-  it("extracts the result body from a sub-agent notification", () => {
-    const info = parseTaskNotification(AGENT_NOTIFICATION);
-    expect(info?.status).toBe("completed");
-    expect(info?.summary).toBe('Agent "Verify conversation (incremental)" completed');
-    expect(info?.result).toContain("Review Summary");
-    expect(info?.result).toContain("No issues found");
   });
 
   it("captures a non-success status", () => {
@@ -62,6 +54,25 @@ describe("parseTaskNotification", () => {
   it("returns null for content that is not a task notification", () => {
     expect(parseTaskNotification("just a normal message")).toBeNull();
     expect(parseTaskNotification("talk about <task-notification> in prose")).toBeNull();
+  });
+});
+
+describe("isSubagentTaskNotification", () => {
+  it("distinguishes a finished sub-agent from a background shell command", () => {
+    // Sub-agents already render as their own card, so their notifications are
+    // hidden; background-command notifications are not.
+    expect(isSubagentTaskNotification(AGENT_NOTIFICATION)).toBe(true);
+    expect(isSubagentTaskNotification(BACKGROUND_COMMAND)).toBe(false);
+    expect(isSubagentTaskNotification("a normal message")).toBe(false);
+  });
+
+  it("hides a sub-agent completion but keeps it a non-boundary, non-inline message", () => {
+    expect(isHiddenUserMessage(AGENT_NOTIFICATION)).toBe(true);
+    expect(isNonBoundaryUserMessage(AGENT_NOTIFICATION)).toBe(true);
+    expect(isInlineNotificationUserMessage(AGENT_NOTIFICATION)).toBe(false);
+    // A background-command notification stays visible and inline.
+    expect(isHiddenUserMessage(BACKGROUND_COMMAND)).toBe(false);
+    expect(isInlineNotificationUserMessage(BACKGROUND_COMMAND)).toBe(true);
   });
 });
 

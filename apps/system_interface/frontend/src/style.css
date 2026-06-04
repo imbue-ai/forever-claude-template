@@ -869,62 +869,6 @@ body {
 }
 
 /* Notifications that carry an expandable body (a finished sub-agent's result). */
-.system-event-block {
-  max-width: 80%;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-base);
-  background: var(--color-bg-sidebar);
-  overflow: hidden;
-}
-
-.system-event-header {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 4px 12px;
-  font-size: 12.5px;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  user-select: none;
-  transition: background 100ms;
-}
-
-.system-event-header:hover {
-  background: var(--color-bg-hover);
-}
-
-.system-event-block--expanded .tool-call-chevron {
-  transform: rotate(90deg);
-}
-
-.system-event-details {
-  display: none;
-  border-top: 1px solid var(--color-border);
-  padding: 8px 12px;
-}
-
-.system-event-block--expanded .system-event-details {
-  display: block;
-}
-
-.system-event-details pre {
-  margin: 0;
-  background: transparent;
-  border: none;
-  padding: 0;
-  overflow-x: auto;
-}
-
-.system-event-details pre code {
-  font-family: var(--font-family-mono);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  background: transparent;
-  padding: 0;
-}
-
 /* Slash-command invocation: a normal user bubble tagged with the command name
    above the user's argument text. */
 .user-command-name {

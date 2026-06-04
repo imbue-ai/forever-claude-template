@@ -635,6 +635,22 @@ describe("inline system notifications (background tasks)", () => {
     expect(sections[0].trailing_reply.map((e) => e.event_id)).toEqual(["rep"]);
   });
 
+  it("does not chip a sub-agent completion (it already renders as its own card)", () => {
+    const agentNotif =
+      "<task-notification>\n<status>completed</status>\n" +
+      '<summary>Agent "Verify conversation" completed</summary>\n<result>done</result>\n</task-notification>';
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "run the review agent", "go"),
+      workMsg("2026-04-28T01:00:01Z", "Agent", "w1"),
+      result("2026-04-28T01:00:01Z", "w1", "launched"),
+      userMsg("2026-04-28T01:00:02Z", agentNotif, "an1"),
+      assistantText("2026-04-28T01:00:03Z", "the agent finished", "rep"),
+    ];
+    const sections = run(events);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].items.some((i) => i.kind === "chip")).toBe(false);
+  });
+
   it("shows a notification that arrives before any human turn in a user-less section", () => {
     const events = [
       userMsg("2026-04-28T01:00:00Z", TASK_NOTIF, "tn1"),
