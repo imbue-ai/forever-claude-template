@@ -91,6 +91,16 @@ _sed_i() {
 
 # Generate ticket ID from directory name + random string
 generate_id() {
+    # When the first argument is "1", mint a STEP id carrying a literal
+    # `-step-` segment (e.g. `cod-step-f1zl`) instead of the plain
+    # `cod-f1zl`. The segment makes a step distinguishable from a regular
+    # ticket by its id alone, without reading the file's `step: true`
+    # frontmatter. The chat progress view relies on this: when the backing
+    # `.tickets/` file is gone (the user cleared the directory), the
+    # enrichment side-table is empty, but a step id still self-identifies so
+    # the view can keep that step's tool-call grouping.
+    local is_step="${1:-0}"
+
     local dir_name
     dir_name=$(basename "$(pwd)")
 
@@ -105,7 +115,11 @@ generate_id() {
     local hash
     hash=$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 4)
 
-    echo "${prefix}-${hash}"
+    if [[ "$is_step" == "1" ]]; then
+        echo "${prefix}-step-${hash}"
+    else
+        echo "${prefix}-${hash}"
+    fi
 }
 
 # Ensure tickets directory exists
@@ -302,7 +316,7 @@ cmd_create() {
 
     title="${title:-Untitled}"
     local id
-    id=$(generate_id)
+    id=$(generate_id "$is_step")
     local file="$TICKETS_DIR/${id}.md"
     local now
     now=$(_iso_date)
