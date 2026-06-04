@@ -40,7 +40,11 @@ import type {
   ToolCall,
   StepEnrichment,
 } from "../models/Response";
-import { isInlineNotificationUserMessage, isNonBoundaryUserMessage } from "./user-message-classification";
+import {
+  isHiddenUserMessage,
+  isInlineNotificationUserMessage,
+  isNonBoundaryUserMessage,
+} from "./user-message-classification";
 
 export type StepStatus = "pending" | "active" | "done";
 
@@ -256,8 +260,11 @@ export function buildSections(
         // notification can arrive with no section yet open (e.g. a background
         // task finishing before the first human turn, as at the very start of
         // a resumed conversation); start a user-less section so it still shows.
-        // Hidden messages (skill expansions, /welcome) are dropped.
-        if (isInlineNotificationUserMessage(e.content ?? "")) {
+        // Hidden messages (skill expansions, /welcome, and stdout-less local
+        // commands -- which are both hidden and inline-classified) are dropped:
+        // they render to nothing, so a chip for them would be an empty box.
+        const content = e.content ?? "";
+        if (!isHiddenUserMessage(content) && isInlineNotificationUserMessage(content)) {
           if (current === null) current = ensureSection(null, `section-${e.event_id}`);
           current.chips.push({ event: e, after: current.entries.length - 1 });
         }

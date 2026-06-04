@@ -646,4 +646,19 @@ describe("inline system notifications (background tasks)", () => {
     const chip = sections[0].items.find((i) => i.kind === "chip") as { event: { event_id: string } } | undefined;
     expect(chip?.event.event_id).toBe("tn1");
   });
+
+  it("drops a stdout-less local command (hidden) instead of emitting an empty chip", () => {
+    // A local slash command with no stdout (e.g. /clear) is both hidden and
+    // inline-classified; it must be dropped, not turned into an empty chip.
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "do the thing", "go"),
+      workMsg("2026-04-28T01:00:01Z", "Bash", "w1"),
+      result("2026-04-28T01:00:01Z", "w1", "ok"),
+      userMsg("2026-04-28T01:00:02Z", "<local-command-stdout></local-command-stdout>", "empty"),
+      assistantText("2026-04-28T01:00:03Z", "done", "rep"),
+    ];
+    const sections = run(events);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].items.some((i) => i.kind === "chip")).toBe(false);
+  });
 });
