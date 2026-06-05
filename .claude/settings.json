@@ -51,15 +51,6 @@
             "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_open_tickets_reminder.sh"
           }
         ]
-      },
-      {
-        "matcher": "TodoWrite",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_block_todowrite.sh"
-          }
-        ]
       }
     ],
     "Stop": [
