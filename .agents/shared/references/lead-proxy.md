@@ -125,13 +125,18 @@ the directory is clean for future runs.
 When syncing reports (or the initial runtime dir to the worker):
 
 ```bash
-mngr rsync <SOURCE_DIR>/ <WORKER>:<DEST_DIR>/ \
+mngr rsync ./<SOURCE_DIR>/ <WORKER>:<DEST_DIR>/ \
     --uncommitted-changes=merge
 ```
 
 - `mngr rsync` takes `SOURCE DESTINATION` (positional): the local source dir
   first, then the `<WORKER>:<PATH>` agent endpoint. Exactly one side must
   reference an agent or remote host.
+- Path resolution: mngr treats an argument as a *local path* only when it
+  starts with `/`, `./`, `../`, or `~/` -- a bare `runtime/foo` is read as an
+  *agent name* (hence the `./` on the source above). On an agent endpoint, a
+  relative `<WORKER>:PATH` resolves against the worker's workdir; an absolute
+  `<WORKER>:/PATH` is used verbatim.
 - Use the directory form (trailing slash on both sides). mngr passes the paths
   through to rsync verbatim, so the trailing slash is load-bearing: it makes
   rsync copy directory *contents* into the destination instead of nesting the

@@ -150,6 +150,46 @@ def test_source_artifacts_dir_synced_after_runtime(tmp_path: Path) -> None:
     ]
 
 
+def test_relative_runtime_dir_is_prefixed_for_local_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repo-relative runtime dir is ``./``-prefixed as the local rsync source.
+
+    This is the real launch contract (the skill passes repo-relative paths from
+    the repo root). ``mngr rsync`` reads a bare ``runtime/foo/`` as an agent name
+    and fails, so the source must be ``./``-prefixed -- while the agent
+    destination stays repo-relative so mngr resolves it against the worker's
+    workdir rather than the lead's. The absolute-path tests above don't exercise
+    this because absolute paths are already recognized as local.
+    """
+    runtime, task, _ = _make_layout(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rel_runtime = runtime.relative_to(tmp_path)
+    rel_task = task.relative_to(tmp_path)
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=rel_runtime,
+        task_file=rel_task,
+        workspace="ws-1",
+        runner=runner,
+    )
+
+    assert rc == 0
+    rsync_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "rsync"]]
+    assert rsync_calls == [
+        [
+            "mngr",
+            "rsync",
+            f"./{rel_runtime}/",
+            f"demo-worker:{rel_runtime}/",
+            "--uncommitted-changes=merge",
+        ],
+    ]
+
+
 def test_source_artifacts_dir_missing_is_fatal(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
