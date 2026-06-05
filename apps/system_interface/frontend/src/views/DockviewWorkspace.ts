@@ -1158,7 +1158,25 @@ async function handleLayoutOp(event: LayoutOpEvent): Promise<void> {
     case "refresh":
       await handleRefresh(event.args, requesterAgentId);
       return;
+    case "reload_interface":
+      handleReloadInterface();
+      return;
   }
+}
+
+/** Reload the entire system interface in the browser.
+ *
+ *  Unlike ``refresh`` (which reloads a single inner iframe/panel),
+ *  ``reload_interface`` reloads the top-level page that hosts the dockview
+ *  shell. This is what the lead agent issues after rebuilding the frontend
+ *  bundle (``npm run build``): a full page reload is the only thing that
+ *  picks up the new hashed assets AND any change to the shell chrome
+ *  itself, and it transitively reloads every child chat iframe. We target
+ *  ``window.top`` so the reload reaches the outermost frame even if the
+ *  shell is ever embedded; ``window`` is the fallback when ``top`` is
+ *  inaccessible (cross-origin embedding). */
+function handleReloadInterface(): void {
+  (window.top ?? window).location.reload();
 }
 
 async function handleOpen(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {

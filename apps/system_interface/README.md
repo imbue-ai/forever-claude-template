@@ -26,6 +26,34 @@ npm install
 npm run dev
 ```
 
+## Updating the running UI (canonical flow)
+
+The deployed system interface is the live web UI the user is looking at, so
+changes are not applied in place. The canonical flow is the
+`update-system-interface` agent skill: a change is delegated to a worker, tested
+in isolation (including Playwright against an isolated instance) and run through
+the review gates, merged, and only then revealed. See
+`.agents/skills/update-system-interface/SKILL.md`.
+
+The two reveal commands (run by the lead, after merge):
+
+```bash
+# Backend (.py) change: restart the services agent so the editable-installed
+# server picks up the new source.
+mngr start --restart system-services
+
+# Frontend change: rebuild the (gitignored) static bundle, then tell the open
+# browser to reload the whole interface.
+cd apps/system_interface/frontend && npm run build
+python3 .agents/skills/update-system-interface/scripts/reload_interface.py
+```
+
+`reload_interface.py` POSTs a `reload_interface` op to the loopback-only
+`/api/layout/broadcast` endpoint, which relays a `layout_op` WebSocket message;
+the frontend responds by reloading the top-level page (shell + all child chat
+iframes). This is distinct from `scripts/layout.py refresh`, which only reloads
+individual inner iframes/panels.
+
 ## Driving the workspace layout from an agent
 
 An agent running inside the workspace container can rearrange the

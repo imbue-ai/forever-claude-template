@@ -43,7 +43,8 @@ export type LayoutOpName =
   | "maximize"
   | "restore"
   | "replace-url"
-  | "refresh";
+  | "refresh"
+  | "reload_interface";
 
 export interface LayoutOpEvent {
   op: LayoutOpName;

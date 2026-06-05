@@ -28,6 +28,7 @@ def test_known_ops_cover_the_full_surface() -> None:
         "restore",
         "replace-url",
         "refresh",
+        "reload_interface",
     ):
         assert is_known_op(op), op
 
@@ -45,6 +46,9 @@ def test_mutating_ops_include_focus_but_not_refresh_or_queries() -> None:
     assert not is_mutating_op("inspect")
     # ``refresh`` is state-preserving and bypasses too.
     assert not is_mutating_op("refresh")
+    # ``reload_interface`` reloads the whole page but touches no serialized
+    # layout state, so it bypasses the mutex like ``refresh``.
+    assert not is_mutating_op("reload_interface")
 
 
 def test_broadcasting_ops_exclude_list_and_inspect() -> None:
@@ -53,6 +57,8 @@ def test_broadcasting_ops_exclude_list_and_inspect() -> None:
     assert not is_broadcasting_op("inspect")
     assert is_broadcasting_op("refresh")
     assert is_broadcasting_op("open")
+    # ``reload_interface`` broadcasts a full-page reload to the frontend.
+    assert is_broadcasting_op("reload_interface")
 
 
 def test_mutex_acquire_succeeds_when_free() -> None:

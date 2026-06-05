@@ -14,7 +14,9 @@ this module:
 
 Read-only ops (``inspect``, ``list``, ``refresh``) bypass the mutex.
 ``focus`` acquires it because it mutates the serialized active-panel
-state.
+state. ``reload_interface`` also bypasses the mutex: it tells the browser
+to reload the whole top-level page (used after a frontend rebuild) and
+does not touch serialized layout state.
 """
 
 import hashlib
@@ -49,6 +51,7 @@ _KNOWN_OPS: frozenset[str] = frozenset(
         "restore",
         "replace-url",
         "refresh",
+        "reload_interface",
     }
 )
 
@@ -84,6 +87,7 @@ _BROADCASTING_OPS: frozenset[str] = frozenset(
         "restore",
         "replace-url",
         "refresh",
+        "reload_interface",
     }
 )
 

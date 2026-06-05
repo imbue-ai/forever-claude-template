@@ -444,6 +444,28 @@ def test_layout_broadcast_refresh_bypasses_mutex(app: FastAPI) -> None:
             }
 
 
+def test_layout_broadcast_reload_interface_emits_ws_message(app: FastAPI) -> None:
+    """``reload_interface`` broadcasts a full-page reload op (no args, no mutex)."""
+    with TestClient(app, client=("127.0.0.1", _TEST_CLIENT_PORT)) as loopback_client:
+        with loopback_client.websocket_connect("/api/ws") as ws:
+            json.loads(ws.receive_text())
+            json.loads(ws.receive_text())
+
+            response = loopback_client.post(
+                "/api/layout/broadcast",
+                json={"op": "reload_interface", "args": {}, "agent_id": "agent-42"},
+            )
+            assert response.status_code == 200
+            assert response.json() == {"ok": True}
+            msg = json.loads(ws.receive_text())
+            assert msg == {
+                "type": "layout_op",
+                "op": "reload_interface",
+                "args": {},
+                "requester_agent_id": "agent-42",
+            }
+
+
 @pytest.mark.timeout(10)
 def test_layout_broadcast_open_terminal_allocates_panel_id_and_returns_ref(app: FastAPI) -> None:
     """``open service:terminal`` is the synchronous-ref-return path.
