@@ -182,10 +182,9 @@ extra_provision_command__extend = [
     # workspace itself rsyncs onto /mngr/code/ via target_path above.
     "sudo ln -sfn /mngr/code /code",
     # Parallel provision script (apt + uv installer || latchkey + uv tool install ||
-    # uv sync + playwright) + Phase D cred-bridge watcher. Piped into bash via
-    # heredoc so `set -euo pipefail` works (mngr's executor uses /bin/sh which
-    # on Ubuntu is dash, and dash doesn't support pipefail). See
-    # [agent_types.main]'s sync_claude_credentials for why Phase D exists.
+    # uv sync + playwright). Piped into bash via heredoc so `set -euo pipefail`
+    # works (mngr's executor uses /bin/sh which on Ubuntu is dash, and dash
+    # doesn't support pipefail).
     '''
 bash <<'EOSCRIPT'
 set -euo pipefail
@@ -246,26 +245,6 @@ wait $UVTOOL_PID   || { echo "[provision] uv tool install failed"  >&2; cat /tmp
 export PATH=$HOME/.local/bin:$PATH
 uv sync --all-packages
 sudo env PATH="$PATH" HOME="$HOME" uv run playwright install --with-deps chromium
-
-# --- Phase D: cred-bridge watcher (fire-and-forget) ---
-# Symlink ~/.claude/.credentials.json -> /mngr/agents/<agent_id>/.../credentials.json
-# as soon as mngr_claude stages it. Runs as a backgrounded subshell so the
-# main extra_provision_command can return cleanly. Nested mngr inside the VM
-# looks up credentials at the default ~/.claude path; mngr_claude on the
-# host delivers them to the per-agent dir, so this watcher bridges the two.
-(
-  sleep 5
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    src=$(find /mngr/agents -maxdepth 5 -name .credentials.json -type f 2>/dev/null | head -1)
-    if [ -n "$src" ]; then
-      mkdir -p ~/.claude
-      ln -sfn "$src" ~/.claude/.credentials.json
-      echo "[cred-bridge] symlinked $src -> ~/.claude/.credentials.json at $(date)"
-      break
-    fi
-    sleep 4
-  done
-) > /tmp/cred-bridge.log 2>&1 < /dev/null &
 EOSCRIPT
 ''',
     # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
