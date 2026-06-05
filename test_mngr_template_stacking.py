@@ -89,7 +89,7 @@ def test_main_template_writes_default_tmux_conf() -> None:
     )
     only_command = tmux_commands[0]
     assert "set -g alternate-screen off" in only_command
-    assert "set -g mouse on" in only_command
+    assert "set -g set-clipboard external" in only_command
 
 
 def test_main_extra_provision_command_stacks_with_lima() -> None:
@@ -98,10 +98,14 @@ def test_main_extra_provision_command_stacks_with_lima() -> None:
     commands = result["extra_provision_command"]
     assert any(_TMUX_MARKER in cmd for cmd in commands)
     # Spot-check several distinct lima provisioning commands to confirm the
-    # entire list (not just the first entry) is concatenated.
+    # entire list (not just the first entry) is concatenated. The bulk of the
+    # provisioning (apt, latchkey, uv tool install, uv sync, playwright, the
+    # cred-bridge watcher) is now collapsed into a single base64-encoded
+    # parallel script, so spot-check that command plus an early and a late
+    # plain entry to confirm the whole list survives.
     assert any("sudo mkdir -p /mngr/worktree" in cmd for cmd in commands)
-    assert any("npm install -g latchkey" in cmd for cmd in commands)
-    assert any("playwright install" in cmd for cmd in commands)
+    assert any("base64 -d | bash" in cmd for cmd in commands)
+    assert any("vendor/tk/ticket" in cmd for cmd in commands)
 
 
 def test_main_extra_provision_command_present_for_docker_mode() -> None:
