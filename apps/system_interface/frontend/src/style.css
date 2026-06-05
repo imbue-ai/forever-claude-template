@@ -889,15 +889,88 @@ body {
   text-decoration: none;
 }
 
-/* ── Permission request footer (inside the tool-call block) ── */
-.tool-call-block--permission-request {
-  border-color: var(--color-accent);
+/* ── Permission request card ──
+   An agent permission request, rendered as a standalone card (not a generic
+   tool block): the service it touches, the agent's rationale, the specific
+   request, a button that opens the modal, and a disclosure preserving the raw
+   request/response. */
+.permission-request {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-composer);
+  padding: 12px 14px;
+  max-width: 560px;
 }
 
-.tool-call-permission-footer {
-  border-top: 1px solid var(--color-accent);
-  background: var(--color-accent-light);
-  padding: 8px 10px;
+.permission-request-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-primary);
+}
+
+.permission-request-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.permission-request-rationale {
+  margin-top: 9px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-text-primary);
+}
+
+.permission-request-rationale--pending {
+  color: var(--color-text-secondary);
+}
+
+.permission-request-detail {
+  margin-top: 10px;
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+}
+
+.permission-request-detail-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.permission-request-detail-value {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+  border-radius: 5px;
+  padding: 2px 7px;
+}
+
+.permission-request-actions {
+  margin-top: 12px;
+}
+
+.permission-request-raw {
+  margin-top: 10px;
+}
+
+.permission-request-raw > summary {
+  font-size: 12px;
+  color: var(--color-text-faint);
+  cursor: pointer;
+}
+
+.permission-request-raw > pre {
+  margin: 8px 0 0;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-sidebar);
+  border-radius: 6px;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .permission-request-button {

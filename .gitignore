@@ -335,6 +335,8 @@ scripts/notify_user.local.sh
 **/.playwright-mcp/
 **/permission-scenarios.png
 **/permission-expanded.png
+**/permission-redesign*.png
+**/permission-production.png
 
 # Dev-only visual mockup for the permission-request progress view (not part of
 # the app or its tests)

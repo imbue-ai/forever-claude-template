@@ -274,26 +274,94 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode
   ]);
 }
 
+/** The rich fields a created permission request echoes back on stdout, parsed
+ *  from the tool result. `requestId` is always present (it's what the modal
+ *  button needs); the rest depend on the request type. */
+export interface PermissionRequestDetails {
+  requestId: string;
+  /** "predefined" (a service scope) or "file-sharing", or null if absent. */
+  requestType: string | null;
+  /** The agent's human-readable reason for the request. */
+  rationale: string | null;
+  /** Predefined requests: the latchkey scope (e.g. "slack-api") and the
+   *  specific permissions being granted. */
+  scope: string | null;
+  permissions: string[];
+  /** File-sharing requests: the path and access mode (READ/WRITE). */
+  path: string | null;
+  access: string | null;
+}
+
+/** Human-readable service names keyed by latchkey scope, mirroring the latchkey
+ *  services catalog (libs/mngr_latchkey .../services.json). The catalog lives in
+ *  the gateway, not the frontend, so this is a display-only copy; an unknown
+ *  scope falls back to a title-cased form via {@link serviceDisplayName}. */
+const SERVICE_DISPLAY_NAMES: Record<string, string> = {
+  aws: "AWS",
+  "calendly-api": "Calendly",
+  "coolify-api": "Coolify",
+  "discord-api": "Discord",
+  "dropbox-api": "Dropbox",
+  "figma-api": "Figma",
+  "github-git": "GitHub (git)",
+  "github-rest-api": "GitHub (REST API)",
+  "gitlab-api": "GitLab (REST API)",
+  "gitlab-git": "GitLab (git)",
+  "google-analytics-api": "Google Analytics",
+  "google-calendar-api": "Google Calendar",
+  "google-directions-api": "Google Directions",
+  "google-docs-api": "Google Docs",
+  "google-drive-api": "Google Drive",
+  "google-gmail-api": "Gmail",
+  "google-people-api": "Google Contacts",
+  "google-sheets-api": "Google Sheets",
+  "linear-api": "Linear",
+  "mailchimp-api": "Mailchimp",
+  "notion-api": "Notion",
+  "sentry-api": "Sentry",
+  "slack-api": "Slack",
+  "stripe-api": "Stripe",
+  "telegram-api": "Telegram",
+  "umami-api": "Umami",
+  "yelp-api": "Yelp",
+  "zoom-api": "Zoom",
+};
+
+/** The display name for a latchkey scope: the catalog name, or a title-cased
+ *  fallback (strip a trailing `-api`/`-git`, capitalize words) so a scope the
+ *  catalog copy doesn't know still reads reasonably. */
+export function serviceDisplayName(scope: string): string {
+  const known = SERVICE_DISPLAY_NAMES[scope];
+  if (known) return known;
+  return scope
+    .replace(/-(api|git)$/, "")
+    .split("-")
+    .map((word) => (word ? word[0].toUpperCase() + word.slice(1) : word))
+    .join(" ");
+}
+
 /**
- * Detect a *successful* latchkey permission-request creation call and pull the
- * resulting request id out of the tool result.
+ * Parse the rich details of a *successful* latchkey permission-request creation
+ * call out of its tool result.
  *
  * An agent asks the user for permission by POSTing to the reserved
  * `latchkey-self.invalid/permission-requests` host (see the latchkey skill).
- * The created request's JSON -- including a `request_id` -- is echoed back on
- * stdout, so the tool result output contains a `"request_id": "..."` field.
+ * The created request's JSON -- request_id, rationale, request_type, and a
+ * type-specific payload -- is echoed back on stdout (after curl's progress
+ * meter), so the result output contains a JSON object starting at the first
+ * `{`.
  *
- * Returns the request id when the tool call is such a creation POST and it
- * succeeded; otherwise null (in which case the caller renders the raw tool
- * block, so failures/errors stay visible and debuggable).
+ * Returns the parsed details when the call is such a creation POST that
+ * succeeded and carries a request_id; otherwise null (the request is still
+ * pending, errored, or the output wasn't parseable -- the caller then shows a
+ * pending card and keeps the raw output available).
  */
 export function parsePermissionRequest(
   toolCall: ToolCall,
   toolResult: ToolResultEvent | null,
-): { requestId: string } | null {
+): PermissionRequestDetails | null {
   // The same input-only predicate the timeline walk uses to lift the request
-  // out of its step, so the two stay in lockstep. A creation (POST) yields a
-  // request_id; reads of existing permissions hit different endpoints.
+  // out of its step, so the two stay in lockstep.
   if (!isPermissionRequestCall(toolCall)) {
     return null;
   }
@@ -301,11 +369,39 @@ export function parsePermissionRequest(
     return null;
   }
   const output = toolResult.output || "";
-  const match = output.match(/"request_id"\s*:\s*"([^"]+)"/);
-  if (!match) {
+  // curl writes a progress meter before the response body; the JSON object is
+  // the last thing on stdout, starting at the first `{`.
+  const start = output.indexOf("{");
+  if (start < 0) {
     return null;
   }
-  return { requestId: match[1] };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output.slice(start));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return null;
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.request_id !== "string") {
+    return null;
+  }
+  const payload =
+    typeof obj.payload === "object" && obj.payload !== null ? (obj.payload as Record<string, unknown>) : {};
+  const permissions = Array.isArray(payload.permissions)
+    ? payload.permissions.filter((p): p is string => typeof p === "string")
+    : [];
+  return {
+    requestId: obj.request_id,
+    requestType: typeof obj.request_type === "string" ? obj.request_type : null,
+    rationale: typeof obj.rationale === "string" ? obj.rationale : null,
+    scope: typeof payload.scope === "string" ? payload.scope : null,
+    permissions,
+    path: typeof payload.path === "string" ? payload.path : null,
+    access: typeof payload.access === "string" ? payload.access : null,
+  };
 }
 
 /**
@@ -337,41 +433,101 @@ function renderLockIcon(): m.Vnode {
   );
 }
 
+/** The card heading: "Permission request: <service>" for a predefined request,
+ *  "Permission request: File access" for a file-sharing one, or plain
+ *  "Permission request" when the subject isn't known (e.g. still pending). */
+function permissionHeading(details: PermissionRequestDetails | null): string {
+  if (details === null) return "Permission request";
+  if (details.requestType === "file-sharing") return "Permission request: File access";
+  if (details.scope) return `Permission request: ${serviceDisplayName(details.scope)}`;
+  return "Permission request";
+}
+
+/** The concise "what is being requested" line: the permissions on a service
+ *  scope, or an access mode on a path. Null when there's nothing specific to
+ *  show. */
+function permissionRequesting(details: PermissionRequestDetails | null): string | null {
+  if (details === null) return null;
+  if (details.scope) {
+    const perms = details.permissions.join(", ");
+    return perms ? `${perms} on ${details.scope}` : details.scope;
+  }
+  if (details.path) {
+    return `${details.access ?? "access"} on ${details.path}`;
+  }
+  return null;
+}
+
 /**
- * Footer rendered inside a permission-request tool block: an outlined button
- * that opens the modal. Living inside the block (rather than alongside it)
- * ties the affordance visually to the request that created it.
+ * Render an agent permission request as a card: the service it touches, the
+ * agent's rationale, what's being requested, a button that opens the modal, and
+ * a disclosure preserving the raw request/response. Replaces the generic
+ * "Tool: Bash" block so the request reads as what it is.
+ *
+ * Before the result lands (still pending) the details are null: the card shows
+ * a waiting state with no button. The button appears once the result carries a
+ * request_id.
  */
-export function renderPermissionRequestFooter(requestId: string): m.Vnode {
-  return m("div", { class: "tool-call-permission-footer" }, [
-    m(
-      "button",
-      {
-        class: "permission-request-button",
-        type: "button",
-        onclick(e: Event) {
-          e.preventDefault();
-          e.stopPropagation();
-          openPermissionRequest(requestId);
-        },
-      },
-      [renderLockIcon(), m("span", "Permission request")],
-    ),
+export function renderPermissionRequestBlock(toolCall: ToolCall, toolResult: ToolResultEvent | null): m.Vnode {
+  const details = parsePermissionRequest(toolCall, toolResult);
+  const requesting = permissionRequesting(details);
+  const rawInput = toolCall.input_preview || "";
+  const rawOutput = toolResult?.output || "";
+  const rawText = rawOutput ? `${rawInput}\n\n${rawOutput}` : rawInput;
+
+  return m("div", { class: "permission-request" }, [
+    m("div", { class: "permission-request-heading" }, [
+      renderLockIcon(),
+      m("span", { class: "permission-request-title" }, permissionHeading(details)),
+    ]),
+    details === null
+      ? m(
+          "div",
+          { class: "permission-request-rationale permission-request-rationale--pending" },
+          "Waiting for the request to register…",
+        )
+      : details.rationale
+        ? m("div", { class: "permission-request-rationale" }, details.rationale)
+        : null,
+    requesting
+      ? m("div", { class: "permission-request-detail" }, [
+          m("span", { class: "permission-request-detail-label" }, "Requesting"),
+          m("code", { class: "permission-request-detail-value" }, requesting),
+        ])
+      : null,
+    details !== null
+      ? m("div", { class: "permission-request-actions" }, [
+          m(
+            "button",
+            {
+              class: "permission-request-button",
+              type: "button",
+              onclick(e: Event) {
+                e.preventDefault();
+                e.stopPropagation();
+                openPermissionRequest(details.requestId);
+              },
+            },
+            [renderLockIcon(), m("span", "Review & respond")],
+          ),
+        ])
+      : null,
+    rawText
+      ? m("details", { class: "permission-request-raw" }, [
+          m("summary", "Show raw request"),
+          m("pre", m("code", rawText)),
+        ])
+      : null,
   ]);
 }
 
-export function renderToolCallBlock(
-  toolCall: ToolCall,
-  toolResult: ToolResultEvent | null,
-  footer: m.Vnode | null = null,
-): m.Vnode {
+export function renderToolCallBlock(toolCall: ToolCall, toolResult: ToolResultEvent | null): m.Vnode {
   const headerText = `Tool: ${toolCall.tool_name}`;
   const inputText = toolCall.input_preview || "";
   const outputText = toolResult?.output || "";
   const isError = toolResult?.is_error === true;
-  const blockClass = footer ? "tool-call-block tool-call-block--permission-request" : "tool-call-block";
 
-  return m("div", { class: blockClass }, [
+  return m("div", { class: "tool-call-block" }, [
     m(
       "div",
       {
@@ -393,7 +549,6 @@ export function renderToolCallBlock(
           ])
         : null,
     ]),
-    footer,
   ]);
 }
 
@@ -422,13 +577,16 @@ export function renderAssistantMessageChildren(
       continue;
     }
     const result = toolResults.get(toolCall.tool_call_id) ?? null;
-    // For a successful permission request, render the button as a footer inside
-    // the tool block so the affordance is visually bound to the request. The
-    // block stays in place (the footer is appended within it once the result
-    // arrives), so the layout doesn't jump.
-    const permissionRequest = parsePermissionRequest(toolCall, result);
-    const footer = permissionRequest ? renderPermissionRequestFooter(permissionRequest.requestId) : null;
-    children.push(renderToolCallBlock(toolCall, result, footer));
+    // A permission request renders as its own card (service, rationale, the
+    // request, a button, and the raw call) rather than a generic tool block.
+    // Gated on the input-only predicate so the card shows even while the request
+    // is still pending -- the same signal the timeline walk uses to lift it out
+    // of its step.
+    if (isPermissionRequestCall(toolCall)) {
+      children.push(renderPermissionRequestBlock(toolCall, result));
+      continue;
+    }
+    children.push(renderToolCallBlock(toolCall, result));
   }
   return children;
 }

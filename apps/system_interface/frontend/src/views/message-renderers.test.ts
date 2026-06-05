@@ -3,7 +3,8 @@ import type { ToolCall, TranscriptEvent, ToolResultEvent } from "../models/Respo
 import {
   buildToolResultsWithSkillExpansions,
   parsePermissionRequest,
-  renderPermissionRequestFooter,
+  renderPermissionRequestBlock,
+  serviceDisplayName,
   openPermissionRequest,
   renderSubagentCard,
 } from "./message-renderers";
@@ -257,19 +258,44 @@ const PERMISSION_INPUT = JSON.stringify({
 });
 
 // A realistic output: curl writes a progress meter to stderr/stdout before the
-// JSON body, so the whole thing is not directly JSON-parseable.
+// JSON body, so the whole thing is not directly JSON-parseable. The body
+// carries the rich fields the card surfaces (rationale, request_type, payload).
 const PERMISSION_OUTPUT = `  % Total    % Received % Xferd
 100  1007  100   670  100   337
 {
   "request_id": "885711ec07bf47239d71294e1534330b",
   "agent_id": "agent-28dc23edadd34caeaba58441ac8e7218",
-  "request_type": "predefined"
+  "rationale": "I need to read #eng-releases to summarize the deploy thread.",
+  "request_type": "predefined",
+  "payload": { "scope": "slack-api", "permissions": ["slack-read-all"] }
 }`;
 
+// A file-sharing request: payload carries a path and access mode instead.
+const FILE_SHARING_OUTPUT = `{"request_id":"fs-1","rationale":"write the report locally","request_type":"file-sharing","payload":{"path":"/Users/you/Documents/report","access":"WRITE"}}`;
+
 describe("parsePermissionRequest", () => {
-  it("extracts the request id from a successful creation POST", () => {
+  it("parses the rich details of a successful predefined creation POST", () => {
     const result = parsePermissionRequest(makeToolCall(PERMISSION_INPUT), makeResult(PERMISSION_OUTPUT));
-    expect(result).toEqual({ requestId: "885711ec07bf47239d71294e1534330b" });
+    expect(result).toEqual({
+      requestId: "885711ec07bf47239d71294e1534330b",
+      requestType: "predefined",
+      rationale: "I need to read #eng-releases to summarize the deploy thread.",
+      scope: "slack-api",
+      permissions: ["slack-read-all"],
+      path: null,
+      access: null,
+    });
+  });
+
+  it("parses a file-sharing request's path and access mode", () => {
+    const result = parsePermissionRequest(makeToolCall(PERMISSION_INPUT), makeResult(FILE_SHARING_OUTPUT));
+    expect(result).toMatchObject({
+      requestId: "fs-1",
+      requestType: "file-sharing",
+      path: "/Users/you/Documents/report",
+      access: "WRITE",
+      scope: null,
+    });
   });
 
   it("ignores tool calls that are not permission-request POSTs", () => {
@@ -293,8 +319,22 @@ describe("parsePermissionRequest", () => {
     expect(parsePermissionRequest(makeToolCall(PERMISSION_INPUT), errored)).toBeNull();
   });
 
-  it("returns null when the output has no request_id", () => {
+  it("returns null when the output has no JSON body", () => {
     expect(parsePermissionRequest(makeToolCall(PERMISSION_INPUT), makeResult("nope"))).toBeNull();
+  });
+
+  it("returns null when the JSON body has no request_id", () => {
+    expect(parsePermissionRequest(makeToolCall(PERMISSION_INPUT), makeResult('{"agent_id":"a"}'))).toBeNull();
+  });
+});
+
+describe("serviceDisplayName", () => {
+  it("maps a known scope to its catalog name", () => {
+    expect(serviceDisplayName("google-gmail-api")).toBe("Gmail");
+  });
+
+  it("title-cases an unknown scope as a fallback", () => {
+    expect(serviceDisplayName("acme-widgets-api")).toBe("Acme Widgets");
   });
 });
 
@@ -318,21 +358,71 @@ function findVnode(
   return null;
 }
 
-describe("renderPermissionRequestFooter", () => {
-  it("renders a footer div containing a 'Permission request' button", () => {
-    const vnode = renderPermissionRequestFooter("req-123") as unknown as {
-      tag: string;
-      attrs: { className: string };
-    };
-    expect(vnode.tag).toBe("div");
-    // Mithril normalizes the `class` attr to `className`.
-    expect(vnode.attrs.className).toBe("tool-call-permission-footer");
+// The exact text of the first text vnode (tag "#") under a node, or null.
+function textOf(node: unknown): string | null {
+  const t = findVnode(node, (v) => v.tag === "#" && typeof (v as { children?: unknown }).children === "string");
+  return t ? (t.children as string) : null;
+}
+
+describe("renderPermissionRequestBlock", () => {
+  it("heads the card with the service name and shows the rationale and a button", () => {
+    const vnode = renderPermissionRequestBlock(makeToolCall(PERMISSION_INPUT), makeResult(PERMISSION_OUTPUT));
+
+    const title = findVnode(
+      vnode,
+      (v) =>
+        v.tag === "span" && (v as { attrs?: { className?: string } }).attrs?.className === "permission-request-title",
+    );
+    expect(textOf(title)).toBe("Permission request: Slack");
+
+    // The rationale and the "Requesting" value are both present.
+    expect(
+      findVnode(
+        vnode,
+        (v) =>
+          v.tag === "#" &&
+          (v as { children?: unknown }).children === "I need to read #eng-releases to summarize the deploy thread.",
+      ),
+    ).not.toBeNull();
+    expect(
+      findVnode(
+        vnode,
+        (v) => v.tag === "#" && (v as { children?: unknown }).children === "slack-read-all on slack-api",
+      ),
+    ).not.toBeNull();
 
     const button = findVnode(vnode, (v) => v.tag === "button");
     expect(button).not.toBeNull();
-    // Mithril wraps the label string in a text vnode (tag "#").
-    const label = findVnode(button, (v) => v.tag === "#");
-    expect(label?.children).toBe("Permission request");
+    expect(textOf(button)).toBe("Review & respond");
+  });
+
+  it("wires the button to open the modal with the request id", () => {
+    const vnode = renderPermissionRequestBlock(makeToolCall(PERMISSION_INPUT), makeResult(PERMISSION_OUTPUT));
+    const button = findVnode(vnode, (v) => v.tag === "button") as { attrs?: { onclick?: (e: Event) => void } } | null;
+
+    const postMessage = vi.fn();
+    vi.stubGlobal("window", { parent: { postMessage } });
+    try {
+      button?.attrs?.onclick?.({ preventDefault() {}, stopPropagation() {} } as unknown as Event);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: "minds:open-request-modal", requestId: "885711ec07bf47239d71294e1534330b" },
+      "*",
+    );
+  });
+
+  it("shows a pending state with no button before the result arrives", () => {
+    const vnode = renderPermissionRequestBlock(makeToolCall(PERMISSION_INPUT), null);
+
+    const title = findVnode(
+      vnode,
+      (v) =>
+        v.tag === "span" && (v as { attrs?: { className?: string } }).attrs?.className === "permission-request-title",
+    );
+    expect(textOf(title)).toBe("Permission request");
+    expect(findVnode(vnode, (v) => v.tag === "button")).toBeNull();
   });
 });
 
