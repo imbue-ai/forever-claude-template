@@ -167,6 +167,17 @@ captured data) unconstrained. Pagination is a normal part of the
 workflow if the original ask requires it. Do NOT make extra
 un-asked-for API calls just to gather more data.
 
+Go further than fields: **persist the raw payload of each record and a
+reference to its source, durably** (e.g. under `runtime/<name>/`), not
+just the extracted/processed fields (see the preserve-and-surface
+principle in CLAUDE.md for what "raw payload" and "source reference"
+mean). A pipeline that fetches, transforms, and discards the raw payload
+cannot satisfy that principle no matter what consumers do: persisting it
+is what lets a *later* change in processing requirements re-derive new
+fields with no refetch, and what lets surfaces show the raw record or
+link out to the source. Make this a postcondition of the skill's
+data-capture step.
+
 ## Worker sub-skills
 The `crystallize-task-worker`, `heal-skill-worker`, and
 `update-skill-worker` skills have been pre-installed into your

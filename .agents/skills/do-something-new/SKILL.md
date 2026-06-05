@@ -179,6 +179,11 @@ re-propose (re-run Step 2 only if the new ask needs fresh research).
 
 Save the raw sample to `runtime/do-something-new/$SLUG/sample.json` so the
 user can ask to see it and so it can **seed the first surface** (Step 7).
+Include in each sampled record its **raw payload and a source reference**,
+not only the processed fields -- the first surface renders this sample, and
+per the preserve-and-surface principle (CLAUDE.md) that surface must be able
+to show the raw record and link to its source. If the sample carries only
+extracted fields, the raw/source affordance has nothing to point at.
 Default presentation is a brief natural-language summary; pick a table /
 inline JSON / structured prose if the data or the user's preference makes it
 clearer.
@@ -250,6 +255,17 @@ third, parallel re-implementation. **If you ever feel the urge to write a
 second, different way of producing the data to feed a surface, stop** -- that
 divergence (the surface showing something the user never confirmed) is the
 exact bug this rule exists to prevent.
+
+**Surface the raw data and its source from the first version.** Per the
+preserve-and-surface principle (CLAUDE.md), the first surface -- not just
+the crystallized one -- includes a clean, unprompted affordance to view
+each record's raw payload and jump to its source (e.g. "view raw email" /
+"open in Gmail"). Build it in now, from the confirmed sample, so the
+throwaway first version and the eventual crystallized version agree rather
+than the affordance appearing only after crystallization. This depends on
+the sample carrying the raw payload + source reference (Step 5). If you are
+building the surface as a web view, the `build-web-service` skill covers the
+same requirement.
 
 Once the surface is seeded from the confirmed sample, additional surfaces (scheduling,
 persistence, history, live integration with a forwarded service, etc.) each
