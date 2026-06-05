@@ -198,12 +198,14 @@ def attribute_steps(
     for ticket_id, title, _status in step_records:
         if ticket_id in owner:
             continue
-        # Sorted for determinism. FIXME: when the same title is pending
-        # simultaneously in more than one session, both have residual capacity
-        # and the first sorted session wins for all of them -- so the steps may
-        # land in the wrong view. Accepted as cosmetically benign: these are
-        # content-less placeholders, and the misattribution self-corrects the
-        # moment one of the steps starts (it then carries a definitive
+        # Sorted for determinism. Known limitation: when the same title is
+        # pending simultaneously in two of this agent's sessions that map to
+        # different scopes (the main agent and its own subagent, or two sibling
+        # subagents), both have residual capacity and the first sorted session
+        # wins for all of them -- so a placeholder may land in the wrong view.
+        # Accepted as cosmetically benign and very unlikely in practice: these
+        # are content-less placeholders, and the misattribution self-corrects
+        # the moment one of the steps starts (it then carries a definitive
         # transition).
         match: str | None = None
         for session_id in sorted(residual.keys()):
