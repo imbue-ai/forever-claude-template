@@ -40,6 +40,7 @@ from playwright.sync_api import Page
 from playwright.sync_api import sync_playwright
 
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.desktop_client.templates import FALLBACK_BRANCH as _FORM_DEFAULT_BRANCH
 
 # This file lives at apps/minds/imbue/minds/desktop_client/e2e_workspace_runner.py,
 # so parents[5] hops up over desktop_client, minds, imbue, minds, apps to the repo
@@ -176,7 +177,16 @@ def _fct_remote_has_branch(branch: str) -> bool:
 
 
 def _shallow_clone_fct(branch: str, destination: Path) -> Path:
-    """Shallow-clone ``branch`` of the FCT public remote into ``destination``."""
+    """Shallow-clone ``branch`` of the FCT public remote into ``destination``.
+
+    Also fetches any release tags into the clone. The minds create form's
+    default branch field (see ``FALLBACK_BRANCH`` in templates.py) pins
+    to an annotated FCT tag (e.g. ``v0.2.35``); without this extra fetch,
+    a depth-1 clone of an unrelated branch does not have the tag's commit,
+    and the downstream ``mngr create`` clone of the form's branch field
+    would fail with ``Remote branch v0.2.35 not found``. Cheap (a handful
+    of extra refs) and keeps test create flows aligned with production.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", branch, _FCT_REMOTE, str(destination)],
@@ -185,7 +195,48 @@ def _shallow_clone_fct(branch: str, destination: Path) -> Path:
         text=True,
         timeout=120,
     )
+    # ``--depth 1`` would only fetch the tag's tip, but ``--tags`` already
+    # implies fetching all tag-pointed commits at shallow depth; combine
+    # so each tag's target commit is reachable without filling out full
+    # branch history.
+    subprocess.run(
+        ["git", "-C", str(destination), "fetch", "--depth", "1", "--tags", "origin"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    # The create form pre-fills its branch field with `_FORM_DEFAULT_BRANCH`
+    # (templates.py `FALLBACK_BRANCH`), so the spawned `mngr create` runs
+    # `git checkout <that ref>` in this very clone. Leaving the clone on
+    # the originally-cloned branch turns that into a real checkout that
+    # rejects any uncommitted edits the test fixture made to opt files in
+    # (e.g. `.mngr/settings.toml is_allowed_in_pytest`). Pre-positioning
+    # to the form's default makes that downstream checkout a no-op even
+    # when the working tree is dirty. Best effort: if the ref is not
+    # reachable (e.g. tag not present on FCT remote yet), leave the clone
+    # as-is and let `mngr create` surface the resulting error.
+    _checkout_best_effort(destination, _FORM_DEFAULT_BRANCH)
     return destination
+
+
+def _checkout_best_effort(repo: Path, ref: str) -> None:
+    verify = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if verify.returncode != 0:
+        logger.info("Skipping pre-checkout of FCT clone to {!r}: ref not reachable", ref)
+        return
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "--detach", ref],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
 
 
 def resolve_fct_path(scratch_dir: Path) -> Path:
