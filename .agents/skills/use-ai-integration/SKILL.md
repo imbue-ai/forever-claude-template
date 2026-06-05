@@ -116,8 +116,7 @@ the task file first (with `lead_agent` / `finish_report_path` frontmatter; see t
 `launch-task` skill). **Triggering**: only on explicit user feedback or an error
 -- never an autonomous loop. **Scope**: give the agent a tightly-scoped task; a
 broad task in an unattended launch is how cost and time run away. What to *do*
-with the returned branch (merge, hand back for review) is out of scope here and
-belongs to a dedicated future skill.
+with the returned branch (merge, hand back for review) is out of scope here.
 
 ## Cost control
 
