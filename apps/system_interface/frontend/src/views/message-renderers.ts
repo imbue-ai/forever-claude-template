@@ -413,7 +413,7 @@ export function openPermissionRequest(requestId: string): void {
   window.parent.postMessage({ type: "minds:open-request-modal", requestId }, "*");
 }
 
-/** Small lock glyph for the permission-request footer button. */
+/** Small lock glyph shown in the permission-request card heading and button. */
 function renderLockIcon(): m.Vnode {
   return m(
     "svg",
