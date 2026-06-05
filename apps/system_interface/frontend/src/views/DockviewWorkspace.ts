@@ -1171,12 +1171,25 @@ async function handleLayoutOp(event: LayoutOpEvent): Promise<void> {
  *  shell. This is what the lead agent issues after rebuilding the frontend
  *  bundle (``npm run build``): a full page reload is the only thing that
  *  picks up the new hashed assets AND any change to the shell chrome
- *  itself, and it transitively reloads every child chat iframe. We target
- *  ``window.top`` so the reload reaches the outermost frame even if the
- *  shell is ever embedded; ``window`` is the fallback when ``top`` is
- *  inaccessible (cross-origin embedding). */
+ *  itself, and it transitively reloads every child chat iframe.
+ *
+ *  In the real deployment the shell IS the top-level page, so ``window.top``
+ *  and ``window`` are the same frame. We still target ``window.top`` so the
+ *  reload reaches the outermost frame if the shell is ever embedded -- but a
+ *  cross-origin embedding makes ``window.top.location`` throw a
+ *  ``SecurityError``, so we wrap it and fall back to reloading our own frame
+ *  (the same cross-origin fallback ``handleRefresh`` uses). */
 function handleReloadInterface(): void {
-  (window.top ?? window).location.reload();
+  try {
+    const top = window.top;
+    if (top !== null) {
+      top.location.reload();
+      return;
+    }
+  } catch {
+    // Cross-origin top frame: fall through to reloading our own window.
+  }
+  window.location.reload();
 }
 
 async function handleOpen(args: Record<string, unknown>, requesterAgentId: string): Promise<void> {

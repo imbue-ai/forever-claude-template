@@ -17,9 +17,21 @@ relays a ``layout_op`` WebSocket message to the connected browser. If no browser
 is connected the broadcast is a harmless no-op, matching how the layout
 broadcasts behave.
 
-This script is intentionally separate from ``scripts/layout.py`` (whose ops all
-*arrange* panels within the running UI) and is not meant to be used by other
-processes -- it lives with the skill that owns the update flow.
+This script is intentionally separate from ``scripts/layout.py`` -- not because
+that helper is purely about arranging panels (its ``refresh`` op already does a
+non-arranging reload), but because of ownership and blast radius: ``layout.py``
+is a general agent-facing surface exposed via the ``manage-layout`` skill that
+any agent may invoke at any time, whereas a full-UI reload is a privileged step
+in one specific lead-only reveal sequence that should fire only after a verified
+rebuild. Keeping it out of the general layout CLI prevents it from showing up as
+a casually-invokable panel verb. It lives with the skill that owns the flow and
+is not meant to be used by other processes.
+
+The HTTP/env plumbing below is deliberately a small standalone copy of
+``scripts/layout.py``'s ``_post_layout`` (same endpoint, env vars, header, and
+default port). The two live in different directories, so a shared import would
+be awkward; if the workspace-server URL/port convention ever changes, update
+both.
 
 Environment:
     MINDS_WORKSPACE_SERVER_URL  Base URL of the workspace server
