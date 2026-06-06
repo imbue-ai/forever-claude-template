@@ -336,33 +336,6 @@ def _agent_not_found_response(agent_id: str) -> JSONResponse:
     return JSONResponse(content=error.model_dump(), status_code=404)
 
 
-def _get_combined_events(request: Request, agent_info: AgentInfo) -> list[dict[str, Any]]:
-    """Ordered session event list for an agent.
-
-    This is purely session transcript events. The progress view derives all
-    structure from the transcript (the `tk` tool calls live in the session
-    stream), and tk ticket state is delivered separately as an enrichment
-    snapshot (see `_get_events`).
-    """
-    watcher = _get_or_create_watcher(request, agent_info)
-    return watcher.get_all_events()
-
-
-def _backfill_slice(merged: list[dict[str, Any]], before_event_id: str, limit: int) -> list[dict[str, Any]]:
-    """Slice of `merged` containing the `limit` events immediately before
-    the event with id `before_event_id`. Returns [] if the id isn't
-    found or sits at index 0."""
-    target_idx = -1
-    for i, event in enumerate(merged):
-        if event["event_id"] == before_event_id:
-            target_idx = i
-            break
-    if target_idx <= 0:
-        return []
-    start_idx = max(0, target_idx - limit)
-    return merged[start_idx:target_idx]
-
-
 def _get_events(agent_id: str, request: Request) -> Response:
     """Get events for an agent. Supports tail-first loading and backfill."""
     agent_info = _find_agent(agent_id, request)
@@ -375,9 +348,21 @@ def _get_events(agent_id: str, request: Request) -> Response:
         limit = int(limit_str)
     except ValueError:
         limit = _DEFAULT_TAIL_COUNT
+    # A non-positive limit would defeat the tail cap (``[-0:]`` returns the whole
+    # list) and break backfill slicing, so fall back to the default.
+    if limit <= 0:
+        limit = _DEFAULT_TAIL_COUNT
 
-    merged = _get_combined_events(request, agent_info)
-    events = _backfill_slice(merged, before_event_id, limit) if before_event_id else merged
+    watcher = _get_or_create_watcher(request, agent_info)
+    if before_event_id:
+        events = watcher.get_backfill_events(before_event_id, limit=limit)
+    else:
+        # Tail-first load: return only the most recent `limit` main-session
+        # events (not subagent events). The client pages further back via the
+        # `before` backfill branch above, so capping here bounds the initial
+        # payload without hiding history.
+        events = watcher.get_all_events()[-limit:]
+
     # tk step enrichment ships as a separate, unpaginated snapshot (always
     # complete regardless of where the transcript window is), joined to the
     # transcript-derived steps by id on the frontend.

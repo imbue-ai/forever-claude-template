@@ -349,18 +349,50 @@ async def _handle_service_websocket(
     try:
         async with websockets.connect(ws_url, subprotocols=ws_subprotocols) as backend_ws:
             await websocket.accept(subprotocol=backend_ws.subprotocol)
-            await asyncio.gather(
-                _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws),
+            client_to_backend = asyncio.create_task(
+                _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws)
+            )
+            backend_to_client = asyncio.create_task(
                 _forward_backend_to_client(
                     client_websocket=websocket, backend_ws=backend_ws, service_name=service_name
-                ),
+                )
             )
+            # When one direction finishes (e.g. the backend WS dies), the other
+            # would otherwise stay parked on receive() forever, holding the
+            # surviving socket open. Cancel and unwind the survivor as soon as
+            # either direction completes.
+            done, pending = await asyncio.wait(
+                {client_to_backend, backend_to_client},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            for task in done:
+                # Surface any unexpected error from the finished direction
+                # instead of swallowing it (the forward helpers already absorb
+                # normal connection-closed cases on their own).
+                await task
     except (ConnectionRefusedError, OSError, TimeoutError) as connection_error:
         logger.debug("Backend WebSocket connection failed for service {}: {}", service_name, connection_error)
         try:
             await websocket.close(code=1011, reason="Backend connection failed")
         except RuntimeError:
             logger.trace("WebSocket already closed when trying to send error for service {}", service_name)
+        return
+
+    # Forwarding has stopped -- e.g. the backend closed its side. Close the
+    # client socket too so a backend-initiated teardown propagates to the
+    # client instead of leaving it open. RuntimeError if the client already
+    # disconnected (the client-initiated case), which is fine.
+    try:
+        await websocket.close()
+    except RuntimeError:
+        logger.trace("Client WebSocket already closed for service {}", service_name)
 
 
 def register_service_routes(application: FastAPI) -> None:
