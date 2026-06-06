@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -240,4 +241,75 @@ def test_dockerignore_is_symlink_to_gitignore() -> None:
     target = dockerignore.readlink()
     assert str(target) == ".gitignore", (
         f"{dockerignore} symlink target is {target!r}, expected '.gitignore'"
+    )
+
+
+_FRONTEND_PREFIX = "apps/system_interface/frontend"
+_STATIC_MARKER_PATH = "apps/system_interface/imbue/system_interface/static/.source-hash"
+
+
+def _git_show_blob(commit: str, path: str) -> bytes:
+    return subprocess.run(
+        ["git", "show", f"{commit}:{path}"],
+        capture_output=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    ).stdout
+
+
+def _hash_committed_frontend_sources(commit: str) -> str:
+    """Compute the same sha256 as frontend/tools/write-source-hash.mjs, but against `commit`."""
+    listing = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", commit, _FRONTEND_PREFIX],
+        capture_output=True,
+        check=True,
+        text=True,
+        cwd=_REPO_ROOT,
+    ).stdout
+    paths = sorted(line for line in listing.splitlines() if line.strip())
+    hasher = hashlib.sha256()
+    for repo_path in paths:
+        rel_to_frontend = repo_path.removeprefix(_FRONTEND_PREFIX + "/")
+        hasher.update(rel_to_frontend.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(_git_show_blob(commit, repo_path))
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+def test_static_bundle_matches_frontend_source() -> None:
+    """Ensure the committed system_interface static/ bundle was built from the committed frontend/ source.
+
+    Docker provider runs `npm run build` inside the Dockerfile, so it
+    rebuilds the frontend from source on every image build. Lima provider
+    serves apps/system_interface/imbue/system_interface/static/ from the
+    git clone as-is, with no build step. Without this ratchet, a frontend
+    edit that landed without a fresh `npm run build` would silently ship
+    stale UI to every Lima-backed agent while looking correct under
+    Docker. The fix is to rebuild and re-commit:
+
+        cd apps/system_interface/frontend && npm run build
+        git add ../imbue/system_interface/static
+        git commit
+
+    The `npm run build` script invokes frontend/tools/write-source-hash.mjs
+    after vite, which writes the marker this test reads.
+
+    Reads happen via `git show HEAD:...`, not the working tree, so the
+    check is independent of CI step order -- it always evaluates the
+    committed snapshot even if a prior step ran `npm run build`.
+    """
+    expected = _hash_committed_frontend_sources("HEAD")
+    try:
+        committed_marker = _git_show_blob("HEAD", _STATIC_MARKER_PATH).decode("utf-8").strip()
+    except subprocess.CalledProcessError:
+        committed_marker = ""
+    assert committed_marker == expected, (
+        "Committed apps/system_interface/imbue/system_interface/static/ is stale "
+        "relative to apps/system_interface/frontend/. Rebuild and re-commit:\n"
+        "  cd apps/system_interface/frontend && npm run build\n"
+        "  git add ../imbue/system_interface/static\n"
+        "  git commit\n"
+        f"Expected source-hash: {expected}\n"
+        f"Committed marker:    {committed_marker or '<missing>'}"
     )
