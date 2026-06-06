@@ -220,14 +220,21 @@ wait $APT_PID || { echo "[provision] apt phase failed" >&2; cat /tmp/prov-apt.lo
 wait $UV_PID  || { echo "[provision] uv installer failed" >&2; cat /tmp/prov-uv.log  >&2; exit 1; }
 wait $TTYD_PID || { echo "[provision] ttyd download failed" >&2; cat /tmp/prov-ttyd.log >&2; exit 1; }
 
-# --- Phase B: latchkey global || uv tool install ---
-# (frontend npm ci + build dropped: apps/system_interface/imbue/system_interface/static/
-#  is now committed in FCT, so the build output rsyncs into the VM with everything else.)
+# --- Phase B: latchkey global || frontend npm ci+build || uv tool install ---
+# Each track touches a disjoint package-manager tree
+# (/usr/lib/node_modules vs apps/system_interface/frontend/node_modules
+# vs ~/.local/share/uv/tools/), so they don't lock against each other.
 (
   set -e
   sudo npm install -g latchkey@2.15.1
 ) > /tmp/prov-latchkey.log 2>&1 &
 LATCHKEY_PID=$!
+
+(
+  set -e
+  cd apps/system_interface/frontend && npm ci && npm run build
+) > /tmp/prov-frontend.log 2>&1 &
+FRONTEND_PID=$!
 
 (
   set -e
@@ -239,6 +246,7 @@ LATCHKEY_PID=$!
 UVTOOL_PID=$!
 
 wait $LATCHKEY_PID || { echo "[provision] latchkey install failed" >&2; cat /tmp/prov-latchkey.log >&2; exit 1; }
+wait $FRONTEND_PID || { echo "[provision] frontend build failed"   >&2; cat /tmp/prov-frontend.log >&2; exit 1; }
 wait $UVTOOL_PID   || { echo "[provision] uv tool install failed"  >&2; cat /tmp/prov-uvtool.log   >&2; exit 1; }
 
 # --- Phase C: uv sync + playwright install (depends on Phase B's uv tools) ---
