@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && node tools/write-source-hash.mjs",
+    "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit && eslint src/",
     "format": "prettier --write 'src/**/*.{ts,css,html}' '*.{ts,html}'",
