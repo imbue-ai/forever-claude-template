@@ -70,13 +70,18 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
           if (pendingId !== null) {
             removePendingMessage(agentId, pendingId);
           }
-          // Restore the user's text so the send is not silently lost. Write it
-          // back to localStorage too (it was cleared before the send) so the
-          // recovered draft survives a reload or agent switch, not just this
-          // in-memory render.
-          messageText = text;
+          // Restore the user's text so the send is not silently lost. Persist
+          // it to localStorage (keyed to this agent) unconditionally so the
+          // recovered draft survives a reload or agent switch. Only touch the
+          // live input if the user is still on this agent -- otherwise we would
+          // clobber whatever they have typed for the agent they switched to
+          // while the send was in flight (the failed draft is still recoverable
+          // from this agent's localStorage when they return to it).
           localStorage.setItem(messageTextKey(agentId), text);
-          m.redraw();
+          if (currentAgentId === agentId) {
+            messageText = text;
+            m.redraw();
+          }
         }
 
         requestAnimationFrame(() => {
