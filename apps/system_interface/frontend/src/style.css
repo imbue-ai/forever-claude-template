@@ -152,11 +152,89 @@ body {
 }
 
 .pending-message-status {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
   margin-top: 4px;
   padding-right: 4px;
-  text-align: right;
   font-size: 12px;
   color: var(--color-text-secondary);
+}
+
+/* "Interrupt and send now" action on a queued message: a compact icon button
+   (up-arrow), styled as an understated secondary control, with a CSS tooltip
+   (native `title` is unreliable in the webview -- see .pv-tl-missing below). */
+.pending-message-interrupt {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.pending-message-interrupt:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+}
+
+.pending-message-interrupt::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  /* Right-anchored (the button sits at the message column's right edge), so the
+     bubble extends leftward and never clips against the panel's right side. */
+  right: 0;
+  z-index: 1000;
+  width: max-content;
+  max-width: 240px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--color-text-primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: normal;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.pending-message-interrupt::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% + 2px);
+  /* Centre the little pointer under the button (which is ~24px wide). */
+  right: 7px;
+  z-index: 1000;
+  border: 5px solid transparent;
+  border-top-color: var(--color-text-primary);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease;
+}
+
+.pending-message-interrupt:hover::after,
+.pending-message-interrupt:focus-visible::after,
+.pending-message-interrupt:hover::before,
+.pending-message-interrupt:focus-visible::before {
+  opacity: 1;
+  visibility: visible;
 }
 
 /* ── Assistant message ── */

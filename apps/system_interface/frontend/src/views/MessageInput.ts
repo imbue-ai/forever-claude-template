@@ -3,9 +3,10 @@ import { interruptAgent, sendMessage, getEventsForAgent } from "../models/Respon
 import {
   addPendingMessage,
   getEffectiveActivityState,
-  markPendingMessageDelivered,
+  markPendingMessageQueued,
   removePendingMessage,
 } from "../models/PendingMessages";
+import { describeRequestError } from "../models/request-error";
 import { isWorkingActivityState } from "./ActivityIndicator";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
@@ -64,20 +65,20 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
 
         try {
           await sendMessage(agentId, text);
-          // The POST blocks until the agent confirms submission (Claude's
-          // UserPromptSubmit hook), so a resolved request means the message was
-          // genuinely delivered. Drop the bubble's "sending" affordance; it stays
-          // up until the real transcript event reconciles it away.
+          // The POST resolves once the backend confirms the agent accepted the
+          // message into its queue, so move the bubble to "queued". It stays up
+          // until the real transcript event reconciles it away -- that is when
+          // the agent has genuinely received it (the user-facing "sent").
           if (pendingId !== null) {
-            markPendingMessageDelivered(agentId, pendingId);
+            markPendingMessageQueued(agentId, pendingId);
           }
         } catch (err) {
-          // The send failed, so no transcript event will ever arrive to
-          // reconcile the optimistic bubble. Roll it back (clearing the bubble
-          // and any forced-"Thinking..." override) so the UI does not get stuck
-          // showing a message that was never delivered, and surface the error.
-          const reqErr = err as { response?: { detail?: string }; message?: string };
-          const detail = reqErr.response?.detail ?? reqErr.message ?? String(err);
+          // The send genuinely failed (the backend confirms delivery before
+          // resolving, so a rejection means the message was NOT accepted). Roll
+          // the optimistic bubble back (clearing the forced-"Thinking..."
+          // override) so the UI does not show a message that was never
+          // delivered, and surface the real error.
+          const detail = describeRequestError(err);
           console.error(`Failed to send message to agent ${agentId}: ${detail}`);
           if (pendingId !== null) {
             removePendingMessage(agentId, pendingId);

@@ -32,14 +32,17 @@ import { getAgentById } from "./AgentManager";
 import type { TranscriptEvent } from "./Response";
 
 /**
- * Delivery status of an optimistic message, driven by the send POST's lifecycle.
- * "sending" while the POST is in flight (delivery to the agent not yet
- * confirmed); "delivered" once it resolves successfully -- the POST blocks until
- * Claude's UserPromptSubmit hook fires, so a success means the agent actually
- * accepted the prompt. A failed send never reaches "delivered"; it is rolled
- * back via removePendingMessage instead.
+ * Lifecycle status of an optimistic message, driven by the send POST.
+ * "sending" while the POST is in flight (not yet known to be accepted);
+ * "queued" once it resolves successfully -- the backend confirms the message
+ * was accepted into the agent's queue (its enqueue event), so it WILL be
+ * received, but may not have been processed yet. The bubble stays up in either
+ * state until the real transcript event arrives (the agent genuinely received
+ * it), at which point reconciliation removes it -- that is the user-facing
+ * "sent". A failed send never reaches "queued"; it is rolled back via
+ * removePendingMessage instead.
  */
-export type PendingMessageStatus = "sending" | "delivered";
+export type PendingMessageStatus = "sending" | "queued";
 
 export interface PendingMessage {
   /** Stable id for keying the rendered bubble. */
@@ -112,17 +115,36 @@ export function addPendingMessage(
   return id;
 }
 
+/** The pending message with this id, or undefined. */
+export function getPendingMessage(agentId: string, id: string): PendingMessage | undefined {
+  return pendingByAgent[agentId]?.find((p) => p.id === id);
+}
+
 /**
- * Mark a pending message as delivered once its send request resolves
- * successfully. The request blocks until the agent confirms submission, so this
- * is the point at which the optimistic bubble stops showing its "sending"
- * affordance (it stays up until the real transcript event reconciles it away).
- * Marking an unknown id is a no-op.
+ * Mark a pending message as queued once its send request resolves successfully:
+ * the backend has confirmed the agent accepted it into its queue. The bubble
+ * stays up (still optimistic) until the real transcript event reconciles it
+ * away -- that, not this, is when the user sees it as "sent". A queued message
+ * is the one offered the "interrupt and send" action. Marking an unknown id is
+ * a no-op.
  */
-export function markPendingMessageDelivered(agentId: string, id: string): void {
+export function markPendingMessageQueued(agentId: string, id: string): void {
   const pending = pendingByAgent[agentId]?.find((p) => p.id === id);
-  if (pending !== undefined && pending.status !== "delivered") {
-    pending.status = "delivered";
+  if (pending !== undefined && pending.status !== "queued") {
+    pending.status = "queued";
+    m.redraw();
+  }
+}
+
+/**
+ * Put a pending message back into the "sending" state -- used when re-sending it
+ * (e.g. "interrupt and send", which interrupts the agent and resends, since the
+ * interrupt clears Claude's queue). Setting an unknown id is a no-op.
+ */
+export function markPendingMessageSending(agentId: string, id: string): void {
+  const pending = pendingByAgent[agentId]?.find((p) => p.id === id);
+  if (pending !== undefined && pending.status !== "sending") {
+    pending.status = "sending";
     m.redraw();
   }
 }

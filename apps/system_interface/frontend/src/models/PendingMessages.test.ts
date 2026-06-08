@@ -20,9 +20,11 @@ vi.mock("./AgentManager", () => ({
 import {
   addPendingMessage,
   getPendingMessages,
+  getPendingMessage,
   reconcilePendingMessages,
   removePendingMessage,
-  markPendingMessageDelivered,
+  markPendingMessageQueued,
+  markPendingMessageSending,
   getEffectiveActivityState,
 } from "./PendingMessages";
 
@@ -226,47 +228,58 @@ describe("rolling back a failed send", () => {
   });
 });
 
-describe("delivery status", () => {
+describe("lifecycle status", () => {
   it("starts a sent message in the sending state", () => {
     const agentId = freshAgentId();
     addPendingMessage(agentId, "hello", []);
     expect(getPendingMessages(agentId)[0].status).toBe("sending");
   });
 
-  it("flips to delivered when the send request resolves", () => {
+  it("flips to queued when the send request resolves", () => {
     const agentId = freshAgentId();
     const id = addPendingMessage(agentId, "hello", []);
-    markPendingMessageDelivered(agentId, id as string);
-    expect(getPendingMessages(agentId)[0].status).toBe("delivered");
+    markPendingMessageQueued(agentId, id as string);
+    expect(getPendingMessages(agentId)[0].status).toBe("queued");
   });
 
-  it("marks only the named message delivered among identical sends", () => {
+  it("marks only the named message queued among identical sends", () => {
     const agentId = freshAgentId();
     const first = addPendingMessage(agentId, "dup", []);
     addPendingMessage(agentId, "dup", []);
 
-    markPendingMessageDelivered(agentId, first as string);
+    markPendingMessageQueued(agentId, first as string);
 
     const pending = getPendingMessages(agentId);
-    expect(pending.find((p) => p.id === first)?.status).toBe("delivered");
+    expect(pending.find((p) => p.id === first)?.status).toBe("queued");
     expect(pending.find((p) => p.id !== first)?.status).toBe("sending");
+  });
+
+  it("can be put back into sending (for a re-send) and getPendingMessage reads it", () => {
+    const agentId = freshAgentId();
+    const id = addPendingMessage(agentId, "resend me", []) as string;
+    markPendingMessageQueued(agentId, id);
+    expect(getPendingMessage(agentId, id)?.status).toBe("queued");
+
+    // "Interrupt and send" re-sends, so the message goes back to sending.
+    markPendingMessageSending(agentId, id);
+    expect(getPendingMessage(agentId, id)?.status).toBe("sending");
   });
 
   it("is a no-op for an unknown id", () => {
     const agentId = freshAgentId();
     addPendingMessage(agentId, "hello", []);
-    markPendingMessageDelivered(agentId, "pending-does-not-exist");
+    markPendingMessageQueued(agentId, "pending-does-not-exist");
     expect(getPendingMessages(agentId)[0].status).toBe("sending");
   });
 
-  it("keeps showing the bubble until reconciliation, even once delivered", () => {
+  it("keeps showing the bubble until reconciliation, even once queued", () => {
     const agentId = freshAgentId();
     const id = addPendingMessage(agentId, "queued while running", []);
-    markPendingMessageDelivered(agentId, id as string);
+    markPendingMessageQueued(agentId, id as string);
 
-    // Delivered, but the real transcript event has not arrived yet -- the bubble
+    // Queued, but the real transcript event has not arrived yet -- the bubble
     // must stay up (this is the mid-run case where the queued message is only
-    // written to the transcript at turn end).
+    // written to the transcript once the agent dequeues it).
     expect(getPendingMessages(agentId)).toHaveLength(1);
 
     reconcilePendingMessages(agentId, [userMsg("u1", "queued while running")]);
