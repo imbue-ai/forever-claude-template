@@ -31,10 +31,13 @@
  * so the user always sees it and can respond without expanding a step. The step
  * it interrupted stays open, so work resumed afterwards keeps grouping under it.
  * When the user later grants or denies the request, the app injects a plain
- * notification user message; the walk reads its verdict, drops the message, and
- * records the outcome on the request's card. That notification carries no
- * request id, so it resolves the oldest still-open request (the agent blocks on
- * a request until answered, so in practice only one is open at a time).
+ * notification user message. The walk reads its verdict onto the request's card
+ * and treats the notification as a turn boundary (the agent blocked on the
+ * request and is now resuming), so any open step carries over and continues in
+ * the new turn rather than the same node resuming beneath the card. The raw text
+ * isn't shown (its verdict is on the card). The notification carries no request
+ * id, so it resolves the oldest still-open request (the agent blocks on a
+ * request until answered, so in practice only one is open at a time).
  *
  * The ONLY timestamp this module reads is tk's own `created` (from the
  * enrichment table), used solely to order pending placeholders among
@@ -286,15 +289,23 @@ export function buildSections(
 
   for (const e of events) {
     if (e.type === "user_message") {
-      // A granted/denied notification for an earlier permission request: record
-      // the verdict against the oldest open request and drop the message, so it
-      // reflects on that request's card rather than rendering as a user prompt.
-      // If no request is open to claim it (e.g. the request scrolled out of the
-      // visible transcript), fall through and let it render normally.
+      // A granted/denied notification for an earlier permission request. Record
+      // the verdict against the oldest open request (it reflects on that
+      // request's card, not as a user prompt), then treat the notification as
+      // the turn boundary it naturally is: the agent blocked on the request and
+      // is now resuming, so close the current section -- carrying any open step
+      // over -- and open a fresh one. The step then continues in the normal
+      // carryover way rather than the same node resuming inline beneath the
+      // card. The raw text is not shown (its verdict is on the card), so the new
+      // section has no user bubble. If no request is open to claim it (e.g. the
+      // request scrolled out of the visible transcript), fall through and let it
+      // render as an ordinary user message.
       const resolution = parsePermissionResolution(e.content ?? "");
       if (resolution !== null && unresolvedPermissions.length > 0) {
         const resolvedEventId = unresolvedPermissions.shift() as string;
         resolutions.set(resolvedEventId, resolution);
+        carryover = current === null ? [] : openStepsAtEnd(current);
+        current = ensureSection(null, `section-after-${e.event_id}`);
         continue;
       }
       if (isNonBoundaryUserMessage(e.content ?? "")) {

@@ -728,9 +728,10 @@ type PermissionItem = { kind: "permission"; resolution: PermissionResolution | n
 
 describe("permission resolutions", () => {
   // When the user grants/denies, the app injects a plain user message; the walk
-  // reads its verdict, drops the message, and records the outcome on the card.
+  // reads its verdict onto the card and treats the notification as a turn
+  // boundary (no user bubble) so an open step carries over the normal way.
 
-  it("marks the card granted and drops the notification message", () => {
+  it("marks the card granted and opens a fresh turn with no user bubble", () => {
     const events = [
       userMsg("2026-05-01T01:00:00Z", "go"),
       permissionMsg("2026-05-01T01:00:01Z", "perm"),
@@ -742,11 +743,45 @@ describe("permission resolutions", () => {
       ),
     ];
     const sections = run(events);
-    // The notification did not open a new turn; it resolved the card instead.
-    expect(sections).toHaveLength(1);
-    const items = sections[0].items;
-    expect(items.map((i) => i.kind)).toEqual(["permission"]);
-    expect((items[0] as PermissionItem).resolution).toBe("granted");
+    // The card (in the first turn) carries the verdict...
+    expect(sections[0].items.map((i) => i.kind)).toEqual(["permission"]);
+    expect((sections[0].items[0] as PermissionItem).resolution).toBe("granted");
+    // ...and the notification opened a new turn rather than rendering as a
+    // user prompt: a second section exists with no user bubble, and the raw
+    // "was granted" text appears as no section's user message.
+    expect(sections).toHaveLength(2);
+    expect(sections[1].user_event).toBeNull();
+    expect(sections.every((s) => !(s.user_event?.content ?? "").includes("was granted"))).toBe(true);
+  });
+
+  it("carries an open step over the approval so it continues in the new turn", () => {
+    const events = [
+      userMsg("2026-05-01T01:00:00Z", "show me my gmail unreads"),
+      tkMsg("2026-05-01T01:00:01Z", "tk start s1", "c-s1"),
+      result("2026-05-01T01:00:01Z", "c-s1", "Updated s1 -> in_progress"),
+      permissionMsg("2026-05-01T01:00:02Z", "perm"),
+      result("2026-05-01T01:00:02Z", "perm", '{"request_id":"r1"}'),
+      userMsg("2026-05-01T01:00:03Z", "Your permission request for Gmail was granted. Retry.", "u-res"),
+      // Post-approval work and the step closing happen after the boundary.
+      workMsg("2026-05-01T01:00:04Z", "Bash", "w-after"),
+      result("2026-05-01T01:00:04Z", "w-after", "ok"),
+      tkMsg("2026-05-01T01:00:05Z", "tk close s1", "x-s1"),
+      result("2026-05-01T01:00:05Z", "x-s1", "Updated s1 -> closed"),
+    ];
+    const sections = run(events, enrich({ s1: { title: "Connect to your Gmail account" } }), /* idle */ false);
+    expect(sections).toHaveLength(2);
+    // First turn: the step (still open at the boundary) and the granted card.
+    expect(sections[0].items.map((i) => i.kind)).toEqual(["step", "permission"]);
+    const s1First = stepItems(sections[0].items)[0];
+    expect(s1First.ticket_id).toBe("s1");
+    expect(s1First.status).toBe("active");
+    // Second turn: the step carried over, did the post-approval work, and closed.
+    const s1Second = stepItems(sections[1].items)[0];
+    expect(s1Second.ticket_id).toBe("s1");
+    expect(s1Second.is_carryover).toBe(true);
+    expect(s1Second.status).toBe("done");
+    expect(s1Second.events.map((e) => e.event_id)).toEqual(["a-w-after"]);
+    expect(sections[1].user_event).toBeNull();
   });
 
   it("marks the card denied", () => {
