@@ -309,6 +309,25 @@ def _drive_oauth_code(process: Any, code: str) -> None:
         raise ClaudeAuthError("Timed out waiting for claude auth login to complete after code submit")
 
 
+def _build_list_command() -> list[str]:
+    """Build the ``mngr list`` argv used to enumerate agents.
+
+    Pure: argv assembly only, so the repo<->mngr CLI contract is testable
+    against the live CLI without a subprocess (see ``claude_auth_test.py``).
+    """
+    return ["mngr", "list", "--format", "json"]
+
+
+def _build_stop_command(name: str) -> list[str]:
+    """Build the ``mngr stop`` argv for one agent. Pure (see above)."""
+    return ["mngr", "stop", name]
+
+
+def _build_start_command(name: str) -> list[str]:
+    """Build the ``mngr start --no-resume`` argv for one agent. Pure (see above)."""
+    return ["mngr", "start", "--no-resume", name]
+
+
 class ClaudeAuthService(MutableModel):
     """Stateful entry point for the in-mind Claude auth-recovery flows.
 
@@ -383,7 +402,7 @@ class ClaudeAuthService(MutableModel):
         interactive claude process to restart.
         """
         result = self.command_runner(
-            ["mngr", "list", "--format", "json"], _MNGR_COMMAND_TIMEOUT_SECONDS
+            _build_list_command(), _MNGR_COMMAND_TIMEOUT_SECONDS
         )
         if result.returncode != 0:
             raise ClaudeAuthError(
@@ -435,7 +454,7 @@ class ClaudeAuthService(MutableModel):
         for name in names:
             logger.info("Stopping type:claude agent {} via mngr stop", name)
             stop_result = self.command_runner(
-                ["mngr", "stop", name], _MNGR_COMMAND_TIMEOUT_SECONDS
+                _build_stop_command(name), _MNGR_COMMAND_TIMEOUT_SECONDS
             )
             if stop_result.returncode != 0:
                 raise ClaudeAuthError(
@@ -446,7 +465,7 @@ class ClaudeAuthService(MutableModel):
         for name in names:
             logger.info("Starting type:claude agent {} via mngr start --no-resume", name)
             start_result = self.command_runner(
-                ["mngr", "start", "--no-resume", name], _MNGR_COMMAND_TIMEOUT_SECONDS
+                _build_start_command(name), _MNGR_COMMAND_TIMEOUT_SECONDS
             )
             if start_result.returncode != 0:
                 raise ClaudeAuthError(

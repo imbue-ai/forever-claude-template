@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from mngr_cli_contract.contract import assert_mngr_argv_valid
 from watchdog.events import FileClosedNoWriteEvent
 from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
@@ -27,6 +28,9 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.agent_manager import _LogQueueCallback
+from imbue.system_interface.agent_manager import _build_chat_create_command
+from imbue.system_interface.agent_manager import _build_observe_command_argv
+from imbue.system_interface.agent_manager import _build_worktree_create_command
 from imbue.system_interface.agent_manager import _make_applications_file_handler
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
@@ -762,6 +766,51 @@ def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroa
         assert cmd[0] == "/path/to/custom-mngr"
     finally:
         manager.stop()
+
+
+# --- mngr CLI argv contract ---
+# These confront each builder's argv with the live ``imbue.mngr.main.cli`` tree,
+# so a vendor/mngr subcommand/flag rename fails here at merge time rather than
+# only surfacing at runtime. See ``mngr_cli_contract`` for the validator.
+
+
+def test_worktree_create_argv_accepted_by_live_cli() -> None:
+    argv = _build_worktree_create_command(
+        mngr_binary="mngr",
+        name="demo",
+        agent_id="agent-123",
+        current_branch="main",
+        new_branch="mngr/demo",
+        parent_labels={"project": "proj"},
+    )
+    assert_mngr_argv_valid(argv)
+
+
+def test_worktree_create_argv_without_project_label() -> None:
+    argv = _build_worktree_create_command(
+        mngr_binary="mngr",
+        name="demo",
+        agent_id="agent-123",
+        current_branch="main",
+        new_branch="mngr/demo",
+        parent_labels={},
+    )
+    assert_mngr_argv_valid(argv)
+
+
+def test_chat_create_argv_accepted_by_live_cli() -> None:
+    argv = _build_chat_create_command(
+        mngr_binary="mngr",
+        name="demo",
+        agent_id="agent-123",
+        primary_labels={"workspace": "ws", "project": "proj"},
+    )
+    assert_mngr_argv_valid(argv)
+
+
+def test_observe_argv_accepted_by_live_cli() -> None:
+    argv = _build_observe_command_argv("mngr", Path("/tmp/events"))
+    assert_mngr_argv_valid(argv)
 
 
 def test_resolve_observe_cwd_prefers_existing_work_dir(

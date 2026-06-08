@@ -90,10 +90,23 @@ latchkey services info slack
 Returns auth options, credentials status, and developer notes about the service.
 
 
+## Secondary gateway
+
+By default, most of the commands above are actually routed through a gateway that runs on the user's computer.
+For `latchkey curl` calls specifically, when the user's computer is offline, you would typically get "Exit code 7".
+Sometimes, there's a secondary Latchkey gateway available running in the cloud that you can use instead.
+To do that, repeat your call with the following env var overrides:
+    - `LATCHKEY_GATEWAY=$LATCHKEY_GATEWAY_SECONDARY`
+    - `LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE=""`
+If you're still not able to connect, it means the secondary gateway hasn't actually been configured.
+Permission management, or any other commands other than `latchkey curl`, are not supported by the secondary gateway.
+
+
 ## Notes
 
 - All curl arguments are passed through unchanged
 - Return code, stdout and stderr are passed back from curl
+- Unless the user explicitly asks about it, don't discuss Latchkey or the technical details (it's easy for the user to get confused).
 
 ## Currently supported services
 

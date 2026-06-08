@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from bootstrap.manager import (
     DEFAULT_RESTART_POLICY,
@@ -372,6 +373,15 @@ def test_build_create_chat_command_omits_project_label_when_missing() -> None:
     cmd = _build_create_chat_command("ws", {"workspace": "ws"})
     labels = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--label"]
     assert all(not label.startswith("project=") for label in labels)
+
+
+def test_build_create_chat_command_argv_accepted_by_live_cli() -> None:
+    """Confront the emitted argv with the live ``imbue.mngr.main.cli`` tree, so
+    a vendor/mngr rename of ``create``/its flags fails here at merge time rather
+    than only at host boot. A ``workspace`` label is supplied so the builder's
+    label resolution short-circuits without reading host files."""
+    argv = _build_create_chat_command("host-1", {"workspace": "ws", "project": "proj"})
+    assert_mngr_argv_valid(argv)
 
 
 # --- _maybe_create_initial_chat ---

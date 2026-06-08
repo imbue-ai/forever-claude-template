@@ -52,6 +52,81 @@ _DEFAULT_MNGR_BINARY = "mngr"
 _COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS = 5.0
 
 
+def _build_worktree_create_command(
+    mngr_binary: str,
+    name: str,
+    agent_id: str,
+    current_branch: str,
+    new_branch: str,
+    parent_labels: dict[str, str],
+) -> list[str]:
+    """Build the ``mngr create`` argv for a worktree agent.
+
+    Pure: argv assembly only, so the repo<->mngr CLI contract is testable
+    against the live CLI without constructing an ``AgentManager`` or running a
+    subprocess (see ``agent_manager_test.py``).
+    """
+    cmd = [
+        mngr_binary,
+        "create",
+        name,
+        "--id",
+        agent_id,
+        "--transfer",
+        "git-worktree",
+        "--branch",
+        f"{current_branch}:{new_branch}",
+        "--template",
+        "worktree",
+        "--label",
+        "user_created=true",
+        "--label",
+        f"workspace={name}",
+        "--no-connect",
+    ]
+    # Inherit the project label from the parent agent.
+    if "project" in parent_labels:
+        cmd.extend(["--label", f"project={parent_labels['project']}"])
+    return cmd
+
+
+def _build_chat_create_command(
+    mngr_binary: str,
+    name: str,
+    agent_id: str,
+    primary_labels: dict[str, str],
+) -> list[str]:
+    """Build the ``mngr create`` argv for a chat agent. Pure (see above)."""
+    cmd = [
+        mngr_binary,
+        "create",
+        name,
+        "--id",
+        agent_id,
+        "--transfer",
+        "none",
+        "--template",
+        "chat",
+        "--no-connect",
+    ]
+    # Inherit workspace and project labels from the primary agent.
+    for key in ("workspace", "project"):
+        if key in primary_labels:
+            cmd.extend(["--label", f"{key}={primary_labels[key]}"])
+    return cmd
+
+
+def _build_observe_command_argv(mngr_binary: str, events_dir: Path) -> list[str]:
+    """Build the ``mngr observe`` discovery-only argv. Pure (see above)."""
+    return [
+        mngr_binary,
+        "observe",
+        "--discovery-only",
+        "--events-dir",
+        str(events_dir),
+    ]
+
+
 def _safe_log_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
     """Non-blocking put for a creation-log queue.
 
@@ -349,28 +424,9 @@ class AgentManager:
         current_branch = self._get_current_branch(Path(work_dir))
         new_branch = f"mngr/{name}"
 
-        cmd = [
-            self._mngr_binary,
-            "create",
-            name,
-            "--id",
-            agent_id,
-            "--transfer",
-            "git-worktree",
-            "--branch",
-            f"{current_branch}:{new_branch}",
-            "--template",
-            "worktree",
-            "--label",
-            "user_created=true",
-            "--label",
-            f"workspace={name}",
-            "--no-connect",
-        ]
-
-        # Inherit the project label from the parent agent
-        if "project" in parent_labels:
-            cmd.extend(["--label", f"project={parent_labels['project']}"])
+        cmd = _build_worktree_create_command(
+            self._mngr_binary, name, agent_id, current_branch, new_branch, parent_labels
+        )
 
         log_queue: queue.Queue[str | None] = queue.Queue(maxsize=10000)
 
@@ -411,23 +467,9 @@ class AgentManager:
             msg = f"Cannot determine work directory for primary agent {self._own_agent_id}"
             raise AgentCreationError(msg)
 
-        cmd = [
-            self._mngr_binary,
-            "create",
-            name,
-            "--id",
-            agent_id,
-            "--transfer",
-            "none",
-            "--template",
-            "chat",
-            "--no-connect",
-        ]
-
-        # Inherit workspace and project labels from the primary agent
-        for key in ("workspace", "project"):
-            if key in primary_labels:
-                cmd.extend(["--label", f"{key}={primary_labels[key]}"])
+        cmd = _build_chat_create_command(
+            self._mngr_binary, name, agent_id, primary_labels
+        )
 
         log_queue: queue.Queue[str | None] = queue.Queue(maxsize=10000)
 
@@ -667,13 +709,7 @@ class AgentManager:
         Pure: no side effects (does not create the events directory).
         """
         events_dir = self._resolve_observe_events_dir()
-        return [
-            self._mngr_binary,
-            "observe",
-            "--discovery-only",
-            "--events-dir",
-            str(events_dir),
-        ]
+        return _build_observe_command_argv(self._mngr_binary, events_dir)
 
     def _start_observe(self) -> None:
         """Start the mngr observe subprocess and a watchdog for early exit."""
