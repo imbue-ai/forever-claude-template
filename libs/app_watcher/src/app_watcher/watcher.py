@@ -4,7 +4,7 @@ Watches runtime/applications.toml for changes. On startup and on every change,
 writes service_registered / service_deregistered events to
 events/services/events.jsonl so the desktop client can discover available services.
 
-Uses both inotify (when available) and mtime polling (10-second fallback).
+Uses both inotify (when available) and mtime polling (5-second fallback).
 """
 
 import os
@@ -29,7 +29,11 @@ except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
 APPLICATIONS_FILE = Path("runtime/applications.toml")
-POLL_INTERVAL_SECONDS = 10
+# mtime-polling fallback interval. Kept low (5s) because under the gVisor (runsc)
+# runtime, and on the lima/vps providers, file changes made outside the sandbox
+# do not raise in-sandbox inotify events -- polling is then the only signal, so a
+# tighter interval bounds the worst-case service-discovery latency.
+POLL_INTERVAL_SECONDS = 5
 
 _EVENT_SOURCE = EventSource("services")
 _EVENT_TYPE_REGISTERED = EventType("service_registered")
