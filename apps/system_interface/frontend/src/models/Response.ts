@@ -141,14 +141,45 @@ interface EventsResponse {
   // id. Always complete regardless of where the transcript window is, so a
   // freshly-loaded tail still has titles/summaries for every visible step.
   step_enrichment?: Record<string, StepEnrichment>;
+  // Whether older history exists before the first returned event, so the client
+  // can page back on scroll without a probe request. Absent on an older backend
+  // response -> treated as false.
+  has_more?: boolean;
 }
 
+const BACKFILL_PAGE_SIZE = 50;
+
+// Upper bound on events held client-side per agent. Far above any viewport
+// window; bounds JS memory for an arbitrarily long conversation while leaving
+// generous scrollback resident. Eviction (see evictOldEvents) only trims the
+// oldest events and only when the caller is following the live tail.
+export const MAX_HELD_EVENTS = 1500;
+// Target size to trim down to when evicting, so eviction runs in batches rather
+// than on every appended event once at the cap.
+export const EVICT_TARGET_EVENTS = 1000;
+
 const eventsByAgent: Record<string, TranscriptEvent[]> = {};
+// Persistent per-agent index from event_id to the stored event object,
+// mirroring eventsByAgent. Gives O(1) dedup on append/prepend (instead of
+// rebuilding a Set on every SSE delivery) and O(1) lookup of an already-stored
+// event so a re-broadcast can upgrade it in place (see appendEvents).
+const eventByIdByAgent: Record<string, Map<string, TranscriptEvent>> = {};
 const notFoundAgentIds = new Set<string>();
-const backfillComplete: Record<string, boolean> = {};
+// Whether older history exists before the first held event (server has_more, or
+// set when we evict local history). Drives scroll-up backfill.
+const hasMoreByAgent: Record<string, boolean> = {};
 // Per-agent step enrichment, keyed by ticket id. Replaced wholesale on each
 // snapshot (GET /events and the `step_enrichment` SSE message), never merged.
 const enrichmentByAgent: Record<string, Map<string, StepEnrichment>> = {};
+
+function idMap(agentId: string): Map<string, TranscriptEvent> {
+  let map = eventByIdByAgent[agentId];
+  if (map === undefined) {
+    map = new Map<string, TranscriptEvent>();
+    eventByIdByAgent[agentId] = map;
+  }
+  return map;
+}
 
 export function getEnrichmentForAgent(agentId: string): Map<string, StepEnrichment> {
   return enrichmentByAgent[agentId] ?? new Map();
@@ -169,6 +200,10 @@ export function getEventsForAgent(agentId: string): TranscriptEvent[] {
   return eventsByAgent[agentId] ?? [];
 }
 
+export function getEventCount(agentId: string): number {
+  return eventsByAgent[agentId]?.length ?? 0;
+}
+
 export function getFirstEventId(agentId: string): string | null {
   const events = eventsByAgent[agentId];
   if (!events || events.length === 0) {
@@ -177,8 +212,12 @@ export function getFirstEventId(agentId: string): string | null {
   return events[0].event_id;
 }
 
+export function hasMoreToBackfill(agentId: string): boolean {
+  return hasMoreByAgent[agentId] === true;
+}
+
 export function isBackfillComplete(agentId: string): boolean {
-  return backfillComplete[agentId] === true;
+  return !hasMoreToBackfill(agentId);
 }
 
 /**
@@ -218,14 +257,18 @@ function mergeLateSubagentMetadata(prior: TranscriptEvent, incoming: TranscriptE
 
 export function appendEvents(agentId: string, newEvents: TranscriptEvent[]): void {
   const existing = eventsByAgent[agentId] ?? [];
-  const existingById = new Map(existing.map((e) => [e.event_id, e]));
+  // The persistent index gives O(1) dedup, and -- because it stores the event
+  // object, not just its id -- O(1) lookup of an already-held event so a
+  // re-broadcast (same event_id) can upgrade it in place rather than being
+  // dropped as a duplicate.
+  const byId = idMap(agentId);
   const brandNewEvents: TranscriptEvent[] = [];
   let didMerge = false;
   for (const event of newEvents) {
-    const prior = existingById.get(event.event_id);
+    const prior = byId.get(event.event_id);
     if (prior === undefined) {
       brandNewEvents.push(event);
-      existingById.set(event.event_id, event);
+      byId.set(event.event_id, event);
     } else if (mergeLateSubagentMetadata(prior, event)) {
       didMerge = true;
     }
@@ -240,14 +283,46 @@ export function appendEvents(agentId: string, newEvents: TranscriptEvent[]): voi
 
 export function prependEvents(agentId: string, olderEvents: TranscriptEvent[]): void {
   const existing = eventsByAgent[agentId] ?? [];
-  const existingIds = new Set(existing.map((e) => e.event_id));
-  const deduped = olderEvents.filter((e) => !existingIds.has(e.event_id));
+  const byId = idMap(agentId);
+  const deduped = olderEvents.filter((e) => !byId.has(e.event_id));
   if (deduped.length > 0) {
+    for (const event of deduped) {
+      byId.set(event.event_id, event);
+    }
     eventsByAgent[agentId] = [...deduped, ...existing];
     m.redraw();
-  } else {
-    backfillComplete[agentId] = true;
   }
+}
+
+/**
+ * Drop the oldest events beyond EVICT_TARGET_EVENTS to bound client memory.
+ *
+ * Returns the number of events removed (0 if under the cap). Callers should
+ * only evict while the user is following the live tail, because removing
+ * already-rendered older rows would shift a scrolled-up viewport. Since the
+ * dropped history still exists on the server, `has_more` is forced true so a
+ * later scroll-up re-fetches it via backfill.
+ */
+export function evictOldEvents(agentId: string): number {
+  const existing = eventsByAgent[agentId];
+  if (existing === undefined || existing.length <= MAX_HELD_EVENTS) {
+    return 0;
+  }
+  const removeCount = existing.length - EVICT_TARGET_EVENTS;
+  const removed = existing.slice(0, removeCount);
+  const byId = idMap(agentId);
+  for (const event of removed) {
+    byId.delete(event.event_id);
+  }
+  eventsByAgent[agentId] = existing.slice(removeCount);
+  hasMoreByAgent[agentId] = true;
+  return removeCount;
+}
+
+function resetEvents(agentId: string, events: TranscriptEvent[], hasMore: boolean): void {
+  eventsByAgent[agentId] = events;
+  eventByIdByAgent[agentId] = new Map(events.map((e) => [e.event_id, e]));
+  hasMoreByAgent[agentId] = hasMore;
 }
 
 export async function fetchEvents(agentId: string): Promise<TranscriptEvent[]> {
@@ -259,7 +334,7 @@ export async function fetchEvents(agentId: string): Promise<TranscriptEvent[]> {
       url: apiUrl("/api/agents/:agentId/events"),
       params: { agentId },
     });
-    eventsByAgent[agentId] = result.events;
+    resetEvents(agentId, result.events, result.has_more === true);
     applyEnrichmentSnapshot(agentId, result.step_enrichment);
     return result.events;
   } catch (error) {
@@ -272,13 +347,13 @@ export async function fetchEvents(agentId: string): Promise<TranscriptEvent[]> {
 }
 
 export async function fetchBackfillEvents(agentId: string): Promise<void> {
-  if (backfillComplete[agentId]) {
+  if (!hasMoreToBackfill(agentId)) {
     return;
   }
 
   const firstEventId = getFirstEventId(agentId);
   if (!firstEventId) {
-    backfillComplete[agentId] = true;
+    hasMoreByAgent[agentId] = false;
     return;
   }
 
@@ -286,17 +361,17 @@ export async function fetchBackfillEvents(agentId: string): Promise<void> {
     const result = await m.request<EventsResponse>({
       method: "GET",
       url: apiUrl("/api/agents/:agentId/events"),
-      params: { agentId, before: firstEventId, limit: "50" },
+      params: { agentId, before: firstEventId, limit: String(BACKFILL_PAGE_SIZE) },
     });
-    if (result.events.length === 0) {
-      backfillComplete[agentId] = true;
-    } else {
+    if (result.events.length > 0) {
       prependEvents(agentId, result.events);
     }
+    // Trust the server's has_more: an empty page or has_more=false ends paging.
+    hasMoreByAgent[agentId] = result.has_more === true && result.events.length > 0;
   } catch (error) {
     // Backfill failure is non-fatal: the older history just isn't loaded, and
-    // `backfillComplete` stays unset so the next scroll retries. Log it so a
-    // persistent failure is diagnosable instead of vanishing silently.
+    // has_more stays set so the next scroll retries. Log it so a persistent
+    // failure is diagnosable instead of vanishing silently.
     console.warn(`Failed to backfill older events for agent ${agentId}`, error);
   }
 }

@@ -980,7 +980,7 @@ def test_watcher_handles_missing_session_file(tmp_path: Path) -> None:
     assert len(result) == 0
 
 
-# --- Two-tier evicting cache + bounded tail/backfill (PR 4a) ---
+# --- Two-tier evicting cache + bounded tail/backfill ---
 
 
 def _ts(index: int) -> str:
