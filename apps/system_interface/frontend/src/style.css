@@ -124,10 +124,14 @@ body {
 /* An optimistic bubble for a message the user just sent. While the send request
    is in flight it is dimmed and captioned "Sending…"; on success it settles to a
    normal bubble (the opacity transition makes the confirmation feel smooth). */
+/* A plain block wrapper -- deliberately NOT a flex/align-items:flex-end column.
+   The inner .message-user must fill the full column width exactly as it does in
+   the main message list (which stretches its children); otherwise it would
+   shrink-wrap to its content and the bubble's max-width:80% would resolve
+   against that narrower base, capping the sending bubble narrower than a normal
+   message. Right alignment of the bubble comes from .message-user's own
+   align-items:flex-end, and of the caption from text-align below. */
 .pending-message {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
   /* Own the inter-message spacing here, and zero out the inner bubble's own
      margin (below), so the "Sending…" caption hugs its own bubble rather than
      being pushed 20px down by the bubble's margin and ending up flush against
@@ -150,6 +154,7 @@ body {
 .pending-message-status {
   margin-top: 4px;
   padding-right: 4px;
+  text-align: right;
   font-size: 12px;
   color: var(--color-text-secondary);
 }
