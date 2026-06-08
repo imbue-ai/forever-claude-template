@@ -70,8 +70,12 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
           if (pendingId !== null) {
             removePendingMessage(agentId, pendingId);
           }
-          // Restore the user's text so the send is not silently lost.
+          // Restore the user's text so the send is not silently lost. Write it
+          // back to localStorage too (it was cleared before the send) so the
+          // recovered draft survives a reload or agent switch, not just this
+          // in-memory render.
           messageText = text;
+          localStorage.setItem(messageTextKey(agentId), text);
           m.redraw();
         }
 
