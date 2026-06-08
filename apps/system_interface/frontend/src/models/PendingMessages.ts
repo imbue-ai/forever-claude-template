@@ -98,6 +98,19 @@ export function getPendingMessages(agentId: string): PendingMessage[] {
  * was not already present when the message was sent and (b) has not been
  * claimed by an earlier pending message, so two identical sends reconcile
  * against two distinct transcript events rather than collapsing into one.
+ *
+ * Matching is by trimmed content: the POST that sends the message is
+ * fire-and-forget (no server-assigned id to correlate on), and the backend
+ * persists the user's text verbatim into the transcript, so equality holds
+ * modulo the surrounding whitespace both sides trim. That verbatim-persistence
+ * is the contract this relies on; if the backend ever rewrote user text the
+ * bubble would not reconcile. (A server-returned correlation id would remove
+ * that fragility, at the cost of a backend change -- a worthwhile follow-up.)
+ *
+ * Matching ignores the frontend's hidden-message classification (skill
+ * expansions, /welcome, stop-hook feedback). That is safe because those are
+ * hook/system texts a human never types, so a user-authored pending message can
+ * never content-match one.
  */
 export function reconcilePendingMessages(agentId: string, events: readonly TranscriptEvent[]): void {
   const list = _pending_by_agent[agentId];
