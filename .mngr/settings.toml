@@ -65,14 +65,17 @@ version = "2.1.160"
 use_env_config_dir = true
 
 # The "main" (services) agent type -- inherits everything from claude, then
-# disables every path that pulls user-local content into the workspace. The
-# repo at the requested git ref is the canonical workspace definition;
-# nothing from the invoking user's ~/.claude/ or ~/.mngr/ should leak in.
+# disables the bulky user-local sync paths that pull content into the
+# workspace. The repo at the requested git ref is the canonical workspace
+# definition; nothing from the invoking user's ~/.claude/ or ~/.mngr/ should
+# leak in. Claude credentials are the deliberate exception:
+# sync_claude_credentials is on so a workspace is authenticated out of the box
+# (on macOS, converted from the host keychain).
 [agent_types.main]
 parent_type = "claude"
 sync_home_settings = false
 sync_claude_json = false
-sync_claude_credentials = false
+sync_claude_credentials = true
 sync_credentials_on_login = false
 # Keep this agent's per-agent CLAUDE_CONFIG_DIR (don't inherit the parent's
 # new shared-mode default). Every other agent in the workspace points at
@@ -125,7 +128,7 @@ extra_window = [
 # `apply_create_template` in vendor/mngr/.../common_opts.py), so the
 # mode-specific templates (docker/lima/...) keep their own commands.
 extra_provision_command__extend = [
-    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' > "$HOME/.tmux.conf"''',
+    '''printf '%s\n' 'set -g alternate-screen off' 'set -g set-clipboard external' > "$HOME/.tmux.conf"''',
 ]
 
 # template for docker provider
@@ -178,17 +181,80 @@ extra_provision_command__extend = [
     # so any straggling absolute /code/... reference still resolves. The
     # workspace itself rsyncs onto /mngr/code/ via target_path above.
     "sudo ln -sfn /mngr/code /code",
-    "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs restic ripgrep sqlite3 unison",
-    "curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash - && sudo apt-get install -y nodejs",
-    # Install latchkey CLI globally; pinned to the same version as Dockerfile's
-    # LATCHKEY_VERSION ARG. Bump both together.
-    "sudo npm install -g latchkey@2.7.2",
-    "curl -LsSf https://astral.sh/uv/install.sh | sh",
-    "ARCH=$(uname -m) && sudo curl -fsSL https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH} -o /usr/local/bin/ttyd && sudo chmod +x /usr/local/bin/ttyd",
-    "sudo mkdir -p -m 755 /etc/apt/keyrings && wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && echo deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt-get update && sudo apt-get install -y gh",
-    "cd apps/system_interface/frontend && npm ci && npm run build",
-    "export PATH=$HOME/.local/bin:$PATH && uv tool install vendor/mngr/libs/mngr && uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal && PATH=\"$UV_TOOL_BIN_DIR:$PATH\" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude",
-    "export PATH=$HOME/.local/bin:$PATH && uv sync --all-packages && sudo env PATH=\"$PATH\" HOME=\"$HOME\" uv run playwright install --with-deps chromium",
+    # Parallel provision script (apt + uv installer || latchkey + uv tool install ||
+    # uv sync + playwright). Piped into bash via heredoc so `set -euo pipefail`
+    # works (mngr's executor uses /bin/sh which on Ubuntu is dash, and dash
+    # doesn't support pipefail).
+    '''
+bash <<'EOSCRIPT'
+set -euo pipefail
+
+# --- Phase A: apt source setup + big install in parallel with uv installer ---
+(
+  set -e
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
+  sudo mkdir -p -m 755 /etc/apt/keyrings
+  wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs restic ripgrep sqlite3 unison nodejs gh
+) > /tmp/prov-apt.log 2>&1 &
+APT_PID=$!
+
+(
+  set -e
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+) > /tmp/prov-uv.log 2>&1 &
+UV_PID=$!
+
+(
+  set -e
+  ARCH=$(uname -m)
+  sudo curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH}" -o /usr/local/bin/ttyd
+  sudo chmod +x /usr/local/bin/ttyd
+) > /tmp/prov-ttyd.log 2>&1 &
+TTYD_PID=$!
+
+
+wait $APT_PID || { echo "[provision] apt phase failed" >&2; cat /tmp/prov-apt.log >&2; exit 1; }
+wait $UV_PID  || { echo "[provision] uv installer failed" >&2; cat /tmp/prov-uv.log  >&2; exit 1; }
+wait $TTYD_PID || { echo "[provision] ttyd download failed" >&2; cat /tmp/prov-ttyd.log >&2; exit 1; }
+
+# --- Phase B: latchkey global || frontend npm ci+build || uv tool install ---
+# Each track touches a disjoint package-manager tree
+# (/usr/lib/node_modules vs apps/system_interface/frontend/node_modules
+# vs ~/.local/share/uv/tools/), so they don't lock against each other.
+(
+  set -e
+  sudo npm install -g latchkey@2.15.1
+) > /tmp/prov-latchkey.log 2>&1 &
+LATCHKEY_PID=$!
+
+(
+  set -e
+  cd apps/system_interface/frontend && npm ci && npm run build
+) > /tmp/prov-frontend.log 2>&1 &
+FRONTEND_PID=$!
+
+(
+  set -e
+  export PATH=$HOME/.local/bin:$PATH
+  uv tool install vendor/mngr/libs/mngr
+  uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal
+  PATH="${UV_TOOL_BIN_DIR:-}:$PATH" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude
+) > /tmp/prov-uvtool.log 2>&1 &
+UVTOOL_PID=$!
+
+wait $LATCHKEY_PID || { echo "[provision] latchkey install failed" >&2; cat /tmp/prov-latchkey.log >&2; exit 1; }
+wait $FRONTEND_PID || { echo "[provision] frontend build failed"   >&2; cat /tmp/prov-frontend.log >&2; exit 1; }
+wait $UVTOOL_PID   || { echo "[provision] uv tool install failed"  >&2; cat /tmp/prov-uvtool.log   >&2; exit 1; }
+
+# --- Phase C: uv sync + playwright install (depends on Phase B's uv tools) ---
+export PATH=$HOME/.local/bin:$PATH
+uv sync --all-packages
+sudo env PATH="$PATH" HOME="$HOME" uv run playwright install --with-deps chromium
+EOSCRIPT
+''',
     # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
     # symlinks at /usr/local/bin/tk and /usr/local/bin/ticket).
     # $HOME/.local/bin is already on PATH because the uv installer prepends it.
