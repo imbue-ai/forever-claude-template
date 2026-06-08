@@ -522,8 +522,8 @@ export function renderAssistantMessageChildren(
       continue;
     }
     const result = toolResults.get(toolCall.tool_call_id) ?? null;
-    // A permission request renders as its own card (service, the request, a
-    // button, and the raw call) rather than a generic tool block.
+    // A permission request renders as its own card (the request, a button, and
+    // the raw call) rather than a generic tool block.
     // Gated on the input-only predicate so the card shows even while the request
     // is still pending -- the same signal the timeline walk uses to lift it out
     // of its step.
