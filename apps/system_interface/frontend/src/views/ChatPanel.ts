@@ -59,6 +59,11 @@ function openAgentTerminalTab(agentId: string): void {
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
 
+// Layout for the centered message column. Shared between the normal transcript
+// render and the empty-state branch that shows an optimistic first message, so
+// the two stay visually identical.
+const MESSAGE_LIST_CLASS = "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6";
+
 function isNearBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
 }
@@ -420,13 +425,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
           m("p", { class: "text-text-secondary" }, "No events yet for this agent."),
         );
       }
-      return m("div", { class: "message-list-wrapper" }, [
-        m(
-          "div",
-          { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
-          pendingNodes,
-        ),
-      ]);
+      return m("div", { class: "message-list-wrapper" }, [m("div", { class: MESSAGE_LIST_CLASS }, pendingNodes)]);
     }
 
     startBackfill(agentId);
@@ -486,10 +485,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     }
 
     return m("div", { class: "message-list-wrapper" }, [
-      m("div", { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" }, [
-        ...messageNodes,
-        ...renderPendingMessages(agentId),
-      ]),
+      m("div", { class: MESSAGE_LIST_CLASS }, [...messageNodes, ...renderPendingMessages(agentId)]),
     ]);
   }
 
