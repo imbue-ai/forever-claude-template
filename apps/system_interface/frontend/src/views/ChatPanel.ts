@@ -96,6 +96,14 @@ function renderPendingMessages(agentId: string): m.Vnode[] {
     });
     if (bubble === null) continue;
     const isSending = pending.status === "sending";
+    // renderUserMessage returns a keyed vnode, so every sibling in this wrapper
+    // must also be keyed: Mithril throws if a children array mixes keyed and
+    // unkeyed vnodes (or contains a null hole alongside keyed nodes). Build the
+    // children imperatively so the array is always fully keyed with no holes.
+    const children: m.Vnode[] = [bubble];
+    if (isSending) {
+      children.push(m("div", { key: `pending-status-${pending.id}`, class: "pending-message-status" }, "Sending…"));
+    }
     nodes.push(
       m(
         "div",
@@ -103,7 +111,7 @@ function renderPendingMessages(agentId: string): m.Vnode[] {
           key: `pending-wrap-${pending.id}`,
           class: isSending ? "pending-message pending-message--sending" : "pending-message",
         },
-        [bubble, isSending ? m("div", { class: "pending-message-status" }, "Sending…") : null],
+        children,
       ),
     );
   }
