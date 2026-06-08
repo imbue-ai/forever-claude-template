@@ -91,6 +91,11 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
               m.redraw();
             }
           }
+          // Surface the failure to the user with an explicit signal: the bubble
+          // vanishing on its own is too subtle to read as "your message did not
+          // send." Matches the alert-based feedback convention for user-initiated
+          // mutations in this file (see handleInterrupt).
+          alert(`Failed to send message: ${detail}`);
         }
 
         requestAnimationFrame(() => {
