@@ -114,6 +114,101 @@ def test_parse_tool_result() -> None:
     assert events[0]["output"] == "file contents"
 
 
+def _make_queued_command_line(
+    uuid: str,
+    timestamp: str,
+    prompt: str,
+    command_mode: str = "prompt",
+) -> str:
+    """A message the user typed while the agent was busy.
+
+    Claude Code records this as an ``attachment`` of type ``queued_command``,
+    never as a normal ``user`` line. ``commandMode`` is ``prompt`` for verbatim
+    user text and ``task-notification`` for background-task completion notices.
+    """
+    return json.dumps(
+        {
+            "type": "attachment",
+            "uuid": uuid,
+            "timestamp": timestamp,
+            "attachment": {"type": "queued_command", "prompt": prompt, "commandMode": command_mode},
+        }
+    )
+
+
+def test_parse_queued_command_attachment_emits_user_message() -> None:
+    """A message queued while the agent is busy must surface as a user_message.
+
+    Claude Code stores it as a ``queued_command`` attachment rather than a
+    ``user`` line (verified against a real Claude 2.1.160 transcript), and the
+    agent answers it without ever writing a ``user`` line. If the parser dropped
+    it, the message would never appear as a user bubble and the frontend's
+    optimistic "Queued" bubble would never reconcile -- staying up even after the
+    agent received and answered the message.
+    """
+    lines = [_make_queued_command_line("uuid-q", "2026-01-01T00:00:00Z", "actually do gmail instead")]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "actually do gmail instead"
+    assert events[0]["event_id"] == "uuid-q-queued"
+
+
+def test_queued_command_reconciles_alongside_normal_turns() -> None:
+    """A queued message interleaves correctly with the surrounding conversation."""
+    lines = [
+        _make_user_line("uuid-1", "2026-01-01T00:00:00Z", "fetch my slack unreads"),
+        _make_assistant_line("uuid-2", "2026-01-01T00:00:01Z", "Pulling your Slack unreads."),
+        _make_queued_command_line("uuid-3", "2026-01-01T00:00:02Z", "actually do gmail instead"),
+        _make_assistant_line("uuid-4", "2026-01-01T00:00:03Z", "Switching to Gmail."),
+    ]
+    events = parse_session_lines(lines)
+    assert [e["type"] for e in events] == [
+        "user_message",
+        "assistant_message",
+        "user_message",
+        "assistant_message",
+    ]
+    assert events[2]["content"] == "actually do gmail instead"
+
+
+def test_queued_task_notification_attachment_not_emitted() -> None:
+    """Background-task notices (commandMode=task-notification) are not user turns."""
+    lines = [
+        _make_queued_command_line(
+            "uuid-n",
+            "2026-01-01T00:00:00Z",
+            "<task-notification>...</task-notification>",
+            command_mode="task-notification",
+        )
+    ]
+    events = parse_session_lines(lines)
+    assert events == []
+
+
+def test_non_queued_command_attachment_ignored() -> None:
+    """Other attachment types (hook output, diagnostics, etc.) produce no events."""
+    lines = [
+        json.dumps(
+            {
+                "type": "attachment",
+                "uuid": "uuid-h",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "attachment": {"type": "hook_success", "content": "some hook output"},
+            }
+        )
+    ]
+    events = parse_session_lines(lines)
+    assert events == []
+
+
+def test_blank_queued_command_not_emitted() -> None:
+    """A whitespace-only queued prompt is dropped, like a blank user message."""
+    lines = [_make_queued_command_line("uuid-b", "2026-01-01T00:00:00Z", "   ")]
+    events = parse_session_lines(lines)
+    assert events == []
+
+
 def test_parse_conversation_sequence() -> None:
     lines = [
         _make_user_line("uuid-1", "2026-01-01T00:00:00Z", "Hello"),

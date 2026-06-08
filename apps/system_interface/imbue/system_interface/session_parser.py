@@ -61,6 +61,20 @@ _SYNTHETIC_MODEL = "<synthetic>"
 # off." -> "No response requested."; this is the reply half.
 _NO_RESPONSE_REQUESTED_TEXT = "No response requested."
 
+# Claude Code records a message the user typed while the agent was busy (a
+# "queued" message) not as a normal ``user`` line but as an ``attachment`` event
+# of this type. Its ``commandMode`` distinguishes the verbatim user prompt
+# (``prompt``) from background-task completion notices (``task-notification``),
+# which are framework-generated and not user turns. Without parsing the
+# ``prompt`` form, a queued user message yields no ``user_message`` event at all:
+# it never appears as a user bubble, and the frontend's optimistic "Queued"
+# bubble never reconciles -- so it stays up even after the agent has received and
+# answered the message. (Empirically a queued message is recorded EITHER as this
+# attachment OR, on older Claude Code versions, as a plain ``user`` line, never
+# both, so parsing it here does not double-render.)
+_QUEUED_COMMAND_ATTACHMENT_TYPE = "queued_command"
+_QUEUED_COMMAND_PROMPT_MODE = "prompt"
+
 
 def _extract_text_content(content: str | list[dict[str, Any]] | Any) -> str:
     """Extract plain text from a message content field (string or list of blocks)."""
@@ -210,6 +224,8 @@ def parse_session_lines(
             )
         elif event_type == "user":
             _parse_user_message(raw, uuid, timestamp, existing_event_ids, tool_name_by_call_id, new_events, session_id)
+        elif event_type == "attachment":
+            _parse_queued_command_attachment(raw, uuid, timestamp, existing_event_ids, new_events, session_id)
         # Skip: progress, file-history-snapshot, system, result, etc.
 
     new_events.sort(key=lambda x: x[0])
@@ -405,3 +421,49 @@ def _parse_user_message(
 
             existing_event_ids.add(event_id)
             new_events.append((timestamp, event))
+
+
+def _parse_queued_command_attachment(
+    raw: dict[str, Any],
+    uuid: str,
+    timestamp: str,
+    existing_event_ids: set[str],
+    new_events: list[tuple[str, dict[str, Any]]],
+    session_id: str | None = None,
+) -> None:
+    """Emit a ``user_message`` event for a message the user queued while busy.
+
+    Claude Code writes such a message as a ``queued_command`` attachment (see
+    ``_QUEUED_COMMAND_ATTACHMENT_TYPE``) rather than a normal ``user`` line.
+    Only the ``prompt`` command mode carries verbatim user text; the
+    ``task-notification`` mode is a framework-generated background-task notice
+    and is left unparsed (it is not a user turn).
+    """
+    attachment = raw.get("attachment")
+    if not isinstance(attachment, dict):
+        return
+    if attachment.get("type") != _QUEUED_COMMAND_ATTACHMENT_TYPE:
+        return
+    if attachment.get("commandMode") != _QUEUED_COMMAND_PROMPT_MODE:
+        return
+    prompt = attachment.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return
+
+    event_id = _make_event_id(uuid, "queued")
+    if event_id in existing_event_ids:
+        return
+
+    event: dict[str, Any] = {
+        "timestamp": timestamp,
+        "type": "user_message",
+        "event_id": event_id,
+        "source": _SOURCE,
+        "role": "user",
+        "content": prompt,
+        "message_uuid": uuid,
+    }
+    if session_id is not None:
+        event["session_id"] = session_id
+    existing_event_ids.add(event_id)
+    new_events.append((timestamp, event))
