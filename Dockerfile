@@ -197,75 +197,10 @@ RUN cd /mngr/code/apps/system_interface/frontend && npm run build
 # to the same minor anyway via uv's default version selection).
 ENV UV_PYTHON=/usr/local/bin/python3.12
 ENV UV_PYTHON_DOWNLOADS=never
-# Install mngr + system_interface as separate RUN-pipeline stages with a
-# `mngr --version` warmup in between. The previous form chained both
-# installs and `mngr plugin add` in one `&&` chain, which reliably SIGILLed
-# at ~3.4s into the RUN on Apple Silicon Lima Debian 12 ARM64 (verified
-# 27234056261 with exit 132 immediately after "Installed 1 executable:
-# system-interface"). Splitting -- and adding a warmup invocation of the
-# freshly-installed mngr binary before plugin add -- empirically clears
-# the SIGILL (verified 27234439518 reached creation status DONE). The
-# precise root cause is suspected to be a JIT/import-cache race in the
-# python-build-standalone cpython binaries combined with concurrent uv
-# tool install activity; the warmup primes whatever needs priming.
-RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr
-RUN uv tool install -e /mngr/code/apps/system_interface \
-        --with-editable /mngr/code/vendor/mngr/libs/mngr_claude
-# Diagnostic: test mngr's actual --version (which SIGILLed at exit 132
-# in 27235248862 on the same wz/uv-python-pin Dockerfile, but with
-# vendor/mngr=our wz/minds_onboard rsync). Walk mngr's own imports
-# stepwise to identify the offending one. Restrict to packages
-# actually in mngr's tool venv -- grpclib/modal live in
-# system_interface's venv, not mngr's.
-RUN MNGR_PY=$(head -1 "$(which mngr)" | sed 's|^#!||') && \
-    echo "mngr python: $MNGR_PY" && \
-    ls -la "$MNGR_PY" && \
-    "$MNGR_PY" --version && \
-    "$MNGR_PY" -c "import click; print('click OK')" && \
-    "$MNGR_PY" -c "import pydantic; print('pydantic OK')" && \
-    "$MNGR_PY" -c "import pydantic_core; print('pydantic_core OK')" && \
-    "$MNGR_PY" -c "import cryptography; print('cryptography OK')" && \
-    "$MNGR_PY" -c "import imbue.imbue_common; print('imbue.imbue_common OK')" && \
-    "$MNGR_PY" -c "import imbue.mngr; print('imbue.mngr OK')" && \
-    echo "--- bisecting imbue.mngr.main top-level deps ---" && \
-    "$MNGR_PY" -c "import pluggy; print('pluggy OK')" && \
-    "$MNGR_PY" -c "import setproctitle; print('setproctitle OK')" && \
-    "$MNGR_PY" -c "from click_option_group import OptionGroup; print('click_option_group OK')" && \
-    "$MNGR_PY" -c "from imbue.imbue_common.model_update import to_update; print('model_update OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.errors import MngrError; print('mngr.errors OK')" && \
-    "$MNGR_PY" -c "from imbue.imbue_common.frozen_model import FrozenModel; print('frozen_model OK')" && \
-    "$MNGR_PY" -c "from imbue.imbue_common.enums import UpperCaseStrEnum; print('enums OK')" && \
-    "$MNGR_PY" -c "from imbue.imbue_common.pure import pure; print('pure OK')" && \
-    "$MNGR_PY" -c "from imbue.concurrency_group.concurrency_group import ConcurrencyGroup; print('concurrency_group OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.primitives import HostName; print('mngr.primitives OK')" && \
-    "$MNGR_PY" -c "import bcrypt; print('bcrypt OK; version=', bcrypt.__version__)" && \
-    "$MNGR_PY" -c "import nacl; print('nacl top OK; version=', nacl.__version__)" && \
-    "$MNGR_PY" -c "import nacl.bindings; print('nacl.bindings OK')" && \
-    "$MNGR_PY" -c "import paramiko; print('paramiko top OK; version=', paramiko.__version__)" && \
-    "$MNGR_PY" -c "import paramiko.transport; print('paramiko.transport OK')" && \
-    "$MNGR_PY" -c "from loguru import logger; print('loguru OK')" && \
-    "$MNGR_PY" -c "from imbue.imbue_common.logging import make_jsonl_file_sink; print('imbue_common.logging OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.utils.logging import LoggingConfig; print('mngr.utils.logging OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.utils.file_utils import atomic_write; print('mngr.utils.file_utils OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.config.data_types import MngrContext; print('mngr.config.data_types OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.interfaces.agent import AgentInterface; print('mngr.interfaces.agent OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.interfaces.host import HostInterface; print('mngr.interfaces.host OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface; print('mngr.interfaces.provider_backend OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.plugins import hookspecs; print('mngr.plugins.hookspecs OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.config.loader import block_disabled_plugins; print('mngr.config.loader OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.utils.click_utils import detect_aliases_by_command; print('mngr.utils.click_utils OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.utils.env_utils import parse_bool_env; print('mngr.utils.env_utils OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.agents.agent_registry import load_agents_from_plugins; print('mngr.agents.agent_registry OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.providers.registry import load_all_registries; print('mngr.providers.registry OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.cli.create import create; print('mngr.cli.create OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.cli.snapshot import snapshot; print('mngr.cli.snapshot OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.cli.events import events; print('mngr.cli.events OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.cli.observe import observe; print('mngr.cli.observe OK')" && \
-    "$MNGR_PY" -c "from imbue.mngr.cli.transcript import transcript; print('mngr.cli.transcript OK')" && \
-    "$MNGR_PY" -c "import imbue.mngr.main; print('imbue.mngr.main OK')" && \
-    echo "--- now running mngr --version directly ---" && \
-    ( mngr --version || echo "mngr --version FAILED with rc=$?" )
-RUN mngr plugin add \
+RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr && \
+    uv tool install -e /mngr/code/apps/system_interface \
+        --with-editable /mngr/code/vendor/mngr/libs/mngr_claude && \
+    mngr plugin add \
     --path vendor/mngr/libs/mngr_claude \
     --path vendor/mngr/libs/mngr_wait
 
