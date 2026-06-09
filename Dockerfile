@@ -197,12 +197,30 @@ RUN cd /mngr/code/apps/system_interface/frontend && npm run build
 # to the same minor anyway via uv's default version selection).
 ENV UV_PYTHON=/usr/local/bin/python3.12
 ENV UV_PYTHON_DOWNLOADS=never
-RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr && \
+# DIAGNOSTIC: bisect the SIGILL location. The previous form just chained
+# everything with &&, so we only knew "something in this RUN crashed at
+# ~3.4s with exit 132". Split into discrete probes so the docker build
+# log pinpoints which step is the offender.
+RUN echo "[probe] uname/arch/cpuinfo:" && \
+    uname -a && \
+    (cat /proc/cpuinfo | head -30 || true) && \
+    echo "[probe] container python version:" && \
+    /usr/local/bin/python3.12 --version && \
+    echo "[probe] uv tool install mngr (verbose):" && \
+    UV_LOG_LEVEL=debug uv tool install -e /mngr/code/vendor/mngr/libs/mngr 2>&1 | tail -10 && \
+    echo "[probe] uv tool install system_interface:" && \
     uv tool install -e /mngr/code/apps/system_interface \
-        --with-editable /mngr/code/vendor/mngr/libs/mngr_claude && \
+        --with-editable /mngr/code/vendor/mngr/libs/mngr_claude 2>&1 | tail -5 && \
+    echo "[probe] which mngr + ldd-equivalent:" && \
+    which mngr && \
+    file "$(which mngr)" && \
+    head -1 "$(which mngr)" && \
+    echo "[probe] mngr --version (does the bare entry point load?):" && \
+    mngr --version 2>&1 || echo "[probe] mngr --version FAILED rc=$?" && \
+    echo "[probe] mngr plugin add:" && \
     mngr plugin add \
     --path vendor/mngr/libs/mngr_claude \
-    --path vendor/mngr/libs/mngr_wait
+    --path vendor/mngr/libs/mngr_wait 2>&1 || echo "[probe] mngr plugin add FAILED rc=$?"
 
 # Sync the workspace venv. --frozen asserts the lockfile is canonical so
 # the pre-warm cache layer is never bypassed by a silent re-resolve.
