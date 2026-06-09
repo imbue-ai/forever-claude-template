@@ -233,6 +233,17 @@ RUN MNGR_PY=$(head -1 "$(which mngr)" | sed 's|^#!||') && \
     "$MNGR_PY" -c "from click_option_group import OptionGroup; print('click_option_group OK')" && \
     "$MNGR_PY" -c "from imbue.imbue_common.model_update import to_update; print('model_update OK')" && \
     "$MNGR_PY" -c "from imbue.mngr.errors import MngrError; print('mngr.errors OK')" && \
+    "$MNGR_PY" -c "from imbue.imbue_common.frozen_model import FrozenModel; print('frozen_model OK')" && \
+    "$MNGR_PY" -c "from imbue.imbue_common.enums import UpperCaseStrEnum; print('enums OK')" && \
+    "$MNGR_PY" -c "from imbue.imbue_common.pure import pure; print('pure OK')" && \
+    "$MNGR_PY" -c "from imbue.concurrency_group.concurrency_group import ConcurrencyGroup; print('concurrency_group OK')" && \
+    "$MNGR_PY" -c "from imbue.mngr.primitives import HostName; print('mngr.primitives OK')" && \
+    "$MNGR_PY" -c "from imbue.mngr.utils.logging import LoggingConfig; print('mngr.utils.logging OK')" && \
+    "$MNGR_PY" -c "from imbue.mngr.utils.file_utils import atomic_write; print('mngr.utils.file_utils OK')" && \
+    "$MNGR_PY" -c "from imbue.mngr.config.data_types import MngrContext; print('mngr.config.data_types OK')" && \
+    "$MNGR_PY" -c "from imbue.mngr.interfaces.agent import AgentInterface; print('mngr.interfaces.agent OK')" && \
+    "$MNGR_PY" -c "from imbue.mngr.interfaces.host import HostInterface; print('mngr.interfaces.host OK')" && \
+    "$MNGR_PY" -c "from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface; print('mngr.interfaces.provider_backend OK')" && \
     "$MNGR_PY" -c "from imbue.mngr.plugins import hookspecs; print('mngr.plugins.hookspecs OK')" && \
     "$MNGR_PY" -c "from imbue.mngr.config.loader import block_disabled_plugins; print('mngr.config.loader OK')" && \
     "$MNGR_PY" -c "from imbue.mngr.utils.click_utils import detect_aliases_by_command; print('mngr.utils.click_utils OK')" && \
