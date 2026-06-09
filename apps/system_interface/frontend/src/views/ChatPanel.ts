@@ -614,8 +614,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     // Bound client memory while following the live tail: trim the oldest held
     // events once well over the cap. Only when at the bottom, so a scrolled-up
     // reader's rendered history is never yanked out from under them; the dropped
-    // history is re-fetched via backfill on scroll-up (evictOldEvents sets
-    // has_more). Re-pinned to the bottom by applyScrollPosition afterwards.
+    // history is re-fetched via backfill on scroll-up (evictOldEvents advances the
+    // window start so it reads as older history above). Re-pinned to the bottom by
+    // applyScrollPosition afterwards.
     if (!userScrolledUp && getEventCount(agentId) > MAX_HELD_EVENTS) {
       evictOldEvents(agentId);
     }
