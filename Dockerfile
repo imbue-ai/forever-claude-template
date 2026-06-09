@@ -203,12 +203,21 @@ RUN cd /mngr/code/apps/system_interface/frontend && npm run build
 # to the same minor anyway via uv's default version selection).
 ENV UV_PYTHON=/usr/local/bin/python3.12
 ENV UV_PYTHON_DOWNLOADS=never
-RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr && \
-    uv tool install -e /mngr/code/apps/system_interface \
-        --with-editable /mngr/code/vendor/mngr/libs/mngr_claude && \
-    mngr plugin add \
+RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr
+RUN uv tool install -e /mngr/code/apps/system_interface \
+        --with-editable /mngr/code/vendor/mngr/libs/mngr_claude
+# `mngr plugin add` SIGILLs reliably in the launch-to-msg CI runner's
+# lima->docker stack (Apple Silicon M4 -> lima 2.0.3 VZ -> docker ->
+# python:3.12.13-slim ARM64), regardless of mngr source version or
+# vendored workspace-package versions. Same uv tool install of the
+# same packages works on Apple Silicon Docker Desktop locally. The
+# root cause is undiagnosed but environment-specific. Run with `|| true`
+# so the docker build doesn't fail -- plugins are also picked up via
+# `mngr plugin list` at runtime from their entry-point metadata.
+RUN mngr plugin add \
     --path vendor/mngr/libs/mngr_claude \
-    --path vendor/mngr/libs/mngr_wait
+    --path vendor/mngr/libs/mngr_wait \
+    || echo "WARNING: mngr plugin add exited rc=$?; plugins may need runtime registration"
 
 # Sync the workspace venv. --frozen asserts the lockfile is canonical so
 # the pre-warm cache layer is never bypassed by a silent re-resolve.
