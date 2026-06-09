@@ -211,9 +211,12 @@ ENV UV_PYTHON_DOWNLOADS=never
 RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr
 RUN uv tool install -e /mngr/code/apps/system_interface \
         --with-editable /mngr/code/vendor/mngr/libs/mngr_claude
-# Diagnostic: locate mngr's tool-venv python and bisect imports there
-# (not /usr/local/bin/python3.12, which has only pip in site-packages).
-# Identify which extension wheel SIGILLs by importing one at a time.
+# Diagnostic: test mngr's actual --version (which SIGILLed at exit 132
+# in 27235248862 on the same wz/uv-python-pin Dockerfile, but with
+# vendor/mngr=our wz/minds_onboard rsync). Walk mngr's own imports
+# stepwise to identify the offending one. Restrict to packages
+# actually in mngr's tool venv -- grpclib/modal live in
+# system_interface's venv, not mngr's.
 RUN MNGR_PY=$(head -1 "$(which mngr)" | sed 's|^#!||') && \
     echo "mngr python: $MNGR_PY" && \
     ls -la "$MNGR_PY" && \
@@ -222,11 +225,12 @@ RUN MNGR_PY=$(head -1 "$(which mngr)" | sed 's|^#!||') && \
     "$MNGR_PY" -c "import pydantic; print('pydantic OK')" && \
     "$MNGR_PY" -c "import pydantic_core; print('pydantic_core OK')" && \
     "$MNGR_PY" -c "import cryptography; print('cryptography OK')" && \
-    "$MNGR_PY" -c "import grpclib; print('grpclib OK')" && \
-    "$MNGR_PY" -c "import google_re2; print('google_re2 OK')" && \
-    "$MNGR_PY" -c "import modal; print('modal OK')" && \
     "$MNGR_PY" -c "import imbue.imbue_common; print('imbue.imbue_common OK')" && \
-    "$MNGR_PY" -c "import imbue.mngr.main; print('imbue.mngr.main OK')"
+    "$MNGR_PY" -c "import imbue.mngr; print('imbue.mngr OK')" && \
+    "$MNGR_PY" -c "import imbue.mngr.main; print('imbue.mngr.main OK')" && \
+    "$MNGR_PY" -c "from imbue.mngr.main import cli; print('imbue.mngr.main.cli OK')" && \
+    echo "--- now running mngr --version directly ---" && \
+    mngr --version || echo "mngr --version FAILED with rc=$?"
 RUN mngr plugin add \
     --path vendor/mngr/libs/mngr_claude \
     --path vendor/mngr/libs/mngr_wait
