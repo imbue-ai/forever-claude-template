@@ -97,9 +97,9 @@ If `ANTHROPIC_API_KEY` is set in the environment, `claude -p` bills **full API
 rates** against the API account, not the subscription's programmatic credit. In a
 deployed mngr agent the key is typically forwarded (via `.mngr/settings.toml`), so
 `run_completion` will usually take the direct-API path -- which is what you want
-(cheapest for non-agentic work), but it *is* real per-token spend. Surface the
-projected cost to the user before scaling a flow up. (A real incident ran ~$1,800
-in two days from an unattended `claude -p` loop on an API key.)
+(cheapest for non-agentic work), but it *is* real per-token spend. An unattended
+`claude -p` loop on an API key can run up four-figure spend in a couple of days,
+so surface the projected cost to the user before scaling a flow up.
 
 ## Credential resolution (what the library checks)
 
@@ -126,7 +126,7 @@ the variable, it looks like the managed main session and engages mngr's hook
 machinery -- the failure mode you hit when calling `claude -p` directly.
 
 The library builds the `claude -p` child environment with `MAIN_CLAUDE_SESSION_ID`
-**unset**, which neutralizes all those hooks (confirmed sufficient; the other
-`MNGR_*` vars are not load-bearing for this bug, though `build_claude_cli_env`
-can strip them too as defense-in-depth). This is why services should always go
+**unset**, which neutralizes all those hooks (the other `MNGR_*` vars are not
+load-bearing for this bug, though `build_claude_cli_env` can strip them too as
+defense-in-depth). This is why services should always go
 through the library rather than spawning `claude -p` themselves.

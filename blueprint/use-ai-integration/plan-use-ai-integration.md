@@ -17,7 +17,7 @@ selection, logging, and spend control.
 >   is the cache-controlled system block; on the keyless `claude -p` fallback it is passed as
 >   `--system-prompt` alongside `--tools ""` (the lean non-bare config). Required because the non-bare
 >   fallback always auto-loads CLAUDE.md, and an empty/absent system prompt lets that ambient text
->   hijack the response (measured: the model answered the repo's instructions instead of the prompt);
+>   hijack the response (the model would answer the repo's instructions instead of the prompt);
 >   a mandatory `system` neutralizes it by construction.
 > * **Pattern 2 — one-shot agentic** (tools/file access) → `run_task()`: always headless `claude -p`,
 >   tools left enabled (the point is to ride the default agent). Optional `append_system`
@@ -30,8 +30,8 @@ selection, logging, and spend control.
 > * All wrappers are thin; async-first surface; no built-in concurrency cap.
 >
 > **Credentialing / env:** prefer `ANTHROPIC_API_KEY`, else inherited `CLAUDE_CONFIG_DIR`, else
-> **fail loudly**. The `claude -p` child env MUST unset `MAIN_CLAUDE_SESSION_ID` (confirmed
-> sufficient — every mngr hook is session-guarded); optionally also drop
+> **fail loudly**. The `claude -p` child env MUST unset `MAIN_CLAUDE_SESSION_ID` (every mngr
+> hook is session-guarded, so unsetting it suffices); optionally also drop
 > `MNGR_AGENT_STATE_DIR`/`MNGR_AGENT_NAME`/`MNGR_HOST_DIR`. Centralizing this is *why* services call
 > `claude -p` through the lib.
 >
@@ -80,17 +80,17 @@ selection, logging, and spend control.
   surface it to the user.
 - The skill steers agents to **measure cost on a small sample before building a high-volume flow**,
   and to **surface the cost/approach tradeoff to the user** with real numbers — prose guidance, not a
-  template. Grounded in the `claude -p` cost profile, which has **three controllable levers** (all
-  measured on this repo, Haiku, a trivial prompt):
+  template. Grounded in the `claude -p` cost profile, which has **three controllable levers** (on this
+  repo, Haiku, a trivial prompt):
   - *Default agent* `claude -p` reloads the full Claude Code context (system prompt + tool
-    definitions + auto-discovered CLAUDE.md/skills) **and** runs a multi-turn tool loop — measured
-    ~7 turns / ~$0.086 for a one-line prompt, and it even wandered off-task (tried to `git commit` an
-    unrelated dirty file). This is the expensive, *dangerous* default for non-agentic work.
+    definitions + auto-discovered CLAUDE.md/skills) **and** runs a multi-turn tool loop —
+    ~7 turns / ~$0.086 for a one-line prompt, and it may wander off-task (e.g. trying to commit an
+    unrelated file). This is the expensive, *dangerous* default for non-agentic work.
   - *Stripped non-bare* (`--system-prompt <s>` + `--tools ""`) drops it to **1 turn / ~$0.016 / ~13k
     context** and keeps it on task. This is what `run_completion`'s keyless fallback uses. The
     residual ~13k is CLAUDE.md + skills, which only `--bare` removes.
   - *`--bare`* strips CLAUDE.md/skills too, but **cannot authenticate without an API key** (OAuth and
-    keychain are never read — confirmed empirically: bare returns "Not logged in"). So bare is
+    keychain are never read — bare returns "Not logged in"). So bare is
     unavailable on the keyless subscription path, and once a key exists `run_completion` routes to the
     direct API anyway — so the library never uses bare.
   Two consequences the guidance names explicitly: (a) for agentic `run_task` work, batch rather than
@@ -143,7 +143,7 @@ selection, logging, and spend control.
   understands the library's behavior and can communicate it; the library enforces that routing
   regardless, so the agent isn't the single point of failure. The cost-probe guidance is about
   whether the volume is worth it, not about manually picking the billing path) + `references/` for the
-  billing/credentialing reference (carrying the empirical cost numbers) and worked per-pattern
+  billing/credentialing reference (carrying the cost numbers) and worked per-pattern
   sketches.
 - **New lib `libs/ai_integration/`** (uv workspace member, registered in root `pyproject.toml`):
   the three async `run_*` functions plus shared internals — credential resolution (+ loud failure),
