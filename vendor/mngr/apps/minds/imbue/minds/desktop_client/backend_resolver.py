@@ -22,12 +22,12 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
-REFRESH_EVENT_SOURCE_NAME: Final[str] = "refresh"
 
 # Every minds workspace runs a constant-named ``main``-type agent that owns
 # the bootstrap service manager (and thus the system interface). This is the
@@ -84,8 +84,31 @@ class BackendResolverInterface(MutableModel, ABC):
 
         Default implementation returns all known agent IDs (no filtering).
         Subclasses with access to agent labels should override this.
+
+        This is the *full* set, including workspaces whose host has been
+        destroyed (retained for the provider's destroyed-host persistence
+        window). Active-workspace surfaces should call
+        :meth:`list_active_workspace_ids` instead; a restore view that needs
+        the destroyed ones uses this plus :meth:`get_host_state`.
         """
         return self.list_known_agent_ids()
+
+    def list_active_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Return workspace agent IDs whose host is not in a terminal DESTROYED state.
+
+        Default implementation has no host-state data, so it returns the same
+        set as :meth:`list_known_workspace_ids`. Subclasses with discovery host
+        state should override to drop agents on DESTROYED hosts.
+        """
+        return self.list_known_workspace_ids()
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        """Return the last-known lifecycle state of a host, or None if unknown.
+
+        Default implementation has no host-state data and returns None.
+        Subclasses fed by discovery should override this.
+        """
+        return None
 
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
@@ -133,6 +156,16 @@ class BackendResolverInterface(MutableModel, ABC):
         Default implementation returns True (appropriate for static resolvers).
         """
         return True
+
+    def get_provider_errors(self) -> dict[ProviderInstanceName, DiscoveryError]:
+        """Return errored providers keyed by name from the latest discovery snapshot.
+
+        Default implementation returns an empty mapping (resolvers without
+        provider state never report errors); ``MngrCliBackendResolver``
+        overrides it. The workspace list uses this to mark a retained-but-
+        unverified workspace stale when its provider's last poll errored.
+        """
+        return {}
 
 
 class StaticBackendResolver(BackendResolverInterface):
@@ -184,6 +217,10 @@ class ParsedAgentsResult(FrozenModel):
         default_factory=dict,
         description="SSH info keyed by agent ID string, only for remote agents",
     )
+    host_state_by_host_id: Mapping[str, HostState] = Field(
+        default_factory=dict,
+        description="Host lifecycle state keyed by host ID string, for hosts whose state is known",
+    )
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
@@ -203,6 +240,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     agents = data.get("agents", [])
     agent_ids: list[AgentId] = []
     ssh_info_by_id: dict[str, RemoteSSHInfo] = {}
+    host_state_by_host_id: dict[str, HostState] = {}
 
     for agent in agents:
         agent_id_str = agent.get("id")
@@ -213,6 +251,15 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
         host = agent.get("host")
         if host is None:
             continue
+
+        host_id_value = host.get("id")
+        state_value = host.get("state")
+        if isinstance(host_id_value, str) and isinstance(state_value, str):
+            try:
+                host_state_by_host_id[host_id_value] = HostState(state_value)
+            except ValueError:
+                logger.warning("Unknown host state {!r} for host {}", state_value, host_id_value)
+
         ssh = host.get("ssh")
         if ssh is None:
             continue
@@ -231,6 +278,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     return ParsedAgentsResult(
         agent_ids=tuple(agent_ids),
         ssh_info_by_agent_id=ssh_info_by_id,
+        host_state_by_host_id=host_state_by_host_id,
     )
 
 
@@ -422,7 +470,6 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
-    _on_refresh_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
     # host_id_str -> the agents last completely enumerated on that host (the
     # in-memory image of the persisted last-good topology). Updated under
     # _lock by update_agents; read by get_system_services_agent_id as the
@@ -606,6 +653,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return agent IDs that are primary workspace agents.
 
         Filters for agents with both ``workspace`` and ``is_primary`` labels.
+        Includes workspaces on DESTROYED hosts; see the interface docstring.
         """
         with self._lock:
             return tuple(
@@ -613,6 +661,30 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 for agent in self._agents_result.discovered_agents
                 if "workspace" in agent.labels and "is_primary" in agent.labels
             )
+
+    def list_active_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Return primary workspace agent IDs whose host is not DESTROYED.
+
+        A destroyed host lingers in discovery for the provider's destroyed-host
+        persistence window; its workspace agents stay in the snapshot but should
+        drop off every active surface. Filtering here (rather than removing the
+        agents from the snapshot) keeps the full set available via
+        :meth:`list_known_workspace_ids` for a future restore view.
+        """
+        with self._lock:
+            host_state_by_host_id = self._agents_result.host_state_by_host_id
+            return tuple(
+                agent.agent_id
+                for agent in self._agents_result.discovered_agents
+                if "workspace" in agent.labels
+                and "is_primary" in agent.labels
+                and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
+            )
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        """Return the last-known lifecycle state of a host from discovery, or None."""
+        with self._lock:
+            return self._agents_result.host_state_by_host_id.get(str(host_id))
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
         """Return the workspace label value for an agent, or None."""
@@ -697,38 +769,3 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def _fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
         """Internal alias for ``fire_on_request`` retained for backward compatibility."""
         self.fire_on_request(agent_id_str, raw_line)
-
-    def add_on_refresh_callback(self, callback: Callable[[str, str], None]) -> None:
-        """Register a callback invoked when a refresh event arrives.
-
-        The callback receives (agent_id_str, raw_json_line). Refresh events
-        tell the desktop client to reload open web-service tabs for a service.
-        """
-        with self._lock:
-            self._on_refresh_callbacks.append(callback)
-
-    def remove_on_refresh_callback(self, callback: Callable[[str, str], None]) -> None:
-        """Unregister a refresh event callback."""
-        with self._lock:
-            try:
-                self._on_refresh_callbacks.remove(callback)
-            except ValueError:
-                pass
-
-    def fire_on_refresh(self, agent_id_str: str, raw_line: str) -> None:
-        """Invoke all registered refresh event callbacks.
-
-        Public dispatch entry point used by both the legacy in-process
-        ``MngrStreamManager`` and the new ``EnvelopeStreamConsumer``.
-        """
-        with self._lock:
-            callbacks = list(self._on_refresh_callbacks)
-        for callback in callbacks:
-            try:
-                callback(agent_id_str, raw_line)
-            except (OSError, RuntimeError) as e:
-                logger.warning("Refresh event callback failed: {}", e)
-
-    def _fire_on_refresh(self, agent_id_str: str, raw_line: str) -> None:
-        """Internal alias for ``fire_on_refresh`` retained for backward compatibility."""
-        self.fire_on_refresh(agent_id_str, raw_line)
