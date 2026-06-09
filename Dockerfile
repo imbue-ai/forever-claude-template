@@ -238,6 +238,12 @@ RUN MNGR_PY=$(head -1 "$(which mngr)" | sed 's|^#!||') && \
     "$MNGR_PY" -c "from imbue.imbue_common.pure import pure; print('pure OK')" && \
     "$MNGR_PY" -c "from imbue.concurrency_group.concurrency_group import ConcurrencyGroup; print('concurrency_group OK')" && \
     "$MNGR_PY" -c "from imbue.mngr.primitives import HostName; print('mngr.primitives OK')" && \
+    "$MNGR_PY" -c "import paramiko; print('paramiko top OK; version=', paramiko.__version__)" && \
+    "$MNGR_PY" -c "import paramiko.transport; print('paramiko.transport OK')" && \
+    "$MNGR_PY" -c "import bcrypt; print('bcrypt OK')" && \
+    "$MNGR_PY" -c "import nacl.bindings; print('nacl.bindings OK')" && \
+    "$MNGR_PY" -c "from loguru import logger; print('loguru OK')" && \
+    "$MNGR_PY" -c "from imbue.imbue_common.logging import make_jsonl_file_sink; print('imbue_common.logging OK')" && \
     "$MNGR_PY" -c "from imbue.mngr.utils.logging import LoggingConfig; print('mngr.utils.logging OK')" && \
     "$MNGR_PY" -c "from imbue.mngr.utils.file_utils import atomic_write; print('mngr.utils.file_utils OK')" && \
     "$MNGR_PY" -c "from imbue.mngr.config.data_types import MngrContext; print('mngr.config.data_types OK')" && \
