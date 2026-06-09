@@ -53,6 +53,10 @@ _BLOCKED = [
     "tk start cod-step-x &",
     "tk start cod-step-x\nfoo",  # a second command after an unquoted newline
     "foo\ntk start cod-step-x",  # a command before it via an unquoted newline
+    # A trailing `#` comment ends at the newline in a real shell, so a command
+    # on the next line still runs -- the comment must not swallow it.
+    "tk start cod-step-x # note\nrm -rf /tmp/x",  # second command hidden behind a comment
+    "echo hi # note\ntk start cod-step-x",  # tk start runs after a commented first line
 ]
 
 

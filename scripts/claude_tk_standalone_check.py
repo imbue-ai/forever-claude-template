@@ -36,29 +36,55 @@ def _newlines_to_semicolons(cmd: str) -> str:
 
     A newline inside quotes (e.g. a multi-line close summary) is preserved.
     Backslash escapes the next char outside single quotes, matching the shell.
+    A `#` that begins a word (at the start, or after whitespace or a shell
+    metacharacter) starts a comment that the shell ends at the newline, so the
+    comment body is dropped here too -- otherwise shlex (which has no newlines
+    left to terminate the comment on) would let it swallow the injected `;` and
+    the command that follows, hiding a real second command from the checks. A
+    `#` in the middle of a word (`a#b`) is a literal, matching the shell.
     """
+    # Characters after which a `#` begins a new word (so starts a comment).
+    word_boundary = set(" \t\n" + _PUNCT)
     out: list[str] = []
     quote: str | None = None
     escaped = False
+    in_comment = False
+    prev: str | None = None
     for ch in cmd:
+        if in_comment:
+            # The shell ends a comment at the newline; emit the separator and
+            # resume normal scanning on the next line.
+            if ch == "\n":
+                in_comment = False
+                out.append(";")
+                prev = "\n"
+            continue
         if escaped:
             out.append(ch)
             escaped = False
+            prev = ch
             continue
         if quote != "'" and ch == "\\":
             out.append(ch)
             escaped = True
+            prev = ch
             continue
         if quote is not None:
             out.append(ch)
             if ch == quote:
                 quote = None
+            prev = ch
             continue
         if ch in ("'", '"'):
             quote = ch
             out.append(ch)
+            prev = ch
+            continue
+        if ch == "#" and (prev is None or prev in word_boundary):
+            in_comment = True
             continue
         out.append(";" if ch == "\n" else ch)
+        prev = ch
     return "".join(out)
 
 
