@@ -248,20 +248,36 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string, isRunnin
   const agentType = toolCall.subagent_type || metadata?.agent_type || "";
   const sessionId = metadata?.session_id;
 
-  // A small status dot communicates whether the sub-agent is still working. It pulses green
-  // while the Agent call is in flight (no tool result yet) and settles to a static dot once
-  // the sub-agent finishes. The slot is always present so the card doesn't shift on completion.
-  const statusDot = m("span", {
-    class: `subagent-card-status-dot ${
-      isRunning ? "subagent-card-status-dot--running" : "subagent-card-status-dot--done"
-    }`,
-    title: isRunning ? "Working" : "Finished",
-    "aria-label": isRunning ? "Sub-agent is working" : "Sub-agent finished",
-  });
+  // The header status indicator communicates whether the sub-agent is still working: a pulsing
+  // green dot while the Agent call is in flight (no tool result yet), switching to a muted
+  // checkmark -- like a completed progress step -- once the sub-agent finishes. On completion the
+  // whole card also drops its green accent for neutral grey, since green reads as "active".
+  const statusIndicator = isRunning
+    ? m("span", {
+        class: "subagent-card-status-dot subagent-card-status-dot--running",
+        title: "Working",
+        "aria-label": "Sub-agent is working",
+      })
+    : m(
+        "svg.subagent-card-status-check",
+        {
+          width: 16,
+          height: 16,
+          viewBox: "0 0 16 16",
+          fill: "none",
+          title: "Finished",
+          "aria-label": "Sub-agent finished",
+        },
+        // Same filled-circle-with-check mark used for a done step in the progress timeline.
+        m.trust(
+          '<circle cx="8" cy="8" r="7" fill="currentColor"/>' +
+            '<path d="M4.5 8L7 10.5L11.5 6" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
+        ),
+      );
 
-  return m("div", { class: "subagent-card" }, [
+  return m("div", { class: `subagent-card${isRunning ? "" : " subagent-card--done"}` }, [
     m("div", { class: "subagent-card-header" }, [
-      statusDot,
+      statusIndicator,
       m("span", { class: "subagent-card-description" }, description),
       agentType ? m("span", { class: "subagent-card-type-badge" }, agentType) : null,
     ]),

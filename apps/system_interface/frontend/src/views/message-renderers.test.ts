@@ -198,7 +198,7 @@ describe("renderSubagentCard", () => {
     expect(text).not.toContain("View conversation");
   });
 
-  it("shows a pulsing running dot while the sub-agent is working", () => {
+  it("shows a pulsing running dot on a green card while the sub-agent is working", () => {
     const toolCall: ToolCall = {
       tool_call_id: "t1",
       tool_name: "Agent",
@@ -209,10 +209,11 @@ describe("renderSubagentCard", () => {
     };
     const classes = collectClasses(renderSubagentCard(toolCall, "agent-1", true)).join(" ");
     expect(classes).toContain("subagent-card-status-dot--running");
-    expect(classes).not.toContain("subagent-card-status-dot--done");
+    expect(classes).not.toContain("subagent-card-status-check");
+    expect(classes).not.toContain("subagent-card--done");
   });
 
-  it("settles to a static done dot once the sub-agent finishes", () => {
+  it("switches to a checkmark and greys the card once the sub-agent finishes", () => {
     const toolCall: ToolCall = {
       tool_call_id: "t1",
       tool_name: "Agent",
@@ -222,7 +223,8 @@ describe("renderSubagentCard", () => {
       subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
     };
     const classes = collectClasses(renderSubagentCard(toolCall, "agent-1", false)).join(" ");
-    expect(classes).toContain("subagent-card-status-dot--done");
+    expect(classes).toContain("subagent-card-status-check");
+    expect(classes).toContain("subagent-card--done");
     expect(classes).not.toContain("subagent-card-status-dot--running");
   });
 

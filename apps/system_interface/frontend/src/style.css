@@ -841,8 +841,8 @@ body {
   flex: 1;
 }
 
-/* Live status dot: pulsing green while the sub-agent works, static and muted once done.
-   Reuses the agent-activity-pulse keyframes so it matches the main chat's activity dot. */
+/* Live status dot: pulsing green while the sub-agent works. Reuses the
+   agent-activity-pulse keyframes so it matches the main chat's activity dot. */
 .subagent-card-status-dot {
   width: 7px;
   height: 7px;
@@ -855,8 +855,16 @@ body {
   animation: agent-activity-pulse 1.4s ease-in-out infinite;
 }
 
-.subagent-card-status-dot--done {
-  background: var(--color-text-faint);
+/* Settled checkmark shown once the sub-agent finishes, mirroring a done progress step. */
+.subagent-card-status-check {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+/* Once finished, the card drops its green accent for neutral grey -- green reads as active. */
+.subagent-card--done {
+  border-color: var(--color-border);
+  background: var(--color-surface-secondary);
 }
 
 .subagent-card-description {
