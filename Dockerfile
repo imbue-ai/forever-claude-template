@@ -4,7 +4,7 @@
 # (verified runs 27238034922 with paramiko 4.0.0, 27241314490 with 3.5.1 --
 # both crash at the same point). The exact culprit is undiagnosed; bullseye
 # is a probe of "is this Debian-12-arm64 + python-build-standalone specific".
-FROM python:3.12-slim-bullseye
+FROM python:3.12.13-slim
 
 # Pinned versions for reproducible builds. Bump deliberately, not by accident.
 ARG TTYD_VERSION=1.7.7
