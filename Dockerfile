@@ -211,18 +211,22 @@ ENV UV_PYTHON_DOWNLOADS=never
 RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr
 RUN uv tool install -e /mngr/code/apps/system_interface \
         --with-editable /mngr/code/vendor/mngr/libs/mngr_claude
-# Diagnostic: identify which package import SIGILLs. If `import imbue.mngr`
-# crashes, the offender is in mngr's transitive dep closure. Print
-# importlib metadata for the top-level wheels so we can correlate.
-RUN python3.12 -c "import sys; print('python:', sys.version)" && \
-    python3.12 -c "import importlib.metadata as m; ds=sorted({d.name for d in m.distributions()}); print('pkgs:', ds[:60])" && \
-    /usr/local/bin/python3.12 -c "import click; print('click OK')" && \
-    /usr/local/bin/python3.12 -c "import pydantic; print('pydantic OK')" && \
-    /usr/local/bin/python3.12 -c "import pydantic_core; print('pydantic_core OK')" && \
-    /usr/local/bin/python3.12 -c "import cryptography; print('cryptography OK')" && \
-    /usr/local/bin/python3.12 -c "import modal; print('modal OK')" && \
-    /usr/local/bin/python3.12 -c "import imbue.imbue_common; print('imbue.imbue_common OK')" && \
-    /usr/local/bin/python3.12 -c "import imbue.mngr; print('imbue.mngr OK')"
+# Diagnostic: locate mngr's tool-venv python and bisect imports there
+# (not /usr/local/bin/python3.12, which has only pip in site-packages).
+# Identify which extension wheel SIGILLs by importing one at a time.
+RUN MNGR_PY=$(head -1 "$(which mngr)" | sed 's|^#!||') && \
+    echo "mngr python: $MNGR_PY" && \
+    file "$MNGR_PY" && \
+    "$MNGR_PY" --version && \
+    "$MNGR_PY" -c "import click; print('click OK')" && \
+    "$MNGR_PY" -c "import pydantic; print('pydantic OK')" && \
+    "$MNGR_PY" -c "import pydantic_core; print('pydantic_core OK')" && \
+    "$MNGR_PY" -c "import cryptography; print('cryptography OK')" && \
+    "$MNGR_PY" -c "import grpclib; print('grpclib OK')" && \
+    "$MNGR_PY" -c "import google_re2; print('google_re2 OK')" && \
+    "$MNGR_PY" -c "import modal; print('modal OK')" && \
+    "$MNGR_PY" -c "import imbue.imbue_common; print('imbue.imbue_common OK')" && \
+    "$MNGR_PY" -c "import imbue.mngr.main; print('imbue.mngr.main OK')"
 RUN mngr plugin add \
     --path vendor/mngr/libs/mngr_claude \
     --path vendor/mngr/libs/mngr_wait
