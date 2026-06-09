@@ -184,6 +184,18 @@ RUN cd /mngr/code/apps/system_interface/frontend && npm run build
 # .mngr/settings.toml sets providers.modal.is_enabled = false; without it,
 # `mngr plugin add` no longer has to inject a third plugin into the mngr
 # tool venv, which is the dominant cost of this RUN.
+#
+# UV_PYTHON pins uv to the container's already-installed python:3.12.13-slim
+# interpreter at /usr/local/bin/python3.12, instead of letting uv download
+# its own managed cpython (currently 3.14.x). The python-build-standalone
+# cpython 3.14.x for linux-aarch64 SIGILLs at startup when this RUN executes
+# under qemu-vz on Apple Silicon (verified on the mac launch-to-msg runner:
+# run 27232809809, exit code 132 immediately after `Installed 1 executable:
+# system-interface`, before `mngr plugin add` could even start). Pinning to
+# the slim base's bundled 3.12.13 sidesteps the issue without changing the
+# Python version mngr/system_interface get at runtime (they were resolving
+# to the same minor anyway via uv's default version selection).
+ENV UV_PYTHON=/usr/local/bin/python3.12
 RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr && \
     uv tool install -e /mngr/code/apps/system_interface \
         --with-editable /mngr/code/vendor/mngr/libs/mngr_claude && \
