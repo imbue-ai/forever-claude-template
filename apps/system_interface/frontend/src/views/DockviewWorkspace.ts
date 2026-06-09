@@ -27,6 +27,7 @@ import {
   getApplications,
   getProtoAgents,
   removeAgentLocally,
+  type AgentState,
   type AgentsUpdatedListener,
   type LayoutOpEvent,
   type LayoutOpListener,
@@ -69,7 +70,7 @@ export function buildAgentTerminalUrl(agentName: string): string {
 
 type PanelType = "chat" | "iframe" | "subagent";
 
-interface PanelParams {
+export interface PanelParams {
   panelType: PanelType;
   agentId: string;
   chatAgentId?: string;
@@ -290,6 +291,56 @@ function getOpenChatAgentIds(): Set<string> {
   return ids;
 }
 
+/** Identify the agent a panel is bound to, or null if it isn't agent-bound.
+ *
+ *  Chat panels are bound to the agent whose conversation they show. Agent
+ *  terminal panels are iframe tabs attached to a specific agent's tmux
+ *  session, identified by the terminal-URL shape that ``buildAgentTerminal
+ *  Url`` produces (and that no other iframe URL uses). Every other panel --
+ *  generic terminals, applications, ad-hoc URLs, subagent views -- is not
+ *  tied to a destroyable agent and returns null. (Those non-agent iframe
+ *  tabs carry the primary agent id as a placeholder owner, so keying off
+ *  ``agentId`` alone would wrongly treat them as agent-bound.) */
+function getPanelBackingAgentId(params: PanelParams, terminalUrlPrefix: string): string | null {
+  if (params.panelType === "chat") {
+    return params.chatAgentId ?? params.agentId;
+  }
+  if (params.panelType === "iframe") {
+    const url = params.url ?? "";
+    if (url.startsWith(terminalUrlPrefix) && url.includes("arg=agent")) {
+      return params.agentId;
+    }
+  }
+  return null;
+}
+
+/** Decide which open panels to close because their backing agent was
+ *  observed alive earlier this session and has since disappeared from the
+ *  authoritative agent list (e.g. the agent was destroyed from a terminal
+ *  outside the UI).
+ *
+ *  ``everSeenAgentIds`` gates this so we only close tabs for agents we
+ *  actually saw alive: a panel whose agent is merely not loaded yet (an
+ *  empty list right after connect, or a chat tab restored from a saved
+ *  layout before the first ``agents_updated`` arrives) is left untouched
+ *  rather than torn down on a transient miss. */
+export function computePanelsToCloseForRemovedAgents(
+  openPanels: ReadonlyArray<{ panelId: string; params: PanelParams }>,
+  terminalUrlPrefix: string,
+  liveAgentIds: ReadonlySet<string>,
+  everSeenAgentIds: ReadonlySet<string>,
+): string[] {
+  const toClose: string[] = [];
+  for (const { panelId, params } of openPanels) {
+    const backingId = getPanelBackingAgentId(params, terminalUrlPrefix);
+    if (backingId === null) continue;
+    if (everSeenAgentIds.has(backingId) && !liveAgentIds.has(backingId)) {
+      toClose.push(panelId);
+    }
+  }
+  return toClose;
+}
+
 /** Get the set of application names that currently have open iframe panels. */
 function getOpenAppNames(): Set<string> {
   const names = new Set<string>();
@@ -499,6 +550,41 @@ function openInitialChatTab(): boolean {
 // chat agent..." vs the default "+ Open new tab" message.
 let awaitingInitialChat = false;
 let agentsUpdatedListener: AgentsUpdatedListener | null = null;
+
+// Agent ids we've observed alive (non-primary) in any agents_updated event
+// this session. Used to distinguish "this agent was destroyed" (seen, now
+// gone -> close its tabs) from "this agent hasn't loaded yet" (never seen ->
+// leave its tabs alone). See computePanelsToCloseForRemovedAgents.
+const everSeenAgentIds = new Set<string>();
+
+/** Reconcile open agent-bound tabs against the live agent list: close any
+ *  chat or agent-terminal tab whose backing agent was alive earlier this
+ *  session and has now disappeared (e.g. destroyed from a terminal outside
+ *  the UI). ``liveAgents`` is the filtered, non-primary list delivered by
+ *  the agents_updated event. */
+function closeTabsForRemovedAgents(liveAgents: AgentState[]): void {
+  if (!dockview) return;
+  const liveAgentIds = new Set(liveAgents.map((a) => a.id));
+  const openPanels: Array<{ panelId: string; params: PanelParams }> = [];
+  for (const panel of dockview.panels) {
+    const params = panelParams.get(panel.id);
+    if (params) openPanels.push({ panelId: panel.id, params });
+  }
+  const stalePanelIds = computePanelsToCloseForRemovedAgents(
+    openPanels,
+    getTerminalUrl(),
+    liveAgentIds,
+    everSeenAgentIds,
+  );
+  for (const panelId of stalePanelIds) {
+    const panel = dockview.panels.find((p) => p.id === panelId);
+    if (panel) dockview.removePanel(panel);
+  }
+  // Record the now-live ids only after computing stale panels, so an agent
+  // appearing for the first time in this event is never mistaken for one
+  // that was seen-then-removed.
+  for (const id of liveAgentIds) everSeenAgentIds.add(id);
+}
 
 function openIframeTab(url: string, title: string, panelType: PanelType = "iframe", serviceName?: string): void {
   if (!dockview) return;
@@ -1740,9 +1826,12 @@ function initializeDockview(parentElement: HTMLElement): void {
     updateEmptyState();
   });
 
-  // While awaitingInitialChat is true, every agents_updated event is
-  // another chance for the bootstrap-created chat agent to show up.
-  agentsUpdatedListener = () => {
+  // Each agents_updated event is the authoritative non-primary agent list.
+  // First close any tabs whose backing agent was destroyed out from under
+  // them, then -- while awaitingInitialChat -- take the chance to open the
+  // bootstrap-created chat agent's tab once it shows up.
+  agentsUpdatedListener = (liveAgents) => {
+    closeTabsForRemovedAgents(liveAgents);
     if (awaitingInitialChat && openInitialChatTab()) {
       awaitingInitialChat = false;
       updateEmptyState();
