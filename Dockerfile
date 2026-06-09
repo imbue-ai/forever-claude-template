@@ -216,7 +216,7 @@ RUN uv tool install -e /mngr/code/apps/system_interface \
 # Identify which extension wheel SIGILLs by importing one at a time.
 RUN MNGR_PY=$(head -1 "$(which mngr)" | sed 's|^#!||') && \
     echo "mngr python: $MNGR_PY" && \
-    file "$MNGR_PY" && \
+    ls -la "$MNGR_PY" && \
     "$MNGR_PY" --version && \
     "$MNGR_PY" -c "import click; print('click OK')" && \
     "$MNGR_PY" -c "import pydantic; print('pydantic OK')" && \
