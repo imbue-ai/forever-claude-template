@@ -110,6 +110,9 @@ body {
   font-size: 15px;
   line-height: 1.65;
   color: var(--color-text-primary);
+  /* Break long unbreakable tokens (e.g. API keys, URLs) so they wrap inside
+     the bubble instead of overflowing past its edge. */
+  overflow-wrap: anywhere;
 }
 
 .message-user-bubble code {
