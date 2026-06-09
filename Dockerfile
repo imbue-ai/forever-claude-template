@@ -211,7 +211,18 @@ ENV UV_PYTHON_DOWNLOADS=never
 RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr
 RUN uv tool install -e /mngr/code/apps/system_interface \
         --with-editable /mngr/code/vendor/mngr/libs/mngr_claude
-RUN mngr --version
+# Diagnostic: identify which package import SIGILLs. If `import imbue.mngr`
+# crashes, the offender is in mngr's transitive dep closure. Print
+# importlib metadata for the top-level wheels so we can correlate.
+RUN python3.12 -c "import sys; print('python:', sys.version)" && \
+    python3.12 -c "import importlib.metadata as m; ds=sorted({d.name for d in m.distributions()}); print('pkgs:', ds[:60])" && \
+    /usr/local/bin/python3.12 -c "import click; print('click OK')" && \
+    /usr/local/bin/python3.12 -c "import pydantic; print('pydantic OK')" && \
+    /usr/local/bin/python3.12 -c "import pydantic_core; print('pydantic_core OK')" && \
+    /usr/local/bin/python3.12 -c "import cryptography; print('cryptography OK')" && \
+    /usr/local/bin/python3.12 -c "import modal; print('modal OK')" && \
+    /usr/local/bin/python3.12 -c "import imbue.imbue_common; print('imbue.imbue_common OK')" && \
+    /usr/local/bin/python3.12 -c "import imbue.mngr; print('imbue.mngr OK')"
 RUN mngr plugin add \
     --path vendor/mngr/libs/mngr_claude \
     --path vendor/mngr/libs/mngr_wait
