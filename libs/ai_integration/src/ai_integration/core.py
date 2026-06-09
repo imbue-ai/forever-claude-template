@@ -21,7 +21,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 
 from anyio import to_thread
+from imbue.imbue_common.frozen_model import FrozenModel
 from loguru import logger
+from pydantic import ConfigDict, ValidationError
 
 from ai_integration import backends
 from ai_integration.credentials import (
@@ -255,14 +257,35 @@ async def run_task(
     return result
 
 
-def _outcome_for(payload: Mapping[str, object]) -> AgentOutcome:
+class _CreateWorkerResult(FrozenModel):
+    """The JSON ``create_worker.py launch-sync`` writes to its ``--result-json``.
+
+    Validated at the boundary so a shape change in ``create_worker`` (a real bug)
+    fails loudly here instead of silently producing a blank/wrong ``AgentResult``.
+    ``timed_out`` / ``body`` / ``branch`` are always emitted by the launcher and so
+    are required; ``type`` / ``name`` come from the worker's report frontmatter and
+    may be null; ``raw_report`` is omitted on the timeout path and defaults to "".
+    ``extra="ignore"`` keeps us tolerant of new launcher fields.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    timed_out: bool
+    body: str
+    branch: str
+    type: str | None = None
+    name: str | None = None
+    raw_report: str = ""
+
+
+def _outcome_for(result: _CreateWorkerResult) -> AgentOutcome:
     # Maps the worker report's open-ended ``name`` string onto the normalized
-    # outcome enum. The input is a free-form report field (not itself an enum),
-    # so the catch-all ``UNKNOWN`` is the deliberate fallback rather than an
-    # ``assert_never`` exhaustiveness check.
-    if payload.get("timed_out"):
+    # outcome enum. ``name`` is a free-form report field (not itself an enum), so
+    # the catch-all ``UNKNOWN`` is the deliberate fallback rather than an
+    # ``assert_never`` exhaustiveness check -- an unrecognized name must NOT raise.
+    if result.timed_out:
         return AgentOutcome.TIMED_OUT
-    match payload.get("name"):
+    match result.name:
         case "done":
             return AgentOutcome.DONE
         case "stuck":
@@ -274,18 +297,19 @@ def _outcome_for(payload: Mapping[str, object]) -> AgentOutcome:
 
 
 def _agent_result_from_payload(payload: Mapping[str, object]) -> AgentResult:
-    report_type = payload.get("type")
-    report_name = payload.get("name")
-    body = payload.get("body")
-    branch = payload.get("branch")
-    raw = payload.get("raw_report")
+    try:
+        result = _CreateWorkerResult.model_validate(payload)
+    except ValidationError as exc:
+        raise AgentRunError(
+            f"create_worker launch-sync result did not match the expected shape: {exc}"
+        ) from exc
     return AgentResult(
-        outcome=_outcome_for(payload),
-        report_type=report_type if isinstance(report_type, str) else None,
-        report_name=report_name if isinstance(report_name, str) else None,
-        body=body if isinstance(body, str) else "",
-        branch=branch if isinstance(branch, str) else None,
-        raw_report=raw if isinstance(raw, str) else "",
+        outcome=_outcome_for(result),
+        report_type=result.type,
+        report_name=result.name,
+        body=result.body,
+        branch=result.branch,
+        raw_report=result.raw_report,
     )
 
 

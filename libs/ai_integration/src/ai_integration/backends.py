@@ -19,6 +19,8 @@ from anthropic.types import (
     message_create_params,
 )
 from anyio import to_thread
+from imbue.imbue_common.frozen_model import FrozenModel
+from pydantic import ConfigDict, ValidationError
 
 from ai_integration.data_types import (
     AnthropicCompletionOptions,
@@ -97,21 +99,42 @@ def build_api_result(response: Message, requested_model: str) -> CompletionResul
     )
 
 
-def _as_int(value: object) -> int:
-    """Coerce a JSON value to an int, treating anything non-numeric as 0."""
-    return int(value) if isinstance(value, (int, float)) else 0
+class _ClaudeCliUsage(FrozenModel):
+    """The ``usage`` sub-object of a ``claude -p`` JSON result.
 
-
-def _str_keyed(value: object) -> dict[str, object]:
-    """Materialize a ``dict[str, object]`` from an arbitrary JSON value.
-
-    ``json.loads`` output is statically ``object``; coercing keys to ``str`` here
-    gives the rest of the parser a precisely-typed mapping to read from (rather
-    than indexing an ``Unknown``-keyed dict that the type checker rejects).
+    ``extra="ignore"`` so new SDK usage fields never break parsing. Token counts
+    are required (the documented ``NonNullableUsage`` shape always reports them);
+    the cache fields default to 0 since they are only present when caching ran.
     """
-    if not isinstance(value, Mapping):
-        return {}
-    return {str(key): item for key, item in value.items()}
+
+    model_config = ConfigDict(extra="ignore")
+
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+
+
+class _ClaudeCliResult(FrozenModel):
+    """The ``--output-format json`` result message from ``claude -p``.
+
+    Validated at the boundary so malformed output fails loudly instead of silently
+    degrading. The required envelope (``subtype`` / ``is_error`` / ``usage`` /
+    ``total_cost_usd``) is present on both the success and the error arms of the
+    documented ``SDKResultMessage`` union; ``result`` is present only on the success
+    arm, and ``errors`` only on the error arm, so both are optional here and the
+    arm is disambiguated by ``subtype`` / ``is_error`` in ``parse_cli_result``.
+    ``extra="ignore"`` keeps us forward-compatible with new CLI fields.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    subtype: str
+    is_error: bool
+    usage: _ClaudeCliUsage
+    total_cost_usd: float
+    result: str | None = None
+    errors: tuple[str, ...] = ()
 
 
 def parse_api_content(
@@ -137,25 +160,43 @@ def parse_api_content(
 
 
 def parse_cli_result(data: object, model: str) -> CompletionResult:
-    """Build a ``CompletionResult`` from ``claude -p --output-format json`` output."""
-    if not isinstance(data, Mapping):
-        raise ClaudeCLIError("claude -p JSON output was not an object")
-    payload = _str_keyed(data)
-    usage_dict = _str_keyed(payload.get("usage"))
+    """Build a ``CompletionResult`` from ``claude -p --output-format json`` output.
+
+    The payload is validated against ``_ClaudeCliResult``; output that does not match
+    the documented shape (missing ``usage`` / ``total_cost_usd``, wrong types, not a
+    JSON object) raises ``ClaudeCLIError`` rather than silently degrading. An *error*
+    result (``is_error`` true, e.g. ``error_max_turns`` / ``error_during_execution``)
+    also raises -- surfacing the failure with the worker's ``errors`` instead of
+    returning an empty-text "success", which is how a maxed-out or failed run would
+    otherwise slip through unnoticed.
+    """
+    try:
+        parsed = _ClaudeCliResult.model_validate(data)
+    except ValidationError as exc:
+        raise ClaudeCLIError(
+            f"claude -p JSON output did not match the expected result shape: {exc}"
+        ) from exc
+    if parsed.is_error or parsed.subtype != "success":
+        detail = "; ".join(parsed.errors) or "no error detail reported"
+        raise ClaudeCLIError(
+            f"claude -p returned an error result (subtype={parsed.subtype}): {detail}"
+        )
+    if parsed.result is None:
+        raise ClaudeCLIError(
+            "claude -p success result was missing the 'result' text field"
+        )
     usage = Usage(
-        input_tokens=_as_int(usage_dict.get("input_tokens")),
-        output_tokens=_as_int(usage_dict.get("output_tokens")),
-        cache_read_tokens=_as_int(usage_dict.get("cache_read_input_tokens")),
-        cache_write_tokens=_as_int(usage_dict.get("cache_creation_input_tokens")),
+        input_tokens=parsed.usage.input_tokens,
+        output_tokens=parsed.usage.output_tokens,
+        cache_read_tokens=parsed.usage.cache_read_input_tokens,
+        cache_write_tokens=parsed.usage.cache_creation_input_tokens,
     )
-    cost = payload.get("total_cost_usd")
-    text = payload.get("result")
     return CompletionResult(
-        text=text if isinstance(text, str) else "",
+        text=parsed.result,
         billing_path=BillingPath.CLAUDE_CLI,
         model=model,
         usage=usage,
-        cost_usd=float(cost) if isinstance(cost, (int, float)) else None,
+        cost_usd=parsed.total_cost_usd,
     )
 
 

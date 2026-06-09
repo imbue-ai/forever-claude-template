@@ -139,17 +139,22 @@ def test_build_api_result_falls_back_to_requested_model() -> None:
     assert result.model == "claude-haiku-4-5"
 
 
-def test_parse_cli_result_extracts_text_usage_cost() -> None:
-    data = {
+def _cli_success(**overrides: object) -> dict[str, object]:
+    """A well-formed ``claude -p`` success result, with optional field overrides."""
+    data: dict[str, object] = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
         "result": "hi",
         "total_cost_usd": 0.01,
-        "usage": {
-            "input_tokens": 10,
-            "output_tokens": 5,
-            "cache_read_input_tokens": 2,
-        },
+        "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 2},
     }
-    result = parse_cli_result(data, "claude-haiku-4-5")
+    data.update(overrides)
+    return data
+
+
+def test_parse_cli_result_extracts_text_usage_cost() -> None:
+    result = parse_cli_result(_cli_success(), "claude-haiku-4-5")
     assert result.text == "hi"
     assert result.billing_path is BillingPath.CLAUDE_CLI
     assert result.cost_usd == 0.01
@@ -158,10 +163,35 @@ def test_parse_cli_result_extracts_text_usage_cost() -> None:
     assert result.usage.cache_read_tokens == 2
 
 
-def test_parse_cli_result_missing_cost_is_none() -> None:
-    result = parse_cli_result({"result": "x"}, "claude-haiku-4-5")
-    assert result.cost_usd is None
-    assert result.text == "x"
+def test_parse_cli_result_error_subtype_raises_with_detail() -> None:
+    # An error result (no `result` field, is_error true) must fail loudly and surface
+    # the worker's errors -- not be parsed as an empty-text success.
+    data = {
+        "type": "result",
+        "subtype": "error_max_turns",
+        "is_error": True,
+        "errors": ["hit the turn limit"],
+        "total_cost_usd": 0.02,
+        "usage": {"input_tokens": 9, "output_tokens": 0},
+    }
+    with pytest.raises(ClaudeCLIError, match="error_max_turns.*hit the turn limit"):
+        parse_cli_result(data, "claude-haiku-4-5")
+
+
+def test_parse_cli_result_missing_cost_raises() -> None:
+    # total_cost_usd is required: a missing cost would otherwise slip past the spend
+    # ceiling, so it must raise rather than degrade to None.
+    data = _cli_success()
+    del data["total_cost_usd"]
+    with pytest.raises(ClaudeCLIError):
+        parse_cli_result(data, "claude-haiku-4-5")
+
+
+def test_parse_cli_result_missing_usage_raises() -> None:
+    data = _cli_success()
+    del data["usage"]
+    with pytest.raises(ClaudeCLIError):
+        parse_cli_result(data, "claude-haiku-4-5")
 
 
 def test_parse_cli_result_non_dict_raises() -> None:

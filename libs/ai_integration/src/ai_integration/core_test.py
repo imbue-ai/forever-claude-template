@@ -15,7 +15,7 @@ from ai_integration.core import (
     run_task,
 )
 from ai_integration.data_types import AgentOutcome, BillingPath, CompletionResult, Usage
-from ai_integration.errors import CredentialsUnavailableError
+from ai_integration.errors import AgentRunError, CredentialsUnavailableError
 from ai_integration.spend import SpendTracker
 
 
@@ -308,7 +308,14 @@ def test_run_agent_maps_report_name_to_outcome(
 
     def fake_runner(**kwargs: object) -> dict[str, object]:
         captured.update(kwargs)
-        return {**payload, "branch": "mngr/demo", "body": "hi", "raw_report": "raw"}
+        # timed_out defaults to False; the timeout parametrization overrides it.
+        return {
+            "timed_out": False,
+            **payload,
+            "branch": "mngr/demo",
+            "body": "hi",
+            "raw_report": "raw",
+        }
 
     result = anyio.run(
         functools.partial(
@@ -326,6 +333,27 @@ def test_run_agent_maps_report_name_to_outcome(
     assert result.branch == "mngr/demo"
     # The injected runner is handed the resolved repo_root, not the process cwd.
     assert captured["repo_root"] == Path("/repo")
+
+
+def test_run_agent_raises_on_malformed_payload() -> None:
+    # A create_worker result missing a required field (here, branch) is a contract
+    # breakage and must fail loudly rather than yield a blank/wrong AgentResult.
+    def fake_runner(**kwargs: object) -> dict[str, object]:
+        return {"timed_out": False, "name": "done", "body": "hi"}  # no branch
+
+    with pytest.raises(AgentRunError):
+        anyio.run(
+            functools.partial(
+                run_agent,
+                name="demo",
+                template="worker",
+                runtime_dir=Path("/tmp/runtime"),
+                task_file=Path("/tmp/runtime/task.md"),
+                service_name="svc",
+                repo_root=Path("/repo"),
+                runner=fake_runner,
+            )
+        )
 
 
 def test_create_worker_subprocess_runs_in_repo_root(tmp_path) -> None:
