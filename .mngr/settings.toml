@@ -239,8 +239,8 @@ FRONTEND_PID=$!
 (
   set -e
   export PATH=$HOME/.local/bin:$PATH
-  uv tool install vendor/mngr/libs/mngr
-  uv tool install apps/system_interface --with vendor/mngr/libs/mngr_claude --with vendor/mngr/libs/mngr_modal
+  uv tool install -e vendor/mngr/libs/mngr
+  uv tool install -e apps/system_interface --with-editable vendor/mngr/libs/mngr --with-editable vendor/mngr/libs/mngr_claude --with-editable vendor/mngr/libs/mngr_modal
   PATH="${UV_TOOL_BIN_DIR:-}:$PATH" mngr plugin add --path vendor/mngr/libs/mngr_modal/ --path vendor/mngr/libs/mngr_claude
 ) > /tmp/prov-uvtool.log 2>&1 &
 UVTOOL_PID=$!
