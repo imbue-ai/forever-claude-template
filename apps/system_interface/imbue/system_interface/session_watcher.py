@@ -488,6 +488,12 @@ class AgentSessionWatcher:
         commingled enrichment table per session.
         """
         self._scan_attribution()
+        # `_main_session_ids` is guarded by `_lock` (see __init__), so snapshot it
+        # there before building the result -- never read it under
+        # `_attribution_lock` alone. The two locks are taken un-nested to avoid
+        # any ordering hazard.
+        with self._lock:
+            main_session_ids = tuple(self._main_session_ids)
         with self._attribution_lock:
             transition_ids_by_session: dict[str, list[str]] = {}
             for ticket_id, session_id in self._transition_session_by_id.items():
@@ -499,7 +505,7 @@ class AgentSessionWatcher:
                 create_titles_by_session={
                     session_id: tuple(titles) for session_id, titles in self._create_titles_by_session.items()
                 },
-                main_session_ids=tuple(self._main_session_ids),
+                main_session_ids=main_session_ids,
             )
 
     def _scan_attribution(self) -> None:
@@ -509,8 +515,17 @@ class AgentSessionWatcher:
         full history and later scans read only the tail.
         """
         self._discover_sessions()
+        # `_session_states` is guarded by `_lock`; snapshot it there (matching
+        # `_discover_sessions`, which copies the values under `_lock` before
+        # iterating) so the watcher thread can keep mutating the dict without a
+        # "dictionary changed size during iteration" race. Each SessionFileState's
+        # `file_path` / `session_id` are immutable after construction, so reading
+        # them from the snapshot outside `_lock` is safe -- the same assumption
+        # `_discover_sessions` relies on.
+        with self._lock:
+            states = list(self._session_states.values())
         with self._attribution_lock:
-            for state in list(self._session_states.values()):
+            for state in states:
                 if not state.file_path.exists():
                     continue
                 offset = self._attribution_offsets.get(state.session_id, 0)
