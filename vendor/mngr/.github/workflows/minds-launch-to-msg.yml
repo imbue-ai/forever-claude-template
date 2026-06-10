@@ -12,7 +12,7 @@ on:
         required: false
         default: false
       template_ref:
-        description: "REQUIRED. forever-claude-template ref (branch / tag / SHA) the agent is created from. Required because agent runtime behavior is a function of (minds binary, FCT template); a moving default would make runs irreproducible the same way an unset commit_sha did. Pass `pilot_2` for the production path, `main` for the user-default path, or a specific SHA for replay."
+        description: "REQUIRED. forever-claude-template ref (branch / tag / SHA) the agent is created from. Required because agent runtime behavior is a function of (minds binary, FCT template); a moving default would make runs irreproducible the same way an unset commit_sha did. Pass the FALLBACK_BRANCH tag (e.g. `v0.2.35`) for the production path, `main` for the user-default path, or a specific SHA for replay."
         required: true
       template_url:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
@@ -112,29 +112,35 @@ jobs:
         env:
           TARGET_SHA: ${{ steps.sha.outputs.full_sha }}
         run: |
+          set -o pipefail
           # ToDesktop returns versionControlInfo.commitId on each build via
-          # `todesktop builds --format json`. If a clean ready build exists
-          # for this SHA we can skip the 15+ min build by reusing its
-          # arm64 .zip URL.
+          # `todesktop builds --format json`. If a clean succeeded build
+          # exists for this SHA we skip the 15+ min pnpm dist by reusing
+          # its arm64 .zip URL.
           mkdir -p resources  # todesktop config validation requires extraResources dir
-          pnpm exec todesktop builds --format json --count 30 --exit > /tmp/td-builds.json 2>&1 || true
-          URL=$(python3 -c '
+          # The CLI emits ANSI cursor-control escapes (`\x1b[2K\x1b[1A...`)
+          # to stdout *before* the JSON payload, so a naive redirect
+          # corrupts the file and the Python matcher used to silently
+          # fall through to "no match" -- causing every retry to redo
+          # the 15+ min build. Strip ANSI before writing. Stderr (CLI
+          # version-out-of-date banner) is routed to a separate file.
+          pnpm exec todesktop builds --format json --count 30 --exit 2>/tmp/td-builds.err \
+            | perl -pe 's/\x1b\[[0-9;]*[a-zA-Z]//g' > /tmp/td-builds.json
+          # Python emits the diagnostics + the chosen <url>\t<build_id> pair
+          # to stdout in a single deterministic format the shell parses below.
+          MATCH=$(python3 -c '
           import json, os, sys
-          try:
-              builds = json.load(open("/tmp/td-builds.json"))
-          except Exception:
-              sys.exit(0)
+          builds = json.load(open("/tmp/td-builds.json"))
           if not isinstance(builds, list):
-              sys.exit(0)
+              print(f"FATAL: unexpected response shape: {type(builds).__name__}", file=sys.stderr)
+              sys.exit(1)
           target = os.environ["TARGET_SHA"]
-          for b in builds:
+          sha_hits = [b for b in builds if (b.get("versionControlInfo") or {}).get("commitId") == target]
+          print(f"scanned {len(builds)} builds; {len(sha_hits)} match {target[:10]}", file=sys.stderr)
+          for b in sha_hits:
               vci = b.get("versionControlInfo") or {}
-              if vci.get("commitId") != target:                continue
-              if vci.get("hasUncommittedChanges"):              continue
-              # ToDesktop CLI v1.x reports completed Mac builds as
-              # status="succeeded". Older docs / some CLI versions used
-              # "ready"; accept both for forward compatibility.
-              if b.get("status") not in ("succeeded", "ready"):  continue
+              status = b.get("status")
+              dirty = vci.get("hasUncommittedChanges")
               # The arm64 .zip URL lives under mac.artifactDownloads.zip.arm64.url
               # in current ToDesktop responses. (Earlier CLI versions exposed
               # mac.zip.arm64.url directly; check both layouts.)
@@ -142,23 +148,26 @@ jobs:
               zip_node = (mac.get("artifactDownloads") or {}).get("zip") or mac.get("zip") or {}
               arm = zip_node.get("arm64") if isinstance(zip_node, dict) else None
               url = arm.get("url") if isinstance(arm, dict) else None
-              if url:
-                  # Prefer the build id from standardUniversalDownloadUrl
-                  # ("https://.../builds/<id>") -- it is the human-readable id
-                  # the dashboard shows; the bare "id" field is a UUID.
-                  bid = (b.get("standardUniversalDownloadUrl") or "").rstrip("/").split("/")[-1] or b.get("id", "")
-                  print(url)
-                  print(bid, file=sys.stderr)
-                  sys.exit(0)
-          ' 2> /tmp/td-existing-build-id.txt || true)
-          if [[ -n "$URL" ]]; then
-            BID=$(cat /tmp/td-existing-build-id.txt | tr -d '[:space:]')
+              # Prefer the build id from standardUniversalDownloadUrl
+              # ("https://.../builds/<id>") -- it is the human-readable id
+              # the dashboard shows; the bare "id" field is a UUID.
+              bid = (b.get("standardUniversalDownloadUrl") or "").rstrip("/").split("/")[-1] or b.get("id", "")
+              print(f"  candidate {bid}: status={status} dirty={dirty} arm64.url={bool(url)}", file=sys.stderr)
+              if status not in ("succeeded", "ready"): continue
+              if dirty:                                 continue
+              if not url:                               continue
+              print(f"{url}\t{bid}")
+              sys.exit(0)
+          ')
+          if [[ -n "$MATCH" ]]; then
+            URL="${MATCH%%$'\t'*}"
+            BID="${MATCH##*$'\t'}"
             echo "url=$URL"      >> "$GITHUB_OUTPUT"
             echo "build_id=$BID" >> "$GITHUB_OUTPUT"
             echo "Reusing existing build $BID for commit $TARGET_SHA"
             echo "  -> $URL"
           else
-            echo "No existing build matches $TARGET_SHA; will build fresh."
+            echo "No reusable build matches $TARGET_SHA; will build fresh."
           fi
       - name: pnpm dist (build + upload to ToDesktop)
         id: dist
@@ -331,6 +340,92 @@ jobs:
       - name: reset to clean state and install fresh app
         run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
 
+      - name: seed lima image-cache sha256.digest marker
+        # Without this marker file, lima 2.0.3 falls back to HEAD-validating
+        # the source URL on every boot. When cloud.debian.org is unreachable
+        # from the runner (as observed in runs 27226429762, 27229065721),
+        # lima logs "Using cache" but silently skips materializing
+        # ~/.lima/<vm>/basedisk, then fatals. With the marker in place lima
+        # trusts the cached data and proceeds straight to basedisk creation
+        # (verified in run 27231554631: lima READY at 12:54 with the seeded
+        # marker, vs fatal at 12:36 without).
+        run: |
+          set +e
+          CACHE_ROOT="$HOME/Library/Caches/lima/download/by-url-sha256"
+          for CACHE_DIR in "$CACHE_ROOT"/*/; do
+            [ -d "$CACHE_DIR" ] || continue
+            DATA="$CACHE_DIR/data"
+            DIGEST_FILE="$CACHE_DIR/sha256.digest"
+            [ -f "$DATA" ] || continue
+            [ -f "$DIGEST_FILE" ] && continue  # already present
+            HASH=$(shasum -a 256 "$DATA" | awk '{print $1}')
+            [ -n "$HASH" ] || continue
+            echo "sha256:$HASH" > "$DIGEST_FILE"
+            echo "seeded $DIGEST_FILE -> sha256:$HASH"
+          done
+          true
+
+      - name: probe debian-image reachability + lima cache state
+        # Two consecutive runs (27226429762, 27229065721) failed with
+        # TLS-handshake-timeout to cloud.debian.org from this runner,
+        # followed by lima logging "Using cache" and then fataling on
+        # "basedisk: no such file or directory". Cache file itself is
+        # intact (verified run 27229383007). Now probe multiple endpoints
+        # with longer timeouts + real GETs to see whether ANY Debian
+        # cloud-image source is reachable from the runner, so we know
+        # if the right fix is (a) a different mirror URL, (b) /etc/hosts
+        # override, or (c) lima cache-fallback workaround.
+        run: |
+          set +e
+          IMG="debian-12-genericcloud-arm64-20260601-2496.qcow2"
+          echo "=== DNS resolution:"
+          for HOST in cloud.debian.org cdimage.debian.org saimei.ftp.acc.umu.se mirrors.kernel.org cdn-fastly.deb.debian.org; do
+            printf "  %-40s -> " "$HOST"
+            dig +short +tries=1 +time=3 "$HOST" 2>&1 | head -1 || echo "(dig fail)"
+          done
+          echo
+          echo "=== HEAD + first-byte GET attempts (30s timeout each):"
+          for URL in \
+            "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/$IMG" \
+            "https://cdimage.debian.org/cdimage/cloud/bookworm/20260601-2496/$IMG" \
+            "https://saimei.ftp.acc.umu.se/cloud-images/cloud/bookworm/20260601-2496/$IMG" \
+            "https://mirrors.kernel.org/debian-cloud-images/bookworm/20260601-2496/$IMG" \
+            "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"; do
+            echo "--- $URL"
+            HEAD_OUT=$(/opt/homebrew/opt/curl/bin/curl --max-time 30 -sSI "$URL" 2>&1)
+            HEAD_RC=$?
+            echo "    HEAD rc=$HEAD_RC: $(echo "$HEAD_OUT" | head -1)"
+            if [[ "$HEAD_RC" -eq 0 ]]; then
+              # Try to fetch the first 100KB to verify the data path actually works.
+              GET_OUT=$(/opt/homebrew/opt/curl/bin/curl --max-time 30 -sS -o /tmp/probe-body -w "%{http_code} %{size_download}b in %{time_total}s\n" -H "Range: bytes=0-102399" "$URL" 2>&1)
+              echo "    GET rc=$? : $GET_OUT"
+              rm -f /tmp/probe-body
+            fi
+          done
+          echo
+          echo "=== plain TCP connectivity (nc -z, 5s timeout):"
+          for HP in cloud.debian.org:443 cdimage.debian.org:443 mirrors.kernel.org:443 github.com:443; do
+            HOST="${HP%%:*}"; PORT="${HP##*:}"
+            printf "  %-40s : " "$HP"
+            nc -z -G 5 -w 5 "$HOST" "$PORT" 2>&1 && echo "open" || echo "closed/timeout"
+          done
+          echo
+          echo "=== lima cache state for the Debian URL:"
+          CACHE_DIR="$HOME/Library/Caches/lima/download/by-url-sha256/8774030760d00b6458319cdbb37dce5d0a878cde994448674bd9f3e6eca6e761"
+          if [[ -d "$CACHE_DIR" ]]; then
+            ls -la "$CACHE_DIR"
+            if [[ -f "$CACHE_DIR/data" ]]; then
+              file "$CACHE_DIR/data" | head -1
+              stat -f 'size=%z' "$CACHE_DIR/data"
+            fi
+          else
+            echo "(cache dir absent)"
+          fi
+          echo
+          echo "=== installed lima version (bundled):"
+          /Applications/Minds.app/Contents/Resources/lima/bin/limactl --version 2>&1 || true
+          true  # never fail the step itself
+
       - name: ensure socat (slack mock TLS terminator)
         run: |
           for BREW in /opt/homebrew/bin/brew /usr/local/bin/brew; do
@@ -375,7 +470,7 @@ jobs:
         # template_ref is required at the dispatch level (branch / tag /
         # SHA accepted). Resolve to a full SHA so the run record names
         # the exact FCT commit the agent was created from; otherwise a
-        # branch ref like `pilot_2` would silently drift between runs
+        # branch ref like `pilot` would silently drift between runs
         # the same way the empty commit_sha trap did.
         id: fct_sha
         env:
@@ -413,6 +508,21 @@ jobs:
           # session for depth rather than spinning a separate workflow per
           # scenario.
           WORKSPACE_COUNT:    "2"
+          # Pin the FCT ref the binary creates against to the `template_ref`
+          # dispatch input. Without this, minds falls back to
+          # `FALLBACK_BRANCH = "v0.2.35"` (templates.py) regardless of what the
+          # workflow_dispatch input says, so a `template_ref=main` run silently
+          # exercises v0.2.35 instead.
+          # MINDS_WORKSPACE_BRANCH is gated by MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
+          # in templates._operator_workspace_default (an end-user `minds run` ignores
+          # a stray MINDS_WORKSPACE_* in the shell unless explicitly opted in).
+          # We pass the branch / tag name (not the resolved SHA) because the
+          # binary's `git clone --branch <ref>` only accepts branch names and
+          # tags. The resolved SHA is still recorded in the GHA step summary
+          # for audit. Moving refs (e.g. `main`) thus float between runs --
+          # the trade-off is "must clone-able" vs "must be byte-identical".
+          MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
+          MINDS_WORKSPACE_BRANCH: ${{ inputs.template_ref }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
@@ -429,6 +539,141 @@ jobs:
           mkdir -p /tmp/launch-to-msg-logs
           uv run --package minds python apps/minds/scripts/launch_to_msg_e2e.py 2>&1 \
             | tee /tmp/launch-to-msg-logs/e2e-stdout.log
+
+      - name: probe agent VM + container state on failure
+        if: failure()
+        # When the e2e fails after agent creation reached DONE (e.g. chat-URL
+        # recovery loop didn't resolve), we need to know why mngr_forward
+        # can't reach the agent's system_interface. Probe the lima VM and the
+        # docker container inside it for service / network state.
+        run: |
+          set +e
+          LIMA=/Applications/Minds.app/Contents/Resources/lima/bin/limactl
+          mkdir -p /tmp/launch-to-msg-logs
+          {
+            echo "=== limactl list ==="
+            "$LIMA" list 2>&1
+            VM=$("$LIMA" list -q 2>/dev/null | head -1)
+            if [ -z "$VM" ]; then
+              echo "(no lima VM)"
+              exit 0
+            fi
+            echo
+            echo "=== VM: $VM ==="
+            echo "=== docker ps inside VM ==="
+            "$LIMA" shell "$VM" -- sudo docker ps -a 2>&1 | head -20
+            CID=$("$LIMA" shell "$VM" -- sudo docker ps -q 2>/dev/null | head -1)
+            if [ -z "$CID" ]; then
+              echo "(no docker container -- pilot in-VM provisioning path)"
+              echo
+              echo "=== tmux sessions inside VM (root socket) ==="
+              "$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default list-sessions 2>&1 | head -10
+              echo
+              for win in $("$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default list-windows -t minds-system-services -F '#{window_name}' 2>/dev/null); do
+                echo "--- tmux capture-pane minds-system-services:$win ---"
+                "$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default capture-pane -t "minds-system-services:$win" -p -S -300 2>&1 | tail -40
+                echo
+              done
+              echo "=== TEST: directly invoke installed CLIs as root (replicates SIGILL trigger) ==="
+              "$LIMA" shell "$VM" -- sudo bash -c '
+                echo "--- which mngr / system-interface ---"
+                which mngr system-interface 2>&1
+                echo "--- mngr --version (catches SIGILL on mngr CLI startup) ---"
+                mngr --version 2>&1 || echo "rc=$?"
+                echo "--- system-interface --help (catches SIGILL on system_interface startup) ---"
+                system-interface --help 2>&1 | head -10 || echo "rc=$?"
+                echo "--- /mngr/code/.venv/bin/system-interface --help (sync-installed copy) ---"
+                /mnt/lima-mngr-*/code/.venv/bin/system-interface --help 2>&1 | head -10 || echo "rc=$?"
+                echo "--- python -c import paramiko (in mngr tool venv) ---"
+                MNGR_PY=$(head -1 $(which mngr 2>/dev/null) 2>/dev/null | sed "s|^#!||")
+                if [ -n "$MNGR_PY" ]; then
+                  echo "mngr python: $MNGR_PY"
+                  "$MNGR_PY" -c "import paramiko; print(\"paramiko OK\")" 2>&1 || echo "rc=$?"
+                fi
+              ' 2>&1 | tail -25
+              echo
+              echo "=== curl system_interface (port 1234) from VM ==="
+              "$LIMA" shell "$VM" -- curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:1234/health 2>&1 | head -5
+              echo
+              echo "=== ps aux in VM ==="
+              "$LIMA" shell "$VM" -- sudo ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|tmux" | head -30
+              echo
+              echo "=== bootstrap.log (if present) ==="
+              "$LIMA" shell "$VM" -- sudo find /var/log /tmp /mngr -name 'bootstrap*' -type f 2>/dev/null | head -5
+              "$LIMA" shell "$VM" -- sudo bash -c 'tail -40 /var/log/bootstrap*.log /tmp/bootstrap*.log /mngr/bootstrap*.log 2>/dev/null' | head -50
+              echo
+              echo "=== mngr forward host-side reach via SSH (port 8421) ==="
+              curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:8421/ 2>&1
+              exit 0
+            fi
+            echo
+            echo "=== container: $CID ==="
+            echo "=== docker exec ss -tlnp ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" ss -tlnp 2>&1 | head -30
+            echo
+            echo "=== tmux list-sessions inside container ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-sessions 2>&1 | head -20
+            echo
+            echo "=== tmux capture-pane svc-system_interface ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t svc-system_interface -p 2>&1 | tail -40
+            echo
+            echo "=== tmux list-windows on minds-system-services ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-windows -t minds-system-services 2>&1 | head -40
+            echo
+            echo "=== tmux capture-pane on each service window ==="
+            for win in $("$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-windows -t minds-system-services -F '#{window_name}' 2>/dev/null); do
+              echo "--- $win ---"
+              "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t "minds-system-services:$win" -p 2>&1 | tail -25
+              echo
+            done
+            echo "=== services.toml ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" cat /mngr/code/services.toml 2>&1 | head -60
+            echo
+            echo "=== bootstrap log ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" find /var/log /tmp /mngr -name "bootstrap*" -type f 2>/dev/null | head -5
+            echo
+            echo "=== container arch + cpu features ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" bash -c '
+              echo "uname -m: $(uname -m)"
+              echo "dpkg arch: $(dpkg --print-architecture)"
+              python3 -c "import platform; print(\"python platform:\", platform.machine(), platform.processor())"
+              echo "--- cpuinfo (features) ---"
+              grep -E "^(processor|Features|CPU implementer|CPU part|CPU variant|model name)" /proc/cpuinfo | head -10
+            ' 2>&1 | tail -15
+            echo
+            echo "=== VM lima cpuinfo (host the docker container runs on) ==="
+            "$LIMA" shell "$VM" -- bash -c 'uname -m; grep -E "^(processor|Features|CPU implementer|CPU part|model name)" /proc/cpuinfo | head -10' 2>&1 | tail -12
+            echo
+            echo "=== TEST: bisect paramiko import inside agent container ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" bash -c '
+              MNGR_PY=$(head -1 $(which mngr 2>/dev/null) 2>/dev/null | sed "s|^#!||")
+              if [ -z "$MNGR_PY" ]; then echo "(mngr not installed)"; exit 0; fi
+              echo "mngr python: $MNGR_PY"
+              for stmt in \
+                "import sys; print(sys.version)" \
+                "import cryptography; print(cryptography.__version__)" \
+                "from cryptography.hazmat.bindings._rust import openssl" \
+                "from cryptography.hazmat.backends.openssl.backend import backend" \
+                "import bcrypt" \
+                "import nacl.bindings" \
+                "import cffi" \
+                "import paramiko" \
+                "import pyinfra"; do
+                echo "--- $stmt ---"
+                "$MNGR_PY" -c "$stmt; print(\"OK\")" 2>&1 || echo "rc=$?"
+              done
+            ' 2>&1 | tail -40
+            echo
+            echo "=== /var/log/cloud-init-output.log tail (VM) ==="
+            "$LIMA" shell "$VM" -- tail -40 /var/log/cloud-init-output.log 2>&1 || true
+            echo
+            echo "=== curl localhost:1234 from container (system_interface default port) ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" curl -s -m 3 http://localhost:1234/health 2>&1 | head -5
+            echo
+            echo "=== ps inside container ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" ps auxf 2>&1 | head -40
+          } > /tmp/launch-to-msg-logs/agent-probe.log 2>&1
+          cat /tmp/launch-to-msg-logs/agent-probe.log
 
       - name: collect screenshots + diagnostics
         if: always()

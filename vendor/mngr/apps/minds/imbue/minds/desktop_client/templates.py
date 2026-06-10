@@ -25,8 +25,6 @@ from jinja2 import select_autoescape
 from jinjax import Catalog
 
 from imbue.imbue_common.pure import pure
-from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
-from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
 from imbue.minds.primitives import AIProvider
@@ -156,23 +154,28 @@ CATALOG: Final[Catalog] = _build_catalog()
 
 # -- Per-workspace identity color --
 # See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side (static/chrome.js, static/sidebar.js).
+# hue. Mirrored on the JS side in static/workspace_accent.js (the shared
+# window.mindsAccent helper consumed by chrome.js and sidebar.js).
 
 # Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue.
-_WORKSPACE_L: Final[int] = 65
-_WORKSPACE_C: Final[float] = 0.15
+# all workspaces so the only axis of variation is the hue. The accent fills
+# the full-width titlebar (not just a small swatch), so a light /
+# low-saturation tone is needed to read as chrome rather than a saturated
+# highlight.
+_WORKSPACE_L: Final[int] = 85
+_WORKSPACE_C: Final[float] = 0.08
 
 
 @pure
 def workspace_accent(agent_id: str) -> str:
     """Deterministically map an agent id to a CSS OKLCH color.
 
-    Uses a fixed lightness and chroma so every workspace accent sits at the
-    same readable mid-tone, and only the hue varies. Full 360 degree hue
-    range means collisions are effectively impossible, and OKLCH's
-    perceptual uniformity means close hashes still read as visibly
-    different colors.
+    Uses a fixed lightness and chroma (a light, low-saturation tone that
+    reads as a chrome surface across the full-width titlebar) so every
+    workspace accent sits at the same readable level, and only the hue
+    varies. Full 360 degree hue range means collisions are effectively
+    impossible, and OKLCH's perceptual uniformity means close hashes
+    still read as visibly different colors.
     """
     digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
     hue = int.from_bytes(digest[:4], "big") % 360
@@ -229,9 +232,9 @@ def render_landing_page(
     )
 
 
-# Hardcoded fallbacks for the workspace-creation form. Overridable via
-# the MINDS_WORKSPACE_* env vars in dev tiers ONLY -- see
-# ``_dev_only_workspace_default`` for the gating rationale.
+# Hardcoded fallbacks for the workspace-creation form. Overridable via the
+# MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
+# ``_operator_workspace_default`` for the gating rationale.
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FALLBACK_HOST_NAME: Final[str] = "assistant"
 # Pin to an annotated FCT tag rather than a moving branch so a shipped
@@ -241,37 +244,36 @@ _FALLBACK_HOST_NAME: Final[str] = "assistant"
 # currently bound to this binary.
 FALLBACK_BRANCH: Final[str] = "v0.2.35"
 
-# Root names that map to operator-managed shared tiers (production /
-# staging). For these tiers the MINDS_WORKSPACE_* env-var defaults are
-# intentionally ignored: ``just minds-start`` (and any other dev-iteration
-# tool) exports those vars from the operator's local FCT worktree state,
-# which only makes sense when iterating against a per-developer dev env.
-# In staging / production the workspaces are end-user-driven and a leaked
-# ``MINDS_WORKSPACE_BRANCH`` from the operator's shell would silently
-# pin the lease to a ref that no pool host carries.
-_SHARED_TIER_ROOT_NAMES: Final[frozenset[str]] = frozenset({DEFAULT_MINDS_ROOT_NAME, "minds-staging"})
+# Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
+# launch into the operator's local-worktree create-form defaults. Gating on an
+# explicit opt-in -- rather than on the tier -- means dev iteration works on ANY
+# tier (including staging / production) when launched via ``just minds-start``,
+# while a normal end-user ``minds run`` never honors a stray MINDS_WORKSPACE_*
+# left over in the operator's shell, on any tier. The previous tier-based gate
+# did the opposite: it blocked legitimate dev iteration on staging (forcing the
+# form back to the public GitHub FCT on ``main``) while leaving dev tiers exposed
+# to stray vars.
+_WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"
 
 
-def _dev_only_workspace_default(env_var: str, fallback: str) -> str:
-    """Read ``env_var`` for dev tiers; otherwise return ``fallback``.
+def _operator_workspace_default(env_var: str, fallback: str) -> str:
+    """Return ``env_var`` only when the operator explicitly opted in; else ``fallback``.
 
-    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars are a dev
-    convenience that wire the create-form's defaults to the operator's
-    local FCT worktree (``just minds-start`` exports them). They have
-    no business pre-filling the form in staging or production, where
-    workspaces are end-user-driven and the operator's local git state
-    is irrelevant.
+    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars wire the create-form
+    defaults to the operator's local FCT worktree. They are honored only when
+    ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set in the same environment
+    (``just minds-start`` and the e2e runner set it). An end-user ``minds run``
+    never sets it, so a stray MINDS_WORKSPACE_* left in the shell is ignored on
+    every tier -- the safety the previous tier-based gate provided, without also
+    blocking dev iteration on staging / production.
 
-    Activation is detected via ``MINDS_ROOT_NAME``. The env var is
-    honored only when the root name names a dev tier (i.e. anything
-    other than ``minds`` / ``minds-staging``). An unactivated shell --
-    ``MINDS_ROOT_NAME`` unset entirely -- is treated as non-dev (defensive
-    default: ``minds run`` always activates first today, so this branch
-    is essentially unreachable; we still want to ignore the env var if
-    we somehow get there).
+    These defaults point at a *local* path and a dev branch, which only make
+    sense for local-compute launch modes (Lima / Docker). For IMBUE_CLOUD (pool
+    lease) they must not be kept -- a pool host cannot clone a local path and the
+    dev branch matches no pre-baked host -- so the opt-in is the operator's
+    signal that they are doing local dev iteration, not an end-user pool create.
     """
-    root_name = os.environ.get(MINDS_ROOT_NAME_ENV_VAR, "")
-    if not root_name or root_name in _SHARED_TIER_ROOT_NAMES:
+    if os.environ.get(_WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR) != "1":
         return fallback
     return os.environ.get(env_var, fallback)
 
@@ -291,6 +293,8 @@ def render_create_form(
     default_account_id: str = "",
     anthropic_api_key: str = "",
     error_message: str = "",
+    region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
+    region_selected_by_launch_mode: Mapping[str, str] | None = None,
 ) -> str:
     """Render the agent creation form page.
 
@@ -309,11 +313,11 @@ def render_create_form(
     host name on the resulting workspace. (The agent itself is always
     named ``system-services``.)
     """
-    effective_url = git_url if git_url else _dev_only_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
+    effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_name = (
-        host_name if host_name else _dev_only_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
+        host_name if host_name else _operator_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
     )
-    effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
+    effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
         launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
@@ -350,6 +354,10 @@ def render_create_form(
         default_account_id=default_account_id,
         anthropic_api_key=anthropic_api_key,
         error_message=error_message,
+        region_options_by_launch_mode={
+            key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
+        },
+        region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
     )
 
 
@@ -420,7 +428,6 @@ def render_creating_page(
         "pages.Creating",
         agent_id=creation_id,
         status_text=status_text,
-        accent=workspace_accent(str(creation_id)),
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
@@ -451,9 +458,58 @@ def render_auth_error_page(message: str) -> str:
     return CATALOG.render("pages.AuthError", message=message)
 
 
-def render_request_unavailable_page(message: str) -> str:
-    """Render the page shown when a request is already resolved or missing."""
-    return CATALOG.render("pages.RequestUnavailable", message=message)
+@pure
+def render_inbox_page(
+    cards: Sequence[Mapping[str, str]],
+    selected_id: str = "",
+    detail_html: str = "",
+    is_empty: bool = False,
+    auto_open: bool = True,
+) -> str:
+    """Render the full inbox modal page served by ``GET /inbox``.
+
+    ``cards`` is the initial left-list content (most-recent-first).
+    ``selected_id`` highlights one card; ``detail_html`` is the
+    pre-rendered right-pane fragment (handler detail, unavailable
+    fragment, or empty). ``is_empty`` is True when there are no
+    pending requests and the layout collapses to a centered message.
+    ``auto_open`` is the initial state of the "Auto-open on new
+    request" checkbox in the inbox header.
+    """
+    return CATALOG.render(
+        "pages.Inbox",
+        cards=cards,
+        selected_id=selected_id,
+        detail_html=detail_html,
+        is_empty=is_empty,
+        auto_open=auto_open,
+    )
+
+
+@pure
+def render_inbox_list_fragment(
+    cards: Sequence[Mapping[str, str]],
+    selected_id: str = "",
+) -> str:
+    """Render the inbox left-list fragment served by ``GET /inbox/list``."""
+    return CATALOG.render("InboxList", cards=cards, selected_id=selected_id)
+
+
+@pure
+def render_inbox_unavailable_fragment(message: str = "") -> str:
+    """Render the inbox right-pane "no longer available" fragment.
+
+    Returned by ``GET /inbox/detail/<id>`` when the id is unknown or
+    already resolved; also innerHTML-swapped into the right pane by the
+    inbox shell JS when an SSE event resolves the currently-selected
+    item.
+
+    ``message`` is an optional supporting sentence rendered under the
+    fragment's heading. When empty (the default), only the heading is
+    shown, so callers that drop the supporting sentence don't end up
+    duplicating the heading.
+    """
+    return CATALOG.render("InboxUnavailable", message=message)
 
 
 # CSS for the recovery page's restart controls, appended to the shared
@@ -1003,7 +1059,6 @@ def render_destroying_page(
         agent_name=agent_name,
         pid=pid,
         status=status,
-        accent=workspace_accent(str(agent_id)),
     )
 
 
@@ -1087,7 +1142,6 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
-        accent=workspace_accent(agent_id),
     )
 
 
@@ -1099,6 +1153,7 @@ def render_workspace_settings(
     accounts: Sequence[object],
     servers: Sequence[str],
     telegram_state: str | None = None,
+    is_leased_imbue_cloud: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1107,6 +1162,10 @@ def render_workspace_settings(
     - ``None`` -- no Telegram orchestrator configured; section is hidden.
     - ``"active"`` -- Telegram is already set up for this workspace.
     - ``"pending"`` -- setup button is shown.
+
+    ``is_leased_imbue_cloud`` is True for workspaces on a host leased from
+    Imbue Cloud; the account section then shows the bound account with a
+    disabled Disassociate control and no association controls.
 
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
@@ -1119,7 +1178,7 @@ def render_workspace_settings(
         accounts=accounts,
         servers=servers,
         telegram_state=telegram_state,
-        accent=workspace_accent(agent_id),
+        is_leased_imbue_cloud=is_leased_imbue_cloud,
     )
 
 

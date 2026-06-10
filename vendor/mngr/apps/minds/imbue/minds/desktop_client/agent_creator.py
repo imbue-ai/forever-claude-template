@@ -30,6 +30,11 @@ import httpx
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_delay
+from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -333,7 +338,6 @@ def clone_git_repo(
     *,
     branch: GitBranch | None = None,
     parent_cg: ConcurrencyGroup | None = None,
-    reference_repo: Path | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
@@ -347,10 +351,6 @@ def clone_git_repo(
     bare repo, and git rejects pushes from a shallow source with "shallow update
     not allowed" (the pushed tip's parent is missing from the pack).
 
-    When ``reference_repo`` points at a local pre-fetched clone of the same repo
-    (e.g. the first-launch FCT prefetch), ``--reference-if-able`` reuses its
-    objects so the network fetch shrinks to the delta from the prefetch point.
-
     Raises GitCloneError if the clone fails (including when ``branch`` does not
     exist on the remote).
     """
@@ -358,8 +358,6 @@ def clone_git_repo(
     command = ["git", "clone"]
     if branch is not None:
         command.extend(["--single-branch", "--branch", str(branch)])
-    if reference_repo is not None and (reference_repo / ".git").is_dir():
-        command.extend(["--reference-if-able", str(reference_repo)])
     command.extend([str(git_url), str(clone_dir)])
 
     # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
@@ -476,6 +474,7 @@ def _build_mngr_create_command(
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
+    region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
@@ -614,6 +613,11 @@ def _build_mngr_create_command(
         case LaunchMode.CLOUD:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
+            # The user always picks a Vultr region in the create form (advanced
+            # settings). It is a hard placement requirement: the VPS is created
+            # in exactly this region.
+            if region:
+                mngr_command.extend(["-b", f"--vps-region={region}"])
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -633,6 +637,12 @@ def _build_mngr_create_command(
             # ``_run_imbue_cloud_create_with_fallback``).
             if imbue_cloud_fast_mode:
                 mngr_command.extend(["-b", f"fast_mode={imbue_cloud_fast_mode}"])
+            # ``region`` is the explicit datacenter the user picked in the create
+            # form (advanced settings). It is a hard requirement: the lease only
+            # adopts/leases a host in this region, and the user gets a clear
+            # "no capacity in <region>" error if none is available there.
+            if region:
+                mngr_command.extend(["-b", f"region={region}"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -796,6 +806,7 @@ def run_mngr_create(
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
+    region: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
@@ -832,6 +843,7 @@ def run_mngr_create(
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
         imbue_cloud_fast_mode=imbue_cloud_fast_mode,
+        region=region,
         latchkey_env=latchkey_env,
     )
 
@@ -903,6 +915,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     latchkey_env: Mapping[str, str] | None
     account_email: str | None
     branch_or_tag: str | None
+    region: str | None
     anthropic_api_key: str | None
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
@@ -933,9 +946,29 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # to pick the right pool generation.
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
+        # ``region`` is honored by both IMBUE_CLOUD (-b region=) and CLOUD/vultr
+        # (-b --vps-region=); the command builder ignores it for DOCKER/LIMA.
+        region=(params.region or None),
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         parent_cg=params.parent_cg,
+    )
+
+
+def _log_backup_attempt(agent_id: AgentId, retry_state: RetryCallState) -> None:
+    """Debug-log a backup-setup retry, called at the start of each retry attempt.
+
+    The first attempt has no prior outcome and is not logged; subsequent attempts
+    log the previous attempt's failure so retries are traceable without spamming.
+    """
+    outcome = retry_state.outcome
+    if outcome is None:
+        return
+    logger.debug(
+        "Backup setup attempt {} for agent {} (previous failed: {}); retrying",
+        retry_state.attempt_number,
+        agent_id,
+        outcome.exception(),
     )
 
 
@@ -1056,6 +1089,21 @@ class AgentCreator(MutableModel):
         frozen=True,
         description="Per-request timeout for the readiness probe HTTP GET.",
     )
+    backup_setup_retry_budget_seconds: float = Field(
+        default=300.0,
+        frozen=True,
+        description=(
+            "Total wall-clock budget for retrying backup setup on the detached thread. "
+            "The workspace is ready before this thread runs, but a slow host's mngr exec can "
+            "still race the agent's reachability; we retry transient failures within this budget "
+            "before giving up and notifying the user. Never blocks the create call."
+        ),
+    )
+    backup_setup_retry_wait_seconds: float = Field(
+        default=10.0,
+        frozen=True,
+        description="Wait between backup-setup retry attempts.",
+    )
 
     # In-flight creation state is keyed by ``str(CreationId)`` because the
     # canonical ``AgentId`` doesn't exist until ``mngr create`` returns.
@@ -1081,6 +1129,7 @@ class AgentCreator(MutableModel):
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",
+        region: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1150,6 +1199,7 @@ class AgentCreator(MutableModel):
                 ai_provider,
                 account_email,
                 branch_or_tag,
+                region,
                 anthropic_api_key,
                 on_created,
                 backup_request,
@@ -1209,6 +1259,7 @@ class AgentCreator(MutableModel):
         ai_provider: AIProvider,
         account_email: str = "",
         branch_or_tag: str = "",
+        region: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1318,18 +1369,12 @@ class AgentCreator(MutableModel):
                     # checkout below is then a no-op for this path, but still
                     # does the work when the source is a pre-existing local
                     # directory.
-                    # When the first-launch prefetch left a warm copy of FCT
-                    # under ``data_dir/template-cache/forever-claude-template``,
-                    # pass it as ``--reference-if-able`` so we reuse those
-                    # objects and the network fetch shrinks to the delta.
-                    ref_repo = self.paths.data_dir / "template-cache" / "forever-claude-template"
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
                         branch=GitBranch(branch) if branch else None,
                         parent_cg=self.root_concurrency_group,
-                        reference_repo=ref_repo,
                     )
                     workspace_dir = clone_target
 
@@ -1423,6 +1468,7 @@ class AgentCreator(MutableModel):
                     latchkey_env=latchkey_setup.env,
                     account_email=account_email,
                     branch_or_tag=branch_or_tag,
+                    region=region,
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
@@ -1597,21 +1643,39 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Detached-thread entry point: configure restic backups for the new host.
 
-        Failures are surfaced as an OS notification (a normal error popup)
-        and logged; they are non-fatal to the already-created workspace --
-        the user can configure backups later.
+        ``configure_backups_for_host`` is idempotent, so we retry it within a
+        bounded wall-clock budget: by the time this thread runs the workspace
+        readiness probe has already passed, but a slow host's ``mngr exec`` can
+        still race the agent's reachability for a while after that. Transient
+        failures are retried quietly (debug-logged per attempt); only if the
+        whole budget is exhausted do we surface an OS notification. Either way
+        this is non-fatal to the already-created workspace -- the user can
+        configure backups later -- and it never blocks the create call.
         """
+
         try:
-            configure_backups_for_host(
-                agent_id=agent_id,
-                host_id=host_id,
-                request=backup_request,
-                imbue_cloud_cli=self.imbue_cloud_cli,
-                paths=self.paths,
-                parent_cg=self.root_concurrency_group,
-            )
+            for attempt in Retrying(
+                retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError)),
+                stop=stop_after_delay(self.backup_setup_retry_budget_seconds),
+                wait=wait_fixed(self.backup_setup_retry_wait_seconds),
+                reraise=True,
+            ):
+                with attempt:
+                    _log_backup_attempt(agent_id, attempt.retry_state)
+                    configure_backups_for_host(
+                        agent_id=agent_id,
+                        host_id=host_id,
+                        request=backup_request,
+                        imbue_cloud_cli=self.imbue_cloud_cli,
+                        paths=self.paths,
+                        parent_cg=self.root_concurrency_group,
+                    )
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
-            logger.opt(exception=exc).warning("Failed to configure backups for agent {}", agent_id)
+            logger.opt(exception=exc).warning(
+                "Failed to configure backups for agent {} after {:.0f}s of retries",
+                agent_id,
+                self.backup_setup_retry_budget_seconds,
+            )
             self.notification_dispatcher.dispatch(
                 NotificationRequest(
                     title="Backup setup failed",
