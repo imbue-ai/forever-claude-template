@@ -397,7 +397,9 @@ class AgentSessionWatcher:
         self._enrich_subagent_metadata(events)
         return events
 
-    def get_forward_events(self, after_event_id: str, limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
+    def get_forward_events(
+        self, after_event_id: str, limit: int = 50, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Return up to ``limit`` events immediately AFTER ``after_event_id``.
 
         The mirror of :meth:`get_backfill_events`, for paging newer when the loaded

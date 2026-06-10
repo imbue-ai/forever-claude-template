@@ -991,7 +991,9 @@ def test_get_step_attribution_is_incremental_and_does_not_double_count(tmp_path:
         "timestamp": "2026-01-01T00:00:01Z",
         "message": {
             "role": "assistant",
-            "content": [{"type": "tool_use", "id": "tc1", "name": "Bash", "input": {"command": 'tk create --step "First"'}}],
+            "content": [
+                {"type": "tool_use", "id": "tc1", "name": "Bash", "input": {"command": 'tk create --step "First"'}}
+            ],
         },
     }
     agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [create_one])
