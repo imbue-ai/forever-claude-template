@@ -4,6 +4,7 @@ import { runHook } from "./hooks";
 import { getPluginRouteMithrilComponents } from "./plugin-routes";
 import { getBasePath } from "./base-path";
 import { initAgentManager } from "./models/AgentManager";
+import { initQueuedMessageIdleClearing } from "./models/PendingMessages";
 import m from "mithril";
 import "./style.css";
 import { App } from "./views/App";
@@ -35,6 +36,9 @@ function getEffectiveRoutePrefix(): string {
 async function bootstrap(): Promise<void> {
   m.route.prefix = getEffectiveRoutePrefix();
   initAgentManager();
+  // Backstop that drops an optimistic "queued" bubble once its agent returns to
+  // idle (the message was edited away or dropped, so it will never reconcile).
+  initQueuedMessageIdleClearing();
   const rootElement = document.getElementById("app");
   if (rootElement) {
     const pluginRoutes = getPluginRouteMithrilComponents();

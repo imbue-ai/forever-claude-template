@@ -1,6 +1,12 @@
 import m from "mithril";
-import { interruptAgent, sendMessage } from "../models/Response";
-import { getAgentById } from "../models/AgentManager";
+import { interruptAgent, sendMessage, getEventsForAgent } from "../models/Response";
+import {
+  addPendingMessage,
+  getEffectiveActivityState,
+  markPendingMessageQueued,
+  removePendingMessage,
+} from "../models/PendingMessages";
+import { describeRequestError } from "../models/request-error";
 import { isWorkingActivityState } from "./ActivityIndicator";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
@@ -52,12 +58,57 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         const text = messageText;
         messageText = "";
         localStorage.removeItem(messageTextKey(agentId));
+        // Show the message immediately (and force "Thinking..." if the agent is
+        // idle) instead of waiting for it to round-trip through the transcript.
+        const pendingId = addPendingMessage(agentId, text, getEventsForAgent(agentId));
         m.redraw();
 
         try {
           await sendMessage(agentId, text);
-        } catch {
-          // Fire-and-forget: response comes via SSE
+          // The POST resolves once the backend confirms the agent accepted the
+          // message into its queue, so move the bubble to "queued". It stays up
+          // until the real transcript event reconciles it away -- that is when
+          // the agent has genuinely received it (the user-facing "sent").
+          if (pendingId !== null) {
+            markPendingMessageQueued(agentId, pendingId);
+          }
+        } catch (err) {
+          // The send genuinely failed (the backend confirms delivery before
+          // resolving, so a rejection means the message was NOT accepted). Roll
+          // the optimistic bubble back (clearing the forced-"Thinking..."
+          // override) so the UI does not show a message that was never
+          // delivered, and surface the real error.
+          const detail = describeRequestError(err);
+          console.error(`Failed to send message to agent ${agentId}: ${detail}`);
+          if (pendingId !== null) {
+            removePendingMessage(agentId, pendingId);
+          }
+          // Restore the user's text so the send is not silently lost -- but only
+          // if they have not already started a new draft for this agent. The
+          // input was cleared at send time, so during the in-flight request the
+          // user may have typed a fresh message; blindly restoring the failed
+          // text would clobber that newer draft. The agent's current draft is
+          // the live input when the user is still on this agent, otherwise its
+          // persisted localStorage value.
+          const currentDraft =
+            currentAgentId === agentId ? messageText : (localStorage.getItem(messageTextKey(agentId)) ?? "");
+          if (currentDraft.trim().length === 0) {
+            // No newer draft to protect: recover the failed text. Persist it to
+            // localStorage (keyed to this agent) so the recovered draft survives
+            // a reload or agent switch, and only touch the live input if the user
+            // is still on this agent (otherwise we would write into the input of
+            // the agent they switched to; the draft stays recoverable here).
+            localStorage.setItem(messageTextKey(agentId), text);
+            if (currentAgentId === agentId) {
+              messageText = text;
+              m.redraw();
+            }
+          }
+          // Surface the failure to the user with an explicit signal: the bubble
+          // vanishing on its own is too subtle to read as "your message did not
+          // send." Matches the alert-based feedback convention for user-initiated
+          // mutations in this file (see handleInterrupt).
+          alert(`Failed to send message: ${detail}`);
         }
 
         requestAnimationFrame(() => {
@@ -76,8 +127,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         try {
           await interruptAgent(agentId);
         } catch (err) {
-          const reqErr = err as { response?: { detail?: string }; message?: string };
-          const detail = reqErr.response?.detail ?? reqErr.message ?? String(err);
+          const detail = describeRequestError(err);
           console.error(`Failed to interrupt agent ${agentId}: ${detail}`);
           // Surface the failure to the user: they deliberately clicked Stop,
           // and on failure the agent is still running. Matches the alert-based
@@ -100,9 +150,10 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
 
       // The stop button is only meaningful while the agent has an interruptible
       // turn in progress -- the same condition that drives the activity
-      // indicator above the input. Hide it whenever the agent is idle.
-      const agent = getAgentById(agentId);
-      const isAgentWorking = isWorkingActivityState(agent?.activity_state);
+      // indicator above the input. Use the effective state so a just-sent
+      // message that forced "Thinking..." also surfaces the stop button, keeping
+      // the two in lockstep. Hide it whenever the agent is idle.
+      const isAgentWorking = isWorkingActivityState(getEffectiveActivityState(agentId));
       const isStopButtonVisible = isAgentWorking && !isInterruptInFlight;
 
       return m("div", { class: "message-input mx-auto w-full" }, [

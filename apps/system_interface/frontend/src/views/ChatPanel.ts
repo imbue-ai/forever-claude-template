@@ -50,6 +50,7 @@ import { buildAgentTerminalUrl, getTerminalUrl, openIframeTabForAgent } from "./
 import { buildSections, type SectionView } from "./turn-grouping";
 import { ProgressBlock } from "./ProgressBlock";
 import { ActivityIndicator } from "./ActivityIndicator";
+import { renderPendingMessages } from "./PendingMessageView";
 
 function getAgentTerminalUrl(agentId: string): string {
   // The ttyd dispatch script is invoked as `bash -c "$SCRIPT" <args...>` where
@@ -75,6 +76,10 @@ function openAgentTerminalTab(agentId: string): void {
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
 
+// Layout for the centered message column. Shared between the normal transcript
+// render and the empty-state branch that shows an optimistic first message, so
+// the two stay visually identical.
+const MESSAGE_LIST_CLASS = "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6";
 // Backfill fires when the viewport is within this many pixels of the top or
 // bottom edge of the loaded rows (and the server reports more history there).
 const BACKFILL_TRIGGER_PX = 600;
@@ -643,11 +648,18 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     const events = getEventsForAgent(agentId);
 
     if (events.length === 0) {
-      return m(
-        "div",
-        { class: "message-list-empty flex items-center justify-center h-full" },
-        m("p", { class: "text-text-secondary" }, "No events yet for this agent."),
-      );
+      // No transcript yet -- but the user may have just sent their first
+      // message, which should still show immediately as an optimistic bubble
+      // rather than be hidden behind the empty-state placeholder.
+      const pendingNodes = renderPendingMessages(agentId);
+      if (pendingNodes.length === 0) {
+        return m(
+          "div",
+          { class: "message-list-empty flex items-center justify-center h-full" },
+          m("p", { class: "text-text-secondary" }, "No events yet for this agent."),
+        );
+      }
+      return m("div", { class: "message-list-wrapper" }, [m("div", { class: MESSAGE_LIST_CLASS }, pendingNodes)]);
     }
 
     const agent = getAgentById(agentId);
@@ -719,11 +731,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     );
 
     return m("div", { class: "message-list-wrapper" }, [
-      m(
-        "div",
-        { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
-        visibleRows,
-      ),
+      // Pending (optimistic) messages render after the virtualized rows so a
+      // just-sent bubble shows at the live tail until its real event lands.
+      m("div", { class: MESSAGE_LIST_CLASS }, [...visibleRows, ...renderPendingMessages(agentId)]),
     ]);
   }
 
