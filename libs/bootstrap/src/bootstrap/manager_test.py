@@ -7,14 +7,20 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from bootstrap.manager import (
+    DEFAULT_RESTART_POLICY,
+    SVC_EXIT_STATUS_OPTION,
     _build_create_chat_command,
+    _build_service_keystrokes,
     _compute_actions,
+    _compute_restarts,
     _ensure_host_claude_config_dir,
     _format_env_file,
     _initialize_workspace_main_branch,
     _maybe_create_initial_chat,
+    _normalize_restart_policy,
     _parse_env_file,
     _read_host_name,
     _read_main_agent_labels,
@@ -79,6 +85,86 @@ def test_compute_actions_handles_mixed_add_remove_change() -> None:
     stops, starts = _compute_actions(desired, current)
     assert sorted(stops) == ["change", "remove"]
     assert sorted(starts) == [("add", "added"), ("change", "new")]
+
+
+# --- Restart policy: _build_service_keystrokes ---
+
+
+def test_build_service_keystrokes_runs_command_then_records_exit_status() -> None:
+    # The service command must run first, then its exit status be recorded so
+    # the manager can detect the service exiting. `$?` must be captured right
+    # after the command so it reflects the service's own status.
+    keys = _build_service_keystrokes("my-server --flag", "sess:svc-foo")
+    assert keys.startswith("my-server --flag;")
+    assert SVC_EXIT_STATUS_OPTION in keys
+    assert '"$?"' in keys
+
+
+def test_build_service_keystrokes_targets_its_own_window_explicitly() -> None:
+    # Regression: a service window runs in the background, so a `set-option -w`
+    # with no target lands on the session's *active* window, not the service's.
+    # The recorder must pass an explicit `-t <window_target>` so the exit status
+    # is written to the window the manager actually polls.
+    keys = _build_service_keystrokes("my-server", "sess:svc-foo")
+    assert "-t sess:svc-foo" in keys
+
+
+# --- Restart policy: _compute_restarts ---
+
+
+def test_compute_restarts_restarts_on_failure_after_nonzero_exit() -> None:
+    desired = {"a": {"command": "cmd", "restart": "on-failure"}}
+    assert _compute_restarts(desired, {"a": "1"}) == ["a"]
+
+
+def test_compute_restarts_skips_on_failure_after_clean_exit() -> None:
+    desired = {"a": {"command": "cmd", "restart": "on-failure"}}
+    assert _compute_restarts(desired, {"a": "0"}) == []
+
+
+def test_compute_restarts_never_policy_is_left_dead() -> None:
+    desired = {"a": {"command": "cmd", "restart": "never"}}
+    assert _compute_restarts(desired, {"a": "1"}) == []
+
+
+def test_compute_restarts_defaults_to_never_when_policy_absent() -> None:
+    desired = {"a": {"command": "cmd"}}
+    assert _compute_restarts(desired, {"a": "1"}) == []
+
+
+def test_compute_restarts_skips_service_removed_from_desired() -> None:
+    # A service that exited but is no longer in services.toml must not be
+    # restarted -- the mtime-driven reconcile removes its window instead.
+    assert _compute_restarts({}, {"gone": "1"}) == []
+
+
+def test_compute_restarts_handles_mixed_services() -> None:
+    desired = {
+        "crash": {"command": "c", "restart": "on-failure"},
+        "clean": {"command": "c", "restart": "on-failure"},
+        "oneshot": {"command": "c", "restart": "never"},
+    }
+    exited = {"crash": "2", "clean": "0", "oneshot": "1"}
+    assert _compute_restarts(desired, exited) == ["crash"]
+
+
+# --- Restart policy: _normalize_restart_policy ---
+
+
+def test_normalize_restart_policy_passes_through_valid_values() -> None:
+    assert _normalize_restart_policy("svc", "never") == "never"
+    assert _normalize_restart_policy("svc", "on-failure") == "on-failure"
+
+
+def test_normalize_restart_policy_defaults_when_absent() -> None:
+    assert _normalize_restart_policy("svc", None) == DEFAULT_RESTART_POLICY
+
+
+def test_normalize_restart_policy_warns_and_defaults_on_unknown_value() -> None:
+    # A typo'd policy must not silently disable restarts; it falls back to the
+    # default so the misconfiguration is visible (warning) and safe.
+    assert _normalize_restart_policy("svc", "on_failure") == DEFAULT_RESTART_POLICY
+    assert _normalize_restart_policy("svc", "always") == DEFAULT_RESTART_POLICY
 
 
 # --- Env-file helpers ---
@@ -287,6 +373,15 @@ def test_build_create_chat_command_omits_project_label_when_missing() -> None:
     cmd = _build_create_chat_command("ws", {"workspace": "ws"})
     labels = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--label"]
     assert all(not label.startswith("project=") for label in labels)
+
+
+def test_build_create_chat_command_argv_accepted_by_live_cli() -> None:
+    """Confront the emitted argv with the live ``imbue.mngr.main.cli`` tree, so
+    a vendor/mngr rename of ``create``/its flags fails here at merge time rather
+    than only at host boot. A ``workspace`` label is supplied so the builder's
+    label resolution short-circuits without reading host files."""
+    argv = _build_create_chat_command("host-1", {"workspace": "ws", "project": "proj"})
+    assert_mngr_argv_valid(argv)
 
 
 # --- _maybe_create_initial_chat ---

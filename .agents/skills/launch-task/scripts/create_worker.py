@@ -47,16 +47,17 @@ and syncs the directory alongside the runtime dir -- no extra CLI flag.
 Launch lifecycle commands:
 
     mngr create <NAME> -t <TEMPLATE> --label workspace=<MINDS_WORKSPACE_NAME>
-    mngr rsync  <RUNTIME_DIR>/   <NAME>:<RUNTIME_DIR>/   --uncommitted-changes=merge
-    mngr rsync  <ARTIFACTS_DIR>/ <NAME>:<ARTIFACTS_DIR>/ --uncommitted-changes=merge
+    mngr rsync  ./<RUNTIME_DIR>/   <NAME>:<RUNTIME_DIR>/   --uncommitted-changes=merge
+    mngr rsync  ./<ARTIFACTS_DIR>/ <NAME>:<ARTIFACTS_DIR>/ --uncommitted-changes=merge
                 (when frontmatter declares it)
     mngr message <NAME> --message-file <TASK_FILE>
 
 ``mngr rsync`` takes ``SOURCE DESTINATION`` (the local source dir first, then
 the ``<NAME>:<PATH>`` agent endpoint). The trailing slash on both ends makes
-rsync copy directory *contents* into the destination; mngr passes the paths
-through verbatim, so the slash is load-bearing. The
-``--uncommitted-changes=merge`` flag is required (see
+rsync copy directory *contents* into the destination. The local source is
+``./``-prefixed so mngr reads it as a path rather than an agent name, while the
+agent destination stays repo-relative so mngr resolves it against the worker's
+workdir. The ``--uncommitted-changes=merge`` flag is required (see
 ``.agents/shared/references/lead-proxy.md``).
 
 Why ``mngr message`` *after* the syncs (instead of using ``mngr create
@@ -237,16 +238,28 @@ def rsync_dir(name: str, source_dir: Path, runner: Runner) -> None:
     then the ``<name>:<path>`` agent endpoint. The directory form (trailing
     slash on both sides) makes rsync copy the directory *contents* into the
     destination rather than nesting it, and ``--uncommitted-changes=merge``
-    keeps the worker's post-create uncommitted state from refusing the sync --
-    see lead-proxy.md § "mngr rsync rationale" for why both are required.
+    keeps the worker's post-create uncommitted state from refusing the sync.
+
+    Two path details are load-bearing (see lead-proxy.md § "mngr rsync
+    rationale"):
+
+    - The local SOURCE is ``./``-prefixed when ``source_dir`` is relative.
+      ``mngr rsync`` only treats a path starting with ``/``, ``./``, ``../`` or
+      ``~/`` as local; a bare ``runtime/foo/`` would be misparsed as an *agent
+      name* and the command would fail.
+    - The agent DESTINATION keeps the bare repo-relative path. mngr resolves a
+      relative agent ``:PATH`` against the worker's workdir (its worktree root),
+      so the dir lands at the same relative location inside the worker rather
+      than wherever the lead happens to be running.
     """
-    normalized = _normalize_dir(str(source_dir))
+    rel = _normalize_dir(str(source_dir))
+    local_source = rel if rel.startswith(("/", "./", "../", "~/")) else f"./{rel}"
     runner.run(
         [
             "mngr",
             "rsync",
-            normalized,
-            f"{name}:{normalized}",
+            local_source,
+            f"{name}:{rel}",
             "--uncommitted-changes=merge",
         ],
         check=True,

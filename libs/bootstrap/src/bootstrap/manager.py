@@ -46,6 +46,16 @@ SVC_PREFIX = "svc-"
 # Tmux window user-option used to remember the command we started a service
 # with, so we can detect command edits in services.toml on the next reconcile.
 SVC_COMMAND_OPTION = "@svc_command"
+# Tmux window user-option that a service window sets to its command's exit
+# status once the command returns. The manager polls this to detect a service
+# that has exited -- the window itself stays open at an idle shell, so its mere
+# existence is not a liveness signal -- and then applies the `restart` policy.
+SVC_EXIT_STATUS_OPTION = "@svc_exit_status"
+# Supported `restart` policies for a service in services.toml. "never" leaves an
+# exited service dead; "on-failure" restarts it when it exits non-zero. An
+# unrecognized value falls back to DEFAULT_RESTART_POLICY (with a warning).
+DEFAULT_RESTART_POLICY = "never"
+VALID_RESTART_POLICIES = frozenset({"never", "on-failure"})
 POLL_INTERVAL = 5  # seconds
 
 RUNTIME_DIR = Path("runtime")
@@ -459,6 +469,36 @@ def _get_window_command(session: str, window_name: str) -> str:
     return result.stdout.rstrip("\n")
 
 
+def _get_window_exit_status(session: str, window_name: str) -> str:
+    """Read a service window's recorded exit status.
+
+    Returns the exit status string set by the recorder in
+    ``_build_service_keystrokes``, or "" if the service is still running (the
+    option stays unset until its command returns).
+    """
+    target = f"{session}:{window_name}"
+    result = subprocess.run(
+        ["tmux", "show-options", "-t", target, "-w", "-v", SVC_EXIT_STATUS_OPTION],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _list_exited_services(
+    session: str, current: dict[str, dict[str, str]]
+) -> dict[str, str]:
+    """Return ``{service_name: exit_status}`` for managed windows that exited."""
+    exited: dict[str, str] = {}
+    for name, info in current.items():
+        status = _get_window_exit_status(session, info["window_name"])
+        if status != "":
+            exited[name] = status
+    return exited
+
+
 def _load_services() -> dict[str, dict]:
     """Load service definitions from services.toml.
 
@@ -480,9 +520,57 @@ def _load_services() -> dict[str, dict]:
             continue
         result[name] = {
             "command": command,
-            "restart": config.get("restart", "never"),
+            "restart": _normalize_restart_policy(name, config.get("restart")),
         }
     return result
+
+
+def _normalize_restart_policy(name: str, restart: str | None) -> str:
+    """Validate a service's `restart` value, defaulting unknown ones with a warning.
+
+    An absent policy is the default and is not flagged. A present-but-unrecognized
+    policy (e.g. a typo like "on_failure") is almost certainly a misconfiguration,
+    so it is logged and falls back to DEFAULT_RESTART_POLICY rather than silently
+    disabling restarts for that service.
+    """
+    if restart is None:
+        return DEFAULT_RESTART_POLICY
+    if restart not in VALID_RESTART_POLICIES:
+        logger.warning(
+            "Service {} has unrecognized restart policy {!r}; expected one of {}; "
+            "treating as {!r}",
+            name,
+            restart,
+            sorted(VALID_RESTART_POLICIES),
+            DEFAULT_RESTART_POLICY,
+        )
+        return DEFAULT_RESTART_POLICY
+    return restart
+
+
+def _build_service_keystrokes(command: str, window_target: str) -> str:
+    """Build the keystrokes typed into a service window's shell.
+
+    Runs the service command, then records its exit status into the window's
+    ``SVC_EXIT_STATUS_OPTION`` user option. The recorder runs in the same shell
+    once the service returns, so the manager can poll that option to detect a
+    service that has exited; the window itself stays open at an idle shell, so
+    its existence alone is not a liveness signal.
+
+    The ``set-option`` is given an explicit ``-t {window_target}``: a service
+    window runs in the background, and a ``tmux set-option -w`` with no target
+    applies to the session's *currently active* window, not the window the
+    command runs in -- so without the explicit target the status would be
+    written to the wrong window and the manager would never see the exit.
+
+    ``$?`` is captured immediately after the command, so it reflects the
+    service's own exit status (128+signal if the service process was killed
+    while its shell survived).
+    """
+    return (
+        f"{command}; tmux set-option -t {window_target} -w "
+        f'{SVC_EXIT_STATUS_OPTION} "$?"'
+    )
 
 
 def _start_service(session: str, name: str, command: str) -> None:
@@ -492,7 +580,10 @@ def _start_service(session: str, name: str, command: str) -> None:
     (which sources env files), then sends the service command via send-keys.
     This ensures the service process inherits MNGR_AGENT_STATE_DIR and other
     agent environment variables. Records the command on the window via a user
-    option so subsequent reconciles can detect command edits.
+    option so subsequent reconciles can detect command edits. The sent
+    keystrokes also append an exit-status recorder (see
+    ``_build_service_keystrokes``) so the manager can detect an exited service
+    and apply its `restart` policy.
     """
     window_name = f"{SVC_PREFIX}{name}"
     window_target = f"{session}:{window_name}"
@@ -506,7 +597,14 @@ def _start_service(session: str, name: str, command: str) -> None:
         check=False,
     )
     subprocess.run(
-        ["tmux", "send-keys", "-t", window_target, command, "Enter"],
+        [
+            "tmux",
+            "send-keys",
+            "-t",
+            window_target,
+            _build_service_keystrokes(command, window_target),
+            "Enter",
+        ],
         check=False,
     )
 
@@ -519,6 +617,17 @@ def _stop_service(session: str, name: str) -> None:
         ["tmux", "kill-window", "-t", f"{session}:{window_name}"],
         check=False,
     )
+
+
+def _restart_service(session: str, name: str, command: str) -> None:
+    """Restart an exited service: kill its stale window and start a fresh one.
+
+    The fresh window has no ``SVC_EXIT_STATUS_OPTION`` set, so the manager
+    does not immediately see it as exited again.
+    """
+    logger.info("Restarting exited service: {}", name)
+    _stop_service(session, name)
+    _start_service(session, name, command)
 
 
 def _get_file_mtime() -> float | None:
@@ -553,6 +662,34 @@ def _compute_actions(
             starts.append((name, config["command"]))
 
     return stops, starts
+
+
+def _compute_restarts(
+    desired: dict[str, dict],
+    exited: dict[str, str],
+) -> list[str]:
+    """Return the names of exited services that should be restarted.
+
+    Honors each service's `restart` policy from services.toml:
+      - "never" (default): never restarted.
+      - "on-failure": restarted only when the recorded exit status is
+        non-zero (a clean exit is left alone).
+
+    A service that exited but is no longer in `desired` (removed from
+    services.toml) is skipped -- the mtime-driven reconcile removes its
+    window instead.
+    """
+    restarts: list[str] = []
+    for name, status in exited.items():
+        config = desired.get(name)
+        if config is None:
+            continue
+        if (
+            config.get("restart", DEFAULT_RESTART_POLICY) == "on-failure"
+            and status != "0"
+        ):
+            restarts.append(name)
+    return restarts
 
 
 def _reconcile(
@@ -637,6 +774,12 @@ def _init_runtime_worktree() -> None:
 
     if (RUNTIME_DIR / ".git").exists():
         logger.info("runtime/ is already a worktree; skipping init")
+        # A prior init may have staged runtime/ content aside and been killed
+        # before restoring it (leaving runtime.preexisting/ behind while the
+        # worktree itself already exists). Recover that content now rather
+        # than stranding it. _restore_preexisting_into_worktree no-ops when
+        # runtime.preexisting/ is absent, which is the common case.
+        _restore_preexisting_into_worktree()
         return
 
     logger.info("Initializing runtime worktree on branch {}", branch)
@@ -703,8 +846,10 @@ def _init_runtime_worktree() -> None:
                 commit.stderr.strip(),
             )
 
-    if staged_aside:
-        _restore_preexisting_into_worktree()
+    # Restore staged-aside content. Calling unconditionally (rather than
+    # gating on the `staged_aside` flag) also recovers content left by a
+    # prior init that staged aside but was killed before it could restore.
+    _restore_preexisting_into_worktree()
 
     if os.environ.get("GH_TOKEN"):
         if has_remote:
@@ -874,16 +1019,34 @@ def main() -> None:
     _init_backup_config()
 
     last_mtime = None
+    # Cache of the parsed services.toml, refreshed only when the file's mtime
+    # changes. Parsing (and the per-service restart-policy validation/warnings
+    # in _load_services) must NOT run every poll: the restart loop below needs
+    # `desired` each iteration, but re-reading the file every POLL_INTERVAL
+    # would re-emit any unrecognized-policy warning on every tick and re-parse
+    # the file needlessly. So we load once per change and reuse the cache.
+    desired: dict[str, dict] = {}
 
     while True:
         current_mtime = _get_file_mtime()
 
-        # Reconcile on startup or when file changes
+        # Reconcile (and reload the cached services) on startup or when
+        # services.toml changes.
         if current_mtime != last_mtime:
             desired = _load_services()
             current = _list_managed_windows(session)
             _reconcile(session, desired, current)
             last_mtime = current_mtime
+
+        # Independently of services.toml edits, detect services whose process
+        # has exited and apply each service's `restart` policy. The reconcile
+        # above only fires on mtime changes, and a crashed service leaves its
+        # tmux window open at an idle shell -- so without this a crashed
+        # service would stay dead, and the `restart` policy would be inert.
+        current = _list_managed_windows(session)
+        exited = _list_exited_services(session, current)
+        for name in _compute_restarts(desired, exited):
+            _restart_service(session, name, desired[name]["command"])
 
         time.sleep(POLL_INTERVAL)
 

@@ -3,6 +3,38 @@
 Uses watchdog for low-latency filesystem change detection with mtime-based
 polling as a safety net fallback, following the pattern from watcher_common.py
 in mngr_recursive.
+
+Parsed events are held in a per-file append-only cache (``SessionFileState``).
+Both the background poll loop and the synchronous ``get_all_events`` HTTP path
+bring the cache up to date through the shared ``_ensure_cache_current`` helper,
+which reads only the bytes appended since the last poll. This keeps the
+transcript loader cheap for arbitrarily long conversations: a file is fully
+parsed once, then only its growing tail is parsed on subsequent reads.
+
+Because both paths share the cache, the poll loop must not infer "new events to
+broadcast" from what its own parse produced -- a concurrent HTTP read may have
+parsed the tail first. Instead each ``SessionFileState`` tracks an
+``emitted_count``, and the poll loop emits every cached event past that marker,
+guaranteeing each event reaches connected SSE clients exactly once.
+
+On top of the cache the watcher links each parent Agent tool_call to the
+subagent session it spawned, so the frontend can render a rich subagent card.
+Linkage comes from two sources (see ``_enrich_subagent_metadata``): the
+subagent's ``<id>.meta.json`` ``toolUseId`` (written at spawn time, so running
+subagents link immediately) and the parent's tool_result ``subagent_id``
+(authoritative but only available once the subagent finishes). Because a
+subagent's linkage can land after its parent Agent tool_call was already
+broadcast, unlinked parent events are cached and re-broadcast once linkage
+appears (see ``_cache_unlinked_agent_parents`` /
+``_rebroadcast_relinked_parents``), letting the frontend upgrade a plain
+tool-call block into the rich card without a page refresh.
+
+All access to the shared session collections, per-file caches, and subagent
+linkage maps is guarded by ``_lock`` because the watcher thread and FastAPI
+handler threads touch them concurrently. File I/O and parsing run while the
+lock is held, but the ``on_events`` callback (which fans out to SSE queues) is
+always invoked outside the lock to avoid serializing fan-out and to avoid
+re-entrancy / deadlock.
 """
 
 from __future__ import annotations
@@ -27,38 +59,68 @@ logger = _loguru_logger
 _BRIEF_WAIT_SECONDS = 0.5
 
 
-def read_complete_lines_since_offset(file_path: Path, byte_offset: int) -> tuple[int, list[str]]:
-    """Read newly-appended, newline-terminated lines from ``file_path`` starting at ``byte_offset``.
+def _is_complete_json_object(fragment: bytes) -> bool:
+    """Return whether ``fragment`` parses as a complete JSON value on its own.
 
-    Returns the advanced byte offset and the decoded complete lines. Only complete,
-    newline-terminated lines are consumed: a trailing partial line means the file was
-    caught mid-write (Claude may split a single JSONL record across flushes that a poll
-    lands between), so its bytes are left unread and the returned offset stays aligned to
-    a line boundary -- the next read reparses the full line once it lands. When there are
-    no new bytes or no complete line yet, the offset is returned unchanged with an empty
-    list. Raises ``OSError`` if the file cannot be read.
+    Used to decide whether a trailing line that lacks a newline terminator is a
+    finished record written without a trailing ``\\n`` (parses -> complete) or an
+    in-progress write that should be retained for the next read (does not parse).
     """
-    with open(file_path, "rb") as f:
-        f.seek(byte_offset)
-        new_data = f.read()
+    stripped = fragment.strip()
+    if not stripped:
+        return False
+    try:
+        json.loads(stripped)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return True
 
-    last_newline = new_data.rfind(b"\n")
-    if last_newline == -1:
-        return byte_offset, []
-    complete_data = new_data[: last_newline + 1]
-    new_offset = byte_offset + len(complete_data)
-    return new_offset, complete_data.decode("utf-8", errors="replace").splitlines()
+
+def _split_at_last_complete_line(data: bytes) -> tuple[bytes, bytes]:
+    """Split raw appended bytes into ``(complete_lines, trailing_fragment)``.
+
+    Only complete lines are safe to parse and consume: advancing the byte offset
+    past an incomplete trailing line would lose that record permanently once it
+    is finished, and decoding a boundary that splits a multi-byte UTF-8 sequence
+    would corrupt it. The trailing fragment is returned so the caller can leave
+    it unconsumed and re-read it on the next poll.
+
+    A trailing fragment with no newline is treated as complete (folded into the
+    first return value) only when it parses as JSON on its own -- a final record
+    written without a trailing newline. Otherwise it is retained.
+    """
+    if data.endswith(b"\n"):
+        return data, b""
+    newline_index = data.rfind(b"\n")
+    fragment = data if newline_index == -1 else data[newline_index + 1 :]
+    if _is_complete_json_object(fragment):
+        return data, b""
+    if newline_index == -1:
+        return b"", data
+    return data[: newline_index + 1], fragment
 
 
 class SessionFileState:
-    """Tracks reading state for a single session JSONL file."""
+    """Tracks reading and parsed-events cache state for a single session JSONL file.
+
+    ``byte_offset_consumed`` is the number of bytes through the last complete
+    line that has been parsed into ``events`` (an append-only cache of all
+    parsed events for the file). ``last_mtime`` lets the poller short-circuit
+    when neither size nor mtime changed.
+
+    ``emitted_count`` is the number of leading ``events`` already handed to the
+    ``on_events`` SSE fan-out. It is tracked separately from parsing so the poll
+    loop emits every not-yet-emitted event even when a concurrent HTTP
+    ``get_all_events`` was the thread that actually parsed the new tail.
+    """
 
     def __init__(self, session_id: str, file_path: Path) -> None:
         self.session_id = session_id
         self.file_path = file_path
-        self.byte_offset: int = 0
+        self.byte_offset_consumed: int = 0
         self.last_mtime: float = 0.0
-        self.last_size: int = 0
+        self.events: list[dict[str, Any]] = []
+        self.emitted_count: int = 0
 
 
 class AgentSessionWatcher:
@@ -76,6 +138,10 @@ class AgentSessionWatcher:
         self._claude_config_dir = claude_config_dir
         self._on_events = on_events
 
+        # Guards every shared collection below, plus every SessionFileState.
+        # Held across file I/O and parsing (cheap, incremental, per-agent) but
+        # never across the on_events fan-out callback.
+        self._lock = threading.Lock()
         self._session_states: dict[str, SessionFileState] = {}
         self._known_session_ids: list[str] = []
         self._main_session_ids: list[str] = []
@@ -111,7 +177,6 @@ class AgentSessionWatcher:
         self._stop_event = threading.Event()
         self._observer: Any = None
         self._thread: threading.Thread | None = None
-        self._mtime_cache: dict[str, tuple[float, int]] = {}
 
     def start(self) -> None:
         """Start watching session files in a background thread."""
@@ -135,46 +200,54 @@ class AgentSessionWatcher:
                 If None, return events from main sessions only (not subagents).
         """
         self._discover_sessions()
-        all_events: list[dict[str, Any]] = []
 
-        for state in self._session_states.values():
+        with self._lock:
+            states = list(self._session_states.values())
+            main_session_ids = set(self._main_session_ids)
+
+        selected_states: list[SessionFileState] = []
+        for state in states:
             if not state.file_path.exists():
                 continue
-
-            # Filter by session if requested
             if session_id is not None and state.session_id != session_id:
                 continue
-            # Default: only main sessions
-            if session_id is None and state.session_id not in self._main_session_ids:
+            if session_id is None and state.session_id not in main_session_ids:
                 continue
+            selected_states.append(state)
 
-            try:
-                content = state.file_path.read_text()
-                lines = content.splitlines()
-            except OSError:
-                logger.debug("Failed to read session file: %s", state.file_path)
-                continue
-
-            tool_names: dict[str, str] = {}
-            events = parse_session_lines(
-                lines,
-                existing_event_ids=None,
-                tool_name_by_call_id=tool_names,
-                session_id=state.session_id,
-            )
-            self._tool_name_by_call_id.update(tool_names)
-            for event in events:
-                self._existing_event_ids.add(event["event_id"])
-            all_events.extend(events)
+        all_events: list[dict[str, Any]] = []
+        for state in selected_states:
+            self._ensure_cache_current(state)
+            with self._lock:
+                all_events.extend(state.events)
 
         all_events.sort(key=lambda e: e.get("timestamp", ""))
         self._enrich_subagent_metadata(all_events)
         return all_events
 
+    def get_backfill_events(
+        self, before_event_id: str, limit: int = 50, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Get events before a given event_id for backfill pagination."""
+        all_events = self.get_all_events(session_id=session_id)
+
+        target_idx = -1
+        for i, event in enumerate(all_events):
+            if event["event_id"] == before_event_id:
+                target_idx = i
+                break
+
+        if target_idx <= 0:
+            return []
+
+        start_idx = max(0, target_idx - limit)
+        return all_events[start_idx:target_idx]
+
     def get_subagent_metadata(self, subagent_session_id: str) -> dict[str, str] | None:
         """Get metadata for a subagent by its session ID."""
         self._discover_sessions()
-        return self._subagent_metadata.get(subagent_session_id)
+        with self._lock:
+            return self._subagent_metadata.get(subagent_session_id)
 
     def is_main_session_event(self, event: dict[str, Any]) -> bool:
         """True if an event belongs to a main session rather than a subagent session.
@@ -188,7 +261,85 @@ class AgentSessionWatcher:
         session_id = event.get("session_id")
         if session_id is None:
             return True
-        return session_id in self._main_session_ids
+        with self._lock:
+            return session_id in self._main_session_ids
+
+    def _ensure_cache_current(self, state: SessionFileState, mark_all_emitted: bool = False) -> None:
+        """Bring ``state``'s cache up to the file's current contents under the lock.
+
+        Appends any newly parsed events to ``state.events`` (the full accumulated
+        transcript). Emission to SSE clients is decoupled from parsing: callers
+        that need to broadcast deltas drive that off ``state.emitted_count`` so a
+        concurrent HTTP read parsing the tail does not rob the poll loop of the
+        events to emit.
+
+        When ``mark_all_emitted`` is set (the priming path), the whole current
+        backlog is marked as already emitted *in the same lock hold* that filled
+        the cache. Splitting the fill and the mark across two lock acquisitions
+        would let a concurrent ``get_all_events`` append events in between that
+        then get marked emitted and never reach SSE clients.
+        """
+        with self._lock:
+            try:
+                stat = state.file_path.stat()
+            except OSError as e:
+                logger.debug("Failed to stat session file {}: {}", state.file_path, e)
+                return
+
+            current_size = stat.st_size
+            current_mtime = stat.st_mtime
+
+            # Truncation / rotation: the file shrank below what we have already
+            # consumed, so our offset is stale. Reset and re-read from the start.
+            # Discard this file's event IDs from the agent-wide dedup set first;
+            # otherwise the re-read would be deduplicated against the stale
+            # pre-truncation IDs and silently drop every record whose ID recurs
+            # (the typical atomic save-rewrite case), leaving the cache empty.
+            if current_size < state.byte_offset_consumed:
+                for event in state.events:
+                    self._existing_event_ids.discard(event["event_id"])
+                state.byte_offset_consumed = 0
+                state.events = []
+                # The re-read content must be re-emitted to live SSE clients, so
+                # the emission marker resets alongside the cache.
+                state.emitted_count = 0
+
+            if current_size == state.byte_offset_consumed and current_mtime == state.last_mtime:
+                if mark_all_emitted:
+                    state.emitted_count = len(state.events)
+                return
+
+            try:
+                with open(state.file_path, "rb") as f:
+                    f.seek(state.byte_offset_consumed)
+                    new_data = f.read()
+            except OSError as e:
+                logger.debug("Failed to read session file {}: {}", state.file_path, e)
+                return
+
+            complete, _fragment = _split_at_last_complete_line(new_data)
+            if not complete:
+                # Only a partial trailing line so far; leave the offset where it
+                # is and re-read on the next poll once the writer flushes.
+                return
+
+            try:
+                decoded = complete.decode("utf-8")
+            except UnicodeDecodeError as e:
+                logger.warning("UTF-8 decode error in session file {}: {}", state.file_path, e)
+                return
+
+            new_events = parse_session_lines(
+                decoded.splitlines(),
+                existing_event_ids=self._existing_event_ids,
+                tool_name_by_call_id=self._tool_name_by_call_id,
+                session_id=state.session_id,
+            )
+            state.byte_offset_consumed += len(complete)
+            state.last_mtime = current_mtime
+            state.events.extend(new_events)
+            if mark_all_emitted:
+                state.emitted_count = len(state.events)
 
     def _enrich_subagent_metadata(self, events: list[dict[str, Any]]) -> None:
         """Enrich Agent tool_use events with subagent metadata.
@@ -208,50 +359,57 @@ class AgentSessionWatcher:
            the subagent finishes; the fallback for sessions recorded on older
            Claude Code versions whose meta.json predates `toolUseId`, or whose
            subagent files are no longer on disk.
+
+        Accumulating tool_result linkage mutates shared maps, and the metadata
+        lookups read shared maps, so the whole body runs under ``_lock``. The
+        ``events`` list and its dicts are not handed to ``on_events`` from here,
+        so holding the lock across the in-memory enrichment cannot deadlock on
+        the fan-out.
         """
-        subagent_by_tool_call: dict[str, str] = {}
+        with self._lock:
+            subagent_by_tool_call: dict[str, str] = {}
 
-        # 1. Disk-based linkage: each subagent meta.json's toolUseId names its parent
-        #    Agent tool_use directly. sub_id is the jsonl stem ("agent-<id>").
-        for sub_id, tool_use_id in self._subagent_tool_use_id.items():
-            subagent_by_tool_call[tool_use_id] = sub_id
+            # 1. Disk-based linkage: each subagent meta.json's toolUseId names its parent
+            #    Agent tool_use directly. sub_id is the jsonl stem ("agent-<id>").
+            for sub_id, tool_use_id in self._subagent_tool_use_id.items():
+                subagent_by_tool_call[tool_use_id] = sub_id
 
-        # 2. Accumulate tool_result-based linkage from this batch into the persistent map,
-        #    then resolve against the full accumulated map (not just this batch's events),
-        #    so the rebroadcast pass links a cached parent against a tool_result that
-        #    arrived in a different poll cycle.
-        for event in events:
-            if event.get("type") != "tool_result":
-                continue
-            if "subagent_id" not in event:
-                continue
-            self._subagent_id_by_tool_call.setdefault(event["tool_call_id"], event["subagent_id"])
-        for tool_call_id, subagent_id in self._subagent_id_by_tool_call.items():
-            subagent_by_tool_call.setdefault(tool_call_id, subagent_id)
-
-        # Enrich assistant messages that have Agent tool calls.
-        for event in events:
-            if event.get("type") != "assistant_message":
-                continue
-            tool_calls = event.get("tool_calls", [])
-            for tc in tool_calls:
-                if tc.get("tool_name") != "Agent":
+            # 2. Accumulate tool_result-based linkage from this batch into the persistent map,
+            #    then resolve against the full accumulated map (not just this batch's events),
+            #    so the rebroadcast pass links a cached parent against a tool_result that
+            #    arrived in a different poll cycle.
+            for event in events:
+                if event.get("type") != "tool_result":
                     continue
-                sub_id = subagent_by_tool_call.get(tc["tool_call_id"])
-                if not sub_id:
+                if "subagent_id" not in event:
                     continue
-                # The agentId in tool results is bare (e.g. "af25b729465418580")
-                # but session files are named "agent-af25b729465418580.jsonl",
-                # so metadata is keyed by "agent-<id>". Try both forms.
-                metadata = self._subagent_metadata.get(sub_id) or self._subagent_metadata.get(f"agent-{sub_id}")
-                if metadata:
-                    tc["subagent_metadata"] = metadata
+                self._subagent_id_by_tool_call.setdefault(event["tool_call_id"], event["subagent_id"])
+            for tool_call_id, subagent_id in self._subagent_id_by_tool_call.items():
+                subagent_by_tool_call.setdefault(tool_call_id, subagent_id)
+
+            # Enrich assistant messages that have Agent tool calls.
+            for event in events:
+                if event.get("type") != "assistant_message":
+                    continue
+                tool_calls = event.get("tool_calls", [])
+                for tc in tool_calls:
+                    if tc.get("tool_name") != "Agent":
+                        continue
+                    sub_id = subagent_by_tool_call.get(tc["tool_call_id"])
+                    if not sub_id:
+                        continue
+                    # The agentId in tool results is bare (e.g. "af25b729465418580")
+                    # but session files are named "agent-af25b729465418580.jsonl",
+                    # so metadata is keyed by "agent-<id>". Try both forms.
+                    metadata = self._subagent_metadata.get(sub_id) or self._subagent_metadata.get(f"agent-{sub_id}")
+                    if metadata:
+                        tc["subagent_metadata"] = metadata
 
     def _run(self) -> None:
         """Main watcher loop."""
         self._discover_sessions()
         self._setup_watchers()
-        self._read_initial_offsets()
+        self._prime_caches()
 
         while not self._stop_event.is_set():
             self._wake_event.wait(timeout=POLL_INTERVAL_SECONDS)
@@ -273,6 +431,25 @@ class AgentSessionWatcher:
             self._observer.stop()
             self._observer.join(timeout=5.0)
 
+    def _prime_caches(self) -> None:
+        """Parse the existing backlog into each cache without emitting it.
+
+        The initial transcript is delivered to clients via the REST
+        ``get_all_events`` path, so the watcher must not also broadcast the
+        backlog through ``on_events`` (that would flood the bounded SSE queues
+        for long histories). Priming fills ``cache.events`` and advances the
+        byte offset to EOF, then marks the whole backlog as already emitted so
+        the poll loop afterwards emits only events appended after start.
+        """
+        with self._lock:
+            states = list(self._session_states.values())
+        for state in states:
+            if state.file_path.exists():
+                # Fill the cache and mark the whole backlog emitted atomically so
+                # a concurrent get_all_events cannot slip in events that then get
+                # marked emitted and never reach SSE clients.
+                self._ensure_cache_current(state, mark_all_emitted=True)
+
     def _discover_sessions(self) -> None:
         """Read claude_session_id_history to find all session IDs."""
         history_file = self._agent_state_dir / "claude_session_id_history"
@@ -281,7 +458,8 @@ class AgentSessionWatcher:
 
         try:
             lines = history_file.read_text().splitlines()
-        except OSError:
+        except OSError as e:
+            logger.debug("Failed to read session history file {}: {}", history_file, e)
             return
 
         for line in lines:
@@ -289,7 +467,9 @@ class AgentSessionWatcher:
             if not parts:
                 continue
             session_id = parts[0]
-            if session_id in self._session_states:
+            with self._lock:
+                already_known = session_id in self._session_states
+            if already_known:
                 continue
 
             # Try to find the session file
@@ -299,28 +479,38 @@ class AgentSessionWatcher:
                 time.sleep(_BRIEF_WAIT_SECONDS)
                 file_path = self._find_session_file(session_id)
                 if file_path is None:
-                    logger.debug("Session file not found for %s, will retry on next cycle", session_id)
+                    logger.debug("Session file not found for {}, will retry on next cycle", session_id)
                     continue
 
-            self._session_states[session_id] = SessionFileState(session_id, file_path)
-            self._known_session_ids.append(session_id)
-            self._main_session_ids.append(session_id)
+            with self._lock:
+                if session_id in self._session_states:
+                    continue
+                self._session_states[session_id] = SessionFileState(session_id, file_path)
+                self._known_session_ids.append(session_id)
+                self._main_session_ids.append(session_id)
 
             # Set up watchdog for the new file
             if self._observer is not None:
                 parent_dir = str(file_path.parent)
                 try:
                     self._observer.schedule(WakeOnChangeHandler(self._wake_event), parent_dir, recursive=False)
-                except OSError:
-                    logger.debug("Failed to schedule watchdog for %s", parent_dir)
+                except OSError as e:
+                    logger.debug("Failed to schedule watchdog for {}: {}", parent_dir, e)
 
         # Discover subagent sessions for ALL known sessions (not just newly discovered ones),
         # since subagent files may appear after the parent session is first discovered.
-        for state in list(self._session_states.values()):
+        with self._lock:
+            states = list(self._session_states.values())
+        for state in states:
             self._discover_subagent_sessions(state.session_id, state.file_path)
 
     def _discover_subagent_sessions(self, parent_session_id: str, parent_file_path: Path) -> None:
-        """Discover subagent session files under <session_id>/subagents/."""
+        """Discover subagent session files under <session_id>/subagents/.
+
+        Registers each subagent's jsonl into the cache-model ``_session_states`` and
+        reads its ``<id>.meta.json`` for display metadata plus the ``toolUseId`` that
+        links it to its parent Agent tool_call.
+        """
         subagents_dir = parent_file_path.parent / parent_session_id / "subagents"
         if not subagents_dir.exists():
             return
@@ -328,46 +518,52 @@ class AgentSessionWatcher:
         for jsonl_file in subagents_dir.glob("*.jsonl"):
             sub_id = jsonl_file.stem
 
-            if sub_id not in self._session_states:
-                self._session_states[sub_id] = SessionFileState(sub_id, jsonl_file)
-                self._known_session_ids.append(sub_id)
-                if self._observer is not None:
-                    try:
-                        self._observer.schedule(
-                            WakeOnChangeHandler(self._wake_event), str(subagents_dir), recursive=False
-                        )
-                    except OSError:
-                        # Watch scheduling failed (inotify limits, fs quirk). The poll
-                        # loop still picks up subagent changes at POLL_INTERVAL, just
-                        # without sub-second latency -- log so the degraded watch is
-                        # diagnosable rather than silently dropped.
-                        logger.debug("Failed to schedule watchdog for {}", subagents_dir)
+            with self._lock:
+                is_new_session = sub_id not in self._session_states
+                if is_new_session:
+                    self._session_states[sub_id] = SessionFileState(sub_id, jsonl_file)
+                    self._known_session_ids.append(sub_id)
+                meta_already_resolved = sub_id in self._subagent_metadata or sub_id in self._subagent_meta_read_failed
+
+            if is_new_session and self._observer is not None:
+                try:
+                    self._observer.schedule(WakeOnChangeHandler(self._wake_event), str(subagents_dir), recursive=False)
+                except OSError as e:
+                    logger.debug("Failed to schedule watchdog for {}: {}", subagents_dir, e)
 
             # Cache .meta.json. Retry on each pass while the read fails with OSError
             # (transient: mid-write, momentary permission glitch). Give up after a
             # JSONDecodeError (truly malformed -- won't self-heal) so we don't spam
             # the log on every poll cycle.
-            if sub_id not in self._subagent_metadata and sub_id not in self._subagent_meta_read_failed:
-                meta_file = jsonl_file.with_suffix(".meta.json")
-                if meta_file.exists():
-                    try:
-                        meta = json.loads(meta_file.read_text())
-                        self._subagent_metadata[sub_id] = {
-                            "agent_type": meta.get("agentType", ""),
-                            "description": meta.get("description", ""),
-                            "session_id": sub_id,
-                        }
-                        # toolUseId points directly at the parent Agent tool_use, giving the
-                        # running subagent its rich card before any tool_result lands. Absent
-                        # on older Claude Code versions, which fall back to tool_result linkage.
-                        tool_use_id = meta.get("toolUseId")
-                        if isinstance(tool_use_id, str) and tool_use_id:
-                            self._subagent_tool_use_id[sub_id] = tool_use_id
-                    except json.JSONDecodeError as exc:
-                        logger.warning("Subagent meta.json is not valid JSON, giving up: {}: {}", meta_file, exc)
-                        self._subagent_meta_read_failed.add(sub_id)
-                    except OSError as exc:
-                        logger.debug("Failed to read subagent meta.json {}: {}", meta_file, exc)
+            if meta_already_resolved:
+                continue
+            meta_file = jsonl_file.with_suffix(".meta.json")
+            if not meta_file.exists():
+                continue
+            try:
+                meta = json.loads(meta_file.read_text())
+            except json.JSONDecodeError as exc:
+                logger.warning("Subagent meta.json is not valid JSON, giving up: {}: {}", meta_file, exc)
+                with self._lock:
+                    self._subagent_meta_read_failed.add(sub_id)
+                continue
+            except OSError as exc:
+                logger.debug("Failed to read subagent meta.json {}: {}", meta_file, exc)
+                continue
+
+            # toolUseId points directly at the parent Agent tool_use, giving the
+            # running subagent its rich card before any tool_result lands. Absent
+            # on older Claude Code versions, which fall back to tool_result linkage.
+            tool_use_id = meta.get("toolUseId")
+            with self._lock:
+                if sub_id not in self._subagent_metadata:
+                    self._subagent_metadata[sub_id] = {
+                        "agent_type": meta.get("agentType", ""),
+                        "description": meta.get("description", ""),
+                        "session_id": sub_id,
+                    }
+                if isinstance(tool_use_id, str) and tool_use_id:
+                    self._subagent_tool_use_id[sub_id] = tool_use_id
 
     def _find_session_file(self, session_id: str) -> Path | None:
         """Search for a session JSONL file under the Claude projects directory."""
@@ -385,7 +581,9 @@ class AgentSessionWatcher:
     def _setup_watchers(self) -> None:
         """Set up watchdog observers for known session file directories."""
         watched_dirs: set[str] = set()
-        for state in self._session_states.values():
+        with self._lock:
+            states = list(self._session_states.values())
+        for state in states:
             if state.file_path.exists():
                 watched_dirs.add(str(state.file_path.parent))
 
@@ -404,66 +602,35 @@ class AgentSessionWatcher:
                 observer.schedule(handler, dir_path, recursive=False)
             observer.start()
             self._observer = observer
-        except OSError:
-            logger.debug("Failed to start watchdog observer, falling back to polling only")
-
-    def _read_initial_offsets(self) -> None:
-        """Set byte offsets to end of file so we only get new events from the watcher.
-
-        The initial load is handled separately by get_all_events().
-        """
-        for state in self._session_states.values():
-            if state.file_path.exists():
-                try:
-                    stat = state.file_path.stat()
-                    state.byte_offset = stat.st_size
-                    state.last_mtime = stat.st_mtime
-                    state.last_size = stat.st_size
-                except OSError:
-                    pass
+        except OSError as e:
+            logger.debug("Failed to start watchdog observer, falling back to polling only: {}", e)
 
     def _poll_for_changes(self) -> None:
-        """Check all session files for new content."""
-        for state in self._session_states.values():
+        """Check all session files for new content and emit any not-yet-emitted events.
+
+        Emission is driven by ``emitted_count`` rather than by what this call
+        parsed, so events that a concurrent HTTP ``get_all_events`` parsed into
+        the cache are still delivered to connected SSE clients exactly once.
+
+        Each batch is enriched with subagent metadata before broadcast, and any
+        Agent-parent events still missing linkage are cached so a later cycle can
+        re-broadcast them once linkage lands (see ``_rebroadcast_relinked_parents``).
+        """
+        with self._lock:
+            states = list(self._session_states.values())
+
+        for state in states:
             if not state.file_path.exists():
                 continue
 
-            try:
-                stat = state.file_path.stat()
-            except OSError:
-                continue
-
-            # mtime/size check -- skip if unchanged
-            current_mtime = stat.st_mtime
-            current_size = stat.st_size
-            if current_mtime == state.last_mtime and current_size == state.last_size:
-                continue
-
-            state.last_mtime = current_mtime
-            state.last_size = current_size
-
-            if current_size <= state.byte_offset:
-                continue
-
-            try:
-                new_offset, new_lines = read_complete_lines_since_offset(state.file_path, state.byte_offset)
-            except OSError:
-                continue
-            state.byte_offset = new_offset
-            if not new_lines:
-                continue
-
-            new_events = parse_session_lines(
-                new_lines,
-                existing_event_ids=self._existing_event_ids,
-                tool_name_by_call_id=self._tool_name_by_call_id,
-                session_id=state.session_id,
-            )
-
-            if new_events:
-                self._enrich_subagent_metadata(new_events)
-                self._cache_unlinked_agent_parents(new_events)
-                self._on_events(self._agent_id, new_events)
+            self._ensure_cache_current(state)
+            with self._lock:
+                pending_events = state.events[state.emitted_count :]
+                state.emitted_count = len(state.events)
+            if pending_events:
+                self._enrich_subagent_metadata(pending_events)
+                self._cache_unlinked_agent_parents(pending_events)
+                self._on_events(self._agent_id, pending_events)
 
     def _cache_unlinked_agent_parents(self, events: list[dict[str, Any]]) -> None:
         """Remember assistant messages whose Agent tool_calls aren't linked yet.
@@ -483,7 +650,8 @@ class AgentSessionWatcher:
                 continue
             message_uuid = event.get("message_uuid", "")
             if message_uuid:
-                self._unlinked_agent_parent_events[message_uuid] = event
+                with self._lock:
+                    self._unlinked_agent_parent_events[message_uuid] = event
 
     def _rebroadcast_relinked_parents(self) -> None:
         """Re-emit cached parent events that gained subagent links since broadcast.
@@ -494,15 +662,29 @@ class AgentSessionWatcher:
         once it links lets the frontend upgrade the plain tool-call block into the rich card
         without a page refresh. Parents whose Agent tool_calls are all linked are dropped
         from the cache.
+
+        The cache snapshot and removals run under ``_lock`` (they mutate shared state), but
+        ``_enrich_subagent_metadata`` / ``_is_fully_linked`` take the lock themselves and the
+        ``on_events`` fan-out runs unlocked, so the lock is never held across either.
         """
+        with self._lock:
+            cached = list(self._unlinked_agent_parent_events.items())
+
         relinked: list[dict[str, Any]] = []
-        for message_uuid, event in list(self._unlinked_agent_parent_events.items()):
+        fully_linked_uuids: list[str] = []
+        for message_uuid, event in cached:
             before = self._linked_agent_tool_call_ids(event)
             self._enrich_subagent_metadata([event])
             if self._linked_agent_tool_call_ids(event) != before:
                 relinked.append(event)
             if self._is_fully_linked(event):
-                del self._unlinked_agent_parent_events[message_uuid]
+                fully_linked_uuids.append(message_uuid)
+
+        if fully_linked_uuids:
+            with self._lock:
+                for message_uuid in fully_linked_uuids:
+                    self._unlinked_agent_parent_events.pop(message_uuid, None)
+
         if relinked:
             self._on_events(self._agent_id, relinked)
 
@@ -523,6 +705,7 @@ class AgentSessionWatcher:
         if no metadata could be attached (e.g. the subagent's files were cleaned up), so such
         a parent is not retried forever.
         """
-        linked = set(self._subagent_tool_use_id.values()) | set(self._subagent_id_by_tool_call.keys())
+        with self._lock:
+            linked = set(self._subagent_tool_use_id.values()) | set(self._subagent_id_by_tool_call.keys())
         agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
         return bool(agent_tool_calls) and all(tc.get("tool_call_id") in linked for tc in agent_tool_calls)

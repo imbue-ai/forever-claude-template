@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from mngr_cli_contract.contract import assert_mngr_argv_valid
 from watchdog.events import FileClosedNoWriteEvent
 from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
@@ -27,6 +28,9 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.agent_manager import _LogQueueCallback
+from imbue.system_interface.agent_manager import _build_chat_create_command
+from imbue.system_interface.agent_manager import _build_observe_command_argv
+from imbue.system_interface.agent_manager import _build_worktree_create_command
 from imbue.system_interface.agent_manager import _make_applications_file_handler
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
@@ -764,6 +768,51 @@ def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroa
         manager.stop()
 
 
+# --- mngr CLI argv contract ---
+# These confront each builder's argv with the live ``imbue.mngr.main.cli`` tree,
+# so a vendor/mngr subcommand/flag rename fails here at merge time rather than
+# only surfacing at runtime. See ``mngr_cli_contract`` for the validator.
+
+
+def test_worktree_create_argv_accepted_by_live_cli() -> None:
+    argv = _build_worktree_create_command(
+        mngr_binary="mngr",
+        name="demo",
+        agent_id="agent-123",
+        current_branch="main",
+        new_branch="mngr/demo",
+        parent_labels={"project": "proj"},
+    )
+    assert_mngr_argv_valid(argv)
+
+
+def test_worktree_create_argv_without_project_label() -> None:
+    argv = _build_worktree_create_command(
+        mngr_binary="mngr",
+        name="demo",
+        agent_id="agent-123",
+        current_branch="main",
+        new_branch="mngr/demo",
+        parent_labels={},
+    )
+    assert_mngr_argv_valid(argv)
+
+
+def test_chat_create_argv_accepted_by_live_cli() -> None:
+    argv = _build_chat_create_command(
+        mngr_binary="mngr",
+        name="demo",
+        agent_id="agent-123",
+        primary_labels={"workspace": "ws", "project": "proj"},
+    )
+    assert_mngr_argv_valid(argv)
+
+
+def test_observe_argv_accepted_by_live_cli() -> None:
+    argv = _build_observe_command_argv("mngr", Path("/tmp/events"))
+    assert_mngr_argv_valid(argv)
+
+
 def test_resolve_observe_cwd_prefers_existing_work_dir(
     broadcaster: WebSocketBroadcaster,
     tmp_path: Path,
@@ -1054,6 +1103,7 @@ def test_update_session_events_no_op_when_not_tracked(agent_manager: AgentManage
         assert "ghost" not in agent_manager._activity_state_by_agent
         assert "ghost" not in agent_manager._has_unmatched_tool_use_by_agent
         assert "ghost" not in agent_manager._last_event_type_by_agent
+        assert "ghost" not in agent_manager._last_event_timestamp_by_agent
 
 
 def test_reset_activity_state_clears_tool_running(
@@ -1102,6 +1152,52 @@ def test_reset_activity_state_no_op_when_not_tracked(agent_manager: AgentManager
         assert "ghost" not in agent_manager._activity_state_by_agent
         assert "ghost" not in agent_manager._has_unmatched_tool_use_by_agent
         assert "ghost" not in agent_manager._last_event_type_by_agent
+        assert "ghost" not in agent_manager._last_event_timestamp_by_agent
+
+
+def test_stale_transcript_tail_after_restart_shows_idle(agent_manager: AgentManager, tmp_path: Path) -> None:
+    """A running agent whose mid-turn transcript predates the current Claude
+    process is shown IDLE, not "Thinking...".
+
+    Reproduces the container-restart case: the transcript still ends on a
+    tool_result from the turn that was abandoned when the restart killed Claude,
+    so the running-but-idle agent would otherwise stay pinned at THINKING. Once
+    mngr touches ``claude_process_started`` on resume, its newer mtime marks the
+    tail as stale and the indicator settles on IDLE.
+    """
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+
+    # The transcript ends on a tool_result from the distant past (the abandoned
+    # turn): an assistant tool_use matched by its tool_result, nothing after.
+    agent_manager.update_session_events(
+        "agent-1",
+        [
+            {
+                "type": "assistant_message",
+                "tool_calls": [{"tool_call_id": "call_a", "tool_name": "Bash"}],
+                "timestamp": "2020-01-01T00:00:00.000Z",
+            },
+            {"type": "tool_result", "tool_call_id": "call_a", "timestamp": "2020-01-01T00:00:01.000Z"},
+        ],
+    )
+
+    # Before the restart marker exists, the mid-turn tail still reads as THINKING.
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
+
+    # mngr touches claude_process_started on resume; its mtime ("now") is well
+    # after the 2020 transcript events.
+    (state_dir / "claude_process_started").touch()
+
+    # In production the post-restart observe snapshot drives this recompute.
+    agent_manager._recompute_activity_state("agent-1", broadcast_on_change=False)
+
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+        assert agent_manager._agents["agent-1"].activity_state == ActivityState.IDLE.value
 
 
 def test_stop_activity_tracking_clears_caches(agent_manager: AgentManager, tmp_path: Path) -> None:
@@ -1120,6 +1216,7 @@ def test_stop_activity_tracking_clears_caches(agent_manager: AgentManager, tmp_p
         assert "agent-1" in agent_manager._activity_state_by_agent
         assert "agent-1" in agent_manager._has_unmatched_tool_use_by_agent
         assert "agent-1" in agent_manager._last_event_type_by_agent
+        assert "agent-1" in agent_manager._last_event_timestamp_by_agent
 
     agent_manager._stop_activity_tracking("agent-1")
 
@@ -1128,6 +1225,7 @@ def test_stop_activity_tracking_clears_caches(agent_manager: AgentManager, tmp_p
         assert "agent-1" not in agent_manager._activity_state_by_agent
         assert "agent-1" not in agent_manager._has_unmatched_tool_use_by_agent
         assert "agent-1" not in agent_manager._last_event_type_by_agent
+        assert "agent-1" not in agent_manager._last_event_timestamp_by_agent
 
 
 def test_handle_agent_destroyed_stops_activity_tracking(agent_manager: AgentManager, tmp_path: Path) -> None:

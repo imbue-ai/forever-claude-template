@@ -4,6 +4,7 @@
 
 [services.system_interface]
 command = "python3 scripts/forward_port.py --url http://localhost:8000 --name system_interface && system-interface"
+restart = "on-failure"
 
 [services.web]
 command = "python3 scripts/forward_port.py --url http://localhost:8080 --name web && uv run web-server"
