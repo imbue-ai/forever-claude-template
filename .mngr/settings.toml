@@ -117,23 +117,16 @@ docker_runtime = "runsc"
 # the plugin) still parses it. The lima create still works because `@<name>.lima`
 # resolves the provider by name regardless of is_enabled (same as @<name>.docker).
 is_enabled = false
-# Run the minds workspace inside a Docker container *in* the Lima VM (built from
-# the same Dockerfile as the docker/vultr providers). is_host_in_docker forces the
-# in-VM btrfs additional-disk layout, so is_host_data_volume_exposed must be false.
-# These live on the provider block (not the lima template's setting__extend)
-# because template `--setting` entries don't reach provider config (imbue-ai/mngr#1914).
-is_host_in_docker = true
+# Run the minds workspace directly in the Lima VM as root (uid 0) -- no nested
+# Docker container. is_run_as_root gives the agent the same "no sudo, install
+# anything" posture it has inside a docker/vps_docker container (the VM is the
+# isolation boundary). Root cannot traverse the 9p bind mount, so is_run_as_root
+# requires the in-VM btrfs additional-disk layout: is_host_data_volume_exposed
+# must be false. These live on the provider block (not the lima template's
+# setting__extend) because template `--setting` entries don't reach provider
+# config (imbue-ai/mngr#1914).
 is_host_data_volume_exposed = false
-# Run the in-VM agent container under the stock `runc` runtime (NOT gVisor/runsc).
-# The Lima VM already provides a hardware-virtualization boundary, so layering runsc
-# inside it adds download size + provisioning complexity for no extra isolation that
-# matters here. install_gvisor_runtime=false skips the runsc install at provisioning
-# time, and docker_runtime="runc" selects the default runtime for the agent
-# `docker run`. The runsc-specific `default_container_run_args` workarounds
-# (`--workdir=/`, `--security-opt=no-new-privileges`) are unnecessary under runc, so
-# they are omitted. (docker/vultr/ovh still run under runsc; only lima opts out.)
-install_gvisor_runtime = false
-docker_runtime = "runc"
+is_run_as_root = true
 
 # vultr VPS provider (cloud mode). is_enabled=false mirrors the lima/docker blocks:
 # the vps_docker backend plugin is not installed in the agent container, so a parsed
@@ -229,19 +222,32 @@ start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
 # Mirror the docker template: flip the (default-disabled) lima provider on for
 # this create. Redundant in practice -- `@<name>.lima` resolves the provider by
 # name regardless of is_enabled -- but kept for parity/intent with docker.
+# (Docker-in-Lima mode and its is_host_in_docker provider config are gone; the
+# agent now runs directly in the VM as root -- see [providers.lima]. Offline
+# reads via `mngr event` / `mngr transcript` against a stopped Lima host do not
+# work in the btrfs layout until the host is started.)
+#
+# The pinned claude binary is installed on the fresh VM during provisioning by
+# the claude plugin itself (is_remote_agent_installation_allowed defaults to
+# True, so a missing remote claude is auto-installed at the pinned version);
+# setup_system.sh below then re-installs it as part of the full toolchain. No
+# version-check disable is needed.
 setting__extend = ["providers.lima.is_enabled=true"]
-# Docker-in-Lima mode (is_host_in_docker / is_host_data_volume_exposed) is
-# configured on the [providers.lima] block above, not here -- template
-# `setting__extend` entries don't reach provider config (imbue-ai/mngr#1914).
-# Offline reads via `mngr event` / `mngr transcript` against a stopped Lima
-# host stop working in this mode until the host is started.
-# Build the project image inside the VM, exactly like the docker template.
-build_arg__extend = ["--file=Dockerfile", "."]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
-# Same first-boot seed as the docker template; see comment there. Runs in the
-# container (the host), where /usr/local/bin/fct-seed is baked into the image.
-post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# Run the SAME setup as a Dockerfile-built workspace, directly in the VM as root.
+# These run after the project is synced to /mngr/code (agent-level provisioning,
+# post work_dir sync) and reuse the exact scripts the Dockerfile RUNs. There is
+# no docker build (so no `--file=Dockerfile` build arg) and no /docker_build_code
+# relocation (the repo lands straight on the VM's btrfs /mngr disk), so the
+# docker template's build_arg + post_host_create_command (fct-seed) are
+# intentionally absent here. extra_provision_command__extend stacks after the
+# main template's entry.
+extra_provision_command__extend = [
+    "bash /mngr/code/scripts/setup_system.sh",
+    "bash /mngr/code/scripts/install_dependencies.sh",
+    "bash /mngr/code/scripts/build_workspace.sh",
+]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]

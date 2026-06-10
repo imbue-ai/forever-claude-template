@@ -93,16 +93,31 @@ def test_main_template_writes_default_tmux_conf() -> None:
 
 
 def test_main_extra_provision_command_stacks_with_lima() -> None:
-    """`main` + `lima`: lima (docker-in-VM mode) has no `extra_provision_command` of its own, so only main's runs.
-
-    Lima now builds the project image inside the VM and runs the agent in a
-    container (mirroring the docker template), so its old in-VM provisioning
-    commands (mkdir worktree, npm install latchkey, playwright install) are gone.
-    Stacking with lima must still preserve main's command.
+    """`main` + `lima`: lima runs the agent directly in the VM as root, so it runs
+    the shared FCT setup scripts via its own `extra_provision_command`. Those must
+    stack *after* main's (the timeline is main's tmux config, then the setup
+    scripts), and main's command must be preserved.
     """
     result = _apply(("main", "lima"))
     commands = result["extra_provision_command"]
+    # main's tmux config still runs.
     assert any(_TMUX_MARKER in cmd for cmd in commands)
+    # lima adds the three shared setup scripts, in order, after main's command.
+    setup_scripts = ["setup_system.sh", "install_dependencies.sh", "build_workspace.sh"]
+    script_positions = [
+        next((idx for idx, cmd in enumerate(commands) if script in cmd), -1)
+        for script in setup_scripts
+    ]
+    assert all(pos >= 0 for pos in script_positions), (
+        f"missing a lima setup script in {commands!r}"
+    )
+    assert script_positions == sorted(script_positions), (
+        f"lima setup scripts out of order in {commands!r}"
+    )
+    tmux_position = next(idx for idx, cmd in enumerate(commands) if _TMUX_MARKER in cmd)
+    assert tmux_position < script_positions[0], (
+        "main's tmux command must run before lima's setup scripts"
+    )
 
 
 def test_main_extra_provision_command_present_for_docker_mode() -> None:

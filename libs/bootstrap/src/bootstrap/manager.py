@@ -900,12 +900,20 @@ def detect_snapshot_settings(
         )
     fstype = _findmnt_fstype(host_dir)
     if fstype == "btrfs":
+        # lima attaches a btrfs additional disk and symlinks host_dir to its
+        # mount point, so the btrfs filesystem *is* host_dir. The snapshot must
+        # live on that same btrfs (you cannot snapshot a subvolume onto another
+        # filesystem), so derive every path from host_dir. The previous
+        # hardcoded /mnt/host-volume only ever existed in the docker/vps layout,
+        # which takes the OUTER_TRIGGER branch above -- never this one -- so on
+        # lima it pointed snapshots at a plain dir on the root fs and the
+        # `btrfs subvolume snapshot` failed with "not a btrfs filesystem".
         return SnapshotSettings(
             method=SnapshotMethod.BTRFS_LOCAL,
-            btrfs_mount_path=Path("/mnt/host-volume"),
+            btrfs_mount_path=host_dir,
             host_subvolume_path=host_dir,
-            snapshot_current_path=Path("/mnt/host-volume/snapshots/current"),
-            snapshot_read_path=Path("/mnt/host-volume/snapshots/current"),
+            snapshot_current_path=host_dir / "snapshots" / "current",
+            snapshot_read_path=host_dir / "snapshots" / "current",
         )
     return SnapshotSettings(
         method=SnapshotMethod.DIRECT,
