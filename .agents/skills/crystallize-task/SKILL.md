@@ -178,8 +178,11 @@ mean). A pipeline that fetches, transforms, and discards the raw payload
 cannot satisfy that principle no matter what consumers do: persisting it
 is what lets a *later* change in processing requirements re-derive new
 fields with no refetch, and what lets surfaces show the raw record or
-link out to the source. Make this a postcondition of the skill's
-data-capture step.
+link out to the source. Retain whatever a consumer needs to *render*
+the record faithfully later -- e.g. keep the email's content-type and
+HTML body, not just a flattened text field -- so a downstream surface
+can render it in its native format rather than dump escaped source.
+Make this a postcondition of the skill's data-capture step.
 
 ## Worker sub-skills
 The `crystallize-task-worker`, `heal-skill-worker`, and

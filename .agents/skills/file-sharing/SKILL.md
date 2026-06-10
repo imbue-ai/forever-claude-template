@@ -7,7 +7,7 @@ description: Use to read and write files and directories on the user's local fil
 
 ## Instructions
 
-Use this skill when the user asks you to work with files located directly on their PC.
+Use this skill when the user asks you to work with files located directly on their computer.
 
 1. **Use `latchkey curl`** calls to communicate with the remote WebDAV server. (They are the same as normal curl calls, just going through the Latchkey Gateway.)
 2. **Submit a permission request to the user** by calling `latchkey curl -XPOST http://latchkey-self.invalid/permission-requests` when the curl request comes back with the "request not permitted by the user" message. See the "Ask for user permission" example below.
@@ -53,4 +53,9 @@ The body must be a JSON object with exactly four fields:
 
 `payload` must be an object with exactly two string fields: `path` and `access`. `path` must be absolute, `access` must be "READ" or "WRITE".
 
-After posting, wait for a system message indicating whether the user approved or denied the permission request.
+After posting, wait for a message indicating whether the user approved or denied the permission request.
+
+## Notes
+
+- Users may run macOS or Linux, possible even other OSes.
+- In the permission request dialog that pops up in the Minds app on their machine, users can adjust the path, overriding the originally requested one. There are no other sharing settings the user can configure.

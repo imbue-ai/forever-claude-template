@@ -93,15 +93,16 @@ def test_main_template_writes_default_tmux_conf() -> None:
 
 
 def test_main_extra_provision_command_stacks_with_lima() -> None:
-    """`main` + `lima`: lima's many provisioning commands all survive alongside main's."""
+    """`main` + `lima`: lima (docker-in-VM mode) has no `extra_provision_command` of its own, so only main's runs.
+
+    Lima now builds the project image inside the VM and runs the agent in a
+    container (mirroring the docker template), so its old in-VM provisioning
+    commands (mkdir worktree, npm install latchkey, playwright install) are gone.
+    Stacking with lima must still preserve main's command.
+    """
     result = _apply(("main", "lima"))
     commands = result["extra_provision_command"]
     assert any(_TMUX_MARKER in cmd for cmd in commands)
-    # Spot-check several distinct lima provisioning commands to confirm the
-    # entire list (not just the first entry) is concatenated.
-    assert any("sudo mkdir -p /mngr/worktree" in cmd for cmd in commands)
-    assert any("npm install -g latchkey" in cmd for cmd in commands)
-    assert any("playwright install" in cmd for cmd in commands)
 
 
 def test_main_extra_provision_command_present_for_docker_mode() -> None:
@@ -111,10 +112,16 @@ def test_main_extra_provision_command_present_for_docker_mode() -> None:
     assert any(_TMUX_MARKER in cmd for cmd in commands)
 
 
-def test_docker_template_adds_sys_ptrace_cap_via_start_arg() -> None:
-    """`main` + `docker`: SYS_PTRACE cap is on `start_arg` (passed to `docker run`), not `build_arg`."""
+def test_docker_template_hardens_start_args_and_drops_sys_ptrace() -> None:
+    """`main` + `docker`: hardened for untrusted agents -- blocks privilege
+    escalation and no longer grants the SYS_PTRACE capability. (The gVisor
+    runtime itself is selected via `docker_runtime` in the [providers.docker]
+    block, not a create-template setting, so it's not asserted here.)"""
     result = _apply(("main", "docker"))
-    assert "--cap-add=SYS_PTRACE" in result["start_arg"]
+    # no-new-privileges hardening rides on start_arg (a `docker run` flag).
+    assert "--security-opt=no-new-privileges" in result["start_arg"]
+    # The SYS_PTRACE capability grant was removed (gVisor is the boundary now).
+    assert "--cap-add=SYS_PTRACE" not in result["start_arg"]
     assert "--cap-add=SYS_PTRACE" not in result["build_arg"]
 
 

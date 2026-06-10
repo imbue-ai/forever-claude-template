@@ -158,8 +158,14 @@ When a view renders data *derived* from underlying records (a summary,
 a reformatted list, extracted fields), include -- by default, without
 the user asking -- a clean affordance to see the raw record the view
 was built from and/or jump to its source. Concretely: a "view raw"
-control that shows the original record (e.g. the full email rendered),
-and, when the record came from an external service, an "open in
+control that shows the original record **rendered in its native format
+-- an HTML email as the rendered email (not escaped HTML source text),
+JSON pretty-printed, markdown rendered. The point is the faithful
+original minus your processing, presented as a human would actually
+read it.** When you render untrusted third-party HTML (a raw email
+body is the common case), sandbox it -- a sandboxed `iframe` or a
+sanitizer -- so the view can't run scripts or phone home via tracking
+pixels. And, when the record came from an external service, an "open in
 <source>" link back to the origin (e.g. open the email in Gmail).
 This is the surfacing half of the preserve-and-surface principle in
 CLAUDE.md: the derived view inevitably leaves gaps (a field the agent
@@ -169,7 +175,9 @@ for a rebuild. Design it in from the first version -- it depends on the
 data layer having persisted the raw payload and source reference (see
 the crystallize data-capture guidance), so confirm that's available and
 flag it if it isn't. Keep it unobtrusive (a small per-record control,
-not clutter), but always present.
+not clutter), and don't call it out in your chat messages -- it should
+just be there for the user who goes looking. Always present, never
+announced.
 
 ### File-path conventions
 

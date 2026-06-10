@@ -140,8 +140,10 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
           ? m(
               "span.pv-tl-missing",
               {
-                "data-tooltip": "The ticket file backing this step is missing. Rich information (title, closing summary) is unavailable.",
-                "aria-label": "The ticket file backing this step is missing. Rich information (title, closing summary) is unavailable.",
+                "data-tooltip":
+                  "The ticket file backing this step is missing. Rich information (title, closing summary) is unavailable.",
+                "aria-label":
+                  "The ticket file backing this step is missing. Rich information (title, closing summary) is unavailable.",
               },
               "?",
             )

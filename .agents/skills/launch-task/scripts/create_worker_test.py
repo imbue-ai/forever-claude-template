@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import pytest
+from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 _SCRIPT = Path(__file__).parent / "create_worker.py"
 _spec = importlib.util.spec_from_file_location("create_worker", _SCRIPT)
@@ -146,6 +147,82 @@ def test_source_artifacts_dir_synced_after_runtime(tmp_path: Path) -> None:
             "rsync",
             f"{artifacts}/",
             f"demo-worker:{artifacts}/",
+            "--uncommitted-changes=merge",
+        ],
+    ]
+
+
+def test_emitted_mngr_argv_accepted_by_live_cli(tmp_path: Path) -> None:
+    """Every ``mngr ...`` argv launch actually emits must be accepted by the
+    live mngr CLI surface.
+
+    Rather than re-asserting a hand-written expected argv (which mirrors the
+    production assumption and so can never catch a divergence when vendor/mngr
+    changes its CLI), we take exactly what ``launch`` hands the runner and
+    confront it with ``imbue.mngr.main.cli``. It exercises the broadest argv set
+    (create + two rsyncs + message) by declaring a ``source_artifacts_dir``.
+    """
+    runtime, task, artifacts = _make_layout(tmp_path)
+    _write_task(task, str(artifacts))
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        runner=runner,
+    )
+
+    assert rc == 0
+    mngr_calls = [c.argv for c in runner.calls if c.argv[:1] == ["mngr"]]
+    # Vacuity guard: the full lifecycle is create + two rsyncs + message, so we
+    # know the loop below actually validates four real invocations rather than
+    # passing on an empty list. This counts steps; it deliberately does NOT pin
+    # the subcommand names (that would re-introduce the hand-mirrored
+    # expectation this test exists to replace) -- assert_mngr_argv_valid is what
+    # confronts each argv with the live CLI.
+    assert len(mngr_calls) == 4
+    for argv in mngr_calls:
+        assert_mngr_argv_valid(argv)
+
+
+def test_relative_runtime_dir_is_prefixed_for_local_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repo-relative runtime dir is ``./``-prefixed as the local rsync source.
+
+    This is the real launch contract (the skill passes repo-relative paths from
+    the repo root). ``mngr rsync`` reads a bare ``runtime/foo/`` as an agent name
+    and fails, so the source must be ``./``-prefixed -- while the agent
+    destination stays repo-relative so mngr resolves it against the worker's
+    workdir rather than the lead's. The absolute-path tests above don't exercise
+    this because absolute paths are already recognized as local.
+    """
+    runtime, task, _ = _make_layout(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    rel_runtime = runtime.relative_to(tmp_path)
+    rel_task = task.relative_to(tmp_path)
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=rel_runtime,
+        task_file=rel_task,
+        workspace="ws-1",
+        runner=runner,
+    )
+
+    assert rc == 0
+    rsync_calls = [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "rsync"]]
+    assert rsync_calls == [
+        [
+            "mngr",
+            "rsync",
+            f"./{rel_runtime}/",
+            f"demo-worker:{rel_runtime}/",
             "--uncommitted-changes=merge",
         ],
     ]

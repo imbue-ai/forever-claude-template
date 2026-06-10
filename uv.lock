@@ -14,6 +14,7 @@ members = [
     "cloudflare-tunnel",
     "forever-claude-template",
     "host-backup",
+    "mngr-cli-contract",
     "runtime-backup",
     "system-interface",
     "telegram-bot",
@@ -645,6 +646,7 @@ dev = [
     { name = "imbue-mngr-claude" },
     { name = "import-linter" },
     { name = "inline-snapshot" },
+    { name = "mngr-cli-contract" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-timeout" },
@@ -674,6 +676,7 @@ dev = [
     { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
     { name = "import-linter", specifier = ">=2.0" },
     { name = "inline-snapshot", specifier = ">=0.31" },
+    { name = "mngr-cli-contract", editable = "libs/mngr_cli_contract" },
     { name = "pyright", specifier = ">=1.1" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-timeout", specifier = ">=2.0" },
@@ -1295,6 +1298,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "mngr-cli-contract"
+version = "0.1.0"
+source = { editable = "libs/mngr_cli_contract" }
+dependencies = [
+    { name = "click" },
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1" },
+    { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
 ]
 
 [[package]]
@@ -2018,6 +2036,7 @@ dev = [
     { name = "coverage" },
     { name = "import-linter" },
     { name = "inline-snapshot" },
+    { name = "mngr-cli-contract" },
     { name = "playwright" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -2049,6 +2068,7 @@ dev = [
     { name = "coverage" },
     { name = "import-linter", specifier = ">=2.0" },
     { name = "inline-snapshot", specifier = ">=0.13" },
+    { name = "mngr-cli-contract", editable = "libs/mngr_cli_contract" },
     { name = "playwright", specifier = ">=1.40" },
     { name = "pytest", specifier = ">=9.0" },
     { name = "pytest-cov", specifier = ">=7.0.0" },

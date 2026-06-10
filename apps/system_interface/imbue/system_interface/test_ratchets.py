@@ -104,11 +104,12 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # +1 for service_dispatcher.py's asyncio.gather running the two WS-forward
-    # tasks concurrently. Dropping asyncio here would mean rolling our own
-    # cancellation-aware gather; the spirit of the ratchet is "prefer the
-    # project's concurrency_group for threads/procs", which doesn't apply
-    # to pure asyncio tasks.
+    # +1 for service_dispatcher.py driving the two WS-forward tasks via
+    # asyncio.create_task + asyncio.wait(return_when=FIRST_COMPLETED), so the
+    # surviving direction can be cancelled once either side finishes. Dropping
+    # asyncio here would mean rolling our own cancellation-aware wait; the spirit
+    # of the ratchet is "prefer the project's concurrency_group for
+    # threads/procs", which doesn't apply to pure asyncio tasks.
     # +1 for ws_broadcaster.py: register() captures asyncio.current_task() /
     # get_running_loop() so eviction can cancel a wedged WS handler via
     # loop.call_soon_threadsafe(task.cancel) -- the only way to free a coroutine

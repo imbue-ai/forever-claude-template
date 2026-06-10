@@ -51,12 +51,24 @@ def _append_to_history(update: dict) -> None:
         f.write(json.dumps(update) + "\n")
 
 
+def _format_agent_message(username: str, text: str, chat_id: int) -> str:
+    """Render the message body delivered to the agent for a telegram update."""
+    return f"telegram message from @{username} (chat_id={chat_id}): {text}"
+
+
+def _build_message_command(agent_name: str, message: str) -> list[str]:
+    """Build the ``mngr message`` argv. Pure: argv assembly only, so the
+    repo<->mngr CLI contract is testable against the live CLI without spawning
+    a subprocess (see ``bot_test.py``)."""
+    return ["mngr", "message", agent_name, "-m", message]
+
+
 def _send_to_agent(agent_name: str, username: str, text: str, chat_id: int) -> None:
     """Send a telegram message to the agent via mngr message."""
-    message = f"telegram message from @{username} (chat_id={chat_id}): {text}"
+    message = _format_agent_message(username, text, chat_id)
     try:
         subprocess.run(
-            ["mngr", "message", agent_name, "-m", message],
+            _build_message_command(agent_name, message),
             check=True,
             capture_output=True,
             text=True,

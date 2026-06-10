@@ -8,6 +8,23 @@ Reads `services.toml`, reconciles tmux windows to match, and watches for changes
 
 - `bootstrap` - Start the service manager (runs in the foreground)
 
+## Restart policy
+
+Each service may declare a `restart` value in `services.toml`:
+
+- `never` (default) - if the service exits, it stays stopped.
+- `on-failure` - the service is restarted when it exits with a non-zero
+  status.
+
+A service runs inside a tmux window's shell, so the window stays open at an
+idle shell after the service process exits -- its existence is not a
+liveness signal. To detect exits, the keystrokes sent to the window append a
+recorder that writes the command's exit status into the `@svc_exit_status`
+window option once it returns. Every poll, the manager reads that option for
+each managed window and restarts the service if its `restart` policy and
+exit status call for it. A crash-looping service is therefore retried at
+most once per poll interval.
+
 ## Deferred-install service
 
 The `deferred-install` entry in `services.toml` runs `scripts/deferred_install.sh`,
