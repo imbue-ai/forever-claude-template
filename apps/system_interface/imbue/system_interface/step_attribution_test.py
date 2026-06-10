@@ -1,8 +1,13 @@
 """Unit tests for tk step -> session attribution.
 
-These exercise the pure pieces: pulling `tk create --step` titles and
-`Updated <id> ->` transition ids out of raw transcript lines, and joining those
+These exercise the pure pieces specific to this module: pulling
+`Updated <id> ->` transition ids (and the `tk create --step` titles that
+``tk_command_parsing`` supplies) out of raw transcript lines, and joining those
 signals onto a set of step records to decide which session owns each step.
+
+The ``extract_create_titles`` parser itself is owned and tested by
+``tk_command_parsing`` (see ``parser_test.py``); we only cover its use here as
+part of ``extract_step_signals``.
 """
 
 from __future__ import annotations
@@ -11,7 +16,6 @@ import json
 
 from imbue.system_interface.step_attribution import StepAttribution
 from imbue.system_interface.step_attribution import attribute_steps
-from imbue.system_interface.step_attribution import extract_create_titles
 from imbue.system_interface.step_attribution import extract_step_signals
 
 
@@ -40,38 +44,6 @@ def _transition_line(text: str, uuid: str = "u2") -> str:
             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tc1", "content": text}]},
         }
     )
-
-
-# --- extract_create_titles ---
-
-
-def test_extract_create_titles_handles_batched_creates_with_parens() -> None:
-    """A single Bash command can batch several `tk create --step` calls; every
-    title is extracted, including one containing parentheses (which a
-    naive split on `)` would corrupt). Mirrors the real repro command shape."""
-    command = (
-        'S1=$(tk create --step "Explore the directory"); '
-        'S2=$(tk create --step "Analyze build process (vite config)"); '
-        'S3=$(tk create --step "Examine backend")'
-    )
-    assert extract_create_titles(command) == [
-        "Explore the directory",
-        "Analyze build process (vite config)",
-        "Examine backend",
-    ]
-
-
-def test_extract_create_titles_ignores_non_step_creates_and_mentions() -> None:
-    """Only `tk/ticket create --step` invocations yield a title. A regular
-    create, an unrelated command that merely mentions a tk verb, and a
-    `--only-steps` listing all yield nothing."""
-    assert extract_create_titles('tk create "Regular ticket"') == []
-    assert extract_create_titles('git commit -m "tk close foo"') == []
-    assert extract_create_titles("tk ls --only-steps") == []
-
-
-def test_extract_create_titles_handles_single_quotes_and_super() -> None:
-    assert extract_create_titles("S1=$(tk super create --step 'Quoted with single')") == ["Quoted with single"]
 
 
 # --- extract_step_signals ---
