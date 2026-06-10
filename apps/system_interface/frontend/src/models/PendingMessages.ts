@@ -240,7 +240,7 @@ export function reconcilePendingMessages(agentId: string, events: readonly Trans
  */
 export function getEffectiveActivityState(agentId: string): string | null {
   const realState = getAgentById(agentId)?.activity_state ?? null;
-  if (realState === "THINKING" || realState === "TOOL_RUNNING") {
+  if (realState !== null && WORKING_ACTIVITY_STATES.has(realState)) {
     return realState;
   }
   if (realState === "IDLE" && getPendingMessages(agentId).some((p) => p.sent_while_idle)) {
