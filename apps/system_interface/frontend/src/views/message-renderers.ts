@@ -14,10 +14,12 @@ import type {
 } from "../models/Response";
 import { openSubagentTab } from "./DockviewWorkspace";
 import {
+  classifyUserMessageForDisplay,
   isCollapsibleUserMessage,
   isHiddenUserMessage,
   isSkillExpansionUserMessage,
 } from "./user-message-classification";
+import type { UserMessageDisplay } from "./user-message-classification";
 
 /** Build a tool_call_id -> tool_result map, merging skill-expansion
  *  user_messages into the output of their preceding "Skill" tool call so
@@ -116,6 +118,81 @@ export function computeAuthErrorHiddenEventIds(events: TranscriptEvent[]): Set<s
   return hidden;
 }
 
+/** A click-to-expand block: a header row that toggles `--expanded` on its
+ *  parent (the same mechanism as tool-call blocks), revealing the body. */
+function renderCollapsibleBlock(label: string, body: string, blockClass: string): m.Vnode {
+  return m("div", { class: blockClass }, [
+    m(
+      "div",
+      {
+        class: "tool-call-header",
+        onclick(e: Event) {
+          const block = (e.currentTarget as HTMLElement).parentElement;
+          if (block) {
+            block.classList.toggle("tool-call-block--expanded");
+          }
+        },
+      },
+      [m("span", { class: "tool-call-chevron" }, "\u25B8"), m("span", label)],
+    ),
+    m("div", { class: "tool-call-details" }, [m("div", { class: "tool-call-input" }, [m("pre", m("code", body))])]),
+  ]);
+}
+
+/** Glyph and tone for a task notification, keyed off its status. */
+function taskNotificationVisual(status: string): { icon: string; toneClass: string } {
+  if (status === "failed") {
+    return { icon: "\u2717", toneClass: " system-event--error" };
+  }
+  if (status === "killed") {
+    return { icon: "\u25A0", toneClass: " system-event--muted" };
+  }
+  return { icon: "\u2713", toneClass: "" };
+}
+
+/** A centered one-line system-event row (icon + label), used for notifications
+ *  that carry no expandable body. */
+function renderSystemEventRow(icon: string, label: string, toneClass: string): m.Vnode {
+  return m("div", { class: `system-event-row${toneClass}` }, [
+    m("span", { class: "system-event-icon" }, icon),
+    m("span", { class: "system-event-label" }, label),
+  ]);
+}
+
+/** A slash-command invocation, rendered as the user's action: the args (their
+ *  real request) read as a normal user bubble, tagged with the command name. */
+function renderSlashCommand(name: string, args: string): m.Vnode {
+  return m("div", { class: "message-user-bubble message-user-command" }, [
+    m("div", { class: "user-command-name" }, name),
+    args ? m("div", { class: "message-content whitespace-pre-wrap" }, args) : null,
+  ]);
+}
+
+/** Render the inner content of a (non-hidden) user_message per its display kind. */
+function renderUserMessageInner(display: UserMessageDisplay, content: string): m.Children {
+  switch (display.kind) {
+    case "task-notification": {
+      const { icon, toneClass } = taskNotificationVisual(display.status);
+      const label = display.summary || `Background task ${display.status}`;
+      return renderSystemEventRow(icon, label, toneClass);
+    }
+    case "local-command":
+      return renderSystemEventRow("\u203A", display.text, " system-event--muted");
+    case "compact-summary":
+      return renderCollapsibleBlock("Conversation compacted", content, "tool-call-block");
+    case "stop-hook": {
+      const label = isCollapsibleUserMessage(content)?.label ?? "Stop hook feedback";
+      return renderCollapsibleBlock(label, content, "tool-call-block");
+    }
+    case "slash-command":
+      return renderSlashCommand(display.name, display.args);
+    case "plain":
+      return m("div", { class: "message-user-bubble" }, [
+        m("div", { class: "message-content whitespace-pre-wrap" }, content),
+      ]);
+  }
+}
+
 export function StableUserMessage(): m.Component<{ event: UserMessageEvent }> {
   let renderedEventId: string | null = null;
   return {
@@ -126,34 +203,26 @@ export function StableUserMessage(): m.Component<{ event: UserMessageEvent }> {
       const event = vnode.attrs.event;
       renderedEventId = event.event_id;
       const content = event.content || "";
-      const collapsible = isCollapsibleUserMessage(content);
-
-      if (collapsible) {
-        return m("div", { class: "tool-call-block" }, [
-          m(
-            "div",
-            {
-              class: "tool-call-header",
-              onclick(e: Event) {
-                const block = (e.currentTarget as HTMLElement).parentElement;
-                if (block) {
-                  block.classList.toggle("tool-call-block--expanded");
-                }
-              },
-            },
-            [m("span", { class: "tool-call-chevron" }, "\u25B8"), m("span", collapsible.label)],
-          ),
-          m("div", { class: "tool-call-details" }, [
-            m("div", { class: "tool-call-input" }, [m("pre", m("code", content))]),
-          ]),
-        ]);
-      }
-
-      return m("div", { class: "message-user-bubble" }, [
-        m("div", { class: "message-content whitespace-pre-wrap" }, content),
-      ]);
+      return renderUserMessageInner(classifyUserMessageForDisplay(content), content);
     },
   };
+}
+
+/** The outer wrapper class controls alignment: assistant-adjacent system rows
+ *  are centered, collapsible notices hug the user side, everything else reads
+ *  as a normal user message. */
+function userMessageWrapperClass(display: UserMessageDisplay): string {
+  switch (display.kind) {
+    case "task-notification":
+    case "local-command":
+      return "message message-system-event";
+    case "compact-summary":
+    case "stop-hook":
+      return "message message-system-collapsed";
+    case "slash-command":
+    case "plain":
+      return "message message-user";
+  }
 }
 
 export function renderUserMessage(event: UserMessageEvent): m.Vnode | null {
@@ -161,8 +230,7 @@ export function renderUserMessage(event: UserMessageEvent): m.Vnode | null {
   if (isHiddenUserMessage(content)) {
     return null;
   }
-  const collapsible = isCollapsibleUserMessage(content);
-  const messageClass = collapsible ? "message message-system-collapsed" : "message message-user";
+  const messageClass = userMessageWrapperClass(classifyUserMessageForDisplay(content));
   return m("div", { class: messageClass, key: event.event_id }, [m(StableUserMessage, { event })]);
 }
 

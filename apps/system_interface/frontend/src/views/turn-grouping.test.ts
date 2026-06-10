@@ -609,3 +609,72 @@ describe("missing tickets directory (step-id fallback)", () => {
     expect(sections[0].items.some((i) => i.kind === "ungrouped")).toBe(true);
   });
 });
+
+describe("inline system notifications (background tasks)", () => {
+  const TASK_NOTIF =
+    "<task-notification>\n<status>completed</status>\n" +
+    '<summary>Background command "poll worker" completed (exit code 0)</summary>\n</task-notification>';
+
+  it("weaves a background-task notification into the current turn instead of splitting it", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "kick off the poll", "go"),
+      workMsg("2026-04-28T01:00:01Z", "Bash", "w1"),
+      result("2026-04-28T01:00:01Z", "w1", "launched"),
+      // The background command finishes: re-invokes the agent mid-flow.
+      userMsg("2026-04-28T01:00:02Z", TASK_NOTIF, "tn1"),
+      workMsg("2026-04-28T01:00:03Z", "Edit", "w2"),
+      result("2026-04-28T01:00:03Z", "w2", "ok"),
+      assistantText("2026-04-28T01:00:04Z", "all done", "rep"),
+    ];
+    const sections = run(events);
+    // The notification did NOT open a new turn.
+    expect(sections).toHaveLength(1);
+    // It renders as a chip, and the follow-up work stays in the same section.
+    const chip = sections[0].items.find((i) => i.kind === "chip") as { event: { event_id: string } } | undefined;
+    expect(chip?.event.event_id).toBe("tn1");
+    expect(sections[0].trailing_reply.map((e) => e.event_id)).toEqual(["rep"]);
+  });
+
+  it("does not chip a sub-agent completion (it already renders as its own card)", () => {
+    const agentNotif =
+      "<task-notification>\n<status>completed</status>\n" +
+      '<summary>Agent "Verify conversation" completed</summary>\n<result>done</result>\n</task-notification>';
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "run the review agent", "go"),
+      workMsg("2026-04-28T01:00:01Z", "Agent", "w1"),
+      result("2026-04-28T01:00:01Z", "w1", "launched"),
+      userMsg("2026-04-28T01:00:02Z", agentNotif, "an1"),
+      assistantText("2026-04-28T01:00:03Z", "the agent finished", "rep"),
+    ];
+    const sections = run(events);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].items.some((i) => i.kind === "chip")).toBe(false);
+  });
+
+  it("shows a notification that arrives before any human turn in a user-less section", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", TASK_NOTIF, "tn1"),
+      assistantText("2026-04-28T01:00:01Z", "picking back up", "rep"),
+    ];
+    const sections = run(events);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].user_event).toBeNull();
+    const chip = sections[0].items.find((i) => i.kind === "chip") as { event: { event_id: string } } | undefined;
+    expect(chip?.event.event_id).toBe("tn1");
+  });
+
+  it("drops a stdout-less local command (hidden) instead of emitting an empty chip", () => {
+    // A local slash command with no stdout (e.g. /clear) is both hidden and
+    // inline-classified; it must be dropped, not turned into an empty chip.
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "do the thing", "go"),
+      workMsg("2026-04-28T01:00:01Z", "Bash", "w1"),
+      result("2026-04-28T01:00:01Z", "w1", "ok"),
+      userMsg("2026-04-28T01:00:02Z", "<local-command-stdout></local-command-stdout>", "empty"),
+      assistantText("2026-04-28T01:00:03Z", "done", "rep"),
+    ];
+    const sections = run(events);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].items.some((i) => i.kind === "chip")).toBe(false);
+  });
+});

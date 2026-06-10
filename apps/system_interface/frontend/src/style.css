@@ -819,6 +819,65 @@ body {
   color: #dc2626;
 }
 
+/* ── System-event notices ── */
+/* Centered, muted markers for system-injected user_messages that are neither a
+   human turn nor assistant output: background-task completions and local
+   slash-command output. Centered alignment distinguishes them from user
+   bubbles (right) and assistant messages (left). */
+.message-system-event {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.system-event-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 80%;
+  padding: 4px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-sidebar);
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+
+.system-event-icon {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--color-accent);
+}
+
+.system-event-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-event--muted .system-event-icon {
+  color: var(--color-text-faint);
+}
+
+.system-event--error .system-event-icon {
+  color: #dc2626;
+}
+
+.system-event--error .system-event-label {
+  color: #dc2626;
+}
+
+/* Slash-command invocation: a normal user bubble tagged with the command name
+   above the user's argument text. */
+.user-command-name {
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent);
+  margin-bottom: 4px;
+}
+
 /* ── Sub-agent link card ── */
 .subagent-card {
   margin-top: 0.75em;

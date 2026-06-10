@@ -40,7 +40,11 @@ import type {
   ToolCall,
   StepEnrichment,
 } from "../models/Response";
-import { isNonBoundaryUserMessage, isStopHookFeedback } from "./user-message-classification";
+import {
+  isHiddenUserMessage,
+  isInlineNotificationUserMessage,
+  isNonBoundaryUserMessage,
+} from "./user-message-classification";
 
 export type StepStatus = "pending" | "active" | "done";
 
@@ -250,11 +254,20 @@ export function buildSections(
   for (const e of events) {
     if (e.type === "user_message") {
       if (isNonBoundaryUserMessage(e.content ?? "")) {
-        // Stop-hook feedback and the like: a chip inside the current section.
-        if (current !== null && isStopHookFeedback(e.content ?? "")) {
+        // Inline system notifications -- stop-hook feedback, background-task
+        // completions, and local slash-command output -- render as a chip
+        // woven into the current turn rather than opening their own. A
+        // notification can arrive with no section yet open (e.g. a background
+        // task finishing before the first human turn, as at the very start of
+        // a resumed conversation); start a user-less section so it still shows.
+        // Hidden messages (skill expansions, /welcome, and stdout-less local
+        // commands -- which are both hidden and inline-classified) are dropped:
+        // they render to nothing, so a chip for them would be an empty box.
+        const content = e.content ?? "";
+        if (!isHiddenUserMessage(content) && isInlineNotificationUserMessage(content)) {
+          if (current === null) current = ensureSection(null, `section-${e.event_id}`);
           current.chips.push({ event: e, after: current.entries.length - 1 });
         }
-        // Hidden non-boundary messages (skill expansions, /welcome) are dropped.
         continue;
       }
       // Real user turn: close the prior section (carrying open steps) and open
