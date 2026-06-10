@@ -31,12 +31,18 @@ git config --global --add safe.directory "$REPO_ROOT"
 # Install mngr and system-interface as tools (both need the plugin packages so
 # they can parse plugin-specific config). mngr_modal is intentionally not
 # registered (providers.modal.is_enabled=false).
-uv tool install -e "$REPO_ROOT/vendor/mngr/libs/mngr"
+#
+# mngr_claude + mngr_wait are baked into mngr's tool venv at install time via
+# --with-editable, so the plugins are discovered through entry-points at
+# import. We don't call `mngr plugin add` (it SIGILLs on the M5 mac CI runner
+# inside lima-VZ on a paramiko-chain wheel import, while the same uv tool
+# install completes fine; locally verified `mngr plugin list` shows claude /
+# wait / headless_claude ENABLED without any plugin add call).
+uv tool install -e "$REPO_ROOT/vendor/mngr/libs/mngr" \
+    --with-editable "$REPO_ROOT/vendor/mngr/libs/mngr_claude" \
+    --with-editable "$REPO_ROOT/vendor/mngr/libs/mngr_wait"
 uv tool install -e "$REPO_ROOT/apps/system_interface" \
     --with-editable "$REPO_ROOT/vendor/mngr/libs/mngr_claude"
-mngr plugin add \
-    --path vendor/mngr/libs/mngr_claude \
-    --path vendor/mngr/libs/mngr_wait
 
 # Sync the workspace venv (registers the editable workspace + path deps). --frozen
 # asserts the lockfile is canonical so the pre-warmed cache is not bypassed.
