@@ -1,10 +1,15 @@
 """HTML rendering for the desktop client.
 
-Each ``render_*`` function is a thin wrapper around a Jinja2 template that
-lives under ``templates/`` in this directory. Tests call these functions
-directly; the FastAPI route handlers call them the same way. Keeping the
-public signatures stable lets the unit tests keep working without caring
-that we moved from inline strings to file-based templates.
+Each ``render_*`` function is a thin wrapper around a JinjaX component
+under ``templates/`` in this directory, rendered through the shared
+``CATALOG``. Primitive components (Button, Card, Notice, Spinner,
+TextInput, Opt, ...) and the page layout (``Base``) sit at the top of
+``templates/``; full pages live under ``templates/pages/`` as PascalCase
+``.jinja`` files; auth pages and the OAuth icon component live under
+``templates/auth/``. Tests call these functions directly; the FastAPI
+route handlers call them the same way. The public signatures are stable
+so neither callers nor tests have to know the templates moved from raw
+Jinja2 macros + ``{% extends %}`` to JinjaX components.
 """
 
 import hashlib
@@ -16,12 +21,10 @@ from pathlib import Path
 from typing import Final
 
 from jinja2 import Environment
-from jinja2 import FileSystemLoader
 from jinja2 import select_autoescape
+from jinjax import Catalog
 
 from imbue.imbue_common.pure import pure
-from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
-from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
 from imbue.minds.primitives import AIProvider
@@ -35,31 +38,144 @@ from imbue.mngr_forward.loading_page import render_loading_page
 
 TEMPLATE_DIR: Final[Path] = Path(__file__).resolve().parent / "templates"
 
-JINJA_ENV: Final[Environment] = Environment(
-    loader=FileSystemLoader(str(TEMPLATE_DIR)),
-    autoescape=select_autoescape(default_for_string=True, default=True),
+# Shared Tailwind class strings for the three button components
+# (Button.jinja, ButtonLink.jinja, ButtonSubmit.jinja). Exposed as JinjaX
+# Catalog globals so a single edit here updates every button variant; the
+# alternative -- inlining the same class string in three sibling templates
+# -- drifted across files trivially. Surface as uppercase to match the
+# `CATALOG` constant convention and to mark them as Jinja globals (not
+# per-render context).
+#
+# Size axis is independent of variant -- size dictates geometry (padding,
+# radius, font weight, text size), variant dictates color. ``md`` is the
+# default in-flow button; ``lg`` is the prominent block CTA used on the
+# auth flow; ``icon`` is a square padding for icon-only buttons (e.g. the
+# restart / settings icons in the Landing project row).
+_BTN_BASE: Final[str] = (
+    "inline-flex items-center justify-center gap-1.5 leading-tight "
+    "transition-colors disabled:opacity-30 disabled:cursor-not-allowed "
+    "cursor-pointer no-underline whitespace-nowrap"
 )
+_BTN_SIZES: Final[Mapping[str, str]] = {
+    "md": "px-3.5 py-2 rounded-md font-medium text-sm",
+    "lg": "px-4 py-3 rounded-lg font-semibold text-base",
+    "icon": "p-1.5 rounded-md font-medium text-sm",
+}
+_BTN_VARIANTS: Final[Mapping[str, str]] = {
+    "primary": "bg-zinc-900 text-zinc-50 border border-transparent hover:bg-zinc-800",
+    "secondary": "bg-zinc-100 text-zinc-900 border border-zinc-200 hover:bg-zinc-200",
+    "danger": "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100",
+    "success": "bg-emerald-800 text-emerald-50 border border-transparent hover:bg-emerald-900",
+    "ghost": "bg-transparent text-zinc-700 border border-transparent hover:bg-zinc-100 hover:text-zinc-900",
+}
+
+# Shared Tailwind class string for the three form-control components
+# (TextInput.jinja, Select.jinja, Textarea.jinja). Exposed as a Catalog
+# global so the focus-ring token, border, padding and text size live in
+# exactly one place. Width and border-radius vary per-component so they
+# are NOT included here -- each component sets its own.
+_INPUT_BASE: Final[str] = (
+    "px-3 py-2.5 text-sm border border-zinc-200 bg-white text-zinc-900 "
+    "outline-none transition focus:border-blue-600 focus:ring-2 focus:ring-blue-600/15"
+)
+
+# Inner SVG path data for the lucide-style 24x24 stroke icons. The
+# Icon24.jinja component wraps these in the canonical stroke shell
+# (fill=none, stroke=currentColor, stroke-width=2, stroke-linecap=round,
+# stroke-linejoin=round). The dict is the single source of truth -- to
+# add or swap an icon, edit one entry here.
+_ICONS_24: Final[Mapping[str, str]] = {
+    "sidebar": '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>',
+    "home": '<path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/>',
+    "back": '<polyline points="15 18 9 12 15 6"/>',
+    "forward": '<polyline points="9 6 15 12 9 18"/>',
+    "messages": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    "restart": '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+    "settings": (
+        '<circle cx="12" cy="12" r="3"/>'
+        '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06'
+        "a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09"
+        "A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83"
+        "l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09"
+        "A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83"
+        "l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09"
+        "a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83"
+        "l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09"
+        'a1.65 1.65 0 0 0-1.51 1z"/>'
+    ),
+    "external": (
+        '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>'
+        '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>'
+    ),
+}
+
+# 12x12 chrome glyph path data (minimize / maximize / close). Title-bar
+# window controls only; rendered through Icon12.jinja, which wraps these
+# in the same stroke shell as Icon24 but with the smaller viewBox + size.
+_ICONS_12: Final[Mapping[str, str]] = {
+    "minimize": '<line x1="2" y1="6" x2="10" y2="6"/>',
+    "maximize": '<rect x="2" y="2" width="8" height="8" rx="0.5"/>',
+    "close": '<line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/>',
+}
+
+
+def _build_catalog() -> Catalog:
+    """Build the JinjaX Catalog used to render every desktop-client template.
+
+    JinjaX builds its own internal Jinja Environment but copies autoescape +
+    filters from any seed env you pass in. We seed with the same autoescape
+    config the old standalone JINJA_ENV used so user-controlled strings (form
+    errors, agent IDs, etc.) stay HTML-escaped exactly as before.
+
+    ``BTN_BASE`` / ``BTN_VARIANTS`` are exposed as Jinja globals so the
+    three button components can share a single source of truth instead of
+    each redeclaring the same class string + variants map.
+    """
+    seed_env = Environment(
+        autoescape=select_autoescape(default_for_string=True, default=True),
+    )
+    catalog = Catalog(
+        jinja_env=seed_env,
+        globals={
+            "BTN_BASE": _BTN_BASE,
+            "BTN_SIZES": _BTN_SIZES,
+            "BTN_VARIANTS": _BTN_VARIANTS,
+            "INPUT_BASE": _INPUT_BASE,
+            "ICONS_24": _ICONS_24,
+            "ICONS_12": _ICONS_12,
+        },
+    )
+    catalog.add_folder(str(TEMPLATE_DIR))
+    return catalog
+
+
+CATALOG: Final[Catalog] = _build_catalog()
 
 
 # -- Per-workspace identity color --
 # See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side (static/chrome.js, static/sidebar.js).
+# hue. Mirrored on the JS side in static/workspace_accent.js (the shared
+# window.mindsAccent helper consumed by chrome.js and sidebar.js).
 
 # Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue.
-_WORKSPACE_L: Final[int] = 65
-_WORKSPACE_C: Final[float] = 0.15
+# all workspaces so the only axis of variation is the hue. The accent fills
+# the full-width titlebar (not just a small swatch), so a light /
+# low-saturation tone is needed to read as chrome rather than a saturated
+# highlight.
+_WORKSPACE_L: Final[int] = 85
+_WORKSPACE_C: Final[float] = 0.08
 
 
 @pure
 def workspace_accent(agent_id: str) -> str:
     """Deterministically map an agent id to a CSS OKLCH color.
 
-    Uses a fixed lightness and chroma so every workspace accent sits at the
-    same readable mid-tone, and only the hue varies. Full 360 degree hue
-    range means collisions are effectively impossible, and OKLCH's
-    perceptual uniformity means close hashes still read as visibly
-    different colors.
+    Uses a fixed lightness and chroma (a light, low-saturation tone that
+    reads as a chrome surface across the full-width titlebar) so every
+    workspace accent sits at the same readable level, and only the hue
+    varies. Full 360 degree hue range means collisions are effectively
+    impossible, and OKLCH's perceptual uniformity means close hashes
+    still read as visibly different colors.
     """
     digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
     hue = int.from_bytes(digest[:4], "big") % 360
@@ -103,8 +219,8 @@ def render_landing_page(
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
     agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
-    template = JINJA_ENV.get_template("landing.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Landing",
         agent_ids=accessible_agent_ids,
         agent_accents=agent_accents,
         mngr_forward_origin=mngr_forward_origin,
@@ -116,44 +232,48 @@ def render_landing_page(
     )
 
 
-# Hardcoded fallbacks for the workspace-creation form. Overridable via
-# the MINDS_WORKSPACE_* env vars in dev tiers ONLY -- see
-# ``_dev_only_workspace_default`` for the gating rationale.
+# Hardcoded fallbacks for the workspace-creation form. Overridable via the
+# MINDS_WORKSPACE_* env vars only when the operator explicitly opts in -- see
+# ``_operator_workspace_default`` for the gating rationale.
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FALLBACK_HOST_NAME: Final[str] = "assistant"
-_FALLBACK_BRANCH: Final[str] = ""
+# Pin to an annotated FCT tag rather than a moving branch so a shipped
+# binary always clones the exact pilot snapshot it was verified against.
+# Pilot evolves independently; future binaries bump this to a newer tag
+# only after re-verifying. See FCT v0.2.35 (commit 4476621) for the snapshot
+# currently bound to this binary.
+FALLBACK_BRANCH: Final[str] = "v0.2.35"
 
-# Root names that map to operator-managed shared tiers (production /
-# staging). For these tiers the MINDS_WORKSPACE_* env-var defaults are
-# intentionally ignored: ``just minds-start`` (and any other dev-iteration
-# tool) exports those vars from the operator's local FCT worktree state,
-# which only makes sense when iterating against a per-developer dev env.
-# In staging / production the workspaces are end-user-driven and a leaked
-# ``MINDS_WORKSPACE_BRANCH`` from the operator's shell would silently
-# pin the lease to a ref that no pool host carries.
-_SHARED_TIER_ROOT_NAMES: Final[frozenset[str]] = frozenset({DEFAULT_MINDS_ROOT_NAME, "minds-staging"})
+# Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
+# launch into the operator's local-worktree create-form defaults. Gating on an
+# explicit opt-in -- rather than on the tier -- means dev iteration works on ANY
+# tier (including staging / production) when launched via ``just minds-start``,
+# while a normal end-user ``minds run`` never honors a stray MINDS_WORKSPACE_*
+# left over in the operator's shell, on any tier. The previous tier-based gate
+# did the opposite: it blocked legitimate dev iteration on staging (forcing the
+# form back to the public GitHub FCT on ``main``) while leaving dev tiers exposed
+# to stray vars.
+_WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR: Final[str] = "MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"
 
 
-def _dev_only_workspace_default(env_var: str, fallback: str) -> str:
-    """Read ``env_var`` for dev tiers; otherwise return ``fallback``.
+def _operator_workspace_default(env_var: str, fallback: str) -> str:
+    """Return ``env_var`` only when the operator explicitly opted in; else ``fallback``.
 
-    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars are a dev
-    convenience that wire the create-form's defaults to the operator's
-    local FCT worktree (``just minds-start`` exports them). They have
-    no business pre-filling the form in staging or production, where
-    workspaces are end-user-driven and the operator's local git state
-    is irrelevant.
+    The MINDS_WORKSPACE_GIT_URL / _NAME / _BRANCH env vars wire the create-form
+    defaults to the operator's local FCT worktree. They are honored only when
+    ``MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1`` is set in the same environment
+    (``just minds-start`` and the e2e runner set it). An end-user ``minds run``
+    never sets it, so a stray MINDS_WORKSPACE_* left in the shell is ignored on
+    every tier -- the safety the previous tier-based gate provided, without also
+    blocking dev iteration on staging / production.
 
-    Activation is detected via ``MINDS_ROOT_NAME``. The env var is
-    honored only when the root name names a dev tier (i.e. anything
-    other than ``minds`` / ``minds-staging``). An unactivated shell --
-    ``MINDS_ROOT_NAME`` unset entirely -- is treated as non-dev (defensive
-    default: ``minds run`` always activates first today, so this branch
-    is essentially unreachable; we still want to ignore the env var if
-    we somehow get there).
+    These defaults point at a *local* path and a dev branch, which only make
+    sense for local-compute launch modes (Lima / Docker). For IMBUE_CLOUD (pool
+    lease) they must not be kept -- a pool host cannot clone a local path and the
+    dev branch matches no pre-baked host -- so the opt-in is the operator's
+    signal that they are doing local dev iteration, not an end-user pool create.
     """
-    root_name = os.environ.get(MINDS_ROOT_NAME_ENV_VAR, "")
-    if not root_name or root_name in _SHARED_TIER_ROOT_NAMES:
+    if os.environ.get(_WORKSPACE_DEFAULTS_OPT_IN_ENV_VAR) != "1":
         return fallback
     return os.environ.get(env_var, fallback)
 
@@ -173,6 +293,8 @@ def render_create_form(
     default_account_id: str = "",
     anthropic_api_key: str = "",
     error_message: str = "",
+    region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
+    region_selected_by_launch_mode: Mapping[str, str] | None = None,
 ) -> str:
     """Render the agent creation form page.
 
@@ -191,11 +313,11 @@ def render_create_form(
     host name on the resulting workspace. (The agent itself is always
     named ``system-services``.)
     """
-    effective_url = git_url if git_url else _dev_only_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
+    effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_name = (
-        host_name if host_name else _dev_only_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
+        host_name if host_name else _operator_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
     )
-    effective_branch = branch if branch else _dev_only_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
+    effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
         launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
@@ -213,8 +335,8 @@ def render_create_form(
     effective_backup_encryption = (
         backup_encryption_method if backup_encryption_method is not None else BackupEncryptionMethod.NO_PASSWORD
     )
-    template = JINJA_ENV.get_template("create.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Create",
         git_url=effective_url,
         host_name=effective_name,
         branch=effective_branch,
@@ -232,6 +354,10 @@ def render_create_form(
         default_account_id=default_account_id,
         anthropic_api_key=anthropic_api_key,
         error_message=error_message,
+        region_options_by_launch_mode={
+            key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
+        },
+        region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
     )
 
 
@@ -298,11 +424,10 @@ def render_creating_page(
     truth for caption resolution (consistent with the SSE status events).
     """
     status_text = status_text_for(str(info.status), error=info.error, launch_mode=info.launch_mode)
-    template = JINJA_ENV.get_template("creating.html")
-    return template.render(
+    return CATALOG.render(
+        "pages.Creating",
         agent_id=creation_id,
         status_text=status_text,
-        accent=workspace_accent(str(creation_id)),
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
@@ -312,25 +437,79 @@ def render_creating_page(
 @pure
 def render_welcome_page() -> str:
     """Render the welcome/splash page for first-time users."""
-    return JINJA_ENV.get_template("welcome.html").render()
+    return CATALOG.render("pages.Welcome")
 
 
 @pure
 def render_login_page() -> str:
     """Render the login prompt page for unauthenticated users."""
-    return JINJA_ENV.get_template("login.html").render()
+    return CATALOG.render("pages.Login")
 
 
 @pure
 def render_login_redirect_page(one_time_code: OneTimeCode) -> str:
     """Render the JS redirect page that forwards to /authenticate."""
-    return JINJA_ENV.get_template("login_redirect.html").render(one_time_code=one_time_code)
+    return CATALOG.render("pages.LoginRedirect", one_time_code=one_time_code)
 
 
 @pure
 def render_auth_error_page(message: str) -> str:
     """Render an error page for failed authentication."""
-    return JINJA_ENV.get_template("auth_error.html").render(message=message)
+    return CATALOG.render("pages.AuthError", message=message)
+
+
+@pure
+def render_inbox_page(
+    cards: Sequence[Mapping[str, str]],
+    selected_id: str = "",
+    detail_html: str = "",
+    is_empty: bool = False,
+    auto_open: bool = True,
+) -> str:
+    """Render the full inbox modal page served by ``GET /inbox``.
+
+    ``cards`` is the initial left-list content (most-recent-first).
+    ``selected_id`` highlights one card; ``detail_html`` is the
+    pre-rendered right-pane fragment (handler detail, unavailable
+    fragment, or empty). ``is_empty`` is True when there are no
+    pending requests and the layout collapses to a centered message.
+    ``auto_open`` is the initial state of the "Auto-open on new
+    request" checkbox in the inbox header.
+    """
+    return CATALOG.render(
+        "pages.Inbox",
+        cards=cards,
+        selected_id=selected_id,
+        detail_html=detail_html,
+        is_empty=is_empty,
+        auto_open=auto_open,
+    )
+
+
+@pure
+def render_inbox_list_fragment(
+    cards: Sequence[Mapping[str, str]],
+    selected_id: str = "",
+) -> str:
+    """Render the inbox left-list fragment served by ``GET /inbox/list``."""
+    return CATALOG.render("InboxList", cards=cards, selected_id=selected_id)
+
+
+@pure
+def render_inbox_unavailable_fragment(message: str = "") -> str:
+    """Render the inbox right-pane "no longer available" fragment.
+
+    Returned by ``GET /inbox/detail/<id>`` when the id is unknown or
+    already resolved; also innerHTML-swapped into the right pane by the
+    inbox shell JS when an SSE event resolves the currently-selected
+    item.
+
+    ``message`` is an optional supporting sentence rendered under the
+    fragment's heading. When empty (the default), only the heading is
+    shown, so callers that drop the supporting sentence don't end up
+    duplicating the heading.
+    """
+    return CATALOG.render("InboxUnavailable", message=message)
 
 
 # CSS for the recovery page's restart controls, appended to the shared
@@ -874,12 +1053,12 @@ def render_destroying_page(
     value (``running``/``failed``/``done``) so the page renders correctly
     even before the first poll completes.
     """
-    return JINJA_ENV.get_template("destroying.html").render(
+    return CATALOG.render(
+        "pages.Destroying",
         agent_id=str(agent_id),
         agent_name=agent_name,
         pid=pid,
         status=status,
-        accent=workspace_accent(str(agent_id)),
     )
 
 
@@ -905,7 +1084,8 @@ def render_chrome_page(
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
     and sidebar are handled by separate WebContentsViews.
     """
-    return JINJA_ENV.get_template("chrome.html").render(
+    return CATALOG.render(
+        "pages.Chrome",
         is_mac=is_mac,
         is_authenticated=is_authenticated,
         mngr_forward_origin=mngr_forward_origin,
@@ -923,7 +1103,8 @@ def render_sidebar_page(mngr_forward_origin: str = "") -> str:
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
     """
-    return JINJA_ENV.get_template("sidebar.html").render(
+    return CATALOG.render(
+        "pages.Sidebar",
         mngr_forward_origin=mngr_forward_origin,
     )
 
@@ -949,7 +1130,8 @@ def render_sharing_editor(
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the page title points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
-    return JINJA_ENV.get_template("sharing.html").render(
+    return CATALOG.render(
+        "pages.Sharing",
         title=title,
         agent_id=agent_id,
         service_name=service_name,
@@ -960,7 +1142,6 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
-        accent=workspace_accent(agent_id),
     )
 
 
@@ -972,6 +1153,7 @@ def render_workspace_settings(
     accounts: Sequence[object],
     servers: Sequence[str],
     telegram_state: str | None = None,
+    is_leased_imbue_cloud: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -981,17 +1163,22 @@ def render_workspace_settings(
     - ``"active"`` -- Telegram is already set up for this workspace.
     - ``"pending"`` -- setup button is shown.
 
+    ``is_leased_imbue_cloud`` is True for workspaces on a host leased from
+    Imbue Cloud; the account section then shows the bound account with a
+    disabled Disassociate control and no association controls.
+
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
     """
-    return JINJA_ENV.get_template("workspace_settings.html").render(
+    return CATALOG.render(
+        "pages.WorkspaceSettings",
         agent_id=agent_id,
         ws_name=ws_name,
         current_account=current_account,
         accounts=accounts,
         servers=servers,
         telegram_state=telegram_state,
-        accent=workspace_accent(agent_id),
+        is_leased_imbue_cloud=is_leased_imbue_cloud,
     )
 
 
@@ -1004,12 +1191,12 @@ def render_dev_styleguide_page() -> str:
 
     The page is a hand-authored catalog of UI patterns and tokens. When a
     new ``:root`` token is added to ``static/tokens.css``, add a swatch
-    in ``templates/dev_styleguide.html`` with ``data-token="--<name>"``
-    on its wrapper -- the ``templates_test.py`` ratchet cross-checks the
-    set of declared ``:root`` tokens against the set of ``data-token``
-    swatches and fails if either side drifts.
+    in ``templates/pages/DevStyleguide.jinja`` with
+    ``data-token="--<name>"`` on its wrapper -- the ``templates_test.py``
+    ratchet cross-checks the set of declared ``:root`` tokens against the
+    set of ``data-token`` swatches and fails if either side drifts.
     """
-    return JINJA_ENV.get_template("dev_styleguide.html").render()
+    return CATALOG.render("pages.DevStyleguide")
 
 
 @pure
@@ -1026,7 +1213,8 @@ def render_accounts_page(
     present (still in sessions.json) but the user disabled the block
     via the providers panel.
     """
-    return JINJA_ENV.get_template("accounts.html").render(
+    return CATALOG.render(
+        "pages.Accounts",
         accounts=accounts,
         default_account_id=default_account_id or "",
         enabled_by_user_id=dict(enabled_by_user_id or {}),

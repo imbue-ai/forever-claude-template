@@ -8,6 +8,7 @@ file covers minds' command-building and helpers.
 """
 
 import queue
+import subprocess
 import threading
 import time
 from collections.abc import Mapping
@@ -19,6 +20,7 @@ import httpx
 import pytest
 from pydantic import AnyUrl
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -29,23 +31,30 @@ from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
-from imbue.minds.desktop_client.agent_creator import _may_shallow_clone_remote_repo
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
+from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import GitBranch
+from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 
 
 def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
@@ -57,18 +66,6 @@ def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
 def test_extract_repo_name_falls_back_to_workspace() -> None:
     assert extract_repo_name("/") == "workspace"
     assert extract_repo_name("///") == "workspace"
-
-
-def test_imbue_cloud_remote_clone_is_never_shallow() -> None:
-    """imbue_cloud must full-clone a remote URL.
-
-    Regression test for the staging slow-path failure: a shallow clone can't be
-    git-mirror-pushed to the leased host ("shallow update not allowed"), so the
-    slow-path fallback failed. Every other mode may shallow-clone.
-    """
-    assert _may_shallow_clone_remote_repo(LaunchMode.IMBUE_CLOUD) is False
-    for mode in (LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD):
-        assert _may_shallow_clone_remote_repo(mode) is True
 
 
 def test_create_event_capture_records_error_class_from_jsonl_error_event() -> None:
@@ -221,6 +218,48 @@ def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
     assert "fast_mode" not in joined
 
 
+def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        region="US-WEST-OR",
+    )
+    # The explicit region must reach mngr as a hard -b region= build arg.
+    assert "region=US-WEST-OR" in command
+
+
+def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.CLOUD,
+        host_name=HostName("hello"),
+        region="lhr",
+    )
+    # Vultr takes the region as the --vps-region build arg.
+    assert "--vps-region=lhr" in command
+
+
+def test_build_mngr_create_command_omits_region_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    joined = " ".join(command)
+    assert "region=" not in joined
+
+
+def test_build_mngr_create_command_ignores_region_for_docker() -> None:
+    # Region is meaningful only for region-bearing providers; DOCKER drops it.
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        region="US-WEST-OR",
+    )
+    joined = " ".join(command)
+    assert "region=" not in joined and "vps-region" not in joined
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
@@ -234,11 +273,26 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
         assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
+@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD])
+def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse(
+    launch_mode: LaunchMode,
+) -> None:
+    """Non-IMBUE_CLOUD modes express "fresh host" via ``--new-host`` and never pass ``--reuse`` / ``--update``.
+
+    mngr's ``--reuse`` matches on agent name only (``system-services``
+    here) without scoping to a host, so passing it from the create-form
+    would adopt the wrong host's agent whenever any other workspace
+    shared the constant agent name. ``--new-host`` already encodes
+    fresh-host intent; ``--reuse`` is reserved for IMBUE_CLOUD where the
+    pool host comes pre-baked with a ``system-services`` agent.
+    """
     command = _build_mngr_create_command(
-        launch_mode=LaunchMode.DOCKER,
+        launch_mode=launch_mode,
         host_name=HostName("hello"),
     )
+    assert "--new-host" in command
+    assert "--reuse" not in command
+    assert "--update" not in command
     assert "--template" in command
     assert "main" in command
     # The /welcome message now lives in forever-claude-template's
@@ -247,10 +301,6 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
-    # ``--reuse --update`` keeps re-deploys of the same workspace name
-    # idempotent on local-host modes.
-    assert "--reuse" in command
-    assert "--update" in command
     # We always emit JSONL so the canonical agent id can be parsed from the
     # trailing ``"event": "created"`` line.
     assert "--format" in command
@@ -332,6 +382,94 @@ def test_is_git_worktree_returns_false_for_nonexistent_path(tmp_path) -> None:
     assert not _is_git_worktree(tmp_path / "no-such-dir")
 
 
+def _git(cwd: Path, *args: str) -> str:
+    """Run a git command in ``cwd`` and return its stripped stdout."""
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _make_origin_repo_with_branch(origin: Path, branch: str) -> None:
+    """Create a repo on ``main`` with a second branch ``branch`` that has its own tip.
+
+    The branch tip has a parent commit, which is exactly the case a ``--depth 1``
+    clone would turn into a shallow boundary (and thus an unpushable mirror).
+    """
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "test@example.com")
+    _git(origin, "config", "user.name", "Test")
+    (origin / "f").write_text("base\n")
+    _git(origin, "add", "f")
+    _git(origin, "commit", "-qm", "base commit")
+    _git(origin, "checkout", "-q", "-b", branch)
+    (origin / "f").write_text("on branch\n")
+    _git(origin, "commit", "-qam", "branch commit")
+    _git(origin, "checkout", "-q", "main")
+
+
+def test_clone_git_repo_branch_is_single_branch_non_shallow_and_mirror_pushable(tmp_path: Path) -> None:
+    """A branch clone fetches only that branch, keeps full ancestry (non-shallow),
+    and remains mirror-pushable.
+
+    This is the regression for the deep-clone fix: the previous ``--depth 1``
+    clone could not check out a non-default branch ("pathspec did not match") and,
+    even once it could, a shallow clone is rejected by mngr create's mirror-push
+    into the agent container ("shallow update not allowed"). A single-branch
+    non-shallow clone fixes both.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("testing"))
+
+    # Checked out on the requested branch, with that branch's content.
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "testing"
+    assert (dest / "f").read_text() == "on branch\n"
+    # Only the requested branch was fetched, and the clone is NOT shallow.
+    assert _git(dest, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
+    assert not (dest / ".git" / "shallow").exists()
+
+    # The mirror-push mngr create performs into the agent container's bare repo
+    # must succeed -- this is what fails on a shallow clone.
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    push = subprocess.run(
+        ["git", "-C", str(dest), "push", "--force", "--prune", str(bare), *GIT_MIRROR_PUSH_REFSPECS],
+        capture_output=True,
+        text=True,
+    )
+    assert push.returncode == 0, push.stderr
+    assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
+
+
+def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
+    """Requesting a branch that does not exist fails at clone time (cleanly)."""
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    with pytest.raises(GitCloneError):
+        clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
+
+
+class _RecordingNotificationDispatcher(NotificationDispatcher):
+    """Test-only NotificationDispatcher that records dispatch calls instead of dispatching."""
+
+    _recorded: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
+
+    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
+        self._recorded.append((request, agent_display_name))
+
+    @property
+    def recorded(self) -> list[tuple[NotificationRequest, str]]:
+        return self._recorded
+
+
 def _make_test_creator(
     tmp_path,
     *,
@@ -341,6 +479,9 @@ def _make_test_creator(
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
+    notification_dispatcher: NotificationDispatcher | None = None,
+    backup_setup_retry_budget_seconds: float = 0.0,
+    backup_setup_retry_wait_seconds: float = 0.0,
 ) -> AgentCreator:
     paths = WorkspacePaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -348,13 +489,16 @@ def _make_test_creator(
     return AgentCreator(
         paths=paths,
         root_concurrency_group=cg,
-        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        notification_dispatcher=notification_dispatcher
+        or NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
         system_interface_health_tracker=system_interface_health_tracker or SystemInterfaceHealthTracker(),
+        backup_setup_retry_budget_seconds=backup_setup_retry_budget_seconds,
+        backup_setup_retry_wait_seconds=backup_setup_retry_wait_seconds,
     )
 
 
@@ -393,6 +537,34 @@ def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.
     thread.start()
     port = server.server_address[1]
     return server, thread, port
+
+
+def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) -> None:
+    """A backup setup that keeps failing notifies the user once the retry budget is spent.
+
+    Uses an API_KEY request with no RESTIC_REPOSITORY, which fails deterministically
+    (no network) on every attempt. With a zero-second budget the loop makes a single
+    attempt, then gives up and dispatches exactly one notification -- and must not let
+    the exception escape the detached-thread entry point.
+    """
+    dispatcher = _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
+    creator = _make_test_creator(
+        tmp_path,
+        notification_dispatcher=dispatcher,
+        backup_setup_retry_budget_seconds=0.0,
+        backup_setup_retry_wait_seconds=0.0,
+    )
+    request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="")
+
+    creator._provision_backups(
+        agent_id=AgentId.generate(),
+        host_id="host-00000000000000000000000000000000",
+        backup_request=request,
+    )
+
+    assert len(dispatcher.recorded) == 1
+    notification, _agent_display_name = dispatcher.recorded[0]
+    assert notification.title == "Backup setup failed"
 
 
 def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:

@@ -41,7 +41,7 @@ Closing an individual window just tears down that window's views -- the backend 
 
 ### Crash recovery
 
-If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/requests-panel/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
+If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
 
 ### Keyboard shortcuts
 
@@ -58,7 +58,7 @@ Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Unique
 - **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
 - **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
-- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json`. On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped.
+- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId, lastWorkspaceAgentId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped. Each window's per-window `lastWorkspaceAgentId` carries the most-recently-opened workspace for that window so its accent paints the titlebar across navigation away from the workspace; it's cleared for matching windows on workspace deletion and for all windows on account sign-out.
 
 ### Environment variables
 
@@ -102,7 +102,7 @@ same shape:
   config.toml             # Optional minds user preferences (default account, etc.)
   client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
   secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
-  window-state.json       # Per-window content URLs, restored on next launch
+  window-state.json       # Per-window content URLs + last-opened workspace, restored on next launch
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories
@@ -142,7 +142,7 @@ deploy-time secrets flow through HCP Vault.
 
 `~/.<root>/config.toml` is optional and holds user-personal
 preferences only (the default account for new workspaces, the
-auto-open behavior for the requests panel). It carries no tier-bound
+auto-open behavior for the inbox). It carries no tier-bound
 URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 `--config-file` as described above.
 
@@ -210,17 +210,19 @@ pnpm build                        # Prepare resources
 pnpm exec todesktop build         # Upload to ToDesktop for native builds
 ```
 
-ToDesktop builds native installers (.dmg for macOS, .AppImage for Linux), handles code signing, notarization, and auto-update infrastructure.
+ToDesktop builds the macOS arm64 native installer (.zip / .dmg), handles code signing, notarization, and auto-update infrastructure. Linux + Windows targets are not currently wired up: `todesktop.js` ships only a `mac:` block, and the release pipeline (`minds-launch-to-msg.yml`) builds and verifies macOS only. The host scripts (`download-binaries.js`, `build.js`) have skeletons for Linux x86_64 and a few Linux native modules ship prebuilds via pnpm, but a packaged Linux install would still need a `linux:` ToDesktop block and a properly bundled git layout (the current `cp $(which git)` skips `libexec/git-core/`).
 
-The build script (`scripts/build.js`) strips the `[tool.uv.sources]` section from the standalone pyproject.toml when copying it to resources, so the packaged app resolves the `minds` package from PyPI instead of a local path.
+The build script (`scripts/build.js`) builds a wheel for every workspace package into `resources/wheels/`, rewrites `[tool.uv.sources]` in the staged `resources/pyproject/pyproject.toml` to point each workspace package at its bundled wheel, then runs `uv lock` in-place to regenerate `resources/pyproject/uv.lock` against the rewritten pyproject. The regenerated lockfile is what ships in the app bundle; the dev-time `electron/pyproject/uv.lock` is not committed.
 
 ### Updating the Python package
 
-1. Bump the version pin in `electron/pyproject/pyproject.toml`
-2. Regenerate the lockfile: `uv lock --project electron/pyproject`
-3. Run `pnpm exec todesktop build` to publish
+All workspace packages must be listed as direct dependencies in `electron/pyproject/pyproject.toml` — uv ignores `[tool.uv.sources]` path overrides for transitive-only packages and will silently fall back to stale PyPI versions. Keep the dependencies list in sync with `WORKSPACE_PACKAGES` in `scripts/build.js`.
 
-The new lockfile is shipped in the app bundle. On next launch, `uv sync` installs the updated packages.
+To ship a change:
+
+1. Edit the Python source in the monorepo as usual
+2. If adding a new workspace package, add it to both `electron/pyproject/pyproject.toml` (as a direct dep + `[tool.uv.sources]` entry) and `WORKSPACE_PACKAGES` in `scripts/build.js`
+3. Run `pnpm exec todesktop build` to publish — `build.js` rebuilds all wheels and regenerates the lockfile automatically
 
 ## File structure
 
