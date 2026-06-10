@@ -1,5 +1,14 @@
 # Plan: End-of-turn progress-view rendering rework
 
+> **Status note (2026-06):** the position-aware "Variant C" inter-step block
+> described below was dropped by the later `transcript-driven-progress-view`
+> rework (which folded everything into an ungrouped-or-reply model) and has now
+> been reintroduced on top of that transcript-driven walk. A step's closing
+> prose is ejected into an inter-step **interjection** rendered with the
+> `.pv-interstep` style specified here. The intent of this plan for inter-step
+> text is therefore live again; see the follow-up note in
+> `blueprint/transcript-driven-progress-view/plan-transcript-driven-progress-view.md`.
+
 > **Robustly handle all end-of-turn rendering scenarios in the chat progress view, without relying on agents closing steps correctly.**
 >
 > * **Guiding principle:** the progress view does the right thing whether or not steps get closed; agents shouldn't have to fight the system. Rendering is the load-bearing fix; prompt/hook steering is best-effort only.

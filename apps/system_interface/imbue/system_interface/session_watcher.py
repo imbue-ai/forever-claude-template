@@ -4,19 +4,43 @@ Uses watchdog for low-latency filesystem change detection with mtime-based
 polling as a safety net fallback, following the pattern from watcher_common.py
 in mngr_recursive.
 
-Parsed events are held in a per-file append-only cache (``SessionFileState``).
-Both the background poll loop and the synchronous ``get_all_events`` HTTP path
-bring the cache up to date through the shared ``_ensure_cache_current`` helper,
-which reads only the bytes appended since the last poll. This keeps the
-transcript loader cheap for arbitrarily long conversations: a file is fully
-parsed once, then only its growing tail is parsed on subsequent reads.
+Scaling model (two-tier cache)
+------------------------------
+A conversation transcript is conceptually unbounded, so the watcher never holds
+every parsed event body in memory. Each session file keeps two tiers:
 
-Because both paths share the cache, the poll loop must not infer "new events to
-broadcast" from what its own parse produced -- a concurrent HTTP read may have
-parsed the tail first. Instead each ``SessionFileState`` tracks an
-``emitted_count``, and the poll loop emits every cached event past that marker,
-guaranteeing each event reaches connected SSE clients exactly once.
+* **Locator tier** (``SessionFileState.locators``): one small ``EventLocator``
+  per event -- ``event_id``, ``timestamp`` and the byte range of the source
+  JSONL line. Built incrementally as the file is tailed and never evicted. It
+  is O(total events) in *count* but free of message/tool bodies (tens of bytes
+  per event), and lives only in memory -- there is no on-disk index sidecar.
 
+* **Body tier** (``_body_cache``): a bounded LRU of fully parsed event dicts
+  (the heavy ``text`` / ``output`` / ``tool_calls`` payloads). When a requested
+  event is not resident, its source line is re-read from disk via the locator's
+  byte range and re-parsed. Backend memory is therefore bounded by the cache
+  capacity plus the compact locator index, regardless of transcript length.
+
+The bounded read paths (:meth:`get_tail_events`, :meth:`get_backfill_events`)
+locate events through the locator index and resolve at most ``limit`` bodies, so
+a backfill page costs O(limit) disk work rather than re-reading the whole file.
+:meth:`get_all_events` remains for the bounded subagent transcripts and as a
+compatibility/oracle path; it resolves every body and is not on the main-view
+hot path.
+
+Emission decoupled from parsing
+-------------------------------
+Both the background poll loop and the synchronous HTTP read paths bring a file's
+locator index up to date through the shared ``_ensure_cache_current`` helper. So
+the poll loop must not infer "new events to broadcast" from what its own parse
+produced -- a concurrent HTTP read may have parsed the tail first. Instead each
+``SessionFileState`` tracks an ``emitted_count`` high-water mark over its locator
+index, and the poll loop broadcasts every locator past that marker (resolving
+their bodies), guaranteeing each event reaches connected SSE clients exactly
+once even when an HTTP read was the thread that advanced the byte offset.
+
+Subagent linkage
+----------------
 On top of the cache the watcher links each parent Agent tool_call to the
 subagent session it spawned, so the frontend can render a rich subagent card.
 Linkage comes from two sources (see ``_enrich_subagent_metadata``): the
@@ -29,12 +53,12 @@ appears (see ``_cache_unlinked_agent_parents`` /
 ``_rebroadcast_relinked_parents``), letting the frontend upgrade a plain
 tool-call block into the rich card without a page refresh.
 
-All access to the shared session collections, per-file caches, and subagent
-linkage maps is guarded by ``_lock`` because the watcher thread and FastAPI
-handler threads touch them concurrently. File I/O and parsing run while the
-lock is held, but the ``on_events`` callback (which fans out to SSE queues) is
-always invoked outside the lock to avoid serializing fan-out and to avoid
-re-entrancy / deadlock.
+All access to the shared session collections, per-file locator lists, the body
+cache and the subagent linkage maps is guarded by ``_lock`` because the watcher
+thread and FastAPI handler threads touch them concurrently. File I/O and parsing
+run while the lock is held, but the ``on_events`` callback (which fans out to SSE
+queues) is always invoked outside the lock to avoid serializing fan-out and to
+avoid re-entrancy / deadlock.
 """
 
 from __future__ import annotations
@@ -43,6 +67,7 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -57,6 +82,13 @@ from imbue.system_interface.watcher_common import WakeOnChangeHandler
 logger = _loguru_logger
 
 _BRIEF_WAIT_SECONDS = 0.5
+
+# Maximum number of parsed event bodies held resident across all of an agent's
+# session files. Far larger than any single tail/backfill page (default 50), so
+# normal scrollback stays in-cache, while still bounding memory for an
+# arbitrarily long transcript. Bodies evicted past this are re-parsed from disk
+# on demand via the locator byte ranges.
+_DEFAULT_BODY_CACHE_CAPACITY = 2000
 
 
 def _is_complete_json_object(fragment: bytes) -> bool:
@@ -100,18 +132,81 @@ def _split_at_last_complete_line(data: bytes) -> tuple[bytes, bytes]:
     return data[: newline_index + 1], fragment
 
 
+def _iter_line_spans(data: bytes, base_offset: int) -> list[tuple[int, int, bytes]]:
+    """Split ``data`` into ``(byte_offset, byte_len, line_bytes)`` per line.
+
+    ``byte_offset`` is the absolute file offset of the line (``base_offset`` plus
+    the line's position within ``data``); ``byte_len`` is the line length in
+    bytes including its trailing newline (the final line may lack one). The line
+    bytes include the newline so re-reading exactly ``byte_len`` bytes at
+    ``byte_offset`` reproduces the line.
+    """
+    spans: list[tuple[int, int, bytes]] = []
+    pos = 0
+    length = len(data)
+    while pos < length:
+        newline_index = data.find(b"\n", pos)
+        if newline_index == -1:
+            line = data[pos:]
+            next_pos = length
+        else:
+            line = data[pos : newline_index + 1]
+            next_pos = newline_index + 1
+        spans.append((base_offset + pos, len(line), line))
+        pos = next_pos
+    return spans
+
+
+class EventLocator(tuple[str, str, int, int]):
+    """A bodyless pointer to a single parsed event within a session file.
+
+    ``byte_offset`` / ``byte_len`` address the source JSONL *line* (a line may
+    yield more than one event, so several locators can share a byte range).
+    Re-reading those bytes and re-parsing reconstructs the event body.
+
+    A ``tuple`` subclass with ``__slots__ = ()`` so each instance is as small as
+    a plain 4-tuple (no ``__dict__``): there is one locator per event for the
+    whole unbounded transcript, so keeping the per-event footprint minimal is
+    the point of the locator tier. The property accessors give named, readable
+    access without the per-instance overhead of a model.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, event_id: str, timestamp: str, byte_offset: int, byte_len: int) -> EventLocator:
+        return super().__new__(cls, (event_id, timestamp, byte_offset, byte_len))
+
+    @property
+    def event_id(self) -> str:
+        return self[0]
+
+    @property
+    def timestamp(self) -> str:
+        return self[1]
+
+    @property
+    def byte_offset(self) -> int:
+        return self[2]
+
+    @property
+    def byte_len(self) -> int:
+        return self[3]
+
+
 class SessionFileState:
-    """Tracks reading and parsed-events cache state for a single session JSONL file.
+    """Tracks reading and locator state for a single session JSONL file.
 
     ``byte_offset_consumed`` is the number of bytes through the last complete
-    line that has been parsed into ``events`` (an append-only cache of all
-    parsed events for the file). ``last_mtime`` lets the poller short-circuit
-    when neither size nor mtime changed.
+    line that has been parsed into ``locators`` (the append-only locator index
+    for the file). ``last_mtime`` lets the poller short-circuit when neither size
+    nor mtime changed. Parsed event *bodies* are not stored here -- they live in
+    the watcher's bounded body cache.
 
-    ``emitted_count`` is the number of leading ``events`` already handed to the
+    ``emitted_count`` is the number of leading ``locators`` already handed to the
     ``on_events`` SSE fan-out. It is tracked separately from parsing so the poll
-    loop emits every not-yet-emitted event even when a concurrent HTTP
-    ``get_all_events`` was the thread that actually parsed the new tail.
+    loop emits every not-yet-emitted event even when a concurrent HTTP read was
+    the thread that actually parsed (and advanced the byte offset past) the new
+    tail.
     """
 
     def __init__(self, session_id: str, file_path: Path) -> None:
@@ -119,7 +214,7 @@ class SessionFileState:
         self.file_path = file_path
         self.byte_offset_consumed: int = 0
         self.last_mtime: float = 0.0
-        self.events: list[dict[str, Any]] = []
+        self.locators: list[EventLocator] = []
         self.emitted_count: int = 0
 
 
@@ -132,18 +227,22 @@ class AgentSessionWatcher:
         agent_state_dir: Path,
         claude_config_dir: Path,
         on_events: Callable[[str, list[dict[str, Any]]], None],
+        body_cache_capacity: int = _DEFAULT_BODY_CACHE_CAPACITY,
     ) -> None:
         self._agent_id = agent_id
         self._agent_state_dir = agent_state_dir
         self._claude_config_dir = claude_config_dir
         self._on_events = on_events
+        self._body_cache_capacity = body_cache_capacity
 
-        # Guards every shared collection below, plus every SessionFileState.
-        # Held across file I/O and parsing (cheap, incremental, per-agent) but
-        # never across the on_events fan-out callback.
+        # Guards _session_states, _main_session_ids, _tool_name_by_call_id,
+        # _existing_event_ids, _subagent_metadata, _subagent_meta_read_failed,
+        # _subagent_tool_use_id, _subagent_id_by_tool_call,
+        # _unlinked_agent_parent_events, _body_cache, _locator_ref_by_id, and
+        # every SessionFileState. Held across file I/O and parsing (cheap,
+        # incremental, per-agent) but never across the on_events fan-out callback.
         self._lock = threading.Lock()
         self._session_states: dict[str, SessionFileState] = {}
-        self._known_session_ids: list[str] = []
         self._main_session_ids: list[str] = []
         self._tool_name_by_call_id: dict[str, str] = {}
         self._existing_event_ids: set[str] = set()
@@ -173,6 +272,11 @@ class AgentSessionWatcher:
         # _rebroadcast_relinked_parents). Fully-linked parents are never cached.
         self._unlinked_agent_parent_events: dict[str, dict[str, Any]] = {}
 
+        # Bounded LRU of parsed event bodies, keyed by event_id, plus a bodyless
+        # locator -> position index so any event can be located and re-resolved.
+        self._body_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._locator_ref_by_id: dict[str, tuple[SessionFileState, int]] = {}
+
         self._wake_event = threading.Event()
         self._stop_event = threading.Event()
         self._observer: Any = None
@@ -193,55 +297,139 @@ class AgentSessionWatcher:
             self._thread.join(timeout=5.0)
 
     def get_all_events(self, session_id: str | None = None) -> list[dict[str, Any]]:
-        """Read session files and return parsed events.
+        """Read session files and return every parsed event, sorted by timestamp.
+
+        Resolves all event bodies (re-parsing any evicted from the body cache),
+        so this is O(total events) and is intended for the bounded subagent
+        transcripts and as a compatibility/oracle path -- the main-view hot path
+        uses :meth:`get_tail_events` / :meth:`get_backfill_events`.
 
         Args:
             session_id: If provided, only return events from this session.
                 If None, return events from main sessions only (not subagents).
         """
-        self._discover_sessions()
+        states = self._selected_states_current(session_id)
 
         with self._lock:
-            states = list(self._session_states.values())
-            main_session_ids = set(self._main_session_ids)
+            pairs: list[tuple[SessionFileState, EventLocator]] = []
+            for state in states:
+                for locator in state.locators:
+                    pairs.append((state, locator))
+            pairs.sort(key=lambda pair: pair[1].timestamp)
+            events = self._resolve_bodies_locked(pairs)
 
-        selected_states: list[SessionFileState] = []
-        for state in states:
-            if not state.file_path.exists():
-                continue
-            if session_id is not None and state.session_id != session_id:
-                continue
-            if session_id is None and state.session_id not in main_session_ids:
-                continue
-            selected_states.append(state)
+        self._enrich_subagent_metadata(events)
+        return events
 
-        all_events: list[dict[str, Any]] = []
-        for state in selected_states:
-            self._ensure_cache_current(state)
-            with self._lock:
-                all_events.extend(state.events)
+    def get_tail_events(self, limit: int, session_id: str | None = None) -> list[dict[str, Any]]:
+        """Return the most recent ``limit`` events (chronological order).
 
-        all_events.sort(key=lambda e: e.get("timestamp", ""))
-        self._enrich_subagent_metadata(all_events)
-        return all_events
+        Bounded: walks only the tail of the locator index and resolves at most
+        ``limit`` event bodies, never reading the whole transcript.
+        """
+        if limit <= 0:
+            return []
+        states = self._selected_states_current(session_id)
+
+        with self._lock:
+            tail = self._collect_tail_locked(states, limit)
+            events = self._resolve_bodies_locked(tail)
+
+        self._enrich_subagent_metadata(events)
+        return events
 
     def get_backfill_events(
         self, before_event_id: str, limit: int = 50, session_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """Get events before a given event_id for backfill pagination."""
-        all_events = self.get_all_events(session_id=session_id)
+        """Return up to ``limit`` events immediately before ``before_event_id``.
 
-        target_idx = -1
-        for i, event in enumerate(all_events):
-            if event["event_id"] == before_event_id:
-                target_idx = i
-                break
-
-        if target_idx <= 0:
+        Bounded: the target is located through the ``_locator_ref_by_id`` index
+        (O(1)) and at most ``limit`` bodies are resolved (re-read from disk on a
+        cache miss), so a page costs O(limit) regardless of how far back it
+        reaches.
+        """
+        if limit <= 0:
             return []
+        states = self._selected_states_current(session_id)
 
-        start_idx = max(0, target_idx - limit)
-        return all_events[start_idx:target_idx]
+        with self._lock:
+            page = self._collect_before_locked(states, before_event_id, limit)
+            events = self._resolve_bodies_locked(page)
+
+        self._enrich_subagent_metadata(events)
+        return events
+
+    def get_forward_events(self, after_event_id: str, limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
+        """Return up to ``limit`` events immediately AFTER ``after_event_id``.
+
+        The mirror of :meth:`get_backfill_events`, for paging newer when the loaded
+        window is not at the live tail (e.g. after a jump to an earlier position).
+        Bounded: the cursor is located via ``_locator_ref_by_id`` (O(1)) and at most
+        ``limit`` bodies are resolved, so a page costs O(limit).
+        """
+        if limit <= 0:
+            return []
+        states = self._selected_states_current(session_id)
+
+        with self._lock:
+            page = self._collect_after_locked(states, after_event_id, limit)
+            events = self._resolve_bodies_locked(page)
+
+        self._enrich_subagent_metadata(events)
+        return events
+
+    def get_events_at_offset(self, offset: int, limit: int, session_id: str | None = None) -> list[dict[str, Any]]:
+        """Return up to ``limit`` events starting at global index ``offset``.
+
+        Lets the client jump straight to an arbitrary scroll position (mapped to an
+        event index) in a single bounded read, instead of paging through every
+        event in between. Bounded: skips whole files by length and resolves at most
+        ``limit`` bodies, so it never reads the full transcript. ``offset`` is
+        clamped to ``[0, total]``.
+        """
+        if limit <= 0:
+            return []
+        states = self._selected_states_current(session_id)
+
+        with self._lock:
+            page = self._collect_at_offset_locked(states, max(0, offset), limit)
+            events = self._resolve_bodies_locked(page)
+
+        self._enrich_subagent_metadata(events)
+        return events
+
+    def get_event_offset(self, event_id: str, session_id: str | None = None) -> int:
+        """Global index of ``event_id`` in the selected timeline, or -1 if unknown.
+
+        Each ``/events`` response reports the offset of its first event so the
+        client knows where the loaded window sits in the whole conversation -- it
+        derives both the scrollbar size and whether more history exists above and
+        below from this plus :meth:`get_total_event_count`. O(sessions); resolves
+        no bodies.
+        """
+        states = self._selected_states_current(session_id)
+        with self._lock:
+            ref = self._locator_ref_by_id.get(event_id)
+            if ref is None:
+                return -1
+            ref_state, ref_idx = ref
+            try:
+                state_pos = states.index(ref_state)
+            except ValueError:
+                return -1
+            return sum(len(states[pos].locators) for pos in range(state_pos)) + ref_idx
+
+    def get_total_event_count(self, session_id: str | None = None) -> int:
+        """Total number of events in the selected timeline.
+
+        Counts locators only -- no body resolution -- so it is O(sessions),
+        regardless of transcript length. Lets the client size the scrollbar for
+        the whole conversation while only a tail window is loaded, so paging
+        older history in does not make the scrollbar jump.
+        """
+        states = self._selected_states_current(session_id)
+        with self._lock:
+            return sum(len(state.locators) for state in states)
 
     def get_subagent_metadata(self, subagent_session_id: str) -> dict[str, str] | None:
         """Get metadata for a subagent by its session ID."""
@@ -264,20 +452,209 @@ class AgentSessionWatcher:
         with self._lock:
             return session_id in self._main_session_ids
 
-    def _ensure_cache_current(self, state: SessionFileState, mark_all_emitted: bool = False) -> None:
-        """Bring ``state``'s cache up to the file's current contents under the lock.
+    def _selected_states_current(self, session_id: str | None) -> list[SessionFileState]:
+        """Discover sessions, bring the selected files' caches current, return them.
 
-        Appends any newly parsed events to ``state.events`` (the full accumulated
-        transcript). Emission to SSE clients is decoupled from parsing: callers
+        The returned list is ordered chronologically by session (main sessions in
+        history order; a single session when ``session_id`` is given). Cache
+        refresh happens outside the returned-list construction so callers can take
+        the lock once for the read phase.
+        """
+        self._discover_sessions()
+
+        with self._lock:
+            states = self._ordered_selected_states_locked(session_id)
+
+        # _ensure_cache_current locks internally; call it outside the lock above.
+        for state in states:
+            if state.file_path.exists():
+                self._ensure_cache_current(state)
+        return states
+
+    def _ordered_selected_states_locked(self, session_id: str | None) -> list[SessionFileState]:
+        """Return the selected session states in chronological order (lock held)."""
+        if session_id is not None:
+            state = self._session_states.get(session_id)
+            return [state] if state is not None else []
+        # Main sessions in history (chronological) order. Resumed sessions do not
+        # overlap in time, so this order matches the merged timestamp order.
+        ordered: list[SessionFileState] = []
+        for sid in self._main_session_ids:
+            state = self._session_states.get(sid)
+            if state is not None:
+                ordered.append(state)
+        return ordered
+
+    def _collect_tail_locked(
+        self, states: list[SessionFileState], limit: int
+    ) -> list[tuple[SessionFileState, EventLocator]]:
+        """Collect the last ``limit`` locators across ``states`` (chronological, lock held).
+
+        Walks states from newest to oldest, taking only as many locators as
+        needed from each file's tail -- O(limit + file count), never O(total events).
+        """
+        collected: list[tuple[SessionFileState, EventLocator]] = []
+        needed = limit
+        pos = len(states) - 1
+        while needed > 0 and pos >= 0:
+            locators = states[pos].locators
+            start = max(0, len(locators) - needed)
+            chunk = [(states[pos], locator) for locator in locators[start:]]
+            collected = chunk + collected
+            needed -= len(locators) - start
+            pos -= 1
+        return collected
+
+    def _collect_before_locked(
+        self, states: list[SessionFileState], before_event_id: str, limit: int
+    ) -> list[tuple[SessionFileState, EventLocator]]:
+        """Collect up to ``limit`` locators immediately before ``before_event_id`` (lock held).
+
+        Locates the target via ``_locator_ref_by_id`` (O(1)) then walks backward
+        across the selected files -- O(limit + file count). Returns [] if the target
+        is unknown, is the very first event, or is not in the selected sessions.
+        """
+        ref = self._locator_ref_by_id.get(before_event_id)
+        if ref is None:
+            return []
+        ref_state, ref_idx = ref
+        try:
+            state_pos = states.index(ref_state)
+        except ValueError:
+            return []
+
+        collected: list[tuple[SessionFileState, EventLocator]] = []
+        needed = limit
+        pos = state_pos
+        while needed > 0 and pos >= 0:
+            state = states[pos]
+            end = ref_idx if state is ref_state else len(state.locators)
+            start = max(0, end - needed)
+            chunk = [(state, locator) for locator in state.locators[start:end]]
+            collected = chunk + collected
+            needed -= end - start
+            pos -= 1
+        return collected
+
+    def _collect_after_locked(
+        self, states: list[SessionFileState], after_event_id: str, limit: int
+    ) -> list[tuple[SessionFileState, EventLocator]]:
+        """Collect up to ``limit`` locators immediately after ``after_event_id`` (lock held).
+
+        Mirror of :meth:`_collect_before_locked`: locates the cursor via
+        ``_locator_ref_by_id`` (O(1)) then walks forward across the selected files.
+        Returns [] if the cursor is unknown or not in the selected sessions.
+        """
+        ref = self._locator_ref_by_id.get(after_event_id)
+        if ref is None:
+            return []
+        ref_state, ref_idx = ref
+        try:
+            state_pos = states.index(ref_state)
+        except ValueError:
+            return []
+
+        collected: list[tuple[SessionFileState, EventLocator]] = []
+        needed = limit
+        pos = state_pos
+        while needed > 0 and pos < len(states):
+            state = states[pos]
+            start = ref_idx + 1 if state is ref_state else 0
+            end = min(len(state.locators), start + needed)
+            collected.extend((state, locator) for locator in state.locators[start:end])
+            needed -= end - start
+            pos += 1
+        return collected
+
+    def _collect_at_offset_locked(
+        self, states: list[SessionFileState], offset: int, limit: int
+    ) -> list[tuple[SessionFileState, EventLocator]]:
+        """Collect ``limit`` locators starting at global index ``offset`` (lock held).
+
+        Skips whole files by length until reaching the offset, then takes locators
+        across file boundaries -- O(limit + file count), never O(total events).
+        """
+        collected: list[tuple[SessionFileState, EventLocator]] = []
+        skip = offset
+        needed = limit
+        for state in states:
+            count = len(state.locators)
+            if skip >= count:
+                skip -= count
+                continue
+            start = skip
+            skip = 0
+            end = min(count, start + needed)
+            collected.extend((state, locator) for locator in state.locators[start:end])
+            needed -= end - start
+            if needed <= 0:
+                break
+        return collected
+
+    def _cache_put_locked(self, event: dict[str, Any]) -> None:
+        """Insert/refresh an event body in the LRU, evicting the oldest if over capacity."""
+        event_id = event["event_id"]
+        self._body_cache[event_id] = event
+        self._body_cache.move_to_end(event_id)
+        while len(self._body_cache) > self._body_cache_capacity:
+            self._body_cache.popitem(last=False)
+
+    def _resolve_bodies_locked(self, pairs: list[tuple[SessionFileState, EventLocator]]) -> list[dict[str, Any]]:
+        """Resolve event bodies for ``pairs``, re-reading from disk on a miss (lock held)."""
+        events: list[dict[str, Any]] = []
+        for state, locator in pairs:
+            body = self._body_cache.get(locator.event_id)
+            if body is not None:
+                self._body_cache.move_to_end(locator.event_id)
+            else:
+                for reparsed in self._reparse_line_locked(state, locator):
+                    self._cache_put_locked(reparsed)
+                body = self._body_cache.get(locator.event_id)
+            if body is not None:
+                events.append(body)
+        return events
+
+    def _reparse_line_locked(self, state: SessionFileState, locator: EventLocator) -> list[dict[str, Any]]:
+        """Re-read and parse the single source line a locator points at (lock held).
+
+        Parses with deduplication disabled so the body is reconstructed even
+        though its ID is already in the agent-wide seen-set, and reuses the
+        persistent tool-name map so re-parsed tool_result events keep their tool
+        names. Returns every event the line yields (a line may produce several).
+        """
+        try:
+            with open(state.file_path, "rb") as f:
+                f.seek(locator.byte_offset)
+                raw = f.read(locator.byte_len)
+        except OSError as e:
+            logger.debug("Failed to re-read session line {}@{}: {}", state.file_path, locator.byte_offset, e)
+            return []
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError as e:
+            logger.warning("UTF-8 decode error re-reading {}@{}: {}", state.file_path, locator.byte_offset, e)
+            return []
+        return parse_session_lines(
+            decoded.splitlines(),
+            existing_event_ids=None,
+            tool_name_by_call_id=self._tool_name_by_call_id,
+            session_id=state.session_id,
+        )
+
+    def _ensure_cache_current(self, state: SessionFileState, mark_all_emitted: bool = False) -> None:
+        """Bring ``state``'s locator index up to the file's current contents (lock held internally).
+
+        Appends a locator for each newly parsed event and writes its body into the
+        bounded LRU. Emission to SSE clients is decoupled from parsing: callers
         that need to broadcast deltas drive that off ``state.emitted_count`` so a
         concurrent HTTP read parsing the tail does not rob the poll loop of the
         events to emit.
 
         When ``mark_all_emitted`` is set (the priming path), the whole current
         backlog is marked as already emitted *in the same lock hold* that filled
-        the cache. Splitting the fill and the mark across two lock acquisitions
-        would let a concurrent ``get_all_events`` append events in between that
-        then get marked emitted and never reach SSE clients.
+        the index. Splitting the fill and the mark across two lock acquisitions
+        would let a concurrent read append locators in between that then get
+        marked emitted and never reach SSE clients.
         """
         with self._lock:
             try:
@@ -291,22 +668,24 @@ class AgentSessionWatcher:
 
             # Truncation / rotation: the file shrank below what we have already
             # consumed, so our offset is stale. Reset and re-read from the start.
-            # Discard this file's event IDs from the agent-wide dedup set first;
-            # otherwise the re-read would be deduplicated against the stale
-            # pre-truncation IDs and silently drop every record whose ID recurs
-            # (the typical atomic save-rewrite case), leaving the cache empty.
+            # Purge this file's event IDs from the agent-wide dedup set and its
+            # locator references first; otherwise the re-read would be
+            # deduplicated against the stale pre-truncation IDs and silently drop
+            # every record whose ID recurs (the typical atomic save-rewrite
+            # case), and the locator index would keep dangling pre-truncation
+            # offsets. The re-read content must be re-emitted to live SSE clients,
+            # so the emission marker resets alongside the index.
             if current_size < state.byte_offset_consumed:
-                for event in state.events:
-                    self._existing_event_ids.discard(event["event_id"])
+                for locator in state.locators:
+                    self._existing_event_ids.discard(locator.event_id)
+                    self._locator_ref_by_id.pop(locator.event_id, None)
                 state.byte_offset_consumed = 0
-                state.events = []
-                # The re-read content must be re-emitted to live SSE clients, so
-                # the emission marker resets alongside the cache.
+                state.locators = []
                 state.emitted_count = 0
 
             if current_size == state.byte_offset_consumed and current_mtime == state.last_mtime:
                 if mark_all_emitted:
-                    state.emitted_count = len(state.events)
+                    state.emitted_count = len(state.locators)
                 return
 
             try:
@@ -321,25 +700,39 @@ class AgentSessionWatcher:
             if not complete:
                 # Only a partial trailing line so far; leave the offset where it
                 # is and re-read on the next poll once the writer flushes.
+                if mark_all_emitted:
+                    state.emitted_count = len(state.locators)
                 return
 
-            try:
-                decoded = complete.decode("utf-8")
-            except UnicodeDecodeError as e:
-                logger.warning("UTF-8 decode error in session file {}: {}", state.file_path, e)
-                return
+            for byte_offset, byte_len, line_bytes in _iter_line_spans(complete, state.byte_offset_consumed):
+                try:
+                    decoded_line = line_bytes.decode("utf-8")
+                except UnicodeDecodeError as e:
+                    logger.warning("UTF-8 decode error in session file {}: {}", state.file_path, e)
+                    continue
+                line_events = parse_session_lines(
+                    decoded_line.splitlines(),
+                    existing_event_ids=self._existing_event_ids,
+                    tool_name_by_call_id=self._tool_name_by_call_id,
+                    session_id=state.session_id,
+                )
+                for event in line_events:
+                    locator = EventLocator(
+                        event_id=event["event_id"],
+                        timestamp=event.get("timestamp", ""),
+                        byte_offset=byte_offset,
+                        byte_len=byte_len,
+                    )
+                    self._locator_ref_by_id[locator.event_id] = (state, len(state.locators))
+                    state.locators.append(locator)
+                    self._cache_put_locked(event)
+                    if event.get("type") == "tool_result" and "subagent_id" in event:
+                        self._subagent_id_by_tool_call.setdefault(event["tool_call_id"], event["subagent_id"])
 
-            new_events = parse_session_lines(
-                decoded.splitlines(),
-                existing_event_ids=self._existing_event_ids,
-                tool_name_by_call_id=self._tool_name_by_call_id,
-                session_id=state.session_id,
-            )
             state.byte_offset_consumed += len(complete)
             state.last_mtime = current_mtime
-            state.events.extend(new_events)
             if mark_all_emitted:
-                state.emitted_count = len(state.events)
+                state.emitted_count = len(state.locators)
 
     def _enrich_subagent_metadata(self, events: list[dict[str, Any]]) -> None:
         """Enrich Agent tool_use events with subagent metadata.
@@ -432,22 +825,21 @@ class AgentSessionWatcher:
             self._observer.join(timeout=5.0)
 
     def _prime_caches(self) -> None:
-        """Parse the existing backlog into each cache without emitting it.
+        """Parse the existing backlog into each locator index without emitting it.
 
-        The initial transcript is delivered to clients via the REST
-        ``get_all_events`` path, so the watcher must not also broadcast the
-        backlog through ``on_events`` (that would flood the bounded SSE queues
-        for long histories). Priming fills ``cache.events`` and advances the
-        byte offset to EOF, then marks the whole backlog as already emitted so
-        the poll loop afterwards emits only events appended after start.
+        The initial transcript is delivered to clients via the REST tail/backfill
+        path, so the watcher must not also broadcast the backlog through
+        ``on_events`` (that would flood the bounded SSE queues for long
+        histories). Priming builds each file's locator index, advances the byte
+        offset to EOF, and marks the whole backlog as already emitted -- all in a
+        single lock hold per file so a concurrent read cannot slip in events that
+        then get marked emitted and never reach SSE clients. Bodies beyond the
+        cache capacity are dropped here and re-read on demand.
         """
         with self._lock:
             states = list(self._session_states.values())
         for state in states:
             if state.file_path.exists():
-                # Fill the cache and mark the whole backlog emitted atomically so
-                # a concurrent get_all_events cannot slip in events that then get
-                # marked emitted and never reach SSE clients.
                 self._ensure_cache_current(state, mark_all_emitted=True)
 
     def _discover_sessions(self) -> None:
@@ -486,7 +878,6 @@ class AgentSessionWatcher:
                 if session_id in self._session_states:
                     continue
                 self._session_states[session_id] = SessionFileState(session_id, file_path)
-                self._known_session_ids.append(session_id)
                 self._main_session_ids.append(session_id)
 
             # Set up watchdog for the new file
@@ -522,7 +913,6 @@ class AgentSessionWatcher:
                 is_new_session = sub_id not in self._session_states
                 if is_new_session:
                     self._session_states[sub_id] = SessionFileState(sub_id, jsonl_file)
-                    self._known_session_ids.append(sub_id)
                 meta_already_resolved = sub_id in self._subagent_metadata or sub_id in self._subagent_meta_read_failed
 
             if is_new_session and self._observer is not None:
@@ -608,9 +998,11 @@ class AgentSessionWatcher:
     def _poll_for_changes(self) -> None:
         """Check all session files for new content and emit any not-yet-emitted events.
 
-        Emission is driven by ``emitted_count`` rather than by what this call
-        parsed, so events that a concurrent HTTP ``get_all_events`` parsed into
-        the cache are still delivered to connected SSE clients exactly once.
+        Emission is driven by ``emitted_count`` (a high-water mark over the
+        locator index) rather than by what this call parsed, so events that a
+        concurrent HTTP read parsed into the index are still delivered to
+        connected SSE clients exactly once. Pending bodies are resolved from the
+        LRU (re-read from disk on a miss) before broadcast.
 
         Each batch is enriched with subagent metadata before broadcast, and any
         Agent-parent events still missing linkage are cached so a later cycle can
@@ -625,8 +1017,9 @@ class AgentSessionWatcher:
 
             self._ensure_cache_current(state)
             with self._lock:
-                pending_events = state.events[state.emitted_count :]
-                state.emitted_count = len(state.events)
+                pending_pairs = [(state, locator) for locator in state.locators[state.emitted_count :]]
+                state.emitted_count = len(state.locators)
+                pending_events = self._resolve_bodies_locked(pending_pairs)
             if pending_events:
                 self._enrich_subagent_metadata(pending_events)
                 self._cache_unlinked_agent_parents(pending_events)

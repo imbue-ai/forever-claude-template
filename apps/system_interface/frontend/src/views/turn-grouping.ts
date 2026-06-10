@@ -22,7 +22,13 @@
  * The walk maintains a single "current open step": events while a step is
  * open group under it; events while none is open fall into an ungrouped
  * run rendered inline (the same plain-chat path used for turns with no
- * steps). A step still open when the next user message arrives carries over:
+ * steps). A step's closing prose -- text it spoke after its last work, before
+ * handing off to the next step -- is ejected from the step into a standalone
+ * "interjection" that breaks the timeline thread between the two steps, so it
+ * stays promoted rather than collapsing back under the closing step. (When the
+ * closing prose is the last thing in the turn, it is the trailing reply
+ * instead, rendered below the timeline.) A step still open when the next user
+ * message arrives carries over:
  * it re-renders at the top of the new turn, while the prior turn's node
  * freezes at its last-known state.
  *
@@ -79,6 +85,12 @@ export type TimelineItem =
   /** Real work (and/or prose) that happened while no step was open. Rendered
    *  inline, exactly like a no-steps plain-chat turn. */
   | { kind: "ungrouped"; key: string; events: AssistantMessageEvent[] }
+  /** Prose the agent spoke as the closing words of a step that then handed off
+   *  to more work -- the last thing it said before the next step. It promotes
+   *  to a standalone block that breaks the timeline thread *between* the two
+   *  steps (never collapses back under the closing step). Distinct from
+   *  `ungrouped` (work with no step) so the renderer can mark the break. */
+  | { kind: "interjection"; key: string; events: AssistantMessageEvent[] }
   /** A non-boundary user message shown inline (e.g. a stop-hook chip). */
   | { kind: "chip"; event: UserMessageEvent };
 
@@ -382,19 +394,41 @@ function finalizeSection(
   agentIsIdle: boolean,
   is_tail: boolean,
 ): SectionView {
+  // 0. Per-step trailing prose: prose spoken inside a step after its last work
+  //    (so it is NOT narration, which is prose *followed* by more work in the
+  //    same step). This is the agent's closing remark for the step. If the step
+  //    was the last thing in the section it becomes the trailing reply (step 1);
+  //    otherwise -- a step that handed off to more work/another step -- it is
+  //    promoted to an inter-step interjection (step 1b) so it renders as a break
+  //    between the two steps and never collapses back under the closing step.
+  const trailingProseIds = new Set<string>();
+  for (const id of section.step_order) {
+    const node = section.steps.get(id)!;
+    let lastWorkIdx = -1;
+    for (let i = 0; i < node.events.length; i++) if (isWork(node.events[i])) lastWorkIdx = i;
+    for (let i = lastWorkIdx + 1; i < node.events.length; i++) {
+      if (isProse(node.events[i])) trailingProseIds.add(node.events[i].event_id);
+    }
+  }
+
   // 1. Trailing reply: text-only messages after the reply boundary -- the
-  //    later of the last real (non-tk) work and the last stop-hook chip.
+  //    latest of the last real (non-tk) work, the last step appearance, and the
+  //    last stop-hook chip. Including the last step appearance keeps closing
+  //    prose promoted to an inter-step break (not the below-timeline reply) the
+  //    moment the next step starts, even before it does any work.
   //    Treating a chip as a boundary keeps a reply written before a chip inline
   //    at its chronological spot (rather than hoisting it below the chip), so a
   //    chip that interrupts two reply fragments still reads top-to-bottom.
   let lastWorkEntryIdx = -1;
+  let lastStepEntryIdx = -1;
   for (let i = 0; i < section.entries.length; i++) {
     const en = section.entries[i];
     if (en.kind === "event" && isWork(en.event)) lastWorkEntryIdx = i;
+    if (en.kind === "step") lastStepEntryIdx = i;
   }
   let maxChipAfter = -1;
   for (const c of section.chips) if (c.after > maxChipAfter) maxChipAfter = c.after;
-  const replyBoundary = Math.max(lastWorkEntryIdx, maxChipAfter);
+  const replyBoundary = Math.max(lastWorkEntryIdx, lastStepEntryIdx, maxChipAfter);
   const trailingIds = new Set<string>();
   const trailing_reply: AssistantMessageEvent[] = [];
   for (let i = replyBoundary + 1; i < section.entries.length; i++) {
@@ -406,6 +440,20 @@ function finalizeSection(
     if (en.step_id !== null) {
       const node = section.steps.get(en.step_id);
       if (node !== undefined) node.events = node.events.filter((ev) => ev.event_id !== en.event.event_id);
+    }
+  }
+
+  // 1b. Inter-step interjections: a step's closing prose that is NOT the
+  //     section's trailing reply -- i.e. the step handed off to more work or
+  //     another step after speaking. Eject it from the step so it renders as a
+  //     standalone break between the two steps (see the timeline build) instead
+  //     of collapsing back under the closing step.
+  const interjectionIds = new Set<string>();
+  for (const evId of trailingProseIds) if (!trailingIds.has(evId)) interjectionIds.add(evId);
+  if (interjectionIds.size > 0) {
+    for (const id of section.step_order) {
+      const node = section.steps.get(id)!;
+      node.events = node.events.filter((ev) => !interjectionIds.has(ev.event_id));
     }
   }
 
@@ -452,11 +500,23 @@ function finalizeSection(
   const emittedSteps = new Set<string>();
   let ungrouped: AssistantMessageEvent[] = [];
   let ungroupedKey = 0;
+  let interjection: AssistantMessageEvent[] = [];
+  let interjectionKey = 0;
   const flushUngrouped = (): void => {
     if (ungrouped.length > 0) {
       items.push({ kind: "ungrouped", key: `${section.key}-ung-${ungroupedKey++}`, events: ungrouped });
       ungrouped = [];
     }
+  };
+  const flushInterjection = (): void => {
+    if (interjection.length > 0) {
+      items.push({ kind: "interjection", key: `${section.key}-int-${interjectionKey++}`, events: interjection });
+      interjection = [];
+    }
+  };
+  const flushInline = (): void => {
+    flushInterjection();
+    flushUngrouped();
   };
 
   const chipsAfter = new Map<number, UserMessageEvent[]>();
@@ -467,7 +527,7 @@ function finalizeSection(
   }
   const emitChips = (afterIdx: number): void => {
     for (const c of chipsAfter.get(afterIdx) ?? []) {
-      flushUngrouped();
+      flushInline();
       items.push({ kind: "chip", event: c });
     }
   };
@@ -478,20 +538,27 @@ function finalizeSection(
   for (let i = 0; i < section.entries.length; i++) {
     const entry = section.entries[i];
     if (entry.kind === "step") {
-      flushUngrouped();
+      flushInline();
       if (!emittedSteps.has(entry.id)) {
         items.push({ kind: "step", step: section.steps.get(entry.id)! });
         emittedSteps.add(entry.id);
       }
-    } else if (!trailingIds.has(entry.event.event_id) && entry.step_id === null) {
+    } else if (trailingIds.has(entry.event.event_id)) {
+      // Trailing reply: rendered below the timeline (see trailing_reply).
+    } else if (interjectionIds.has(entry.event.event_id)) {
+      // A step's closing prose ejected from the step: it breaks the thread
+      // between this step and the next as a standalone interjection.
+      flushUngrouped();
+      interjection.push(entry.event);
+    } else if (entry.step_id === null) {
       // An ungrouped event (no step open): coalesce into an inline run.
-      // In-step events render inside the step node; trailing prose renders
-      // below the timeline (see trailing_reply).
+      // In-step events render inside the step node.
+      flushInterjection();
       ungrouped.push(entry.event);
     }
     emitChips(i);
   }
-  flushUngrouped();
+  flushInline();
 
   // 6. Pending roster (tail section only): steps in enrichment that never
   //    started anywhere, as dashed placeholders at the tail, in tk `created`

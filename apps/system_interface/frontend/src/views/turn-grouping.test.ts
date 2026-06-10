@@ -273,6 +273,128 @@ describe("reply promotion", () => {
   });
 });
 
+describe("inter-step interjections", () => {
+  // The reported bug: a step's closing prose was attached to the closing step,
+  // so it promoted to the below-timeline reply while that step was last, then
+  // collapsed back under the step once the next step started. It must instead
+  // promote to a standalone interjection that breaks the thread BETWEEN the two
+  // steps and stays there.
+  it("promotes a step's closing prose to an interjection between the two steps", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      assistantText("2026-04-28T01:00:03Z", "Found the theme; wiring it up next.", "mid"),
+      tkMsg("2026-04-28T01:00:04Z", "tk close s1", "t1c"),
+      result("2026-04-28T01:00:04Z", "t1c", "Updated s1 -> closed"),
+      tkMsg("2026-04-28T01:00:05Z", "tk start s2", "t2"),
+      result("2026-04-28T01:00:05Z", "t2", "Updated s2 -> in_progress"),
+      workMsg("2026-04-28T01:00:06Z", "Edit", "w2"),
+      result("2026-04-28T01:00:06Z", "w2", "ok"),
+    ];
+    const sections = run(
+      events,
+      enrich({ s1: { status: "closed" }, s2: { status: "in_progress" } }),
+      /* idle */ false,
+    );
+    const items = sections[0].items;
+    // step s1, then the interjection, then step s2 -- in that order.
+    expect(items.map((i) => i.kind)).toEqual(["step", "interjection", "step"]);
+    const inter = items[1] as { kind: "interjection"; events: AssistantMessageEvent[] };
+    expect(inter.events.map((e) => e.event_id)).toEqual(["mid"]);
+    // The closing prose is NOT buried in the closing step, and NOT the reply.
+    const steps = stepItems(items);
+    expect(steps[0].events.map((e) => e.event_id)).toEqual(["a-w1"]);
+    expect(steps[0].narration).toBeNull();
+    expect(sections[0].trailing_reply).toHaveLength(0);
+  });
+
+  // The live moment between "start the next step" and "issue its first tool
+  // call": the closing prose must already be an interjection, not the
+  // below-timeline reply -- otherwise it would jump positions as work arrives.
+  it("treats closing prose as an interjection the moment the next step starts, before it does work", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      assistantText("2026-04-28T01:00:03Z", "Done with that; on to the next.", "mid"),
+      tkMsg("2026-04-28T01:00:04Z", "tk close s1", "t1c"),
+      result("2026-04-28T01:00:04Z", "t1c", "Updated s1 -> closed"),
+      tkMsg("2026-04-28T01:00:05Z", "tk start s2", "t2"),
+      result("2026-04-28T01:00:05Z", "t2", "Updated s2 -> in_progress"),
+    ];
+    const sections = run(
+      events,
+      enrich({ s1: { status: "closed" }, s2: { status: "in_progress" } }),
+      /* idle */ false,
+    );
+    const items = sections[0].items;
+    expect(items.map((i) => i.kind)).toEqual(["step", "interjection", "step"]);
+    const inter = items[1] as { kind: "interjection"; events: AssistantMessageEvent[] };
+    expect(inter.events.map((e) => e.event_id)).toEqual(["mid"]);
+    expect(sections[0].trailing_reply).toHaveLength(0);
+    // s2 is the live frontier.
+    const steps = stepItems(items);
+    expect(steps[1].is_frontier).toBe(true);
+  });
+
+  // The distinction that keeps the wrap-up reply below the timeline: closing
+  // prose with nothing after it (the last step of the turn) is the trailing
+  // reply, NOT an interjection.
+  it("keeps closing prose of the last step as the below-timeline reply, not an interjection", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      workMsg("2026-04-28T01:00:02Z", "Edit", "w1"),
+      result("2026-04-28T01:00:02Z", "w1", "ok"),
+      assistantText("2026-04-28T01:00:03Z", "All done -- anything else?", "reply"),
+      tkMsg("2026-04-28T01:00:04Z", "tk close s1", "t1c"),
+      result("2026-04-28T01:00:04Z", "t1c", "Updated s1 -> closed"),
+    ];
+    const sections = run(events, enrich({ s1: { status: "closed" } }));
+    expect(sections[0].items.some((i) => i.kind === "interjection")).toBe(false);
+    expect(sections[0].trailing_reply.map((e) => e.event_id)).toEqual(["reply"]);
+  });
+
+  // Narration (prose followed by more work in the SAME step) is untouched; only
+  // the prose after the step's last work is ejected as the interjection.
+  it("keeps mid-step narration in the step while ejecting only the closing prose", () => {
+    const events = [
+      userMsg("2026-04-28T01:00:00Z", "go"),
+      tkMsg("2026-04-28T01:00:01Z", "tk start s1", "t1"),
+      result("2026-04-28T01:00:01Z", "t1", "Updated s1 -> in_progress"),
+      assistantText("2026-04-28T01:00:02Z", "Patching now.", "narr"),
+      workMsg("2026-04-28T01:00:03Z", "Edit", "w1"),
+      result("2026-04-28T01:00:03Z", "w1", "ok"),
+      assistantText("2026-04-28T01:00:04Z", "Patched; moving on.", "close"),
+      tkMsg("2026-04-28T01:00:05Z", "tk close s1", "t1c"),
+      result("2026-04-28T01:00:05Z", "t1c", "Updated s1 -> closed"),
+      tkMsg("2026-04-28T01:00:06Z", "tk start s2", "t2"),
+      result("2026-04-28T01:00:06Z", "t2", "Updated s2 -> in_progress"),
+      workMsg("2026-04-28T01:00:07Z", "Edit", "w2"),
+      result("2026-04-28T01:00:07Z", "w2", "ok"),
+    ];
+    const sections = run(
+      events,
+      enrich({ s1: { status: "closed" }, s2: { status: "in_progress" } }),
+      /* idle */ false,
+    );
+    const steps = stepItems(sections[0].items);
+    expect(steps[0].narration).toBe("Patching now.");
+    // Narration prose stays in the step body; only the closing prose ejected.
+    expect(steps[0].events.map((e) => e.event_id)).toEqual(["narr", "a-w1"]);
+    const inter = sections[0].items.find((i) => i.kind === "interjection") as {
+      events: AssistantMessageEvent[];
+    };
+    expect(inter.events.map((e) => e.event_id)).toEqual(["close"]);
+  });
+});
+
 describe("carryover", () => {
   it("re-renders a still-open step at the top of the next turn with frozen prior state", () => {
     const events = [

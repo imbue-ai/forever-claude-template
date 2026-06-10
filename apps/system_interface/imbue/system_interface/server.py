@@ -343,32 +343,54 @@ def _get_events(agent_id: str, request: Request) -> Response:
         return _agent_not_found_response(agent_id)
 
     before_event_id = request.query_params.get("before")
+    after_event_id = request.query_params.get("after")
+    offset_str = request.query_params.get("offset")
     limit_str = request.query_params.get("limit", str(_DEFAULT_TAIL_COUNT))
     try:
         limit = int(limit_str)
     except ValueError:
         limit = _DEFAULT_TAIL_COUNT
-    # A non-positive limit would defeat the tail cap (``[-0:]`` returns the whole
-    # list) and break backfill slicing, so fall back to the default.
+    # A non-positive limit would defeat the window cap and break slicing, so fall
+    # back to the default.
     if limit <= 0:
         limit = _DEFAULT_TAIL_COUNT
 
     watcher = _get_or_create_watcher(request, agent_info)
     if before_event_id:
+        # Page older: the `limit` events immediately before the cursor.
         events = watcher.get_backfill_events(before_event_id, limit=limit)
+    elif after_event_id:
+        # Page newer: the `limit` events immediately after the cursor (used when
+        # the loaded window has been moved off the live tail by a jump).
+        events = watcher.get_forward_events(after_event_id, limit=limit)
+    elif offset_str is not None:
+        # Jump: a `limit`-event window starting at an arbitrary global index, so
+        # the client can land at a far scroll position in one bounded read.
+        try:
+            offset = int(offset_str)
+        except ValueError:
+            offset = 0
+        events = watcher.get_events_at_offset(offset, limit)
     else:
-        # Tail-first load: return only the most recent `limit` main-session
-        # events (not subagent events). The client pages further back via the
-        # `before` backfill branch above, so capping here bounds the initial
-        # payload without hiding history.
-        events = watcher.get_all_events()[-limit:]
+        # Initial load: the newest `limit` events (the live tail). Bounded read
+        # from the end; the client pages/jumps from here.
+        events = watcher.get_tail_events(limit)
 
+    # `total` is the full transcript length and `offset` is the global index of the
+    # first returned event. Together they place the loaded window in the whole
+    # conversation, so the client sizes the scrollbar for the full length and
+    # derives whether more history exists above (offset > 0) and below
+    # (offset + len < total) -- no separate has_more flag needed.
+    total = watcher.get_total_event_count()
+    offset = watcher.get_event_offset(events[0]["event_id"]) if events else total
     # tk step enrichment ships as a separate, unpaginated snapshot (always
     # complete regardless of where the transcript window is), joined to the
     # transcript-derived steps by id on the frontend.
     tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
     step_enrichment = tickets_watcher.get_enrichment() if tickets_watcher is not None else {}
-    return JSONResponse(content={"events": events, "step_enrichment": step_enrichment})
+    return JSONResponse(
+        content={"events": events, "offset": offset, "total": total, "step_enrichment": step_enrichment}
+    )
 
 
 def _stream_filtered_events(

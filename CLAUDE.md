@@ -100,7 +100,9 @@ Then for **each step in order**, one at a time:
    ```
 4. Move on to the next step. Only one is `in_progress` at a time.
 
-If during the work you discover a sub-problem that warrants its own step, `tk create --step` a new one (it'll appear at the bottom of the timeline). If you discover a previously-planned step is no longer needed, `tk close <id> "No longer needed — covered by the previous step."`.
+**Run `tk start` and `tk close` each as the only command in their tool call** — no `cd` prefix, no chaining (`&&`, `;`, `|`, `&`, a newline), no output redirection; otherwise the progress view can't place the step. (This applies only to `start`/`close` — you can still batch `tk create --step` calls when declaring the plan.)
+
+If during the work you discover a sub-problem that warrants its own step, `tk create --step` a new one (it'll appear at the bottom of the timeline). If you discover a previously-planned step is no longer needed, `tk close <id> "No longer needed — covered by the previous step."` (as its own command).
 
 Summary rules: ONE concise line, plain English, describing **the work you did in this step** — what the user would see if they expanded the block. Think of it as a high-level non-technical caption for the raw tool calls inside.
 
@@ -113,6 +115,7 @@ After all your steps for the turn are closed, write your final user-facing assis
 **Steps and prose:**
 - Text emitted while a step is `in_progress` shows as a live caption under the step, replaced by each new message.
 - **Close your final step *before* writing your user-facing wrap-up reply.** The progress view detects your reply by scanning backward from the end of the turn and stopping at the first closed step, so prose written *after* the last close is promoted to a top-level reply below the timeline, while prose written *before* it stays buried inside the step (reachable only by expanding it). This is best-effort, not a hard rule — the view renders sensibly either way, and if you do speak before closing you'll get a reminder to re-output user-facing text after the close.
+- **Never mention steps, tickets, or `tk` in what you say to the user.** The step machinery is invisible to them — don't narrate it ("closing this step," "moving on to the next step," "starting X"). Speak only about the actual work and its subject matter, as if the timeline weren't there. Step titles and close summaries are the one place step structure may surface, and even those describe the *work*, not the act of tracking it.
 - Steps may stay open across turns. Close when work is done; leave open if work continues.
 
 ## Working with regular tickets
@@ -180,7 +183,7 @@ Only after doing all of the above should you begin writing code.
 # Important commands and conventions:
 
 - Never run `uv sync`, always run `uv sync --all-packages` instead
-- For browser automation, Playwright's Python API is available in the root venv -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`. The Chromium browser itself (and its apt system libraries) installs asynchronously on first container boot via the `deferred-install` service rather than being baked into the image; if the install hasn't finished yet, any `playwright.chromium.launch()` call will fail with a clear error. Check `/var/lib/minds/deferred-install/done.playwright` (or watch `tmux capture-pane -t svc-deferred-install -p`) to confirm the install completed before using browser automation in a fresh workspace. See `libs/bootstrap/README.md` for the full deferral contract.
+- For browser automation, Playwright's Python API is available in the root venv -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`. The Chromium browser itself (and its apt system libraries) installs asynchronously on first container boot via the `deferred-install` service rather than being baked into the image; if the install hasn't finished yet, any `playwright.chromium.launch()` call will fail with a clear error. Check `/var/lib/minds/deferred-install/done.playwright` (or watch `tmux capture-pane -t svc-deferred-install -p`) to confirm the install completed before using browser automation in a fresh workspace. See `libs/bootstrap/README.md` for the full deferral contract. Chromium works as-is under the docker provider's gVisor (runsc) runtime -- gVisor allows user namespaces, so Chromium's namespace sandbox starts even though the container runs as root (verified: `chromium.launch()` succeeds with and without `--no-sandbox`). If you ever hit a "No usable sandbox!" error (e.g. on a host/runtime that doesn't permit unprivileged user namespaces), pass `chromium.launch(args=["--no-sandbox"])` (or `chromium_sandbox=False`) -- gVisor is the security boundary, so disabling Chromium's in-browser sandbox there is acceptable.
 
 # Always remember these guidelines:
 

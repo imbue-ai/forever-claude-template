@@ -89,23 +89,35 @@ def test_main_template_writes_default_tmux_conf() -> None:
     )
     only_command = tmux_commands[0]
     assert "set -g alternate-screen off" in only_command
-    assert "set -g set-clipboard external" in only_command
+    assert "set -g mouse on" in only_command
 
 
 def test_main_extra_provision_command_stacks_with_lima() -> None:
-    """`main` + `lima`: lima's many provisioning commands all survive alongside main's."""
+    """`main` + `lima`: lima runs the agent directly in the VM as root, so it runs
+    the shared FCT setup scripts via its own `extra_provision_command`. Those must
+    stack *after* main's (the timeline is main's tmux config, then the setup
+    scripts), and main's command must be preserved.
+    """
     result = _apply(("main", "lima"))
     commands = result["extra_provision_command"]
+    # main's tmux config still runs.
     assert any(_TMUX_MARKER in cmd for cmd in commands)
-    # Spot-check several distinct lima provisioning commands to confirm the
-    # entire list (not just the first entry) is concatenated. The bulk of the
-    # provisioning (apt, latchkey, uv tool install, uv sync, playwright) is
-    # collapsed into a single heredoc-fed bash script, so spot-check that
-    # command plus an early and a late plain entry to confirm the whole list
-    # survives.
-    assert any("sudo mkdir -p /mngr/worktree" in cmd for cmd in commands)
-    assert any("bash <<'EOSCRIPT'" in cmd for cmd in commands)
-    assert any("vendor/tk/ticket" in cmd for cmd in commands)
+    # lima adds the three shared setup scripts, in order, after main's command.
+    setup_scripts = ["setup_system.sh", "install_dependencies.sh", "build_workspace.sh"]
+    script_positions = [
+        next((idx for idx, cmd in enumerate(commands) if script in cmd), -1)
+        for script in setup_scripts
+    ]
+    assert all(pos >= 0 for pos in script_positions), (
+        f"missing a lima setup script in {commands!r}"
+    )
+    assert script_positions == sorted(script_positions), (
+        f"lima setup scripts out of order in {commands!r}"
+    )
+    tmux_position = next(idx for idx, cmd in enumerate(commands) if _TMUX_MARKER in cmd)
+    assert tmux_position < script_positions[0], (
+        "main's tmux command must run before lima's setup scripts"
+    )
 
 
 def test_main_extra_provision_command_present_for_docker_mode() -> None:
@@ -115,10 +127,16 @@ def test_main_extra_provision_command_present_for_docker_mode() -> None:
     assert any(_TMUX_MARKER in cmd for cmd in commands)
 
 
-def test_docker_template_adds_sys_ptrace_cap_via_start_arg() -> None:
-    """`main` + `docker`: SYS_PTRACE cap is on `start_arg` (passed to `docker run`), not `build_arg`."""
+def test_docker_template_hardens_start_args_and_drops_sys_ptrace() -> None:
+    """`main` + `docker`: hardened for untrusted agents -- blocks privilege
+    escalation and no longer grants the SYS_PTRACE capability. (The gVisor
+    runtime itself is selected via `docker_runtime` in the [providers.docker]
+    block, not a create-template setting, so it's not asserted here.)"""
     result = _apply(("main", "docker"))
-    assert "--cap-add=SYS_PTRACE" in result["start_arg"]
+    # no-new-privileges hardening rides on start_arg (a `docker run` flag).
+    assert "--security-opt=no-new-privileges" in result["start_arg"]
+    # The SYS_PTRACE capability grant was removed (gVisor is the boundary now).
+    assert "--cap-add=SYS_PTRACE" not in result["start_arg"]
     assert "--cap-add=SYS_PTRACE" not in result["build_arg"]
 
 

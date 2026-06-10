@@ -3,9 +3,10 @@
  *
  * The section is a flat, ordered list of timeline items produced by the
  * transcript walk (see turn-grouping): step nodes, ungrouped work/prose runs
- * (rendered inline, thread-breaking), and chips. Step nodes carry their own
- * grouped events; expanding a step reveals that grouped work. The wrap-up
- * reply renders below the timeline.
+ * (rendered inline, thread-breaking), inter-step interjections (a step's
+ * closing prose, promoted to break the thread between two steps), and chips.
+ * Step nodes carry their own grouped events; expanding a step reveals that
+ * grouped work. The wrap-up reply renders below the timeline.
  *
  * This component renders structure it is given; it does no grouping or
  * ordering itself.
@@ -27,6 +28,9 @@ interface ProgressBlockAttrs {
    *  only references a subset. */
   toolResults: Map<string, ToolResultEvent>;
   agentId: string;
+  /** Optional DOM id for the root, so a virtualized list can measure this
+   *  block's height by querying ``.message-list > [id]``. */
+  id?: string;
 }
 
 function statusIcon(status: StepStatus, is_frontier: boolean): m.Vnode {
@@ -156,7 +160,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
   return {
     view(vnode) {
-      const { items, trailing_reply, toolResults, agentId } = vnode.attrs;
+      const { items, trailing_reply, toolResults, agentId, id } = vnode.attrs;
 
       // Index of the last step item, so only it gets the `--last` thread cap.
       let lastStepIdx = -1;
@@ -175,11 +179,26 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
             item.events.map((e) => renderAssistantMessage(e, toolResults, agentId)),
           );
         }
+        if (item.kind === "interjection") {
+          // A step's closing prose, promoted to break the timeline thread
+          // between the closing step and the next (top/bottom hairlines mark
+          // the break -- see .pv-interstep). Interjection events are always
+          // pure prose (no tool calls), so render the text directly like the
+          // trailing reply does -- NOT via renderAssistantMessage, whose
+          // `.message-assistant` wrapper carries a 20px bottom margin that
+          // would sit inside the bordered block and leave a lopsided gap below
+          // the text.
+          const interText = item.events
+            .map((e) => e.text ?? "")
+            .filter(Boolean)
+            .join("\n\n");
+          return m("div.pv-interstep", { key: item.key }, m(MarkdownContent, { content: interText }));
+        }
         // chip
         return m("div.pv-stophook", { key: `chip-${item.event.event_id}` }, renderUserMessage(item.event));
       });
 
-      return m("div.progress-block", [
+      return m("div.progress-block", { id }, [
         m("div.pv.pv--timeline", [
           m("div.pv-timeline-thread", { "aria-hidden": "true" }),
           m("div.pv-timeline-nodes", timelineNodes),

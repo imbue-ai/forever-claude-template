@@ -163,7 +163,9 @@ export function renderUserMessage(event: UserMessageEvent): m.Vnode | null {
   }
   const collapsible = isCollapsibleUserMessage(content);
   const messageClass = collapsible ? "message message-system-collapsed" : "message message-user";
-  return m("div", { class: messageClass, key: event.event_id }, [m(StableUserMessage, { event })]);
+  // id mirrors the assistant rows so the virtualized list can measure every
+  // rendered row's height by querying ``.message-list > [id]``.
+  return m("div", { id: event.event_id, class: messageClass, key: event.event_id }, [m(StableUserMessage, { event })]);
 }
 
 export function countResolvedToolResults(

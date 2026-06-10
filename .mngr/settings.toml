@@ -65,17 +65,14 @@ version = "2.1.160"
 use_env_config_dir = true
 
 # The "main" (services) agent type -- inherits everything from claude, then
-# disables the bulky user-local sync paths that pull content into the
-# workspace. The repo at the requested git ref is the canonical workspace
-# definition; nothing from the invoking user's ~/.claude/ or ~/.mngr/ should
-# leak in. Claude credentials are the deliberate exception:
-# sync_claude_credentials is on so a workspace is authenticated out of the box
-# (on macOS, converted from the host keychain).
+# disables every path that pulls user-local content into the workspace. The
+# repo at the requested git ref is the canonical workspace definition;
+# nothing from the invoking user's ~/.claude/ or ~/.mngr/ should leak in.
 [agent_types.main]
 parent_type = "claude"
 sync_home_settings = false
 sync_claude_json = false
-sync_claude_credentials = true
+sync_claude_credentials = false
 sync_credentials_on_login = false
 # Keep this agent's per-agent CLAUDE_CONFIG_DIR (don't inherit the parent's
 # new shared-mode default). Every other agent in the workspace points at
@@ -103,6 +100,55 @@ is_enabled = false
 [providers.docker]
 is_enabled = false
 isolate_host_volumes = true
+# Run agent containers under the gVisor (`runsc`) runtime to shrink the host
+# kernel attack surface for untrusted agents. `runsc` must be installed and
+# registered with the local Docker daemon (see CLAUDE.md); container creation
+# fails with Docker's native "unknown runtime" error otherwise. Override back to
+# the default runtime where gVisor is unavailable (e.g. CI, Modal) with
+# MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
+docker_runtime = "runsc"
+
+[providers.lima]
+# is_enabled=false (mirrors [providers.docker]) is load-bearing: the lima backend
+# is a plugin (imbue-mngr-lima) that is NOT installed in the agent container, so a
+# *parsed* lima block would crash the in-container mngr with "unknown backend
+# 'lima'". With is_enabled=false the config loader skips the whole block wherever
+# the lima plugin is absent (the container), while the host-side mngr (which has
+# the plugin) still parses it. The lima create still works because `@<name>.lima`
+# resolves the provider by name regardless of is_enabled (same as @<name>.docker).
+is_enabled = false
+# Run the minds workspace directly in the Lima VM as root (uid 0) -- no nested
+# Docker container. is_run_as_root gives the agent the same "no sudo, install
+# anything" posture it has inside a docker/vps_docker container (the VM is the
+# isolation boundary). Root cannot traverse the 9p bind mount, so is_run_as_root
+# requires the in-VM btrfs additional-disk layout: is_host_data_volume_exposed
+# must be false. These live on the provider block (not the lima template's
+# setting__extend) because template `--setting` entries don't reach provider
+# config (imbue-ai/mngr#1914).
+is_host_data_volume_exposed = false
+is_run_as_root = true
+
+# vultr VPS provider (cloud mode). is_enabled=false mirrors the lima/docker blocks:
+# the vps_docker backend plugin is not installed in the agent container, so a parsed
+# block would crash the in-container mngr; with is_enabled=false the loader skips the
+# block where the plugin is absent, while the host-side mngr (which runs the bake)
+# still parses it. The vultr create still works because `@<name>.vultr` resolves the
+# provider by name regardless of is_enabled. runsc is installed+registered at
+# provisioning time and selected for the agent container; the matching `--workdir=/`
+# and `--security-opt=no-new-privileges` run args are added in the vultr template's
+# start_arg (which, unlike lima, reaches the inner `docker run`).
+[providers.vultr]
+is_enabled = false
+install_gvisor_runtime = true
+docker_runtime = "runsc"
+
+# OVH VPS provider (the imbue-cloud pool-bake's default). Same rationale as the
+# vultr block above; the `--workdir=/` / `--security-opt=no-new-privileges` run args
+# are added in the ovh template's start_arg.
+[providers.ovh]
+is_enabled = false
+install_gvisor_runtime = true
+docker_runtime = "runsc"
 
 # --- Create templates ---
 
@@ -128,19 +174,31 @@ extra_window = [
 # `apply_create_template` in vendor/mngr/.../common_opts.py), so the
 # mode-specific templates (docker/lima/...) keep their own commands.
 extra_provision_command__extend = [
-    '''printf '%s\n' 'set -g alternate-screen off' 'set -g set-clipboard external' > "$HOME/.tmux.conf"''',
+    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' > "$HOME/.tmux.conf"''',
 ]
 
 # template for docker provider
 [create_templates.docker]
 provider = "docker"
 target_path = "/mngr/code/"
+# gVisor runtime selection lives in the [providers.docker] block above
+# (docker_runtime), not here -- provider config belongs on the provider, and
+# template `--setting` entries don't reliably reach the provider config anyway.
 setting__extend = ["providers.docker.is_enabled=true"]
 build_arg__extend = ["--file=Dockerfile", "."]
-# `--cap-add=SYS_PTRACE` is a `docker run` flag (not `docker build`), so it
-# rides on `start_arg` rather than `build_arg`. Lets us attach gdb / strace
-# inside the container for debugging without rebuilding the image.
-start_arg__extend = ["--cap-add=SYS_PTRACE"]
+# Security hardening for `docker run`: block privilege escalation via setuid
+# binaries. `--cap-add=SYS_PTRACE` was removed deliberately -- gVisor is the
+# isolation boundary now, and the extra capability widened the container's
+# privileges with no upside for untrusted agents.
+#
+# `--workdir=/` overrides the image's `WORKDIR /mngr/code` for the container's
+# idle entrypoint. Under gVisor (runsc), sandbox startup tries to create the
+# process working directory and aborts with "file exists" when it already
+# exists -- and `/mngr/code` exists inside the mounted `/mngr` volume. runc
+# tolerates a pre-existing cwd; runsc does not. Pointing the cwd at `/` (always
+# present) sidesteps it; nothing depends on the host container's default cwd
+# (the entrypoint just sleeps; agents set their own work_dir=/mngr/code).
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
@@ -161,111 +219,34 @@ provider = "lima"
 target_path = "/mngr/code/"
 idle_mode = "disabled"
 start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
-# Back host_dir with an in-VM btrfs additional disk instead of a 9p bind
-# mount, so the minds workspace data lives on a snapshottable filesystem
-# (towards consistent backups). This drops the host-side `volumes/<host_id>/`
-# bind mount; offline reads via `mngr event` / `mngr transcript` against
-# a stopped Lima host stop working in this mode until the host is started.
-# See vendor/mngr/specs/lima-btrfs-host-volume/concise.md for the design.
-setting__extend = ["providers.lima.is_host_data_volume_exposed=false"]
+# Mirror the docker template: flip the (default-disabled) lima provider on for
+# this create. Redundant in practice -- `@<name>.lima` resolves the provider by
+# name regardless of is_enabled -- but kept for parity/intent with docker.
+# (Docker-in-Lima mode and its is_host_in_docker provider config are gone; the
+# agent now runs directly in the VM as root -- see [providers.lima]. Offline
+# reads via `mngr event` / `mngr transcript` against a stopped Lima host do not
+# work in the btrfs layout until the host is started.)
+#
+# The pinned claude binary is installed on the fresh VM during provisioning by
+# the claude plugin itself (is_remote_agent_installation_allowed defaults to
+# True, so a missing remote claude is auto-installed at the pinned version);
+# setup_system.sh below then re-installs it as part of the full toolchain. No
+# version-check disable is needed.
+setting__extend = ["providers.lima.is_enabled=true"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Run the SAME setup as a Dockerfile-built workspace, directly in the VM as root.
+# These run after the project is synced to /mngr/code (agent-level provisioning,
+# post work_dir sync) and reuse the exact scripts the Dockerfile RUNs. There is
+# no docker build (so no `--file=Dockerfile` build arg) and no /docker_build_code
+# relocation (the repo lands straight on the VM's btrfs /mngr disk), so the
+# docker template's build_arg + post_host_create_command (fct-seed) are
+# intentionally absent here. extra_provision_command__extend stacks after the
+# main template's entry.
 extra_provision_command__extend = [
-    # Create /mngr/worktree/ on the fresh lima VM so worktrees ride the
-    # /mngr/ volume backup, and install the /worktree -> /mngr/worktree
-    # safety-net symlink so any straggling `/worktree/...` references keep
-    # working (mirrors the Dockerfile symlink installed in docker-based
-    # providers).
-    "sudo mkdir -p /mngr/worktree && sudo chown $(whoami) /mngr/worktree && sudo ln -sfn /mngr/worktree /worktree",
-    # Same safety-net symlink for the workspace itself: /code -> /mngr/code
-    # so any straggling absolute /code/... reference still resolves. The
-    # workspace itself rsyncs onto /mngr/code/ via target_path above.
-    "sudo ln -sfn /mngr/code /code",
-    # Parallel provision script (apt + uv installer || latchkey + uv tool install ||
-    # uv sync + playwright). Piped into bash via heredoc so `set -euo pipefail`
-    # works (mngr's executor uses /bin/sh which on Ubuntu is dash, and dash
-    # doesn't support pipefail).
-    '''
-bash <<'EOSCRIPT'
-set -euo pipefail
-
-# --- Phase A: apt source setup + big install in parallel with uv installer ---
-(
-  set -e
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-  sudo mkdir -p -m 755 /etc/apt/keyrings
-  wget -nv -O- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-  sudo apt-get update
-  sudo apt-get install -y --no-install-recommends build-essential fd-find git-lfs restic ripgrep sqlite3 unison nodejs gh
-) > /tmp/prov-apt.log 2>&1 &
-APT_PID=$!
-
-(
-  set -e
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-) > /tmp/prov-uv.log 2>&1 &
-UV_PID=$!
-
-(
-  set -e
-  ARCH=$(uname -m)
-  sudo curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.${ARCH}" -o /usr/local/bin/ttyd
-  sudo chmod +x /usr/local/bin/ttyd
-) > /tmp/prov-ttyd.log 2>&1 &
-TTYD_PID=$!
-
-
-wait $APT_PID || { echo "[provision] apt phase failed" >&2; cat /tmp/prov-apt.log >&2; exit 1; }
-wait $UV_PID  || { echo "[provision] uv installer failed" >&2; cat /tmp/prov-uv.log  >&2; exit 1; }
-wait $TTYD_PID || { echo "[provision] ttyd download failed" >&2; cat /tmp/prov-ttyd.log >&2; exit 1; }
-
-# --- Phase B: latchkey global || frontend npm ci+build || uv tool install ---
-# Each track touches a disjoint package-manager tree
-# (/usr/lib/node_modules vs apps/system_interface/frontend/node_modules
-# vs ~/.local/share/uv/tools/), so they don't lock against each other.
-(
-  set -e
-  sudo npm install -g latchkey@2.15.1
-) > /tmp/prov-latchkey.log 2>&1 &
-LATCHKEY_PID=$!
-
-(
-  set -e
-  cd apps/system_interface/frontend && npm ci && npm run build
-) > /tmp/prov-frontend.log 2>&1 &
-FRONTEND_PID=$!
-
-(
-  set -e
-  export PATH=$HOME/.local/bin:$PATH
-  uv tool install -e vendor/mngr/libs/mngr --with-editable vendor/mngr/libs/mngr_claude --with-editable vendor/mngr/libs/mngr_modal
-  uv tool install -e apps/system_interface --with-editable vendor/mngr/libs/mngr --with-editable vendor/mngr/libs/mngr_claude --with-editable vendor/mngr/libs/mngr_modal
-) > /tmp/prov-uvtool.log 2>&1 &
-UVTOOL_PID=$!
-
-wait $LATCHKEY_PID || { echo "[provision] latchkey install failed" >&2; cat /tmp/prov-latchkey.log >&2; exit 1; }
-wait $FRONTEND_PID || { echo "[provision] frontend build failed"   >&2; cat /tmp/prov-frontend.log >&2; exit 1; }
-wait $UVTOOL_PID   || { echo "[provision] uv tool install failed"  >&2; cat /tmp/prov-uvtool.log   >&2; exit 1; }
-
-# --- Phase C: uv sync + playwright install (depends on Phase B's uv tools) ---
-export PATH=$HOME/.local/bin:$PATH
-uv sync --all-packages
-sudo env PATH="$PATH" HOME="$HOME" uv run playwright install --with-deps chromium
-EOSCRIPT
-''',
-    # Expose the vendored tk ticket tracker on PATH (mirrors the Dockerfile
-    # symlinks at /usr/local/bin/tk and /usr/local/bin/ticket).
-    # $HOME/.local/bin is already on PATH because the uv installer prepends it.
-    "mkdir -p $HOME/.local/bin && ln -sf /mngr/code/vendor/tk/ticket $HOME/.local/bin/tk",
-    # Source /mngr/env (the host env file, when present) for interactive bash
-    # sessions, so a shell opened via `limactl shell <instance>` inherits the
-    # variables mngr commands need. Mirrors the Dockerfile snippet that does
-    # the same for docker-based providers (`docker exec -it bash`); the only
-    # difference is the non-root lima user's $HOME/.bashrc target instead of
-    # /root/.bashrc. mngr otherwise only sources /mngr/env in the tmux
-    # default-command, so manually-opened shells miss it without this.
-    '''printf '%s\n' 'if [ -f /mngr/env ]; then set -a; . /mngr/env; set +a; fi' >> "$HOME/.bashrc"''',
+    "bash /mngr/code/scripts/setup_system.sh",
+    "bash /mngr/code/scripts/install_dependencies.sh",
+    "bash /mngr/code/scripts/build_workspace.sh",
 ]
 
 # template for vultr VPS provider (cloud mode)
@@ -285,6 +266,13 @@ build_arg__extend = ["--file=Dockerfile", "--vps-plan=vc2-2c-4gb", "--vps-region
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
+# gVisor runsc hardening for the agent container, matching the docker template.
+# runsc itself is installed+selected on the [providers.vultr] block above; these
+# `docker run` args go via start_arg (vps_docker forwards start_arg to the inner
+# `docker run`): `--workdir=/` (runsc aborts when the image WORKDIR /mngr/code,
+# inside the mounted /mngr volume, already exists as the process cwd) and
+# `--security-opt=no-new-privileges`.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
@@ -305,6 +293,9 @@ build_arg__extend = ["--file=Dockerfile", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
+# gVisor runsc hardening for the agent container; see the vultr template comment.
+# runsc is installed+selected on the [providers.ovh] block above.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.

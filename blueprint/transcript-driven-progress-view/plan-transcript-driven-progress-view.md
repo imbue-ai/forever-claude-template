@@ -35,6 +35,24 @@
 - Each step groups the assistant text + tool calls that occur while it is the open step; expanding a step shows that grouped work inline.
 - Tool calls done while no step is open render in the top-level ungrouped bucket inline, in transcript order.
 
+> **Follow-up (2026-06): inter-step interjections reintroduced.** The (4/7a)
+> reply rule above promotes *only* the run after the last tool activity to the
+> below-timeline reply, leaving a step's closing prose (text spoken after that
+> step's last work, before the next step starts) buried inside the closing
+> step. In the live-streaming case this made the closing prose promote while
+> its step was last, then collapse back under the step once the next step did
+> work. The fix re-adds the dedicated **inter-step interjection** (the
+> "Variant C" broken-thread block from the end-of-turn-progress-rendering
+> plan, whose `.pv-interstep` style had been left in `style.css` but unwired):
+> a step's closing prose is ejected into a standalone item that breaks the
+> timeline thread *between* the two steps and stays there. Closing prose at the
+> very end of the turn is still the below-timeline reply. So this region now
+> has three placements — leading/ungrouped (above or inline), inter-step
+> interjection (between steps), and trailing reply (below) — not the
+> ungrouped-or-reply-only model implied above. See
+> `blueprint/end-of-turn-progress-rendering/` for the original Variant C
+> design that this restores.
+
 ### Steps and status
 - Step status follows the last transition seen in the walk: created-but-not-started = pending; after `Updated -> in_progress` = active; after `Updated -> closed` = done.
 - The currently-active step is the last one started and not yet closed; only it shows the live spinner (when the turn is still running).

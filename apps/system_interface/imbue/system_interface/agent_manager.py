@@ -36,7 +36,9 @@ from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
+from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
+from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.models import AgentCreationError
@@ -116,14 +118,19 @@ def _build_chat_create_command(
     return cmd
 
 
-def _build_observe_command_argv(mngr_binary: str, events_dir: Path) -> list[str]:
-    """Build the ``mngr observe`` discovery-only argv. Pure (see above)."""
+def _build_observe_command_argv(mngr_binary: str) -> list[str]:
+    """Build the ``mngr observe`` discovery-only argv. Pure (see above).
+
+    ``--discovery-only`` streams discovery events as JSONL to stdout (which we
+    consume directly) and tails the single shared discovery log under the
+    default host dir. We deliberately do NOT pass ``--events-dir``: that flag
+    only relocates the *full* observer's event files + lock and has no effect in
+    discovery-only mode -- mngr now rejects the combination outright.
+    """
     return [
         mngr_binary,
         "observe",
         "--discovery-only",
-        "--events-dir",
-        str(events_dir),
     ]
 
 
@@ -257,6 +264,7 @@ class AgentManager:
     _activity_tracked_agents: set[str]
     _has_unmatched_tool_use_by_agent: dict[str, bool]
     _last_event_type_by_agent: dict[str, str | None]
+    _last_event_timestamp_by_agent: dict[str, str | None]
     _activity_state_by_agent: dict[str, ActivityState]
 
     @classmethod
@@ -286,6 +294,7 @@ class AgentManager:
         manager._activity_tracked_agents = set()
         manager._has_unmatched_tool_use_by_agent = {}
         manager._last_event_type_by_agent = {}
+        manager._last_event_timestamp_by_agent = {}
         manager._activity_state_by_agent = {}
         return manager
 
@@ -467,9 +476,7 @@ class AgentManager:
             msg = f"Cannot determine work directory for primary agent {self._own_agent_id}"
             raise AgentCreationError(msg)
 
-        cmd = _build_chat_create_command(
-            self._mngr_binary, name, agent_id, primary_labels
-        )
+        cmd = _build_chat_create_command(self._mngr_binary, name, agent_id, primary_labels)
 
         log_queue: queue.Queue[str | None] = queue.Queue(maxsize=10000)
 
@@ -674,17 +681,6 @@ class AgentManager:
         except (OSError, ValueError, RuntimeError, MngrError) as e:
             _loguru_logger.opt(exception=e).error("Agent refresh failed")
 
-    def _resolve_observe_events_dir(self) -> Path:
-        """Return the path to the mngr observe events directory.
-
-        Does not create the directory; ``_start_observe`` creates it before
-        spawning the subprocess.
-        """
-        agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
-        if agent_state_dir:
-            return Path(agent_state_dir) / "system_interface" / "observe"
-        return Path.home() / ".mngr" / "system_interface" / "observe"
-
     def _resolve_observe_cwd(self) -> Path:
         """Return the cwd for the mngr observe subprocess.
 
@@ -704,16 +700,11 @@ class AgentManager:
         return Path.home()
 
     def _build_observe_command(self) -> list[str]:
-        """Build the argv for the mngr observe discovery-only subprocess.
-
-        Pure: no side effects (does not create the events directory).
-        """
-        events_dir = self._resolve_observe_events_dir()
-        return _build_observe_command_argv(self._mngr_binary, events_dir)
+        """Build the argv for the mngr observe discovery-only subprocess. Pure."""
+        return _build_observe_command_argv(self._mngr_binary)
 
     def _start_observe(self) -> None:
         """Start the mngr observe subprocess and a watchdog for early exit."""
-        self._resolve_observe_events_dir().mkdir(parents=True, exist_ok=True)
         cmd = self._build_observe_command()
 
         self._observe_cg = ConcurrencyGroup(name="agent-manager-observe")
@@ -970,7 +961,23 @@ class AgentManager:
             self._activity_tracked_agents.discard(agent_id)
             self._has_unmatched_tool_use_by_agent.pop(agent_id, None)
             self._last_event_type_by_agent.pop(agent_id, None)
+            self._last_event_timestamp_by_agent.pop(agent_id, None)
             self._activity_state_by_agent.pop(agent_id, None)
+
+    def _read_process_started_at(self, agent_id: str) -> float | None:
+        """Return the mtime of the agent's ``claude_process_started`` marker, or None.
+
+        mngr touches this marker on every startup/resume (a fresh, not-mid-turn
+        Claude process), so its mtime is the boundary the activity tracker
+        compares transcript timestamps against. Returns ``None`` when the marker
+        is absent (e.g. an agent that has not restarted since the marker was
+        introduced) so the staleness override simply does not fire.
+        """
+        marker = self._get_agent_state_dir(agent_id) / "claude_process_started"
+        try:
+            return marker.stat().st_mtime
+        except OSError:
+            return None
 
     def _recompute_activity_state(self, agent_id: str, *, broadcast_on_change: bool) -> None:
         """Recompute activity state for ``agent_id`` from cached transcript signals.
@@ -982,6 +989,11 @@ class AgentManager:
         Quietly does nothing when the agent is not being tracked for activity
         (e.g. a remote agent) or is no longer in ``_agents``.
         """
+        # Read the restart-boundary marker outside the lock (it is a filesystem
+        # stat, not shared state). Re-read on every recompute so a restart that
+        # touches the marker is reflected even when no new transcript events
+        # arrive -- the post-restart observe snapshot drives the recompute.
+        process_started_at = self._read_process_started_at(agent_id)
         with self._lock:
             if agent_id not in self._activity_tracked_agents:
                 return
@@ -990,10 +1002,13 @@ class AgentManager:
                 return
             has_pending_tool = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
             cached_last_event_type = self._last_event_type_by_agent.get(agent_id)
+            tail_event_at = parse_iso_timestamp_to_epoch(self._last_event_timestamp_by_agent.get(agent_id))
             new_state = derive_activity_state(
                 is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
                 has_pending_tool_use=has_pending_tool,
                 tail_event_type=cached_last_event_type,
+                tail_event_at=tail_event_at,
+                process_started_at=process_started_at,
             )
             old_state = self._activity_state_by_agent.get(agent_id)
             if old_state == new_state and agent_state.activity_state == new_state.value:
@@ -1024,6 +1039,7 @@ class AgentManager:
         """
         new_pending = has_unmatched_tool_use(events)
         new_last_type = last_event_type(events)
+        new_last_timestamp = last_event_timestamp(events)
         with self._lock:
             if agent_id not in self._activity_tracked_agents:
                 return
@@ -1033,6 +1049,11 @@ class AgentManager:
                 return
             self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
             self._last_event_type_by_agent[agent_id] = new_last_type
+            # Refreshed alongside the type so the stale-tail check sees the
+            # current tail's time. Kept out of the short-circuit above so a new
+            # event that leaves pending/type unchanged does not force a recompute
+            # (and a per-event marker stat) on every streamed line.
+            self._last_event_timestamp_by_agent[agent_id] = new_last_timestamp
 
         self._recompute_activity_state(agent_id, broadcast_on_change=True)
 
@@ -1056,6 +1077,7 @@ class AgentManager:
                 return
             self._has_unmatched_tool_use_by_agent[agent_id] = False
             self._last_event_type_by_agent[agent_id] = None
+            self._last_event_timestamp_by_agent[agent_id] = None
         self._recompute_activity_state(agent_id, broadcast_on_change=True)
 
     def _read_applications(self, toml_path: Path) -> None:
