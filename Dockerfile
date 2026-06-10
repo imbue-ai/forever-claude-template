@@ -203,21 +203,23 @@ RUN cd /mngr/code/apps/system_interface/frontend && npm run build
 # to the same minor anyway via uv's default version selection).
 ENV UV_PYTHON=/usr/local/bin/python3.12
 ENV UV_PYTHON_DOWNLOADS=never
-RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr
-RUN uv tool install -e /mngr/code/apps/system_interface \
-        --with-editable /mngr/code/vendor/mngr/libs/mngr_claude
-# `mngr plugin add` SIGILLs reliably in the launch-to-msg CI runner's
+# Install mngr WITH its plugin packages bundled via --with-editable, so
+# the plugins are in mngr's tool venv from first launch and the broken
+# `mngr plugin add` invocation isn't needed. `mngr plugin add` runs the
+# `mngr` CLI which SIGILLs reliably in the launch-to-msg CI runner's
 # lima->docker stack (Apple Silicon M4 -> lima 2.0.3 VZ -> docker ->
 # python:3.12.13-slim ARM64), regardless of mngr source version or
-# vendored workspace-package versions. Same uv tool install of the
-# same packages works on Apple Silicon Docker Desktop locally. The
-# root cause is undiagnosed but environment-specific. Run with `|| true`
-# so the docker build doesn't fail -- plugins are also picked up via
-# `mngr plugin list` at runtime from their entry-point metadata.
-RUN mngr plugin add \
-    --path vendor/mngr/libs/mngr_claude \
-    --path vendor/mngr/libs/mngr_wait \
-    || echo "WARNING: mngr plugin add exited rc=$?; plugins may need runtime registration"
+# vendored workspace-package versions. The same uv tool install works
+# on Apple Silicon Docker Desktop locally; the trigger is undiagnosed
+# but environment-specific to this runner. uv resolves the --with-editable
+# packages into mngr's venv and mngr's plugin discovery (entry points)
+# picks them up at module-load time, so the result is the same as if
+# `mngr plugin add` had run.
+RUN uv tool install -e /mngr/code/vendor/mngr/libs/mngr \
+    --with-editable /mngr/code/vendor/mngr/libs/mngr_claude \
+    --with-editable /mngr/code/vendor/mngr/libs/mngr_wait
+RUN uv tool install -e /mngr/code/apps/system_interface \
+        --with-editable /mngr/code/vendor/mngr/libs/mngr_claude
 
 # Sync the workspace venv. --frozen asserts the lockfile is canonical so
 # the pre-warm cache layer is never bypassed by a silent re-resolve.
