@@ -1061,9 +1061,11 @@ class AgentManager:
             self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
             self._last_event_type_by_agent[agent_id] = new_last_type
             # Refreshed alongside the type so the stale-tail check sees the
-            # current tail's time. Kept out of the short-circuit above so a new
-            # event that leaves pending/type unchanged does not force a recompute
-            # (and a per-event marker stat) on every streamed line.
+            # current tail's time. This sits under the same short-circuit above:
+            # a new event that leaves pending/type unchanged returns early and
+            # skips both this refresh and the recompute (and its per-event marker
+            # stat), so streamed lines that don't change the derived signals stay
+            # cheap.
             self._last_event_timestamp_by_agent[agent_id] = new_last_timestamp
 
         self._recompute_activity_state(agent_id, broadcast_on_change=True)
