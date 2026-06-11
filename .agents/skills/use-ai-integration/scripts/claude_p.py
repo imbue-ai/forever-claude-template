@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
+# dependencies = ["anyio"]
 # ///
 """Copyable helper for calling headless ``claude -p`` from a service.
 
@@ -38,13 +39,15 @@ text.
 
 from __future__ import annotations
 
-import asyncio
+import functools
 import json
 import os
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+
+from anyio import to_thread
 
 _MAIN_CLAUDE_SESSION_ID = "MAIN_CLAUDE_SESSION_ID"
 # mngr identity vars its own subagent proxy strips; dropping them is defense in
@@ -199,7 +202,9 @@ async def claude_p_completion(
     # working directory, so a throwaway dir keeps that project context out of the
     # answer. Credentials come from the env, not the cwd, so auth is unaffected.
     with tempfile.TemporaryDirectory(prefix="claude_p_completion_") as cwd:
-        return await asyncio.to_thread(_run_blocking, argv, env=env, cwd=cwd)
+        return await to_thread.run_sync(
+            functools.partial(_run_blocking, argv, env=env, cwd=cwd)
+        )
 
 
 async def claude_p_task(
@@ -226,4 +231,6 @@ async def claude_p_task(
         tools=None,
         permission_mode=permission_mode,
     )
-    return await asyncio.to_thread(_run_blocking, argv, env=env, cwd=None)
+    return await to_thread.run_sync(
+        functools.partial(_run_blocking, argv, env=env, cwd=None)
+    )
