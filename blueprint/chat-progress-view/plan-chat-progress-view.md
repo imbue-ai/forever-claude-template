@@ -1,125 +1,305 @@
-# Minds Chat — Progress View
+# Chat Progress View — Canonical Specification
 
-> **Update (post-implementation):** the "use tk tickets directly as per-turn
-> progress markers" model proved fragile across multiple agents sharing a
-> TICKETS_DIR — sibling agents' turn-markers leaked into each other's
-> progress views. The follow-up plan
-> [tk step / ticket model](../tk-step-ticket-model/plan-tk-step-ticket-model.md)
-> splits the concept: regular tk tickets remain cross-agent issue records,
-> while a new `step: true` frontmatter field marks turn-bound progress
-> records. The chat progress view now shows both — a step record renders
-> as a node on the timeline as before; a regular ticket the agent has
-> picked up renders as a top-level node with its child steps nested
-> underneath. References to "tickets" below as the progress-marker concept
-> should now be read as "step records" unless they're explicitly about
-> cross-agent work tracking.
+> **This is the single canonical spec for the chat progress view.** It supersedes
+> and replaces four prior planning docs, which have been removed:
+> - `chat-progress-view` (original: tickets-as-progress-markers, timestamp-window grouping)
+> - `tk-step-ticket-model` (added `step: true`, multi-agent scoping, ticket/step nesting)
+> - `transcript-driven-progress-view` (rewrite: transcript = structure, tk = enrichment side-table)
+> - `end-of-turn-progress-rendering` (interjection + backward-scan reply rules)
+>
+> Those documents describe the evolution that produced the *current* code. This
+> spec describes both where the feature is today and the **target simplification**
+> agreed in design discussion. The target removes the tk enrichment watcher, the
+> carryover mechanism, the interjection/trailing-reply boundary machinery, and the
+> dead ticket-nesting machinery — collapsing five layers and ~4,000 lines into a
+> single transcript-driven path with a small set of decoration lines that tk
+> prints on stdout.
 
-
-## Refined prompt
-
-> Fetch this design file, read its readme, and implement the relevant aspects of the design. https://api.anthropic.com/v1/design/h/5tMCxah6DGHF9wqFoEpoGg?open_file=Minds+Chat+-+Progress+View.html
-> Implement: Minds Chat - Progress View.html
->
-> it's relevant to also look at ~/utilities/mngr/.external_worktrees/forever-claude-template-main - i think there will be necessary updates there two. basically this requires a two-fold change:
-> 1. very strong prompting for the agent around task management (in the template)
-> 2. handling of the task management to render in the new ui (on the mngr side)
->
-> right now agents tend to use claude code's built in todo tool for task management. you can research online about it (or just think about it since you should have access to that tool). i don't think that that tool supports the sort of final summary message that the design calls for, though. so we may need to switch to a different tool or figure out another way to handle this. we've explored using https://github.com/wedow/ticket in the template; it's possible it could handle this function? but i'm open to suggestions.
->
-> but let's plan out the spec for the template- and mngr-side changes to make this improved progress view work
->
-> * Use the already-vendored `tk` ticket tracker as the agent's task primitive (no TodoWrite + sidecar combination — too much per-task overhead).
-> * Use tk as-is for now (no fork); the agent records the per-task summary by running `tk add-note <id> "<summary>"` immediately before `tk close <id>`.
-> * Disable Claude Code's built-in TodoWrite via `.claude/settings.json` so the agent can't dual-track.
-> * Map tk status vocabulary to the design's vocabulary: `open` → pending, `in_progress` → active, `closed` → done. There is no failed state.
-> * Tasks persist across turns until the agent closes them; the agent always closes a ticket with *some* result reported to the user (no abandonment).
-> * A start-of-turn hook injects a system reminder listing every incomplete ticket's id and title so the agent can decide whether to keep, replace, or close them.
-> * A stop-hook reminder calls out any tickets still open at end-of-turn but does NOT block or auto-close — the agent is free to ignore it (carryover handles the rest).
-> * If a task is unfinished at the end of a turn, it appears as a fresh entry at the top of the next turn's progress block; the original entry in the prior turn is left unresolved (never backfilled).
-> * Workspace server attributes tickets to turns by creation timestamp: a ticket belongs to the turn whose user-message timestamp range covers its `created_at`.
-> * Render the Timeline variant from the design as production default, with no expand-by-default, expanding allowed (per-task chevron reveals raw events), and a per-turn final-message footer below the task list.
-> * The expanded raw events panel reuses the existing `tool-call-block` chrome inside `.markdown-content`, interleaved with the assistant's prose between tool calls — matching how the current chat already renders an assistant turn.
-> * Replace the existing `agent-activity-indicator` with a single bottom-of-chat strip whose label is derived purely client-side from the most recent tool call: "Reading X" / "Editing X" / "Writing X" / "Running X" for known tools, "Running tool…" for unknown tools, "Thinking…" when no tool is active. No task-title context.
-> * Turns where the agent uses no tk tickets render exactly as today's chat (assistant text + inline tool blocks); progress UI is conditional on the presence of tickets in that turn.
-> * Don't worry about the conflict between in-turn progress tickets and longer-lived "real" tk tickets for now — every ticket created within a turn is treated as a progress task.
-> * For `launch-task` subagents: the parent represents the whole delegation as a single progress task in its own chat; the subagent's own tickets live only in the subagent's chat (better subagent rendering can come later).
+---
 
 ## Overview
 
-- Make the Minds chat readable for non-technical users by hiding the raw tool-call stream behind a per-turn "progress view" — a clean Timeline of plain-English task titles and on-completion summaries, with raw work tucked behind a per-task expand affordance.
-- Use the already-vendored `tk` ticket tracker as the agent's task primitive; disable Claude Code's built-in TodoWrite so there's exactly one source of truth for task state. Per-task summaries ride on `tk add-note` followed by `tk close`.
-- The agent's prompt and a pair of session hooks (start-of-turn reminder + soft stop-of-turn nag) keep the task list honest across turns. Tasks persist until the agent closes them; unfinished tasks carry over to the top of the next turn's block, with the original entry in the prior turn left frozen as-is.
-- The workspace server gains a `.tickets/`-watching parser that emits new `task_*` events into the same transcript stream the chat already consumes; turn ↔ ticket attribution is done passively by `created_at` timestamp.
-- The existing "Running tool…" activity indicator is replaced by a smarter, client-derived strip ("Reading X" / "Editing X" / "Running X" / "Thinking…") that reads the latest assistant tool call directly from the transcript — no agent or server changes needed.
+- **What the feature is.** For each user turn, the Minds chat renders a clean
+  **progress timeline** instead of a raw tool-call stream: a vertical list of
+  plain-English step nodes (pending / active / done), each expandable to reveal
+  the underlying work, with the agent's wrap-up reply rendered below the
+  timeline. Turns where the agent declares no steps render as ordinary chat.
+
+- **Who drives it.** The agent declares and updates steps with `tk` — the
+  vendored ticket tracker — using `tk create --step`, `tk start <id>`, and
+  `tk close <id> "summary"`. Steps replace Claude Code's built-in TodoWrite
+  (disabled), and unlike TodoWrite they render directly in the user-facing chat.
+
+- **Core architectural decision (target).** The **agent session transcript is the
+  single source of truth** for both *structure* (which steps exist, their order,
+  their open/close transitions, which work groups under which step) and
+  *decoration* (titles, close summaries). tk's lifecycle commands print
+  machine-readable lines on stdout — `Created <id>: <title>`,
+  `Updated <id> -> <status>`, `tk-step <id> title:`/`summary:` — that the parser
+  protects from truncation. The frontend parses those lines out of tool output;
+  nothing watches `.tickets/` files at runtime.
+
+- **Why this design.** The previous design carried decoration in a separate
+  `.tickets/`-watching backend (`tickets_watcher.py` + `tickets_parser.py`) that
+  pushed an "enrichment" snapshot over SSE, joined onto transcript-derived
+  structure by id. That side-table is the single largest source of complexity and
+  is almost entirely redundant: every title and summary already passes through a
+  tk command and is recoverable from the transcript. Folding decoration into tk's
+  stdout deletes the watcher, the parser, the SSE enrichment channel, the
+  timestamp-normalization code, the per-agent surfacing rules, and the
+  deleted-directory resilience machinery — with no change to what the user sees.
+
+- **Why tk stdout (not command-input parsing) is the primary contract.** Step
+  ids are minted by `tk create` and only appear in *output*; the canonical close
+  invocation uses a shell variable (`tk close "$S1" "..."`) whose id cannot be
+  recovered from the command input at all. Since ids and transitions must come
+  from output regardless, tk echoes the title/summary on the same output lines so
+  id and decoration pair exactly, with no positional zipping and no shell-quoting
+  parser to maintain. Command-input parsing is retained **only** as a
+  best-effort fallback for historical transcripts (see below).
 
 ## Expected behavior
 
 ### From the user's perspective
 
-- Every turn where the agent does meaningful work shows a clean Timeline of plain-English task steps under the user's message, with the agent's final summary message below the timeline.
-- Each task's status is visually obvious: pending (dashed circle), active (spinner, breathing), done (green check), and only those three — there is no "failed" state.
-- Completed tasks carry a one-line, user-facing summary written by the agent ("Found a midnight theme in your settings file…") rather than a tool log.
-- A user who wants to see what the agent actually did clicks a chevron on the task and gets the existing tool-call-block chrome inline, interleaved with the agent's prose for that step.
-- Short turns where the agent doesn't open any tickets (chitchat, one-shots, "yes please") render exactly as today — no empty progress block, no forced ceremony.
-- A single activity strip just above the composer always reflects what the agent is currently doing — "Editing src/themes/index.ts", "Running npm test", or "Thinking…" — with no per-task context cluttering it.
-- If the agent leaves a task unfinished at end of turn, the next turn opens with that task at the top of its progress block as a fresh entry; the original turn's block keeps showing the task as it was when the turn ended.
-- Existing chat history (sessions with no tk tickets) renders exactly as before — no broken legacy view.
+- Every turn where the agent does real work shows a timeline of plain-English
+  steps under the user's message, with the agent's final reply below it.
+- Step status is visually obvious and limited to three states: **pending**
+  (dashed ring), **active** (spinner on the live step; static partial ring once
+  settled/idle/past), **done** (green check + one-line summary). There is no
+  "failed" state — every step terminates as done.
+- A done step shows a one-line, user-facing summary written by the agent
+  ("Read through your recent commits to find the new theme").
+- Expanding a step (chevron) reveals the assistant prose + tool-call blocks that
+  occurred while that step was open, in transcript order, using the existing
+  `tool-call-block` chrome.
+- While the agent works inside a step, the latest in-step prose that is followed
+  by more work shows as a live caption under the step ("narration").
+- Work the agent does with **no step open** (e.g. before declaring any steps)
+  renders inline as ordinary chat at its position in the turn — never dropped.
+- Turns with no steps at all (chitchat, one-shots) render exactly as today's
+  plain chat — no empty timeline, no forced ceremony.
+- Non-genuine user messages (skill expansions, `/welcome`, stop-hook feedback)
+  never split a turn; they are hidden or shown as inline chips.
+- Existing chat history renders correctly: historical transcripts still contain
+  the tk lifecycle lines, so the timeline reconstructs from them.
 
 ### From the agent's perspective
 
-- TodoWrite is unavailable; the agent uses `tk` for all in-turn task tracking.
-- At the start of each turn, the agent receives a system reminder listing every still-open ticket (id + title) so it can decide whether to continue, replace, or close them.
-- At the end of each turn, if any tickets the agent touched remain open, it gets a soft, ignorable reminder noting them — no blocking, no auto-close. The agent is expected to close every ticket it started with a real summary, but isn't forced to.
-- Subagents launched via `launch-task` use their own `.tickets/` directory; their task list does not bleed into the parent's chat. The parent treats the whole delegation as a single ticket in its own progress.
+- TodoWrite is unavailable; `tk create --step` is the replacement for declaring
+  plan steps. The first action on any substantive turn is to create all expected
+  steps up front (batchable in one tool call), then `tk start` / work /
+  `tk close` each in sequence. Only one step is in_progress at a time.
+- The agent reads each step's id directly from the `tk create` output line and
+  uses the literal id in `tk start` / `tk close`. (No shell-variable capture
+  convention; `tk steps` re-lists ids if one scrolls out of reach.)
+- `tk start` and `tk close` must each be the **only** command in their tool call
+  (no `&&`, `cd` prefix, redirection) so the parser can hide the pure tk call and
+  place the step cleanly. `tk create --step` calls may be batched.
+- `tk close <id> "summary"` requires a one-line, user-facing summary of the
+  *work done* in the step (not the outcome — the outcome goes in the final reply).
+- At turn start, a reminder lists any of the agent's steps left open from a prior
+  turn that were auto-closed, so the agent can redeclare what's still relevant.
 
-### Edge cases
+### End-of-turn / reply placement (target — simplified)
 
-- Multiple new turns can arrive while a task is still in_progress; the unfinished task carries over only to the next turn (not duplicated through every subsequent turn — once it carries forward, the new turn becomes its "home").
-- A ticket created before any user message in the conversation (e.g. by an event-processor or background activity) attaches to no turn and does not render in chat.
-- A ticket the agent creates and closes within the same turn renders as a fully-resolved entry.
-- If the agent closes a ticket without first calling `tk add-note`, the rendered summary falls back to the ticket title (plus a subtle indicator that no summary was written) so the UI degrades gracefully.
+- **Narration (kept):** prose inside a step that is followed by more work in the
+  same step renders as the step's live caption.
+- **Close-time ejection (replaces interjection + trailing reply):** when a step
+  closes, any prose spoken inside it *after its last work* is ejected into the
+  ungrouped inline stream immediately after that step node — so a closing remark
+  the agent spoke just before `tk close` is promoted out of the step rather than
+  buried in it.
+- **Trailing reply:** the turn's wrap-up reply is simply the final contiguous run
+  of ungrouped prose in the section, rendered below the timeline. It is not a
+  separately computed concept — it falls out of the ejection rule plus
+  "prose with no step open is ungrouped."
+- Chips render at their chronological position but are not reply boundaries.
+- This removes the three-way (leading / inter-step interjection / trailing)
+  boundary computation and the chip-boundary interactions. The
+  `claude_tk_close_reoutput_nudge.sh` hook remains as a best-effort steer toward
+  the ideal "close, then speak" ordering; the ejection rule is the renderer-side
+  backstop.
 
-## Changes
+### Unfinished steps at turn boundary (target — carryover removed)
 
-### Forever-claude-template (agent side)
+- A step left open when the next user message arrives **freezes** in its own
+  turn: it renders with a static (settled) icon and does not retroactively flip
+  to done. It is **not** re-rendered at the top of the next turn.
+- The stop hook **auto-closes** any still-open steps at turn end with a canned
+  summary ("Not completed this turn.") and records their ids/titles. The
+  next-turn reminder reads and clears that record and tells the agent the steps
+  were auto-closed unfinished, so it can redeclare whatever remains relevant.
+- These hook-driven closes happen outside the transcript, so the view never sees
+  them; the frozen-in-place rendering is the entire view-side story. This removes
+  the carryover apparatus (re-opening at section top, duplicate nodes per id,
+  `is_carryover`, `openStepsAtEnd`).
 
-- **CLAUDE.md**: add a strong, prominent task-management section that:
-  - declares `tk` the only allowed task tracker for in-turn progress, and TodoWrite as forbidden;
-  - dictates user-facing tone for ticket titles (plain English, abstract over implementation, no jargon, no file names, no tool names);
-  - dictates user-facing tone for summaries on close (one-line answer to "what did you actually do for this step?", written for a non-technical reader);
-  - prescribes the lifecycle: `tk create` → `tk start` → work → `tk add-note` (summary) → `tk close`;
-  - explains the carryover behavior so the agent reasons correctly about old open tickets;
-  - covers the no-failed-state rule: every started ticket must terminate as closed, with a summary that honestly reports whatever the agent achieved (including partial / negative results).
-- **`.claude/settings.json`**: explicitly disable the built-in TodoWrite tool so the agent can't dual-track; ensure `tk` and `ticket` are on the agent's allowed Bash invocations.
-- **Session hooks** (added in `settings.json`):
-  - **UserPromptSubmit / SessionStart-of-turn hook**: queries `tk` for open tickets and injects a system reminder listing them (id + title); stays silent if none are open.
-  - **Stop hook**: queries `tk` for tickets still open at end of turn that the current turn touched, surfaces them as soft feedback the agent can read on next wake. Never blocks. Never closes. Never reopens.
-- **Skills**:
-  - Update `launch-task` to make subagents use their own `.tickets/` dir (or no `.tickets/` at all) and to instruct the parent agent to model the whole delegation as a single ticket in its own list.
-  - Optionally add a tiny `progress` (or similar) skill whose body is a concise restatement of the task-management protocol, to give Claude a scannable reference when it needs one.
-- **No fork of `tk`** for v1 — use the upstream behavior verbatim. If the no-summary fallback proves too lossy in practice, revisit later.
+### Historical transcripts
 
-### Mngr / minds_workspace_server (rendering side)
+- Old transcripts predate the new tk output lines, but their titles/summaries are
+  present in the tk *command inputs* (`tk create --step "Title"`,
+  `tk close <id> "summary"`), which the parser already recognizes by regex.
+- The frontend keeps a **best-effort input-preview fallback**: when the new
+  output decoration is absent, pull the quoted title/summary argument from the tk
+  command's `input_preview`. This is explicitly allowed to be imperfect (exotic
+  quoting degrades to a raw id) because it serves a frozen corpus only.
+- To make the fallback reliable for the common batched-create case, the parser
+  **exempts tk lifecycle commands from the 200-char `input_preview` truncation**
+  (see Implementation). Because transcripts are re-parsed on every load, this
+  applies retroactively.
 
-- **Backend ticket-watching layer**: add a watcher analogous to the existing session JSONL watcher that observes the agent's `.tickets/` directory, parses the YAML frontmatter and notes from each `<id>.md`, and synthesizes a stream of new transcript events:
-  - a `task_event` for each ticket state transition (created, started, closed) carrying ticket id, title, status, summary (most recent note before close), and `created_at` / `updated_at` timestamps;
-  - events flow through the same API endpoints / WebSocket stream the frontend already consumes, with deterministic event_ids so deduplication works.
-- **Turn attribution**: server-side, when serving events, group `task_event`s into turns by checking which user-message timestamp window each ticket's `created_at` falls within. Tickets that don't fall in any window are tagged "carryover" and attached to the *next* turn after their last update.
-- **Frontend `Response.ts` model**: add `task_event` to the `TranscriptEvent` discriminated union and expose a per-agent task-state map that's kept in sync as events arrive (mirroring `eventsByAgent`).
-- **Frontend `ChatPanel.ts` rendering**: split the per-turn message list into "progress turns" and "plain turns":
-  - A progress turn (any turn with one or more task_events) renders the user message followed by a Timeline-variant progress block, then the agent's final-message text below the block. Raw tool calls stop being inline children and instead live behind each task's chevron.
-  - A plain turn (no task_events) renders exactly as today.
-- **New view module**: a `ProgressBlock` component (Mithril, matching existing patterns in `views/`) that renders the Timeline variant from the design — task list with status icons, per-task expand affordance reusing `renderToolCallBlock` and `MarkdownContent` for the expanded body.
-- **Per-task event grouping**: when expanding a task, gather the assistant text + tool calls that occurred between that ticket's `started` and `closed` events (or between started and now, if active) and render them in transcript order, matching how the current `renderAssistantMessageChildren` interleaves prose and tool blocks.
-- **Activity indicator rewrite**: replace the current `.agent-activity-indicator` with a derived strip whose label is computed each redraw from the latest assistant tool call without a matching tool_result — verb table covering Read / Edit / Write / Bash / etc., a generic "Running tool…" fallback, "Thinking…" when no tool is in flight.
-- **Styles**: port `progress-styles.css` (Timeline section + shared base) into the Vite frontend's stylesheet. Keep the existing `tool-call-block` styles intact since the expanded view re-uses them verbatim.
-- **No subagent rendering changes** for v1 beyond ensuring subagent tabs continue to render with today's chat (since subagents have no `.tickets/` exposed up to the parent).
-- **Legacy / no-ticket sessions**: untouched. The new code path only activates when `task_event`s are present for a turn, so existing agents, snapshots, and event-processor traces keep rendering exactly as before.
+### Out of scope
 
-### Out of scope for v1 (explicitly deferred)
+- Ticket/step nesting in the chat view (parent ticket as a node with steps
+  nested under it). The tk `--parent`/auto-nest machinery, the `parent_id`
+  plumbing, and the `.pv-tl-children` / `.pv-tl-node--ticket` CSS are **dead**
+  and are removed. Regular (non-step) tk tickets do not render in the progress
+  view.
+- Retroactive enrichment from editing a `.tickets/` file after the fact (a
+  consciously accepted loss — steps are ephemeral and turn-bound).
+- A cross-agent task dashboard / sidebar.
 
-- Distinguishing "real backlog" tk tickets from in-turn progress tickets (every ticket within a turn is treated as progress).
-- Forking tk to add a first-class `--summary` flag on `close`.
-- A better cross-rendering of subagent / background-agent task progress in the parent's chat.
-- Auto-closing or auto-failing incomplete tasks (we explicitly chose not to).
-- Per-user toggle to fall back to the technical view (the new view is the new default; the toggle in the design's Tweaks panel exists only for design exploration and is not shipped).
+## Implementation plan
+
+### `vendor/tk/ticket`
+
+- `cmd_create`: when `--step`, print `Created <id>: <title>` on **stdout** (today
+  it prints the bare id). Keep bare-id stdout for regular (non-step) creates so
+  existing `TICKET_ID=$(tk create ...)` captures in the lifecycle skills are
+  unaffected.
+- `cmd_start` (steps only): after `Updated <id> -> in_progress`, also print
+  `tk-step <id> title: <title>`.
+- `cmd_close` (steps only): after `Updated <id> -> closed`, also print
+  `tk-step <id> title: <title>` and `tk-step <id> summary: <summary>`.
+- Title/summary are emitted verbatim to end-of-line (newlines normalized to
+  spaces); the id prefix disambiguates. No escaping/JSON.
+- **Remove** the step auto-nest block (`--no-parent`, the in_progress-ticket
+  scan, parent stamping for steps). `--parent` remains for regular tickets.
+- Keep `--step`, `step: true` frontmatter, the `-step-` id segment (now the
+  primary "is a step" signal), the `agent` creator stamp, and the mandatory
+  close summary.
+
+### `apps/system_interface/imbue/system_interface/session_parser.py`
+
+- Extend `_truncate_tool_output` to also preserve `tk-step <id> ...` lines (same
+  mechanism that protects `Updated <id> -> <status>` today).
+- Exempt tk lifecycle Bash calls (anchored command-prefix regex, shared shape
+  with the frontend's `TK_LIFECYCLE_RE`) from the 200-char `input_preview`
+  truncation, so batched multi-create commands and long titles survive for the
+  historical input fallback.
+
+### `apps/system_interface/frontend/src/views/turn-grouping.ts`
+
+- **Decoration source:** parse `Created <id>: ...` and `tk-step <id> title|summary: ...`
+  from tool outputs into a per-id decoration map built *during* the transcript
+  walk (no external enrichment argument).
+- **Input fallback:** when a decoration is missing, extract the quoted
+  title/summary from the originating tk command's `input_preview` (best-effort).
+- **Membership:** a transition id is a step iff it matches `-step-` (or, for
+  historical ids, its `tk create --step` call is visible in the loaded window).
+- **Pending roster:** a step whose `Created` line was seen but which never
+  transitioned renders as a pending placeholder, ordered by transcript position
+  (the `created_at` timestamp sort is deleted).
+- **Prose:** keep narration; delete the `interjection` item kind,
+  `trailingProseIds` / `interjectionIds`, and the three-way reply boundary.
+  Implement close-time ejection + "trailing reply = final ungrouped prose run."
+- **Carryover removal:** delete `carryover`, `openStepsAtEnd`, `is_carryover`,
+  and section-top re-opening. An open step at a boundary freezes (existing
+  frontier logic already drops its spinner in a non-tail section).
+- **Deletions:** the `enrichment` parameter and all joins on it; `file_missing`
+  handling.
+
+### `apps/system_interface/frontend/src/models/Response.ts` and `StreamingMessage.ts`
+
+- Delete `StepEnrichment`, the `#enrichment` store, `applyEnrichment` /
+  `applyEnrichmentSnapshot` / `getEnrichmentForAgent`, the `step_enrichment`
+  field on the events response, and the `step_enrichment` SSE message handling.
+
+### `apps/system_interface/frontend/src/views/ProgressBlock.ts` + `style.css`
+
+- Remove the `file_missing` "?" marker UI and its tooltip/aria handling.
+- Remove the dead `.pv-tl-children` / `.pv-tl-node--ticket` CSS.
+- Keep the interjection render path only if the item kind survives — under the
+  ejection model, ejected prose renders as an ordinary ungrouped block, so the
+  dedicated `.pv-interstep` block can be removed (confirm against mocks).
+
+### `apps/system_interface/frontend/src/views/ChatPanel.ts`
+
+- Update `buildSections` call site to drop the enrichment argument; everything
+  else (virtualization, buildRows) is unchanged.
+
+### Backend deletions
+
+- Delete `tickets_watcher.py`, `tickets_parser.py`, and their `_test.py` files.
+- Remove `server.py` wiring: `_get_or_create_tickets_watcher`,
+  `app.state.tickets_watchers`, the `step_enrichment` field on GET `/events`, and
+  the shutdown teardown loop.
+
+### Hooks + CLAUDE.md (`scripts/`, `CLAUDE.md`)
+
+- `claude_open_tickets_stop_nudge.sh`: auto-close each still-open step with a
+  canned summary, record closed ids+titles to a runtime file, stay non-blocking.
+- `claude_open_tickets_reminder.sh`: read-and-clear that file and tell the agent
+  the steps were auto-closed unfinished — redeclare what's still relevant.
+- CLAUDE.md: replace carryover semantics with the auto-close/redeclare model;
+  remove the auto-nest / ticket-nesting-in-chat-view sections; rewrite the
+  plan-declaration examples and the `launch-task` example to the literal-id
+  (no `$(...)` capture) style; keep the standalone-command rule and the
+  close-before-reply guidance.
+- Keep `claude_tk_standalone*` (the standalone-command enforcement, which buys
+  clean hiding of pure tk calls) and `claude_tk_close_reoutput_nudge.sh`.
+
+## Implementation phases
+
+1. **tk output contract + parser protection (additive, safe alone).** tk prints
+   the new lines; `session_parser.py` protects them and un-truncates tk inputs.
+   The current frontend ignores the new lines (the `Updated` regex is unanchored),
+   so this lands without breaking anything.
+2. **Frontend rewrite + backend deletion (one change).** Switch
+   `turn-grouping.ts` to transcript-only decoration with input fallback; delete
+   the enrichment store/SSE/watcher/parser together so there is no half-state.
+   Includes prose simplification and carryover removal.
+3. **Protocol (independent, lands last).** Stop-hook auto-close + reminder
+   rewrite; CLAUDE.md and skill/example updates; remove tk auto-nest and dead CSS.
+
+## Testing strategy
+
+- **Unit (`turn-grouping.test.ts`):** rebuild the behavior matrix on
+  new-format synthetic events — titles, summaries, pending roster (transcript
+  order), narration, close-time ejection, trailing reply, frozen unfinished
+  steps, ungrouped pre-step work, chips. No enrichment argument anywhere.
+- **Historical fixture:** a section built from a real pre-redesign transcript
+  (old tk output, a batched `>200`-char create command) renders titles and
+  summaries via the input fallback.
+- **Backend:** assert `step_enrichment` appears nowhere and GET `/events` no
+  longer carries it; delete the watcher/parser tests.
+- **tk:** update/add coverage for the new `Created`/`tk-step` output lines and
+  confirm regular-create stdout is unchanged.
+- **Manual (real app):** run a multi-step turn and confirm the rendered timeline
+  matches today's; leave a step open and confirm the auto-close + next-turn
+  reminder flow.
+- **Full suites before done:** `npm run lint`, `npm run test`, and
+  `uv run pytest` for `apps/system_interface`.
+
+## Open questions
+
+- **Pending placeholders for steps created out-of-window.** Under transcript-only
+  parsing, a pending step whose `Created` line has scrolled out of the loaded
+  event window won't show until it transitions. Steps are turn-bound and
+  creator-private, so this is believed acceptable — confirm during implementation
+  against a long-transcript spot check.
+- **`.pv-interstep` removal.** Confirm against regenerated mocks that ejected
+  closing prose reads acceptably as a plain ungrouped block, so the dedicated
+  broken-thread style can be deleted rather than retained.
+- **Accepted regressions (decided, recorded):** editing a `.tickets/` file after
+  the fact no longer updates the chat; very old steps (pre-`-step-` ids) whose
+  create call has scrolled out of the loaded window drop from historical
+  timelines.
+
+## Related (not superseded)
+
+- `blueprint/scaling-design/` covers the virtualized list / pagination and is a
+  separate concern. It references the old `step_enrichment` response field in its
+  description of the `/events` shape; that reference is stale once Phase 2 lands
+  and should be read as historical.
