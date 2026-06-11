@@ -78,19 +78,27 @@ This app is effectively **a second client for Claude Code's private on-disk stat
 
 ### 1.4 Sub-agent spawning & the `claude` CLI dependency
 
-**Notable non-coupling:** the repo does **not** use Claude Code's own Task/subagent tool — the mngr `claude_subagent_proxy` plugin is *deliberately disabled* (`.mngr/settings.toml`), and `TaskCreate/TaskList/TaskUpdate/TodoWrite` are disallowed. All delegation goes through `mngr create` → a file-based task/report protocol.
+**There are two distinct sub-agent mechanisms, and they couple very differently.**
+
+1. **mngr-level worker delegation** (`launch-task` / `create_worker.py`): spawns a *separate full mngr agent* in its own container/worktree, communicating via a file-based task/report protocol. This layer is harness-agnostic (zero `claude` references).
+2. **Claude Code's own native in-process subagents** (the `Agent`/Task tool): **these are available and actively used** — by the main agent directly *and* by the `imbue-code-guardian` gates (`/autofix`, `/verify-conversation`, etc.), which currently spawn subagents to do their work. The `system_interface` UI has first-class handling for them: `session_watcher._discover_subagent_sessions` walks `<sid>/subagents/agent-<id>.jsonl` + `.meta.json`, and `session_parser` special-cases the `Agent` tool to render subagent cards (reading `description`/`subagent_type`). **This is a real, Claude-Code-specific coupling**, not a non-coupling — the `Agent` tool name, the subagent transcript layout, and the `toolUseId`/`meta.json` linkage are all CC internals.
+
+What I previously mis-stated: native subagents are **not** disabled here.
+- The `--disallowed-tools` list is `AskUserQuestion, ExitPlanMode, TodoWrite, TaskCreate, TaskList, TaskUpdate`. **The `Agent`/Task subagent tool is *not* on it.** `TaskCreate/TaskList/TaskUpdate` are mngr's MCP *task-tracking* tools (disallowed because this repo uses `tk` for that), and `TodoWrite` is the todo tool — none of these is subagent spawning.
+- Disabling the `claude_subagent_proxy` plugin (`.mngr/settings.toml`) does **not** turn off subagents. The proxy is an *experimental mngr feature* that would re-route Claude's `Agent` tool to spawn separate mngr-managed agents (and which wedges parents in a Haiku retry loop on error). With it off, subagents simply run as **normal native Claude Code subagents**, in-process — which is exactly why the UI renders them.
 
 | Component | Claude-specific? | Severity |
 |---|---|---|
 | `create_worker.py` launch/await driver (4 `mngr` commands + poll a `report.md`) | **No** — zero `claude` references | Shallow (reusable verbatim) |
 | Task-file / report-file protocol, worker-skill installer | **No** | Shallow |
+| **Native Claude `Agent`/Task subagents** (used by main agent + code-guardian gates; rendered by `system_interface`) | **Yes** — `Agent` tool name, `<sid>/subagents/*.jsonl` layout, `toolUseId`/`meta.json` linkage | **Deep** (another harness's subagent model needs its own discovery + rendering) |
 | Skill-lifecycle workers (crystallize/heal/update) | mostly no; only the `common_transcript.sh` transcript flush is CC-specific and **self-disables on non-claude agents** | Shallow–Moderate |
 | `.mngr/settings.toml` agent type/flags/model (`type="claude"`, `--dangerously-skip-permissions`, `--disallowed-tools`, `--append-system-prompt`, `model=opus[1m]`, `sleep infinity && claude`) | **Yes (hard)** — knows the `claude` binary's arg shape | Moderate (add a new `agent_types.<harness>`) |
 | CC env hardening (`DISABLE_AUTOUPDATER`, `CLAUDE_CODE_*`, `ENABLE_CLAUDEAI_MCP_SERVERS`) | Yes | Shallow (remap) |
 | Install/version-pin (`Dockerfile` `CLAUDE_CODE_VERSION=2.1.160`; `setup_system.sh` installs from `claude.ai/install.sh`; mngr refuses version mismatch) | Yes (hard) | Moderate |
 | Auth sharing (single shared `CLAUDE_CONFIG_DIR` across all agents) | Yes (hard) | Moderate |
 
-**Key finding:** the **delegation *architecture* is portable** ("ask mngr to create an agent, hand it a task file, poll a report file"). The coupling is pushed down into (a) the mngr config saying "the agent is `claude`," (b) the install/pin/auth infra for the `claude` binary, and (c) the transcript-reading display layer (1.3).
+**Key finding:** the **mngr worker-delegation architecture is portable** ("ask mngr to create an agent, hand it a task file, poll a report file"). But the repo *also* relies on **Claude Code's native subagents** (for the agent itself and for the code-guardian quality gates), which is a genuine CC coupling that surfaces in the `system_interface` rendering layer (1.3). Porting therefore has to handle a second harness's native subagent model — discovery, transcript layout, and linkage — not just the mngr worker path.
 
 ---
 
