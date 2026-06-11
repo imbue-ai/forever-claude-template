@@ -27,6 +27,7 @@ import {
   type ToolResultEvent,
 } from "../models/Response";
 import { computeVisibleWindow } from "../models/virtualWindow";
+import { nextUserScrolledUp } from "../models/scrollFollow";
 import {
   createRowMeasurer,
   OVERSCAN_PX,
@@ -215,6 +216,11 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let scrollEl: HTMLElement | null = null;
   let viewportHeight = 0;
   let scrollTop = 0;
+  // Last scroll position the panel observed, used to tell which direction the
+  // user just scrolled. Every programmatic scroll (tail-pin, prepend
+  // compensation, jump pin) updates this in lockstep with scrollTop so its own
+  // re-pin is never mistaken for a user-initiated upward scroll.
+  let previousScrollTop = 0;
   const rowMeasurer = createRowMeasurer();
   let viewportResizeObserver: ResizeObserver | null = null;
   // Memoized turn-grouping output. buildSections walks the whole held
@@ -421,6 +427,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     currentAgentId = agentId;
     scrollTop = 0;
+    previousScrollTop = 0;
     userScrolledUp = false;
     backfillInFlight = false;
     scrollHeightBeforePrepend = 0;
@@ -506,6 +513,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       pendingPinToWindowTop = false;
       element.scrollTop = phantomTopHeight;
       scrollTop = element.scrollTop;
+      previousScrollTop = element.scrollTop;
       return;
     }
 
@@ -532,23 +540,36 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       if (delta !== 0) {
         element.scrollTop = Math.max(phantomTopHeight, element.scrollTop + delta);
         scrollTop = element.scrollTop;
+        previousScrollTop = element.scrollTop;
       }
     }
 
     if (!userScrolledUp) {
       scrollToBottom(element);
       scrollTop = element.scrollTop;
+      previousScrollTop = element.scrollTop;
     }
   }
 
   function handleScrollEvent(event: Event): void {
     const element = event.target as HTMLElement;
+    // Decide tail-following from scroll *direction*, not just position. Any
+    // user-initiated upward movement disengages immediately -- even within the
+    // bottom band -- otherwise the redraw-driven scrollToBottom (which fires
+    // continuously while a turn streams) would re-pin a small upward scroll back
+    // down before the user could escape the band, the jitter that made scrolling
+    // up feel impossible. Following resumes only once the user scrolls back to the
+    // true tail. previousScrollTop is kept in lockstep by applyScrollPosition, so
+    // the panel's own programmatic re-pins are not misread as upward scrolls.
+    const didScrollUp = element.scrollTop < previousScrollTop;
+    previousScrollTop = element.scrollTop;
     scrollTop = element.scrollTop;
 
-    // Following the live tail only when truly at the end -- at the bottom of the
-    // loaded rows AND with no newer history still unloaded (a jump leaves newer
-    // history below, so being near the bottom of a jumped window is not the tail).
-    userScrolledUp = !(isNearBottom(element) && !hasMoreAfter(currentAgentId ?? ""));
+    userScrolledUp = nextUserScrolledUp({
+      didScrollUp,
+      isNearBottom: isNearBottom(element),
+      hasMoreAfter: hasMoreAfter(currentAgentId ?? ""),
+    });
 
     if (currentAgentId !== null) {
       maybePage(currentAgentId, element);
