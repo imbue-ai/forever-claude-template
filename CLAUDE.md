@@ -25,7 +25,7 @@ You manage your work using `tk`, the vendored ticket tracker at `vendor/tk/`. Th
 `tk` stores two distinct kinds of records, distinguished by the `step:` frontmatter field:
 
 - **Step records** (`tk create --step "..."`) are *turn-bound progress markers* — the direct replacement for Claude Code's `TodoWrite`. They populate the chat progress view: each step becomes a node on the timeline with a status icon and (on close) a one-line summary. Steps are **creator-private** — only the agent that created them sees them. They are sequential within a turn, ephemeral by intent, and exist purely to communicate progress to the user.
-- **Regular tickets** (`tk create "..."`, no `--step`) are *substantive work units worth tracking cross-agent*. Other agents can see them, pick them up, and own them. A ticket is "current" to whichever agent has it `in_progress` and assigned to themselves; that agent's progress view shows the ticket as a top-level node, with any step records they file *during* the work nested under it.
+- **Regular tickets** (`tk create "..."`, no `--step`) are *substantive work units worth tracking cross-agent*. Other agents can see them, pick them up, and own them. A ticket is "current" to whichever agent has it `in_progress` and assigned to themselves. Regular tickets are a cross-agent backlog tool only; they do **not** render in the chat progress view (only step records do).
 
 Most turns use only step records. Tickets enter the picture when a piece of work is large enough to span turns or to be handed between agents.
 
@@ -42,7 +42,7 @@ This means every step title and every closing summary is **user-facing copy**. W
 Concretely, the start of every substantive turn looks like:
 
 1. (Optional) One short prose acknowledgement to the user — e.g. "Sure, looking into that now." This renders as plain text above the timeline. Keep it to one line; do not narrate the plan here.
-2. `tk create --step "..."` for every step you currently expect the work to require, in order. Capture each id. Do NOT call `tk start` on any of them yet.
+2. `tk create --step "..."` for every step you currently expect the work to require, in order. Each `tk create --step` prints `Created <id>: <title>` — note each id (you pass it to `tk start`/`tk close`). Do NOT call `tk start` on any of them yet.
 3. `tk start` the first step and begin the work for that step.
 
 You may add steps later (`tk create --step` more as new sub-problems surface) or remove ones that turn out to be unneeded (`tk close <id> "No longer needed — the previous step covered this."`).
@@ -52,17 +52,6 @@ You may add steps later (`tk create --step` more as new sub-problems surface) or
 A step represents a logical step in the user's mental model of the work, not a unit of parallel computation. If you'd describe the work to the user as "first I'll do X, then Y, then Z," that's three steps. If you'd describe it as a single coherent step — even if it involves several parallel lookups internally — it's one step.
 
 Granularity: typically 2-5 sequential steps per substantive turn. Not one per tool call (way too granular). Not one step for the whole turn (defeats the purpose of progress).
-
-## Auto-nest under an in_progress ticket
-
-If you have a regular ticket that is currently `in_progress` AND assigned to you, `tk create --step` automatically nests the new step under that ticket as its parent. The chat view renders this as: the ticket appears as the top-level node, the steps appear indented underneath. You don't need to pass `--parent` in the common case — auto-nest handles it.
-
-If you have *more than one* ticket in_progress for yourself simultaneously, auto-nest is ambiguous and `tk create --step` will error with a list of candidate tickets. You must then disambiguate with either:
-
-- `tk create --step "..." --parent=<ticket-id>` to pick a specific parent, or
-- `tk create --step "..." --no-parent` to file a standalone step.
-
-In practice having two tickets in_progress at once is allowed but discouraged. Prefer to finish or hand off the current ticket before picking up another.
 
 ## When you don't need any records
 
@@ -76,27 +65,35 @@ If your turn is truly one of these, just write your reply directly — no record
 
 ## Step lifecycle (must follow exactly)
 
-At the **start of the turn**, create every step you currently expect the work to require:
+At the **start of the turn**, create every step you currently expect the work to require. Each `tk create --step` prints `Created <id>: <title>`; note the id it prints (you can batch the creates in one tool call):
 
 ```bash
-S1=$(tk create --step "Look through your recent changes to find the new theme")
-S2=$(tk create --step "Trace how the dark-mode toggle picks a theme")
-S3=$(tk create --step "Register the new theme and update the toggle")
-S4=$(tk create --step "Verify the toggle now reaches your new theme")
+tk create --step "Look through your recent changes to find the new theme"
+tk create --step "Trace how the dark-mode toggle picks a theme"
+tk create --step "Register the new theme and update the toggle"
+tk create --step "Verify the toggle now reaches your new theme"
+```
+
+This prints, e.g.:
+
+```
+Created cod-step-a1b2: Look through your recent changes to find the new theme
+Created cod-step-c3d4: Trace how the dark-mode toggle picks a theme
+...
 ```
 
 Title rules: plain English, describes the goal as the user understands it, no file names, no tool names, no internal jargon. The title is what the user sees as the step name.
 
-Then for **each step in order**, one at a time:
+Then for **each step in order**, one at a time, using the literal id from the `Created` line (run `tk steps` if you need to re-list the ids):
 
 1. **Start** it:
    ```bash
-   tk start "$S1"
+   tk start cod-step-a1b2
    ```
 2. **Do the work.** Run whatever tools you need.
 3. **Close with a summary** (required, positional):
    ```bash
-   tk close "$S1" "Read through your recent commits and the theme files to find what's new."
+   tk close cod-step-a1b2 "Read through your recent commits and the theme files to find what's new."
    ```
 4. Move on to the next step. Only one is `in_progress` at a time.
 
@@ -114,7 +111,7 @@ After all your steps for the turn are closed, write your final user-facing assis
 
 **Steps and prose:**
 - Text emitted while a step is `in_progress` shows as a live caption under the step, replaced by each new message.
-- **Close your final step *before* writing your user-facing wrap-up reply.** The progress view detects your reply by scanning backward from the end of the turn and stopping at the first closed step, so prose written *after* the last close is promoted to a top-level reply below the timeline, while prose written *before* it stays buried inside the step (reachable only by expanding it). This is best-effort, not a hard rule — the view renders sensibly either way, and if you do speak before closing you'll get a reminder to re-output user-facing text after the close.
+- **Close your final step *before* writing your user-facing wrap-up reply.** The progress view promotes the final run of prose with no step open to your top-level reply below the timeline; prose you speak *inside* a step, after its last work, is ejected to the inline stream just after that step. So closing the last step first keeps your wrap-up cleanly below the timeline. This is best-effort, not a hard rule — the view renders sensibly either way.
 - **Never mention steps, tickets, or `tk` in what you say to the user.** The step machinery is invisible to them — don't narrate it ("closing this step," "moving on to the next step," "starting X"). Speak only about the actual work and its subject matter, as if the timeline weren't there. Step titles and close summaries are the one place step structure may surface, and even those describe the *work*, not the act of tracking it.
 - Steps may stay open across turns. Close when work is done; leave open if work continues.
 
@@ -129,7 +126,7 @@ Regular tickets are for substantive work worth tracking cross-agent. The relevan
 - `tk close <id> [summary]` — close. Summary is optional for tickets (required for steps).
 - `tk assign <id> [agent]` / `tk unassign <id>` — explicit assignment.
 
-Tickets can be left `in_progress` across turns; the chat view will keep rendering them at the top of every subsequent turn (with a "continued in next turn" marker on the prior turn) until you close them.
+Tickets can be left `in_progress` across turns until you close them. (Regular tickets are not shown in the chat progress view — that view renders step records only. Use `tk ls` / `tk show` to track tickets.)
 
 ## Persistent task state across turns
 

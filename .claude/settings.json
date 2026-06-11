@@ -36,10 +36,6 @@
           {
             "type": "command",
             "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_require_steps_pretool.sh"
-          },
-          {
-            "type": "command",
-            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_tk_close_reoutput_nudge.sh"
           }
         ]
       }
