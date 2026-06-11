@@ -130,7 +130,10 @@ def _parse_result(data: object) -> ClaudeResult:
         raise ClaudeCLIError("claude -p JSON output was not an object")
     if data.get("is_error") or data.get("subtype") != "success":
         errors = data.get("errors")
-        detail = "; ".join(errors) if isinstance(errors, list) else ""
+        # claude -p output is external JSON, so coerce each element to str: a
+        # non-string entry would otherwise make str.join raise TypeError inside
+        # this error path, masking the ClaudeCLIError we are trying to raise.
+        detail = "; ".join(str(e) for e in errors) if isinstance(errors, list) else ""
         raise ClaudeCLIError(
             f"claude -p returned an error result (subtype={data.get('subtype')!r}): "
             f"{detail or 'no error detail reported'}"

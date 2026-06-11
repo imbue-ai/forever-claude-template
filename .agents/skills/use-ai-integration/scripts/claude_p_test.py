@@ -102,6 +102,21 @@ def test_parse_result_raises_on_error_arm() -> None:
         claude_p._parse_result(payload)
 
 
+def test_parse_result_error_arm_tolerates_non_string_errors() -> None:
+    # claude -p output is external JSON: a non-string element in 'errors' must
+    # still raise ClaudeCLIError (with the detail stringified), not a TypeError
+    # from str.join inside the error path.
+    payload = {
+        "subtype": "error_during_execution",
+        "is_error": True,
+        "errors": [{"code": 42}, "and a string"],
+        "total_cost_usd": 0.5,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    with pytest.raises(claude_p.ClaudeCLIError, match="and a string"):
+        claude_p._parse_result(payload)
+
+
 def test_parse_result_raises_when_subtype_not_success() -> None:
     # is_error may be absent/false but a non-success subtype must still raise,
     # rather than be treated as an empty-text success.
