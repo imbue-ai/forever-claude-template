@@ -30,6 +30,11 @@ import httpx
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from tenacity import RetryCallState
+from tenacity import Retrying
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_delay
+from tenacity import wait_fixed
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -263,20 +268,6 @@ def _is_local_path(repo_source: str) -> bool:
     return repo_source.startswith(("/", "./", "../", "~"))
 
 
-def _may_shallow_clone_remote_repo(launch_mode: LaunchMode) -> bool:
-    """Whether a remote-URL clone for ``launch_mode`` may be shallow (``--depth 1``).
-
-    Shallow is fine for modes that rsync the workspace into place, but the
-    imbue_cloud *slow path* transfers the clone to the leased host via mngr's
-    git-mirror PUSH (``host.py:_git_push_to_target``), which git rejects for
-    shallow history (``shallow update not allowed``). So imbue_cloud requires a
-    full clone -- otherwise a slow-path fallback (no fast/adopt match) fails
-    outright. Shared tiers (staging / production) hit this because their create
-    form defaults to the remote FCT URL rather than a local worktree.
-    """
-    return launch_mode is not LaunchMode.IMBUE_CLOUD
-
-
 def _redact_url_credentials(url: str) -> str:
     """Strip any ``user[:password]@`` userinfo from a URL's netloc for logging.
 
@@ -345,20 +336,35 @@ def clone_git_repo(
     clone_dir: Path,
     on_output: OutputCallback | None = None,
     *,
-    is_shallow: bool = False,
+    branch: GitBranch | None = None,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
     """Clone a git repository into the specified directory.
 
-    The clone_dir must not already exist -- git clone will create it.
-    When is_shallow is True, clones with --depth 1 to skip history.
-    Raises GitCloneError if the clone fails.
+    The clone_dir must not already exist -- this function creates it.
+
+    ``branch`` accepts a branch name, a tag name, or a commit SHA -- git
+    fetch handles all three uniformly. The fetched ref lands in
+    ``FETCH_HEAD``; the caller materialises HEAD by calling
+    :func:`checkout_branch` next.
+
+    Implementation is ``git init`` + ``git remote add origin`` + ``git
+    fetch origin <ref>`` rather than ``git clone --single-branch --branch
+    <ref>``. ``--branch`` rejects commit SHAs (``fatal: Remote branch
+    <sha> not found in upstream origin``); ``git fetch`` does not. The
+    fetch downloads only the requested ref's full ancestry -- same shape
+    as ``--single-branch``, still non-shallow.
+
+    We deliberately do NOT shallow-clone (no ``--depth``): this clone is
+    the source ``mngr create`` mirror-pushes into the agent container's
+    bare repo, and git rejects pushes from a shallow source with "shallow
+    update not allowed" (the pushed tip's parent is missing from the pack).
+
+    Raises GitCloneError if any step fails (including when ``branch`` does
+    not exist on the remote and is not a reachable commit).
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
-    command = ["git", "clone"]
-    if is_shallow:
-        command.extend(["--depth", "1"])
-    command.extend([str(git_url), str(clone_dir)])
+    clone_dir.mkdir(parents=True, exist_ok=False)
 
     # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
     # of embedded credentials before being forwarded. Git commonly echoes the
@@ -366,22 +372,37 @@ def clone_git_repo(
     # which would otherwise leak tokens from credentialed URLs into logs.
     redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
+    # `init` and `remote add` are local-only and never fail in healthy
+    # environments; `fetch` is the step that can legitimately error
+    # (auth, network, ref-not-found). All three are wrapped under the
+    # same child concurrency group so cancellation is uniform; the
+    # failure is raised AFTER the `with cg` block to keep GitCloneError
+    # from being wrapped in a ConcurrencyExceptionGroup.
     cg = _make_child_cg("git-clone", parent_cg)
+    failed: tuple[str, str] | None = None
     with cg:
-        result = cg.run_process_to_completion(
-            command=command,
-            is_checked_after=False,
-            on_output=redacted_on_output,
-        )
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        stdout = result.stdout.strip()
-        raise GitCloneError(
-            "git clone failed (exit code {}):\n{}".format(
-                result.returncode,
-                _redact_url_credentials_in_text(stderr if stderr else stdout),
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "remote", "add", "origin", str(git_url)],
+            ["git", "fetch", "origin", str(branch) if branch is not None else "HEAD"],
+        ):
+            result = cg.run_process_to_completion(
+                command=command,
+                cwd=clone_dir,
+                is_checked_after=False,
+                on_output=redacted_on_output,
             )
-        )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                stdout = result.stdout.strip()
+                failed = (command[1], stderr if stderr else stdout)
+                break
+    if failed is not None:
+        step_name, output = failed
+        raise GitCloneError("git {} failed:\n{}".format(step_name, _redact_url_credentials_in_text(output)))
+
+
+_FULL_SHA_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
 
 
 def checkout_branch(
@@ -391,22 +412,36 @@ def checkout_branch(
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
-    """Check out a specific branch in a cloned repository.
+    """Check out the just-fetched ref as a named local branch.
 
-    Raises GitOperationError if the checkout fails (e.g. branch does not exist).
+    Uses ``git checkout -B <local-name> FETCH_HEAD`` -- FETCH_HEAD is the
+    pseudo-ref :func:`clone_git_repo`'s fetch just landed on, so this is
+    the unambiguous source whether the input was a branch, a tag, or a
+    SHA. ``-B`` creates the local branch (rather than leaving HEAD
+    detached) so downstream ``mngr.create``'s source-base autodetection
+    (``git rev-parse --abbrev-ref HEAD``) returns a real branch name.
+
+    When ``branch`` is a 40-char lowercase hex SHA, the local branch is
+    named ``sha-<sha>`` instead of ``<sha>`` to avoid git's "refname is
+    ambiguous" warning that fires on any subsequent operation that types
+    a 40-hex string. Cosmetic only -- operations work either way.
+
+    Raises GitOperationError if the checkout fails.
     """
-    logger.debug("Checking out branch {} in {}", branch, repo_dir)
+    ref = str(branch)
+    local_name = f"sha-{ref}" if _FULL_SHA_RE.match(ref) else ref
+    logger.debug("Checking out {} as local branch {} in {}", ref, local_name, repo_dir)
     cg = _make_child_cg("git-checkout", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
-            command=["git", "checkout", str(branch)],
+            command=["git", "checkout", "-B", local_name, "FETCH_HEAD"],
             cwd=repo_dir,
             is_checked_after=False,
             on_output=on_output,
         )
     if result.returncode != 0:
         raise GitOperationError(
-            "git checkout failed for branch '{}' (exit code {}):\n{}".format(
+            "git checkout failed for ref '{}' (exit code {}):\n{}".format(
                 branch,
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
@@ -463,6 +498,7 @@ def _build_mngr_create_command(
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
+    region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
@@ -485,11 +521,11 @@ def _build_mngr_create_command(
     Every mode creates a separate host, so the agent address uses
     ``system-services@<host_name>`` -- the agent name is constant across
     every minds workspace; the host name (the user's input from the
-    create-project form) is the workspace identifier. ``--reuse`` and
-    ``--update`` are passed for the non-IMBUE_CLOUD modes so re-deploying
-    resets the agent on the same host instead of failing on a duplicate
-    name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
-    is not meaningful there).
+    create-project form) is the workspace identifier. Only IMBUE_CLOUD
+    passes ``--reuse`` (to satisfy the pre-baked services-agent on the
+    pool host); the other modes rely on ``--new-host`` for fresh-host
+    intent and pass neither ``--reuse`` nor ``--update`` because
+    mngr's ``--reuse`` matches on agent name without host scope.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
     the FCT template's own ``pass_(host_)env`` declarations, not by inline
@@ -579,7 +615,12 @@ def _build_mngr_create_command(
             # transfer + provisioning round the bake already paid for.
             mngr_command.append("--reuse")
         case _:
-            mngr_command.extend(["--reuse", "--update"])
+            # Non-IMBUE_CLOUD modes pass neither ``--reuse`` nor ``--update``:
+            # the create form is "give me a new agent on a new host", and
+            # ``--reuse`` matches only on agent name (``system-services``)
+            # without scoping to host, so it collides across hosts. The
+            # ``--new-host`` flag below already covers fresh-host intent.
+            pass
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides
@@ -596,6 +637,11 @@ def _build_mngr_create_command(
         case LaunchMode.CLOUD:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
+            # The user always picks a Vultr region in the create form (advanced
+            # settings). It is a hard placement requirement: the VPS is created
+            # in exactly this region.
+            if region:
+                mngr_command.extend(["-b", f"--vps-region={region}"])
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -615,6 +661,12 @@ def _build_mngr_create_command(
             # ``_run_imbue_cloud_create_with_fallback``).
             if imbue_cloud_fast_mode:
                 mngr_command.extend(["-b", f"fast_mode={imbue_cloud_fast_mode}"])
+            # ``region`` is the explicit datacenter the user picked in the create
+            # form (advanced settings). It is a hard requirement: the lease only
+            # adopts/leases a host in this region, and the user gets a clear
+            # "no capacity in <region>" error if none is available there.
+            if region:
+                mngr_command.extend(["-b", f"region={region}"])
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -778,6 +830,7 @@ def run_mngr_create(
     imbue_cloud_repo_url: str | None = None,
     imbue_cloud_branch_or_tag: str | None = None,
     imbue_cloud_fast_mode: str | None = None,
+    region: str | None = None,
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
@@ -814,6 +867,7 @@ def run_mngr_create(
         imbue_cloud_repo_url=imbue_cloud_repo_url,
         imbue_cloud_branch_or_tag=imbue_cloud_branch_or_tag,
         imbue_cloud_fast_mode=imbue_cloud_fast_mode,
+        region=region,
         latchkey_env=latchkey_env,
     )
 
@@ -885,6 +939,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     latchkey_env: Mapping[str, str] | None
     account_email: str | None
     branch_or_tag: str | None
+    region: str | None
     anthropic_api_key: str | None
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
@@ -915,9 +970,29 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # to pick the right pool generation.
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
+        # ``region`` is honored by both IMBUE_CLOUD (-b region=) and CLOUD/vultr
+        # (-b --vps-region=); the command builder ignores it for DOCKER/LIMA.
+        region=(params.region or None),
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
         parent_cg=params.parent_cg,
+    )
+
+
+def _log_backup_attempt(agent_id: AgentId, retry_state: RetryCallState) -> None:
+    """Debug-log a backup-setup retry, called at the start of each retry attempt.
+
+    The first attempt has no prior outcome and is not logged; subsequent attempts
+    log the previous attempt's failure so retries are traceable without spamming.
+    """
+    outcome = retry_state.outcome
+    if outcome is None:
+        return
+    logger.debug(
+        "Backup setup attempt {} for agent {} (previous failed: {}); retrying",
+        retry_state.attempt_number,
+        agent_id,
+        outcome.exception(),
     )
 
 
@@ -1038,6 +1113,21 @@ class AgentCreator(MutableModel):
         frozen=True,
         description="Per-request timeout for the readiness probe HTTP GET.",
     )
+    backup_setup_retry_budget_seconds: float = Field(
+        default=300.0,
+        frozen=True,
+        description=(
+            "Total wall-clock budget for retrying backup setup on the detached thread. "
+            "The workspace is ready before this thread runs, but a slow host's mngr exec can "
+            "still race the agent's reachability; we retry transient failures within this budget "
+            "before giving up and notifying the user. Never blocks the create call."
+        ),
+    )
+    backup_setup_retry_wait_seconds: float = Field(
+        default=10.0,
+        frozen=True,
+        description="Wait between backup-setup retry attempts.",
+    )
 
     # In-flight creation state is keyed by ``str(CreationId)`` because the
     # canonical ``AgentId`` doesn't exist until ``mngr create`` returns.
@@ -1063,6 +1153,7 @@ class AgentCreator(MutableModel):
         ai_provider: AIProvider = AIProvider.SUBSCRIPTION,
         account_email: str = "",
         branch_or_tag: str = "",
+        region: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1132,6 +1223,7 @@ class AgentCreator(MutableModel):
                 ai_provider,
                 account_email,
                 branch_or_tag,
+                region,
                 anthropic_api_key,
                 on_created,
                 backup_request,
@@ -1191,6 +1283,7 @@ class AgentCreator(MutableModel):
         ai_provider: AIProvider,
         account_email: str = "",
         branch_or_tag: str = "",
+        region: str = "",
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
@@ -1249,12 +1342,14 @@ class AgentCreator(MutableModel):
                         # .git/worktrees/ dir, which breaks when copied into Docker.
                         # Clone locally to get a standalone repo.
                         #
-                        # Full clone (no --depth=1): mngr's downstream mirror push
-                        # to the agent container's bare `.git` rejects shallow
-                        # updates with "shallow update not allowed" whenever the
-                        # source's tip has a parent not in the pack. Cloning
-                        # deeply avoids that failure mode. Local file:// clones
-                        # are cheap regardless.
+                        # Full clone (no --depth=1): a shallow clone only pulls
+                        # the default branch (e.g. main) and not the user's
+                        # target branch (e.g. pilot), so the subsequent
+                        # `git checkout <branch>` fails with `pathspec did not
+                        # match`. mngr's downstream mirror push into the agent
+                        # container's bare receiver also rejects shallow source
+                        # packs with "shallow update not allowed". Cloning
+                        # deeply avoids both. Local file:// clones are cheap.
                         # Use a stable path based on repo name so Docker layer caching works.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
@@ -1287,15 +1382,22 @@ class AgentCreator(MutableModel):
                     if clone_target.exists():
                         shutil.rmtree(clone_target)
                     log_queue.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
-                    # See _may_shallow_clone_remote_repo: imbue_cloud's slow-path
-                    # git-mirror push rejects shallow history, so it needs a full
-                    # clone (the remote-URL twin of the local-worktree branch
-                    # above, which full-clones for the same reason).
+                    # Clone only the requested branch (non-shallow) when one is
+                    # given: cheaper than a full clone, yet keeps the complete
+                    # ancestry that the downstream mirror-push into the agent
+                    # container requires (a shallow clone would be rejected with
+                    # "shallow update not allowed"). Every launch mode reaches
+                    # mngr create's git-mirror push (a cloned-repo source + a
+                    # new host always resolves to TransferMode.GIT_MIRROR), so a
+                    # shallow clone is never safe here regardless of mode. The
+                    # checkout below is then a no-op for this path, but still
+                    # does the work when the source is a pre-existing local
+                    # directory.
                     clone_git_repo(
                         GitUrl(repo_source),
                         clone_target,
                         on_output=emit_log,
-                        is_shallow=_may_shallow_clone_remote_repo(launch_mode),
+                        branch=GitBranch(branch) if branch else None,
                         parent_cg=self.root_concurrency_group,
                     )
                     workspace_dir = clone_target
@@ -1390,6 +1492,7 @@ class AgentCreator(MutableModel):
                     latchkey_env=latchkey_setup.env,
                     account_email=account_email,
                     branch_or_tag=branch_or_tag,
+                    region=region,
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
@@ -1564,21 +1667,39 @@ class AgentCreator(MutableModel):
     ) -> None:
         """Detached-thread entry point: configure restic backups for the new host.
 
-        Failures are surfaced as an OS notification (a normal error popup)
-        and logged; they are non-fatal to the already-created workspace --
-        the user can configure backups later.
+        ``configure_backups_for_host`` is idempotent, so we retry it within a
+        bounded wall-clock budget: by the time this thread runs the workspace
+        readiness probe has already passed, but a slow host's ``mngr exec`` can
+        still race the agent's reachability for a while after that. Transient
+        failures are retried quietly (debug-logged per attempt); only if the
+        whole budget is exhausted do we surface an OS notification. Either way
+        this is non-fatal to the already-created workspace -- the user can
+        configure backups later -- and it never blocks the create call.
         """
+
         try:
-            configure_backups_for_host(
-                agent_id=agent_id,
-                host_id=host_id,
-                request=backup_request,
-                imbue_cloud_cli=self.imbue_cloud_cli,
-                paths=self.paths,
-                parent_cg=self.root_concurrency_group,
-            )
+            for attempt in Retrying(
+                retry=retry_if_exception_type((BackupProvisioningError, ImbueCloudCliError)),
+                stop=stop_after_delay(self.backup_setup_retry_budget_seconds),
+                wait=wait_fixed(self.backup_setup_retry_wait_seconds),
+                reraise=True,
+            ):
+                with attempt:
+                    _log_backup_attempt(agent_id, attempt.retry_state)
+                    configure_backups_for_host(
+                        agent_id=agent_id,
+                        host_id=host_id,
+                        request=backup_request,
+                        imbue_cloud_cli=self.imbue_cloud_cli,
+                        paths=self.paths,
+                        parent_cg=self.root_concurrency_group,
+                    )
         except (BackupProvisioningError, ImbueCloudCliError) as exc:
-            logger.opt(exception=exc).warning("Failed to configure backups for agent {}", agent_id)
+            logger.opt(exception=exc).warning(
+                "Failed to configure backups for agent {} after {:.0f}s of retries",
+                agent_id,
+                self.backup_setup_retry_budget_seconds,
+            )
             self.notification_dispatcher.dispatch(
                 NotificationRequest(
                     title="Backup setup failed",
