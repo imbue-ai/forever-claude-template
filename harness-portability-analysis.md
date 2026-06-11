@@ -44,7 +44,7 @@ Five hook surfaces: `SessionStart`, `PreToolUse`, `UserPromptSubmit`, `Stop`, `s
 | Stop → `detect_crystallization_candidate.py` (documented; wired via the code-guardian plugin, not in `settings.json`) | nudge crystallization after a heavy turn | Stop event + exit-2; reads mngr **common transcript**, deliberately *not* CC's `transcript_path` | Moderate (consciously de-coupled) |
 | statusLine → `claude_status_line.sh` | render branch/PR status bar | `statusLine` run-command-render-stdout | Shallow (Missing on Codex/Gemini today) |
 
-**Key finding:** the *hard-block* contract (exit 2 + stderr) is the most portable CC mechanism — Codex, Cursor, and Gemini CLI all copied it. The **least** portable mechanism is **non-blocking `additionalContext` injection** plus **`transcript_path`-to-hook**, which together power the soft tk-step reminders. A harness lacking a "inject context without blocking" channel can only hard-block or stay silent.
+**Key finding:** the *hard-block* contract (exit 2 + stderr) is the most portable CC mechanism — Codex, Cursor, and Gemini CLI all copied it. **Non-blocking `additionalContext` injection turns out to be more portable than it first appears** (correcting an earlier overstatement): the major CC-compatible harnesses replicate it — Codex supports `hookSpecificOutput.additionalContext` on both `PreToolUse` and `UserPromptSubmit` (the exact mechanism `claude_require_steps_pretool.sh` uses); Cursor supports it via `permissionDecision: allow` + `additionalContext`; Gemini CLI supports it but **only on `AfterTool`/`BeforeAgent`, not on the pre-tool-call hook (`BeforeTool`)**, so our nudge would have to move to a per-turn (`BeforeAgent`) point there. The genuinely *less* portable dependency is **`transcript_path`-passed-to-hook** (used by `claude_tk_close_reoutput_nudge.sh`): fewer harnesses hand the hook a path to the live transcript. And both affordances are simply absent on the harnesses with no hook system at all (Goose, Amp, Aider) or a different hook model (opencode JS plugins, pi extensions), where a soft reminder must be reimplemented programmatically or dropped. So: a harness lacking a non-blocking-injection channel can only hard-block or stay silent — but among the CC-compatible cluster, that channel mostly exists (with hook-point differences), it's the live-transcript access that's the rarer requirement.
 
 ### 1.2 Skills, plugins, instruction file
 
@@ -135,7 +135,7 @@ The real residual coupling sits **above** mngr, in the template itself: (a) the 
 | Instruction file (`CLAUDE.md`) | AGENTS.md | **Easy filename / Moderate content** | CC-specific prose (TodoWrite, Skill tool, slash cmds) |
 | `mngr` agent type / install / version-pin | none (per-harness binary) | **Moderate** | new `agent_types.<harness>` + install script per harness |
 | Auth sharing (shared config dir) | none | **Moderate** | per-harness credential model |
-| Soft tk-step nudges (`additionalContext`, `transcript_path`) | CC hook contract (partially copied) | **Moderate–Hard** | needs non-blocking-injection + transcript-to-hook; absent on several harnesses |
+| Soft tk-step nudges (`additionalContext`, `transcript_path`) | CC hook contract (widely copied) | **Easy–Moderate** on CC-compatible harnesses; **Hard** elsewhere | non-blocking injection exists on Codex/Cursor/Gemini (hook-point differs on Gemini); the rarer need is `transcript_path`-to-hook; absent on no-hook harnesses (Goose/Amp/Aider) |
 | Plugin/marketplace + code-guardian gate (`/autofix`, `/verify-conversation`) | none (CC-only) | **Hard** | CC plugin system; mandatory in workflow |
 | `system_interface` transcript parser | the existing `source`-tagged event seam | **Hard (per-harness adapter)** | no transcript standard; literal-string coupling |
 | `system_interface` auth flow + auth-error detection | none | **Hardest (no seam)** | 100% Claude/Anthropic-specific |
@@ -158,13 +158,15 @@ Legend: ✅ equivalent/native · 🔶 different implementation (adapter needed) 
 | Status line | ✅ scriptable | ❌ (requested) | ❌ (requested) | ⚠️ | ⚠️ | ❌ | ⚠️ | ❌ | ✅ TUI | ✅ TUI |
 | Plugins/marketplace | ✅ | ⚠️ community | ✅ Extensions | ⚠️ | ✅ | ⚠️ | ✅ | ❌ | ✅ packages | ✅ |
 
+*Hooks row — two capabilities to keep separate:* (i) **blocking control** (events + stdin JSON + exit-2-block / deny) is what "CC-compatible" usually means, and Codex/Cursor both advertise it while Gemini has a native superset; (ii) **non-blocking context injection** (`additionalContext` without blocking — what our soft tk-step nudge needs) is *also* present on Codex (`PreToolUse`+`UserPromptSubmit`), Cursor (`allow`+`additionalContext`), and Gemini (`AfterTool`/`BeforeAgent` only — **not** at the pre-tool point), but is unavailable on the ⚠️-none harnesses (Goose/Amp/Aider) and must be done programmatically on the 🔶 plugin/extension models (opencode/pi). A ✅ in this row means (i); it does not by itself guarantee (ii) at the same hook-point we use.
+
 ### Matrix C — Roadblock classification: our fault vs fundamental
 
 | Roadblock | Self-inflicted (our org is CC-specific) | Fundamental (harnesses genuinely differ) |
 |---|---|---|
 | `CLAUDE.md` filename + CC-specific prose | ✅ mostly — we wrote one file for one harness | partial: each harness has its own default name |
 | Plugin/marketplace dependency (`/autofix`, `/verify-conversation` mandatory) | ✅ — we made a CC-plugin a hard workflow gate | partial: no cross-harness plugin standard |
-| Soft tk-step nudges need `additionalContext`+`transcript_path` | ✅ partly — we leaned on CC-only hook affordances for UX polish | ✅ partly — several harnesses lack non-blocking injection entirely |
+| Soft tk-step nudges need `additionalContext`+`transcript_path` | ✅ mostly — non-blocking injection is widely available (Codex/Cursor/Gemini); we just assumed the exact CC hook-point | ⚠️ partly — only the no-hook harnesses lack it entirely; the rarer gap is `transcript_path`-to-hook |
 | `system_interface` parses CC JSONL + literal strings | ✅ — we hard-coded CC internals instead of building to the `source` seam everywhere | ✅ — **no transcript standard exists**; a per-harness parser is unavoidable |
 | `system_interface` auth flow | ⚠️ small — could be abstracted | ✅ **fundamental** — auth is 100% per-vendor, no standard |
 | Activity "is working" inference from transcript shape | ✅ — chosen because we distrust CC's marker | ✅ — no harness exposes reliable run-state |
@@ -198,7 +200,7 @@ Legend: ✅ equivalent/native · 🔶 different implementation (adapter needed) 
 
 - **The fundamental 40%** is: **transcript persistence** (no standard — JSONL vs SQLite vs cloud vs markdown) and **auth** (100% per-vendor). For these, *no amount of cleaning up our code removes the need for a per-harness adapter.* The best we can do is define the adapter interface cleanly (the `source` event seam is the right start) and accept N implementations. Worse, some harnesses are *structurally hostile* to the `system_interface` model: **Amp stores transcripts only in the cloud** (no local file to watch), and **Cursor's SQLite is explicitly undocumented and unstable.**
 
-- **A third category — capability gaps — caps how well a given harness can ever do.** A scriptable status line is missing on Codex/Gemini/Amp/Goose/Aider; non-blocking `additionalContext` injection (our soft tk-step nudges) is missing on several; pi/Aider lack subagents/MCP/skills outright. For these, parity is *impossible*, not just expensive — the feature would have to be dropped or reimplemented on a different surface.
+- **A third category — capability gaps — caps how well a given harness can ever do.** A scriptable status line is missing on Codex/Gemini/Amp/Goose/Aider; non-blocking context injection (our soft tk-step nudges) is present across the CC-compatible cluster (Codex/Cursor/Gemini) — with a hook-point caveat on Gemini — but absent on the no-hook harnesses (Goose/Amp/Aider); pi/Aider lack subagents/MCP/skills outright. Where a capability is truly absent, parity is *impossible*, not just expensive — the feature would have to be dropped or reimplemented on a different surface.
 
 ### Recommended sequencing (if pursuing this)
 
