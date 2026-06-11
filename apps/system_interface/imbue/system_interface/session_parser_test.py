@@ -597,3 +597,58 @@ def test_tool_output_preserves_tk_transition_past_truncation() -> None:
     assert "Updated s1 -> closed" in events[0]["output"]
     # Still truncated overall (not the full verbose output).
     assert len(events[0]["output"]) < len(output)
+
+
+def test_tool_output_preserves_tk_step_decoration_past_truncation() -> None:
+    """The `tk-step <id> title|summary: ...` decoration lines that a step's
+    start/close emit are preserved past the output truncation limit, so the
+    progress view can read titles and summaries straight from the transcript."""
+    output = (
+        ("x" * 5000)
+        + "\nUpdated cod-step-abcd -> closed\n"
+        + "tk-step cod-step-abcd title: Register the new theme\n"
+        + "tk-step cod-step-abcd summary: Wired the theme into the toggle.\n"
+    )
+    lines = [_make_tool_result_line("uuid-dec", "2026-01-01T00:00:02Z", "toolu_1", output)]
+    events = parse_session_lines(lines)
+    preserved = events[0]["output"]
+    assert "Updated cod-step-abcd -> closed" in preserved
+    assert "tk-step cod-step-abcd title: Register the new theme" in preserved
+    assert "tk-step cod-step-abcd summary: Wired the theme into the toggle." in preserved
+    assert len(preserved) < len(output)
+
+
+def test_tk_lifecycle_input_preview_is_not_truncated() -> None:
+    """tk create/start/close inputs survive past the 200-char input-preview
+    limit so the historical input fallback can recover titles and summaries.
+    Batched `S1=$(tk create ...)` forms and long `tk close <id> "<summary>"`
+    calls both qualify; a long non-tk command is still truncated."""
+    batched_create = "\n".join(
+        f'S{i}=$(tk create --step "Step number {i} with a fairly long descriptive title here")'
+        for i in range(1, 6)
+    )
+    long_close = 'tk close cod-step-abcd "' + ("a very detailed summary of the work " * 6).strip() + '"'
+    long_non_tk = "echo " + ("y" * 400)
+    lines = [
+        _make_assistant_line(
+            "uuid-tk",
+            "2026-01-01T00:00:00Z",
+            "working",
+            tool_calls=[
+                {"id": "toolu_create", "name": "Bash", "input": {"command": batched_create}},
+                {"id": "toolu_close", "name": "Bash", "input": {"command": long_close}},
+                {"id": "toolu_echo", "name": "Bash", "input": {"command": long_non_tk}},
+            ],
+        ),
+    ]
+    events = parse_session_lines(lines)
+    calls = {tc["tool_call_id"]: tc["input_preview"] for tc in events[0]["tool_calls"]}
+    # tk lifecycle inputs kept in full (no truncation marker, full length).
+    assert len(calls["toolu_create"]) > 203
+    assert not calls["toolu_create"].endswith("...")
+    assert "Step number 5" in calls["toolu_create"]
+    assert len(calls["toolu_close"]) > 203
+    assert "detailed summary" in calls["toolu_close"]
+    # Non-tk input still truncated at the 200-char limit.
+    assert calls["toolu_echo"].endswith("...")
+    assert len(calls["toolu_echo"]) <= 203

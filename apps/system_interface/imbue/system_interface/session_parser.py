@@ -20,12 +20,27 @@ logger = _loguru_logger
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
-# tk lifecycle commands print `Updated <id> -> <status>` on each transition; the
-# chat progress view reads these from tool output to position a step's
-# open/close. They must survive output truncation (e.g. when a tk command is
-# batched after a verbose one whose output pushes the line past the limit), so a
-# step transition is never lost to truncation -- see `_truncate_tool_output`.
-_TK_TRANSITION_PATTERN = re.compile(r"Updated \S+ -> (?:open|in_progress|closed)")
+# tk lifecycle commands print machine-readable decoration on stdout that the
+# chat progress view reads back from the transcript: `Updated <id> -> <status>`
+# on every transition (positions a step's open/close) and, for steps,
+# `tk-step <id> title:`/`summary:` lines (carry the title and close summary).
+# These must survive output truncation (e.g. when a tk command is batched after
+# a verbose one whose output pushes the line past the limit), so a step's
+# structure and decoration are never lost to truncation -- see
+# `_truncate_tool_output`.
+_TK_OUTPUT_DECORATION_PATTERN = re.compile(
+    r"Updated \S+ -> (?:open|in_progress|closed)|tk-step \S+ (?:title|summary): .*"
+)
+
+# A Bash command that invokes a tk/ticket create|start|close as one of its
+# command words (start of string, or after `$(`, a pipe/semicolon/ampersand, or
+# whitespace -- so batched `S1=$(tk create ...)` forms and long `tk close <id>
+# "<summary>"` calls both match). Such commands carry the step titles/summaries
+# that the chat progress view's historical input-preview fallback reads, so
+# their `input_preview` is exempted from the 200-char truncation below.
+_TK_LIFECYCLE_COMMAND_PATTERN = re.compile(
+    r"(?:^|[\s;&|(])(?:tk|ticket)\s+(?:super\s+)?(?:create|start|close)\b"
+)
 
 _SOURCE = "claude/common_transcript"
 
@@ -130,15 +145,29 @@ def _make_event_id(uuid: str, suffix: str) -> str:
     return f"{uuid}-{suffix}"
 
 
+def _is_tk_lifecycle_call(tool_name: str, tool_input: Any) -> bool:
+    """True for a Bash call whose command invokes a tk/ticket create|start|close.
+    Their `input_preview` is exempted from truncation so batched multi-create
+    commands and long close summaries survive intact for the chat progress
+    view's historical input-preview fallback."""
+    if tool_name != "Bash" or not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command", "")
+    if not isinstance(command, str):
+        return False
+    return _TK_LIFECYCLE_COMMAND_PATTERN.search(command) is not None
+
+
 def _truncate_tool_output(content: str) -> str:
-    """Truncate a tool result to the head limit, but keep any tk transition
-    lines (`Updated <id> -> <status>`) that fall past the cut, appended after
-    the truncation marker. This preserves the progress view's step-transition
-    signal even when a tk command's output is pushed past the limit."""
+    """Truncate a tool result to the head limit, but keep any tk decoration
+    lines (`Updated <id> -> <status>` and `tk-step <id> title|summary: ...`)
+    that fall past the cut, appended after the truncation marker. This preserves
+    the progress view's step structure and decoration even when a tk command's
+    output is pushed past the limit."""
     if len(content) <= _MAX_OUTPUT_LENGTH:
         return content
     head = content[:_MAX_OUTPUT_LENGTH]
-    preserved = [m.group(0) for m in _TK_TRANSITION_PATTERN.finditer(content) if m.end() > _MAX_OUTPUT_LENGTH]
+    preserved = [m.group(0) for m in _TK_OUTPUT_DECORATION_PATTERN.finditer(content) if m.end() > _MAX_OUTPUT_LENGTH]
     if preserved:
         return head + "...\n" + "\n".join(preserved)
     return head + "..."
@@ -271,7 +300,7 @@ def _parse_assistant_message(
             tool_name: str = block.get("name", "")
             tool_input = block.get("input", {})
             input_preview = json.dumps(tool_input, separators=(",", ":"))
-            if len(input_preview) > _MAX_INPUT_PREVIEW_LENGTH:
+            if len(input_preview) > _MAX_INPUT_PREVIEW_LENGTH and not _is_tk_lifecycle_call(tool_name, tool_input):
                 input_preview = input_preview[:_MAX_INPUT_PREVIEW_LENGTH] + "..."
 
             if call_id and tool_name:

@@ -66,7 +66,6 @@ Commands:
     -a, --assignee         Assignee [default: git user.name, suppressed when MNGR_AGENT_NAME is set]
     --external-ref         External reference (e.g., gh-123, JIRA-456)
     --parent               Parent ticket ID
-    --no-parent            Disable auto-nest under in_progress ticket (steps only)
     --step                 Create as a turn-bound progress record (step)
     --tags                 Comma-separated tags (e.g., --tags ui,backend,urgent)
   start <id>               Set status to in_progress (auto-self-assigns when MNGR_AGENT_NAME is set)
