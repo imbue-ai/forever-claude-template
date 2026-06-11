@@ -216,10 +216,8 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let scrollEl: HTMLElement | null = null;
   let viewportHeight = 0;
   let scrollTop = 0;
-  // Last scroll position the panel observed, used to tell which direction the
-  // user just scrolled. Every programmatic scroll (tail-pin, prepend
-  // compensation, jump pin) updates this in lockstep with scrollTop so its own
-  // re-pin is never mistaken for a user-initiated upward scroll.
+  // Previous observed scroll position, for detecting scroll direction. Updated in
+  // lockstep with scrollTop at every programmatic scroll site (see handleScrollEvent).
   let previousScrollTop = 0;
   const rowMeasurer = createRowMeasurer();
   let viewportResizeObserver: ResizeObserver | null = null;
@@ -553,14 +551,8 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
   function handleScrollEvent(event: Event): void {
     const element = event.target as HTMLElement;
-    // Decide tail-following from scroll *direction*, not just position. Any
-    // user-initiated upward movement disengages immediately -- even within the
-    // bottom band -- otherwise the redraw-driven scrollToBottom (which fires
-    // continuously while a turn streams) would re-pin a small upward scroll back
-    // down before the user could escape the band, the jitter that made scrolling
-    // up feel impossible. Following resumes only once the user scrolls back to the
-    // true tail. previousScrollTop is kept in lockstep by applyScrollPosition, so
-    // the panel's own programmatic re-pins are not misread as upward scrolls.
+    // applyScrollPosition keeps previousScrollTop in lockstep with its own
+    // programmatic re-pins, so only a genuine user scroll registers as movement.
     const didScrollUp = element.scrollTop < previousScrollTop;
     previousScrollTop = element.scrollTop;
     scrollTop = element.scrollTop;
