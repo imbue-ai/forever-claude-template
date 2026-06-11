@@ -137,7 +137,7 @@ function isProtoAgent(agentId: string): boolean {
  * streaming. Rendered with the assistant message styling (plus a streaming
  * modifier class) from the live `assistant_streaming` preview. It is shown only
  * at the live tail and only while genuinely in-progress -- ``shouldShowStreamingPreview``
- * suppresses it when the agent is idle or when its text already equals the
+ * suppresses it when the agent is idle or when its text adds nothing beyond the
  * latest finalized message (mngr keeps the last assistant block in the buffer
  * after it commits, so without this it would double the just-rendered turn and
  * re-appear at the start of the next one).
