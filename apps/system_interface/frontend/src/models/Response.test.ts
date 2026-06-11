@@ -337,7 +337,7 @@ describe("render version", () => {
     expect(getRenderVersion(agent)).toBeGreaterThan(vAfterPrepend);
   });
 
-  it("bumps on a fetch (reset + enrichment snapshot)", async () => {
+  it("bumps on a fetch (window reset)", async () => {
     const agent = freshAgent();
     const v0 = getRenderVersion(agent);
     mockRequest.mockResolvedValueOnce({ events: [makeEvent("x")], offset: 0, total: 1 });

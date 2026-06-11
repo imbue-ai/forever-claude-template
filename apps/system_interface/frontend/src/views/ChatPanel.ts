@@ -14,7 +14,6 @@ import {
   fetchForwardEvents,
   fetchWindowAtOffset,
   getEventsForAgent,
-  getEnrichmentForAgent,
   getEventCount,
   getFirstOffset,
   getRenderVersion,
@@ -668,21 +667,19 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     // Memoize the turn-grouping -> rows pipeline. buildSections walks the entire
     // held transcript, so recomputing it on every scroll-driven redraw is the
     // dominant scroll cost on a long conversation. Its output depends only on the
-    // held events, the enrichment snapshot, and the idle flag -- all captured by
-    // the render version (bumped on any data mutation) plus the idle flag -- so a
-    // scroll-only redraw reuses the cached rows. The grouping (tk-step nesting,
-    // skill expansions, auth-error hiding) is produced by the same functions on
-    // the same inputs, so the rendered structure is identical to recomputing.
+    // held events and the idle flag -- captured by the render version (bumped on
+    // any data mutation) plus the idle flag -- so a scroll-only redraw reuses the
+    // cached rows. The grouping (steps, decoration, skill expansions, auth-error
+    // hiding) is produced by the same functions on the same inputs, so the
+    // rendered structure is identical to recomputing.
     const renderKey = `${agentId}|${getRenderVersion(agentId)}|${agentIsIdle ? 1 : 0}`;
     if (renderKey !== rowsCacheKey) {
       const toolResults = buildToolResultsWithSkillExpansions(events);
       const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
       const visibleEvents = hiddenEventIds.size > 0 ? events.filter((e) => !hiddenEventIds.has(e.event_id)) : events;
-      // tk is an enrichment side-table (titles, summaries, pending roster),
-      // joined onto the transcript-derived structure by id; structure -- which
-      // steps exist, their order, grouping -- comes purely from the transcript walk.
-      const enrichment = getEnrichmentForAgent(agentId);
-      const sections = buildSections(visibleEvents, toolResults, enrichment, agentIsIdle);
+      // Both structure and decoration come from the transcript walk; there is no
+      // side-channel enrichment.
+      const sections = buildSections(visibleEvents, toolResults, agentIsIdle);
       cachedRows = buildRows(agentId, sections, toolResults);
       rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
       rowsCacheKey = renderKey;
