@@ -2,7 +2,6 @@ import os
 import signal
 from collections import defaultdict
 from collections.abc import Sequence
-from datetime import datetime, timezone
 
 from imbue.imbue_common.pure import pure
 from loguru import logger
@@ -13,6 +12,7 @@ from memory_watchdog.data_types import (
     RecentShedSummary,
     ShedRecord,
     Tier,
+    now_iso_timestamp,
 )
 
 
@@ -99,9 +99,7 @@ def shed_tier(
         is_agent_process = tier in (Tier.USER_AGENT, Tier.WORKER_AGENT)
         records.append(
             ShedRecord(
-                timestamp=datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%S.%f000Z"
-                ),
+                timestamp=now_iso_timestamp(),
                 tier=tier,
                 tier_rank=tier_rank,
                 label=target.label,

@@ -1,9 +1,26 @@
+from datetime import datetime, timezone
 from enum import auto
 from typing import Final
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from pydantic import Field
+
+# The on-disk timestamp format for ledger records and the status file:
+# nanosecond-precision ISO 8601 in UTC. Defined once here so producers and the
+# strptime parser in watchdog._prune_recent_records cannot drift apart.
+ISO_TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%S.%f000Z"
+
+
+def now_iso_timestamp() -> str:
+    """Current UTC time as a nanosecond-precision ISO 8601 string.
+
+    Delegates to imbue_common.format_nanosecond_iso_timestamp (the same helper
+    mngr uses for event/discovery timestamps) so the watchdog does not reimplement
+    the format.
+    """
+    return format_nanosecond_iso_timestamp(datetime.now(timezone.utc))
 
 
 class Tier(UpperCaseStrEnum):

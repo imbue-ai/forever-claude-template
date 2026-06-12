@@ -2,13 +2,12 @@ import json
 import os
 import tempfile
 from collections.abc import Sequence
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
 from loguru import logger
 
-from memory_watchdog.data_types import MemoryStatus, ShedRecord
+from memory_watchdog.data_types import MemoryStatus, ShedRecord, now_iso_timestamp
 
 # Both files live under runtime/ so they ride the runtime-backup branch and
 # survive container loss. The ledger is the append-only history; the status file
@@ -50,10 +49,6 @@ _RECORD_TYPE_SERVICE_UNBLOCKED: Final[str] = "service_unblocked"
 _RECORD_TYPE_NOTICE_DELIVERED: Final[str] = "notice_delivered"
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
-
-
 def _append_ledger_line(record: dict[str, object]) -> None:
     ledger_path = shed_ledger_path()
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +77,7 @@ def record_service_blocked(service_name: str, reason: str) -> None:
     """Record that bootstrap paused a crash-looping service under pressure."""
     _append_ledger_line(
         {
-            "timestamp": _now_iso(),
+            "timestamp": now_iso_timestamp(),
             "type": _RECORD_TYPE_SERVICE_BLOCKED,
             "service": service_name,
             "reason": reason,
@@ -94,7 +89,7 @@ def record_service_unblocked(service_name: str) -> None:
     """Record that a previously paused service resumed."""
     _append_ledger_line(
         {
-            "timestamp": _now_iso(),
+            "timestamp": now_iso_timestamp(),
             "type": _RECORD_TYPE_SERVICE_UNBLOCKED,
             "service": service_name,
         }

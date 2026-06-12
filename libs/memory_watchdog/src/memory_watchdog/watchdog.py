@@ -19,11 +19,13 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Final
 
+from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.pure import pure
 from loguru import logger
 
 from memory_watchdog.classifier import classify_processes
 from memory_watchdog.data_types import (
+    ISO_TIMESTAMP_FORMAT,
     SHEDDABLE_TIERS_IN_SHED_ORDER,
     MemoryPressure,
     MemoryStatus,
@@ -80,7 +82,7 @@ def _now() -> datetime:
 
 
 def _iso(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
+    return format_nanosecond_iso_timestamp(moment)
 
 
 def _get_services_session_name() -> str:
@@ -223,7 +225,7 @@ def _prune_recent_records(
     for record in recent_records:
         try:
             record_time = datetime.strptime(
-                record.timestamp, "%Y-%m-%dT%H:%M:%S.%f000Z"
+                record.timestamp, ISO_TIMESTAMP_FORMAT
             ).replace(tzinfo=timezone.utc)
         except ValueError:
             continue
