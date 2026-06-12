@@ -22,8 +22,11 @@ import pytest
 import uvicorn
 
 from imbue.system_interface.agent_discovery import AgentInfo
+from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
+from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 try:
     from playwright.sync_api import Page
@@ -99,6 +102,11 @@ def _make_agent_fixture(
 
     session_id = "e2e-session-001"
     (agent_state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
+    # The session endpoint (_find_agent) resolves an agent's CLAUDE_CONFIG_DIR
+    # from this per-agent env file (step 1 of read_claude_config_dir_from_env_file),
+    # so pin it at the fixture's config dir. Without this the watcher falls back to
+    # the real ~/.claude and the fixture transcript never loads.
+    (agent_state_dir / "env").write_text(f"CLAUDE_CONFIG_DIR={claude_config_dir}\n")
 
     if session_events is None:
         session_events = [
@@ -140,16 +148,39 @@ def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], N
     agent_info, session_file = _make_agent_fixture(tmp_path)
     agents = [agent_info]
 
-    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
-    app = create_application(config)
+    # Isolate the workspace environment: point MNGR_HOST_DIR at the fixture's
+    # tmp tree so the session endpoint (_find_agent) resolves the fixture agent's
+    # state dir + env file, and clear MNGR_AGENT_ID so the layout endpoint has no
+    # primary-agent dir to read from (returns 404 -> the UI auto-opens the fixture
+    # chat) and never reads or writes the real workspace's layout.json. This
+    # overrides the autouse _isolate_system_interface_tests fixture's env for the
+    # duration of the test.
+    env_patcher = patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""})
+    env_patcher.start()
 
-    # Patch discover_agents globally to return our mock agents
-    patcher = patch("imbue.system_interface.server.discover_agents", return_value=agents)
-    patcher.start()
-
-    # Patch send_message to succeed
     send_patcher = patch("imbue.system_interface.server.send_message", return_value=True)
     send_patcher.start()
+    discover_patcher = patch("imbue.system_interface.server.discover_agents", return_value=agents)
+    discover_patcher.start()
+
+    # The autouse conftest fixture no-ops AgentManager.start (so background mngr
+    # discovery never runs in tests), so seed the agent into the manager directly
+    # and inject it. The UI renders its agent list from the WebSocket
+    # agents_updated snapshot, which the server sends from this manager on connect.
+    broadcaster = WebSocketBroadcaster()
+    manager = AgentManager.build(broadcaster)
+    with manager._lock:
+        manager._agents[agent_info.id] = AgentStateItem(
+            id=agent_info.id,
+            name=agent_info.name,
+            state="RUNNING",
+            labels={},
+            work_dir=str(tmp_path / "work"),
+        )
+    manager._ensure_activity_tracking(agent_info.id)
+
+    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
+    app = create_application(config, agent_manager=manager)
 
     server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT, log_level="error"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -167,8 +198,9 @@ def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], N
 
     yield _BASE_URL, agents, session_file
 
-    patcher.stop()
+    discover_patcher.stop()
     send_patcher.stop()
+    env_patcher.stop()
     server.should_exit = True
     thread.join(timeout=5.0)
 
