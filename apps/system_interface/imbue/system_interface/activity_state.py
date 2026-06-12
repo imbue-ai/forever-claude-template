@@ -57,6 +57,23 @@ class ActivityState(UpperCaseStrEnum):
 
 
 @pure
+def matched_tool_result_ids(events: Sequence[dict[str, Any]]) -> frozenset[str]:
+    """The ``tool_call_id`` of every ``tool_result`` event in the transcript.
+
+    A ``tool_use`` whose id appears in this set has completed; one whose id does
+    not is still pending (or abandoned). Shared by the pending-tool scanners
+    below so the matching rule lives in one place.
+    """
+    matched: set[str] = set()
+    for event in events:
+        if event.get("type") == "tool_result":
+            tool_call_id = event.get("tool_call_id")
+            if tool_call_id:
+                matched.add(tool_call_id)
+    return frozenset(matched)
+
+
+@pure
 def has_unmatched_tool_use(events: Sequence[dict[str, Any]]) -> bool:
     """True iff the transcript has at least one ``tool_use`` without a matching ``tool_result``.
 
@@ -65,23 +82,15 @@ def has_unmatched_tool_use(events: Sequence[dict[str, Any]]) -> bool:
     from its most recent assistant message, but the matching is order-independent
     so we don't have to care.
     """
-    pending: set[str] = set()
-    matched: set[str] = set()
+    matched = matched_tool_result_ids(events)
     for event in events:
-        event_type = event.get("type")
-        if event_type == "assistant_message":
-            for tool_call in event.get("tool_calls") or ():
-                tool_call_id = tool_call.get("tool_call_id")
-                if tool_call_id:
-                    pending.add(tool_call_id)
-        elif event_type == "tool_result":
-            tool_call_id = event.get("tool_call_id")
-            if tool_call_id:
-                matched.add(tool_call_id)
-        else:
-            # user_message or other event types we don't care about for tool tracking.
-            pass
-    return bool(pending - matched)
+        if event.get("type") != "assistant_message":
+            continue
+        for tool_call in event.get("tool_calls") or ():
+            tool_call_id = tool_call.get("tool_call_id")
+            if tool_call_id and tool_call_id not in matched:
+                return True
+    return False
 
 
 @pure
@@ -100,12 +109,7 @@ def newest_unmatched_tool_use_timestamp(events: Sequence[dict[str, Any]]) -> str
     a tool in flight, that newer tool_use governs (TOOL_RUNNING is correct); once
     it resolves, only the abandoned one remains and the fence retires it.
     """
-    matched: set[str] = set()
-    for event in events:
-        if event.get("type") == "tool_result":
-            tool_call_id = event.get("tool_call_id")
-            if tool_call_id:
-                matched.add(tool_call_id)
+    matched = matched_tool_result_ids(events)
     newest: str | None = None
     for event in events:
         if event.get("type") != "assistant_message":
