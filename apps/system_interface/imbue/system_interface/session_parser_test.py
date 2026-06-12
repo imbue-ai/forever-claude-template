@@ -209,6 +209,68 @@ def test_blank_queued_command_not_emitted() -> None:
     assert events == []
 
 
+# Real Claude Code slash-command expansions. The tag ORDER differs between
+# custom commands (lead with <command-message>) and built-ins (lead with
+# <command-name>), and built-ins indent the trailing tags -- both verified
+# against real transcripts. Normalization must handle either.
+_CUSTOM_COMMAND_EXPANSION = (
+    "<command-message>rebase-merge</command-message>\n"
+    "<command-name>/rebase-merge</command-name>\n"
+    "<command-args>origin/main</command-args>"
+)
+_BUILTIN_COMMAND_EXPANSION = (
+    "<command-name>/compact</command-name>\n"
+    "            <command-message>compact</command-message>\n"
+    "            <command-args></command-args>"
+)
+
+
+def test_slash_command_expansion_normalized_to_typed_text() -> None:
+    """A slash command renders as the '/name args' the user actually typed.
+
+    Claude Code does not store a slash command verbatim; it expands it into an
+    XML-ish <command-name>/<command-args> block. The parser rebuilds the typed
+    text so (a) the user bubble shows '/rebase-merge origin/main' rather than the
+    raw expansion and (b) it matches what the frontend's optimistic bubble stored,
+    so reconciliation (whitespace-normalized content match) succeeds.
+    """
+    lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", _CUSTOM_COMMAND_EXPANSION)]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "/rebase-merge origin/main"
+
+
+def test_slash_command_expansion_with_empty_args_drops_trailing_space() -> None:
+    """A no-argument command (built-in tag order, indented, empty args) yields
+    just '/compact' -- the rebuilt text carries no dangling whitespace around the
+    (absent) args."""
+    lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", _BUILTIN_COMMAND_EXPANSION)]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["content"] == "/compact"
+
+
+def test_queued_slash_command_expansion_normalized() -> None:
+    """A slash command queued while the agent is busy is normalized the same way
+    on the queued_command path, so it too reconciles against its optimistic
+    bubble."""
+    lines = [_make_queued_command_line("uuid-q", "2026-01-01T00:00:00Z", _CUSTOM_COMMAND_EXPANSION)]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["content"] == "/rebase-merge origin/main"
+
+
+def test_non_command_text_with_angle_brackets_untouched() -> None:
+    """Ordinary user text that happens to contain angle brackets but no
+    <command-name> tag passes through unchanged."""
+    text = "does <Foo> compile when T <: Bar?"
+    lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", text)]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["content"] == text
+
+
 def test_parse_conversation_sequence() -> None:
     lines = [
         _make_user_line("uuid-1", "2026-01-01T00:00:00Z", "Hello"),

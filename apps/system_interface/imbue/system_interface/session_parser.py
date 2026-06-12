@@ -75,6 +75,40 @@ _NO_RESPONSE_REQUESTED_TEXT = "No response requested."
 _QUEUED_COMMAND_ATTACHMENT_TYPE = "queued_command"
 _QUEUED_COMMAND_PROMPT_MODE = "prompt"
 
+# A slash command the user types (``/foo bar``) is not recorded verbatim: Claude
+# Code expands it into an XML-ish block carrying the command name, a display
+# message, and the trailing arguments, e.g.
+#     <command-message>foo</command-message>
+#     <command-name>/foo</command-name>
+#     <command-args>bar</command-args>
+# The three tags appear in varying order (built-ins lead with <command-name>,
+# custom commands with <command-message>), so they are matched individually
+# rather than positionally. We rebuild the original ``/foo bar`` text so (a) the
+# rendered user bubble shows what the user actually typed instead of the raw
+# expansion and (b) the frontend's optimistic-message reconciliation -- which
+# matches a pending bubble to its transcript event by whitespace-normalized
+# content -- finds the match (otherwise the bubble is stranded; see
+# PendingMessages.ts).
+_COMMAND_NAME_PATTERN = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
+_COMMAND_ARGS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+
+
+def _normalize_slash_command(text: str) -> str:
+    """Rebuild ``/name args`` from a Claude Code slash-command expansion.
+
+    Returns ``text`` unchanged when it is not a command expansion (no
+    ``<command-name>`` tag, or an empty command name).
+    """
+    name_match = _COMMAND_NAME_PATTERN.search(text)
+    if name_match is None:
+        return text
+    command = name_match.group(1).strip()
+    if not command:
+        return text
+    args_match = _COMMAND_ARGS_PATTERN.search(text)
+    args = args_match.group(1).strip() if args_match is not None else ""
+    return f"{command} {args}".strip()
+
 
 def _extract_text_content(content: str | list[dict[str, Any]] | Any) -> str:
     """Extract plain text from a message content field (string or list of blocks)."""
@@ -349,7 +383,7 @@ def _parse_user_message(
     if not _has_tool_results_only(content):
         event_id = _make_event_id(uuid, "user")
         if event_id not in existing_event_ids:
-            text = _extract_text_content(content)
+            text = _normalize_slash_command(_extract_text_content(content))
             if text and text.strip() != _INTERRUPT_SENTINEL_TEXT and not _is_resume_continuation_marker(raw):
                 event: dict[str, Any] = {
                     "timestamp": timestamp,
@@ -449,6 +483,10 @@ def _parse_queued_command_attachment(
     prompt = attachment.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return
+    # A queued message can itself be a slash command; normalize it the same way
+    # a non-queued one is handled in ``_parse_user_message`` so it renders as the
+    # typed text and reconciles against its optimistic bubble.
+    prompt = _normalize_slash_command(prompt)
 
     event_id = _make_event_id(uuid, "queued")
     if event_id in existing_event_ids:

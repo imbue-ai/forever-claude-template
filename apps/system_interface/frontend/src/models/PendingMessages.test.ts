@@ -195,6 +195,19 @@ describe("reconciliation against the transcript", () => {
     expect(getPendingMessages(agentId)).toHaveLength(0);
   });
 
+  it("reconciles a slash command whose typed args were newline-separated", () => {
+    const agentId = freshAgentId();
+    // The user typed the command, a newline, then a multi-line body. The parser
+    // rebuilds the slash-command expansion as "/name args" joined by a single
+    // space, so the transcript content differs from the typed text only in
+    // whitespace; whitespace-normalized matching must still reconcile them.
+    addPendingMessage(agentId, "/sculptor:sculpt-cli\nrun through the steps", []);
+
+    reconcilePendingMessages(agentId, [userMsg("u1", "/sculptor:sculpt-cli run through the steps")]);
+
+    expect(getPendingMessages(agentId)).toHaveLength(0);
+  });
+
   it("matches two identical sends to two distinct transcript events", () => {
     const agentId = freshAgentId();
     addPendingMessage(agentId, "again", []);
