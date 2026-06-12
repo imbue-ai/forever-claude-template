@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 from typing import Generator
@@ -373,6 +375,111 @@ def test_sse_stream_delivers_new_events(e2e_server: tuple[str, list[AgentInfo], 
     # Wait for the new message to appear (watcher polls every 1 second)
     new_message = page.locator(".message-user", has_text="This is a new message via SSE!")
     expect(new_message).to_be_visible(timeout=10000)
+
+
+_TRIGGER_TIMEOUT_MS = 20000
+
+
+def _broadcast_layout_op(base_url: str, op: str, args: dict[str, Any], agent_id: str) -> None:
+    """POST a layout op to the loopback ``/api/layout/broadcast`` endpoint.
+
+    This is the same path ``scripts/layout.py`` drives, so issuing a ``split``
+    here exercises the real frontend ``handleSplit`` handler (which carves the
+    second group) rather than reaching into dockview internals from the test.
+    """
+    payload = json.dumps({"op": op, "args": args, "agent_id": agent_id}).encode()
+    request = urllib.request.Request(
+        f"{base_url}/api/layout/broadcast",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200, f"layout broadcast failed: {response.status}"
+
+
+@pytest.mark.timeout(120)
+def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
+    """The header "+" opens the new tab in the split whose header was clicked.
+
+    Regression test for the bug where clicking "+" in a right-hand split opened
+    the tab in the (active) left split instead. We split the layout into two
+    groups, make the LEFT group active (so dockview's default "add to the
+    active group" would land a new tab on the left), then click the RIGHT
+    split's "+" and add a URL tab. It must land in the RIGHT split.
+    """
+    base_url, _, _ = e2e_server
+    page.goto(base_url)
+
+    # The fixture auto-opens the chat for "test-agent" as the sole group.
+    expect(page.locator(".dv-default-tab-content", has_text="test-agent").first).to_be_visible(
+        timeout=_TRIGGER_TIMEOUT_MS
+    )
+    add_buttons = page.locator(".dockview-add-tab-button")
+    expect(add_buttons).to_have_count(1)
+
+    # Carve a second group to the right of the chat by opening a URL iframe in
+    # a fresh column. Driven through the real layout-op broadcast path.
+    _broadcast_layout_op(
+        base_url,
+        "split",
+        {
+            "ref": "https://placement-split.example/",
+            "relative_to": "chat:test-agent",
+            "direction": "right",
+            "new_group": True,
+        },
+        agent_id="agent-test-123",
+    )
+
+    # Two groups now, each header carrying its own "+".
+    expect(add_buttons).to_have_count(2, timeout=10000)
+    expect(page.locator(".dv-default-tab-content", has_text="placement-split.example").first).to_be_visible(
+        timeout=10000
+    )
+
+    # Activate the LEFT (chat) split. Without the fix, the new tab would follow
+    # the active group and wrongly land here.
+    chat_tab = page.locator(".dv-default-tab-content", has_text="test-agent").first
+    chat_tab.click()
+    left_group = page.locator(".dv-groupview", has=page.locator(".dv-default-tab-content", has_text="test-agent"))
+    expect(left_group).to_have_class(re.compile(r"\bdv-active-group\b"))
+
+    # Click the "+" in the RIGHT split's header (the geometrically rightmost one).
+    boxes = [add_buttons.nth(i).bounding_box() for i in range(2)]
+    assert boxes[0] is not None and boxes[1] is not None
+    right_index = 0 if boxes[0]["x"] > boxes[1]["x"] else 1
+    add_buttons.nth(right_index).click()
+
+    # Choose "New URL" from the (right split's) dropdown and submit a URL.
+    page.locator(".dockview-add-tab-dropdown-item:visible", has_text="New URL").click()
+    page.locator(".custom-url-dialog-input").first.fill("https://newtab-target.example/")
+    page.locator(".custom-url-dialog-open").click()
+
+    # The new tab must render in the RIGHT split, not the left, and must tab
+    # into the existing right group rather than carving a third.
+    expect(page.locator(".dv-default-tab-content", has_text="newtab-target.example").first).to_be_visible(
+        timeout=10000
+    )
+    placement = page.evaluate(
+        """
+        (title) => {
+          const groups = Array.from(document.querySelectorAll('.dv-groupview'))
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+          const has = (g) => Array.from(g.querySelectorAll('.dv-default-tab-content'))
+            .some((e) => (e.textContent || '').includes(title));
+          return {
+            count: groups.length,
+            inLeft: groups.length > 0 ? has(groups[0]) : false,
+            inRight: groups.length > 0 ? has(groups[groups.length - 1]) : false,
+          };
+        }
+        """,
+        "newtab-target.example",
+    )
+    assert placement["count"] == 2, f"new tab should join the right split, not create a third group: {placement}"
+    assert placement["inRight"], f"new tab should be in the right split: {placement}"
+    assert not placement["inLeft"], f"new tab leaked into the left split: {placement}"
 
 
 @_STALE_DOCKVIEW_SKIP
