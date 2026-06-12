@@ -27,6 +27,7 @@ import {
   type ToolResultEvent,
 } from "../models/Response";
 import { computeVisibleWindow } from "../models/virtualWindow";
+import { nextUserScrolledUp } from "../models/scrollFollow";
 import {
   createRowMeasurer,
   OVERSCAN_PX,
@@ -215,6 +216,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let scrollEl: HTMLElement | null = null;
   let viewportHeight = 0;
   let scrollTop = 0;
+  // Previous observed scroll position, for detecting scroll direction. Updated in
+  // lockstep with scrollTop at every programmatic scroll site (see handleScrollEvent).
+  let previousScrollTop = 0;
   const rowMeasurer = createRowMeasurer();
   let viewportResizeObserver: ResizeObserver | null = null;
   // Memoized turn-grouping output. buildSections walks the whole held
@@ -421,6 +425,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     currentAgentId = agentId;
     scrollTop = 0;
+    previousScrollTop = 0;
     userScrolledUp = false;
     backfillInFlight = false;
     scrollHeightBeforePrepend = 0;
@@ -506,6 +511,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       pendingPinToWindowTop = false;
       element.scrollTop = phantomTopHeight;
       scrollTop = element.scrollTop;
+      previousScrollTop = element.scrollTop;
       return;
     }
 
@@ -532,23 +538,30 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       if (delta !== 0) {
         element.scrollTop = Math.max(phantomTopHeight, element.scrollTop + delta);
         scrollTop = element.scrollTop;
+        previousScrollTop = element.scrollTop;
       }
     }
 
     if (!userScrolledUp) {
       scrollToBottom(element);
       scrollTop = element.scrollTop;
+      previousScrollTop = element.scrollTop;
     }
   }
 
   function handleScrollEvent(event: Event): void {
     const element = event.target as HTMLElement;
+    // applyScrollPosition keeps previousScrollTop in lockstep with its own
+    // programmatic re-pins, so only a genuine user scroll registers as movement.
+    const didScrollUp = element.scrollTop < previousScrollTop;
+    previousScrollTop = element.scrollTop;
     scrollTop = element.scrollTop;
 
-    // Following the live tail only when truly at the end -- at the bottom of the
-    // loaded rows AND with no newer history still unloaded (a jump leaves newer
-    // history below, so being near the bottom of a jumped window is not the tail).
-    userScrolledUp = !(isNearBottom(element) && !hasMoreAfter(currentAgentId ?? ""));
+    userScrolledUp = nextUserScrolledUp({
+      didScrollUp,
+      isNearBottom: isNearBottom(element),
+      hasMoreAfter: hasMoreAfter(currentAgentId ?? ""),
+    });
 
     if (currentAgentId !== null) {
       maybePage(currentAgentId, element);

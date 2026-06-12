@@ -9,6 +9,7 @@ import type {
 } from "../models/Response";
 import { parseJsonMessage } from "../models/ws-json";
 import { computeVisibleWindow } from "../models/virtualWindow";
+import { nextUserScrolledUp } from "../models/scrollFollow";
 import {
   createRowMeasurer,
   OVERSCAN_PX,
@@ -185,13 +186,13 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     const didScrollUp = currentScrollTop < previousScrollTop;
     previousScrollTop = currentScrollTop;
     scrollTop = currentScrollTop;
-    if (didScrollUp) {
-      userScrolledUp = true;
-      return;
-    }
-    if (element.scrollHeight - element.scrollTop - element.clientHeight < 40) {
-      userScrolledUp = false;
-    }
+    // A subagent transcript is a single loaded list with no off-tail jump, so
+    // there is never newer unloaded history below: hasMoreAfter is always false.
+    userScrolledUp = nextUserScrolledUp({
+      didScrollUp,
+      isNearBottom: element.scrollHeight - element.scrollTop - element.clientHeight < 40,
+      hasMoreAfter: false,
+    });
   }
 
   // Refresh the cached viewport height and schedule a measure pass; the
