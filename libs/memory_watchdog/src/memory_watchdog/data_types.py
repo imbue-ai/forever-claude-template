@@ -137,7 +137,7 @@ class ShedRecord(FrozenModel):
     """A single process the shedder killed, appended to the shed ledger."""
 
     timestamp: str = Field(
-        description="Microsecond-precision UTC ISO 8601 time of the kill"
+        description="Nanosecond-precision UTC ISO 8601 time of the kill"
     )
     tier: Tier = Field(description="Tier the process belonged to")
     tier_rank: int = Field(description="1..8 rank of the tier (8 = shed first)")
