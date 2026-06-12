@@ -108,7 +108,7 @@ def read_memory_pressure() -> MemoryPressure:
     return MemoryPressure(total_kb=total_kb, available_kb=available_kb)
 
 
-def _read_agent_label_sets() -> tuple[frozenset[str], frozenset[str]]:
+def read_agent_label_sets() -> tuple[frozenset[str], frozenset[str]]:
     """Scan the host's agent records for user-created vs agent-created names.
 
     Reads ``$MNGR_HOST_DIR/agents/*/data.json``; each record carries the agent
@@ -142,8 +142,3 @@ def _read_agent_label_sets() -> tuple[frozenset[str], frozenset[str]]:
         if str(labels.get("agent_created", "")).lower() == "true":
             agent_created.add(name)
     return frozenset(user_created), frozenset(agent_created)
-
-
-def read_agent_label_sets() -> tuple[frozenset[str], frozenset[str]]:
-    """Public wrapper around the host agent-record scan."""
-    return _read_agent_label_sets()
