@@ -10,7 +10,10 @@ import threading
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Generator
+from typing import Any
 
+import anyio
+import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI
@@ -18,6 +21,7 @@ from fastapi import Request
 from fastapi.responses import HTMLResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import PlainTextResponse
+from fastapi.responses import Response
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocket
@@ -26,7 +30,12 @@ from starlette.websockets import WebSocketDisconnect
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
 from imbue.system_interface.models import ApplicationEntry
+from imbue.system_interface.primitives import ServiceName
 from imbue.system_interface.server import create_application
+from imbue.system_interface.service_dispatcher import _RequestBodyTooLargeError
+from imbue.system_interface.service_dispatcher import _build_rewritten_html_response
+from imbue.system_interface.service_dispatcher import _capped_request_stream
+from imbue.system_interface.service_dispatcher import _request_has_body
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 
@@ -102,6 +111,26 @@ def _build_stub_backend() -> FastAPI:
             gen(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
+        )
+
+    @stub.post("/echo-size")
+    async def echo_size(request: Request) -> JSONResponse:
+        body = await request.body()
+        return JSONResponse({"size": len(body)})
+
+    @stub.get("/big-binary")
+    def big_binary() -> StreamingResponse:
+        total_chunks = 64
+        chunk = b"x" * 65536
+
+        async def gen() -> AsyncGenerator[bytes, None]:
+            for _ in range(total_chunks):
+                yield chunk
+
+        return StreamingResponse(
+            gen(),
+            media_type="application/octet-stream",
+            headers={"X-Total-Size": str(total_chunks * len(chunk))},
         )
 
     @stub.websocket("/ws-echo")
@@ -307,3 +336,131 @@ def test_websocket_unknown_service_closes_with_4004(workspace_client: TestClient
         with workspace_client.websocket_connect("/service/nonexistent/anything") as ws:
             ws.receive_text()
     assert excinfo.value.code == 4004
+
+
+def test_request_body_is_streamed_to_backend(workspace_client: TestClient) -> None:
+    """A POST body reaches the backend intact via streaming forwarding."""
+    payload = b"z" * (3 * 1024 * 1024)
+    response = workspace_client.post(
+        "/service/web/echo-size",
+        content=payload,
+        cookies={"sw_installed_web": "1"},
+    )
+    assert response.status_code == 200
+    assert response.json()["size"] == len(payload)
+
+
+def test_large_non_html_response_is_streamed_intact(workspace_client: TestClient) -> None:
+    """A large non-HTML response streams through without buffering and arrives intact."""
+    response = workspace_client.get("/service/web/big-binary", cookies={"sw_installed_web": "1"})
+    assert response.status_code == 200
+    assert response.headers.get("content-type", "").startswith("application/octet-stream")
+    expected_size = int(response.headers["x-total-size"])
+    assert len(response.content) == expected_size
+
+
+def test_sse_streams_without_event_stream_accept_header(workspace_client: TestClient) -> None:
+    """SSE streams even when the client sends the default Accept: */* (not text/event-stream).
+
+    Regression for the old detection that gated streaming on the Accept header:
+    fetch()-based consumers usually send */*, so they fell into the buffering
+    branch. Streaming is now decided by the backend content-type instead.
+    """
+    response = workspace_client.get(
+        "/service/web/events",
+        headers={"accept": "*/*"},
+        cookies={"sw_installed_web": "1"},
+    )
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers.get("content-type", "")
+    assert "chunk-1" in response.text
+    assert "chunk-2" in response.text
+
+
+def test_oversize_html_response_is_rejected() -> None:
+    """An HTML response larger than the rewrite cap returns 502 instead of OOMing.
+
+    HTML must be buffered to rewrite (base tag / WS shim / path rewriting), so
+    it is the one body the proxy holds in memory; the cap bounds that.
+    """
+    oversized = b"<html><head></head><body>" + (b"a" * 4096) + b"</body></html>"
+    backend_response = httpx.Response(200, headers={"content-type": "text/html"}, content=oversized)
+
+    async def _drive() -> Response:
+        return await _build_rewritten_html_response(backend_response, ServiceName("web"), max_bytes=1024)
+
+    response = anyio.run(_drive)
+    assert response.status_code == 502
+
+
+def test_html_under_cap_is_rewritten() -> None:
+    """HTML within the cap is buffered and gets the base tag injected."""
+    backend_response = httpx.Response(
+        200,
+        headers={"content-type": "text/html"},
+        content=b"<html><head></head><body>hi</body></html>",
+    )
+
+    async def _drive() -> Response:
+        return await _build_rewritten_html_response(backend_response, ServiceName("web"), max_bytes=10_000)
+
+    response = anyio.run(_drive)
+    assert response.status_code == 200
+    assert b'<base href="/service/web/">' in bytes(response.body)
+
+
+def _make_streaming_request(chunks: list[bytes]) -> Request:
+    """Build a Starlette Request whose .stream() yields the given body chunks."""
+    messages: list[dict[str, Any]] = [
+        {"type": "http.request", "body": chunk, "more_body": index < len(chunks) - 1}
+        for index, chunk in enumerate(chunks)
+    ]
+    cursor = {"index": 0}
+
+    async def receive() -> dict[str, Any]:
+        message = messages[cursor["index"]]
+        cursor["index"] += 1
+        return message
+
+    scope: dict[str, Any] = {"type": "http", "method": "POST", "headers": []}
+    return Request(scope, receive)
+
+
+def test_capped_request_stream_aborts_when_body_exceeds_limit() -> None:
+    """The request-body stream raises once cumulative bytes exceed the cap."""
+    request = _make_streaming_request([b"a" * 100, b"b" * 100])
+
+    async def _drive() -> list[bytes]:
+        return [chunk async for chunk in _capped_request_stream(request, max_bytes=150)]
+
+    with pytest.raises(_RequestBodyTooLargeError):
+        anyio.run(_drive)
+
+
+def test_capped_request_stream_passes_body_under_limit() -> None:
+    """A body within the cap is yielded in full, unchanged."""
+    request = _make_streaming_request([b"a" * 100, b"b" * 50])
+
+    async def _drive() -> list[bytes]:
+        return [chunk async for chunk in _capped_request_stream(request, max_bytes=1000)]
+
+    chunks = anyio.run(_drive)
+    assert b"".join(chunks) == b"a" * 100 + b"b" * 50
+
+
+def test_request_has_body_detects_content_length_and_chunked() -> None:
+    """_request_has_body gates whether a content stream is forwarded at all."""
+    assert _request_has_body(_request_with_headers({"content-length": "10"})) is True
+    assert _request_has_body(_request_with_headers({"transfer-encoding": "chunked"})) is True
+    assert _request_has_body(_request_with_headers({"content-length": "0"})) is False
+    assert _request_has_body(_request_with_headers({})) is False
+
+
+def _request_with_headers(headers: dict[str, str]) -> Request:
+    raw_headers = [(key.encode(), value.encode()) for key, value in headers.items()]
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope: dict[str, Any] = {"type": "http", "method": "POST", "headers": raw_headers}
+    return Request(scope, receive)
