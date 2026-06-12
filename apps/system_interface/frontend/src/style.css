@@ -58,6 +58,27 @@ body {
   pointer-events: none;
 }
 
+/* ── Memory-pressure banner ──
+   A calm, low-key strip shown only while the watchdog reports sustained memory
+   pressure. Deliberately not alarming (no red): amber-tinted, thin, informative. */
+.memory-pressure-banner {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  background: color-mix(in srgb, #d9a441 16%, var(--color-bg, #ffffff));
+  border-bottom: 1px solid color-mix(in srgb, #d9a441 40%, transparent);
+}
+
+.memory-pressure-banner__title {
+  font-weight: 600;
+}
+
+.memory-pressure-banner__detail {
+  opacity: 0.85;
+}
+
 /* ── Title bar ── */
 .app-header {
   padding: 14px 32px;

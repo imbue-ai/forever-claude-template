@@ -18,6 +18,10 @@
           {
             "type": "command",
             "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/ensure_tk_on_path.sh"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_shed_notice_hook.py"
           }
         ]
       }

@@ -322,6 +322,11 @@ def launch(
             template,
             "--label",
             f"workspace={workspace}",
+            # Marks this as an agent-created (worker) agent so the memory
+            # watchdog classifies it at tier 7 -- shed before user-created
+            # agents (tier 5) under memory pressure.
+            "--label",
+            "agent_created=true",
         ],
         check=True,
     )

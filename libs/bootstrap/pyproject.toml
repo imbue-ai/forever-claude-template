@@ -9,6 +9,7 @@ dependencies = [
     "tomli>=2.0; python_version < '3.11'",
     "tomlkit>=0.12",
     "host-backup",
+    "memory-watchdog",
 ]
 
 [project.scripts]

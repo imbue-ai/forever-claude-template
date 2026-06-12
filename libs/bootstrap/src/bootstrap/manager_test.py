@@ -11,12 +11,14 @@ from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from bootstrap.manager import (
     DEFAULT_RESTART_POLICY,
+    MAX_RAPID_RESTARTS,
     SVC_EXIT_STATUS_OPTION,
     _build_create_chat_command,
     _build_service_keystrokes,
     _compute_actions,
     _compute_restarts,
     _ensure_host_claude_config_dir,
+    _evaluate_restart_breaker,
     _format_env_file,
     _initialize_workspace_main_branch,
     _maybe_create_initial_chat,
@@ -382,6 +384,67 @@ def test_build_create_chat_command_argv_accepted_by_live_cli() -> None:
     label resolution short-circuits without reading host files."""
     argv = _build_create_chat_command("host-1", {"workspace": "ws", "project": "proj"})
     assert_mngr_argv_valid(argv)
+
+
+def test_build_create_chat_command_tags_user_created() -> None:
+    cmd = _build_create_chat_command("my-workspace", {"workspace": "my-workspace"})
+    labels = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--label"]
+    assert "user_created=true" in labels
+
+
+# --- _evaluate_restart_breaker ---
+
+
+def test_breaker_allows_restarts_within_budget() -> None:
+    times: tuple[float, ...] = ()
+    blocked: float | None = None
+    now = 1000.0
+    for _ in range(MAX_RAPID_RESTARTS):
+        outcome = _evaluate_restart_breaker(now, times, blocked)
+        assert outcome.should_restart is True
+        assert outcome.should_block is False
+        times = outcome.new_restart_times
+        blocked = outcome.new_blocked_until
+        now += 1.0
+    assert len(times) == MAX_RAPID_RESTARTS
+
+
+def test_breaker_trips_after_too_many_rapid_restarts() -> None:
+    # MAX_RAPID_RESTARTS recent restarts already on record.
+    times = tuple(1000.0 + i for i in range(MAX_RAPID_RESTARTS))
+    outcome = _evaluate_restart_breaker(1000.0 + MAX_RAPID_RESTARTS, times, None)
+    assert outcome.should_restart is False
+    assert outcome.should_block is True
+    assert outcome.new_blocked_until is not None
+
+
+def test_breaker_stays_paused_during_cooldown() -> None:
+    blocked_until = 2000.0
+    outcome = _evaluate_restart_breaker(1990.0, (), blocked_until)
+    assert outcome.should_restart is False
+    assert outcome.should_block is False
+    assert outcome.should_unblock is False
+    assert outcome.new_blocked_until == blocked_until
+
+
+def test_breaker_resumes_after_cooldown_elapses() -> None:
+    blocked_until = 2000.0
+    outcome = _evaluate_restart_breaker(
+        blocked_until + 1.0, (1000.0, 1001.0, 1002.0), blocked_until
+    )
+    # Cooldown elapsed: the history resets and one fresh restart is allowed.
+    assert outcome.should_unblock is True
+    assert outcome.should_restart is True
+    assert outcome.new_blocked_until is None
+
+
+def test_breaker_window_drops_old_restarts() -> None:
+    # Three restarts, but all far older than the rapid window -> not counted, so
+    # a restart is allowed.
+    old_times = (1.0, 2.0, 3.0)
+    outcome = _evaluate_restart_breaker(100_000.0, old_times, None)
+    assert outcome.should_restart is True
+    assert outcome.should_block is False
 
 
 # --- _maybe_create_initial_chat ---

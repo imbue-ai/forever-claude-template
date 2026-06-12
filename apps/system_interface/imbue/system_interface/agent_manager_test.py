@@ -808,6 +808,17 @@ def test_chat_create_argv_accepted_by_live_cli() -> None:
     assert_mngr_argv_valid(argv)
 
 
+def test_chat_create_tags_user_created() -> None:
+    argv = _build_chat_create_command(
+        mngr_binary="mngr",
+        name="demo",
+        agent_id="agent-123",
+        primary_labels={"workspace": "ws"},
+    )
+    labels = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--label"]
+    assert "user_created=true" in labels
+
+
 def test_observe_argv_accepted_by_live_cli() -> None:
     argv = _build_observe_command_argv("mngr")
     assert_mngr_argv_valid(argv)

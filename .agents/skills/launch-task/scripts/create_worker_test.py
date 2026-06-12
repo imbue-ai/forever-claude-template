@@ -104,7 +104,17 @@ def test_happy_path_no_artifacts(tmp_path: Path) -> None:
     assert rc == 0
     argvs = [c.argv for c in runner.calls]
     assert argvs == [
-        ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
+        [
+            "mngr",
+            "create",
+            "demo-worker",
+            "-t",
+            "worker",
+            "--label",
+            "workspace=ws-1",
+            "--label",
+            "agent_created=true",
+        ],
         [
             "mngr",
             "rsync",
@@ -450,7 +460,17 @@ def test_common_transcript_flushed_before_message_send(tmp_path: Path) -> None:
     argvs = [c.argv for c in runner.calls]
     expected_script = str(state_dir / "commands" / "common_transcript.sh")
     assert argvs == [
-        ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
+        [
+            "mngr",
+            "create",
+            "demo-worker",
+            "-t",
+            "worker",
+            "--label",
+            "workspace=ws-1",
+            "--label",
+            "agent_created=true",
+        ],
         [
             "mngr",
             "rsync",

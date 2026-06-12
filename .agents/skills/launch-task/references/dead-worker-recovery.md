@@ -2,6 +2,26 @@
 
 When a worker (sub-agent created via `launch-task`) is in `STOPPED` state -- claude session died mid-iteration, but the worktree (and any uncommitted work in it) is still intact -- the default path is to restart it, not to manually salvage. `mngr start` only re-creates the tmux session and re-execs claude in the existing worktree; it does not touch git state, so uncommitted changes survive the restart.
 
+## First: was the worker shed for memory pressure?
+
+A worker can die because the **memory watchdog** shed it -- the container was running out of memory and the watchdog killed the most-expendable work first. Check the shed ledger before reviving, because reviving into ongoing memory pressure just gets the worker killed again:
+
+```bash
+# Did the watchdog shed this worker? (look for your worker's name)
+grep '"agent_name": *"<worker>"' runtime/memory_watchdog/events/shed/events.jsonl
+
+# Is the container still under pressure right now?
+cat runtime/memory_watchdog/status.json   # is_under_pressure, used_fraction
+```
+
+Revival guidelines when a worker was shed:
+
+- **If pressure is still elevated** (`is_under_pressure` is true, or `used_fraction` is near the threshold): do NOT revive. Surface the situation to the user and let them decide -- reviving now will likely just be shed again and deepen the crunch.
+- **If pressure has cleared**: revive at most once (the default restart below) and re-establish your report poll.
+- **If the same worker has already been shed twice** (two `process_shed` lines naming it): stop. Do not keep reviving. Surface to the user with the ledger details -- something about this worker's footprint is incompatible with the current memory budget.
+
+If the worker was *not* in the ledger, it died for some other reason; proceed with the normal restart path below.
+
 ## Default: restart the worker and resume
 
 1. Bring claude back up in the existing worktree:

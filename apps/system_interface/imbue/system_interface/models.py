@@ -113,6 +113,28 @@ class StartAgentResponse(FrozenModel):
     status: str = Field(description="Result of the start operation")
 
 
+class RecentShedItem(FrozenModel):
+    """One aggregated line of what the memory watchdog shed recently."""
+
+    label: str = Field(description="What was shed (service, agent, or command name)")
+    tier_rank: int = Field(description="1..8 priority rank of the shed processes")
+    count: int = Field(description="How many processes with this label were shed")
+    reclaimed_kb: int = Field(description="Total resident memory reclaimed, in kibibytes")
+
+
+class MemoryStatusResponse(FrozenModel):
+    """Response from /api/memory-status -- a projection of the watchdog status file."""
+
+    is_under_pressure: bool = Field(description="Whether the pressure banner should show")
+    used_fraction: float = Field(description="Fraction of total memory in use, 0..1")
+    recently_shed: list[RecentShedItem] = Field(
+        default_factory=list, description="What the watchdog shed recently"
+    )
+    blocked_services: list[str] = Field(
+        default_factory=list, description="Services the service manager has paused under pressure"
+    )
+
+
 class ClaudeAuthStatusResponse(FrozenModel):
     """Response from /api/claude-auth/status."""
 

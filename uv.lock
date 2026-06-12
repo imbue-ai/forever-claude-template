@@ -13,6 +13,7 @@ members = [
     "cloudflare-tunnel",
     "forever-claude-template",
     "host-backup",
+    "memory-watchdog",
     "mngr-cli-contract",
     "runtime-backup",
     "system-interface",
@@ -150,6 +151,7 @@ source = { editable = "libs/bootstrap" }
 dependencies = [
     { name = "host-backup" },
     { name = "loguru" },
+    { name = "memory-watchdog" },
     { name = "tomlkit" },
 ]
 
@@ -157,6 +159,7 @@ dependencies = [
 requires-dist = [
     { name = "host-backup", editable = "libs/host_backup" },
     { name = "loguru", specifier = ">=0.7.0" },
+    { name = "memory-watchdog", editable = "libs/memory_watchdog" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "tomlkit", specifier = ">=0.12" },
 ]
@@ -584,6 +587,7 @@ dependencies = [
     { name = "cloudflare-tunnel" },
     { name = "host-backup" },
     { name = "imbue-common" },
+    { name = "memory-watchdog" },
     { name = "playwright" },
     { name = "runtime-backup" },
     { name = "telegram-bot" },
@@ -613,6 +617,7 @@ requires-dist = [
     { name = "cloudflare-tunnel", editable = "libs/cloudflare_tunnel" },
     { name = "host-backup", editable = "libs/host_backup" },
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
+    { name = "memory-watchdog", editable = "libs/memory_watchdog" },
     { name = "playwright", specifier = "==1.58.0" },
     { name = "runtime-backup", editable = "libs/runtime_backup" },
     { name = "telegram-bot", editable = "libs/telegram_bot" },
@@ -1176,6 +1181,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "memory-watchdog"
+version = "0.1.0"
+source = { editable = "libs/memory_watchdog" }
+dependencies = [
+    { name = "imbue-common" },
+    { name = "loguru" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
+    { name = "loguru", specifier = ">=0.7.0" },
 ]
 
 [[package]]

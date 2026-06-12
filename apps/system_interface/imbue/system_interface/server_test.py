@@ -455,6 +455,45 @@ def test_random_name_endpoint(client: TestClient) -> None:
     assert len(data["name"]) > 0
 
 
+def test_memory_status_healthy_when_no_status_file(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no watchdog status file, the endpoint reports no pressure."""
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
+    response = client.get("/api/memory-status")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_under_pressure"] is False
+    assert data["recently_shed"] == []
+
+
+def test_memory_status_reflects_pressure_file(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The endpoint projects the watchdog status file into the banner shape."""
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
+    status_path = tmp_path / "runtime" / "memory_watchdog" / "status.json"
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "is_under_pressure": True,
+                "used_fraction": 0.93,
+                "recently_shed": [
+                    {"label": "pytest", "tier_rank": 8, "count": 2, "reclaimed_kb": 500000}
+                ],
+                "blocked_services": ["web"],
+            }
+        )
+    )
+    response = client.get("/api/memory-status")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_under_pressure"] is True
+    assert data["recently_shed"][0]["label"] == "pytest"
+    assert data["blocked_services"] == ["web"]
+
+
 def test_create_chat_agent_without_work_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     """Creating a chat agent without a primary agent work dir returns 400."""
     monkeypatch.delenv("MNGR_AGENT_WORK_DIR", raising=False)

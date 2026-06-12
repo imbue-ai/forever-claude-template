@@ -109,6 +109,10 @@ def _build_chat_create_command(
         "none",
         "--template",
         "chat",
+        # Tags this as a user-created agent so the memory watchdog protects it at
+        # tier 5 (the same label the worktree-create path already sets).
+        "--label",
+        "user_created=true",
         "--no-connect",
     ]
     # Inherit workspace and project labels from the primary agent.

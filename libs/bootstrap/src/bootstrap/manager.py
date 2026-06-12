@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from host_backup.config import (
     BACKUP_TOML_PATH,
@@ -34,6 +35,7 @@ from host_backup.config import (
     write_default_restic_env_template,
 )
 from loguru import logger
+from memory_watchdog.ledger import record_service_blocked, record_service_unblocked
 
 try:
     import tomllib
@@ -57,6 +59,78 @@ SVC_EXIT_STATUS_OPTION = "@svc_exit_status"
 DEFAULT_RESTART_POLICY = "never"
 VALID_RESTART_POLICIES = frozenset({"never", "on-failure"})
 POLL_INTERVAL = 5  # seconds
+
+# Crash-loop circuit breaker. A service that exits and is restarted more than
+# MAX_RAPID_RESTARTS times within RAPID_RESTART_WINDOW_SECONDS is "blocked":
+# restarts pause for BREAKER_COOLDOWN_SECONDS, the service is recorded as blocked
+# in the shed ledger (so the UI banner can show it), and after the cooldown the
+# breaker resets and one fresh restart is attempted. Without this, a service that
+# OOMs on startup under sustained memory pressure would thrash every poll,
+# repeatedly eating memory and dying.
+RAPID_RESTART_WINDOW_SECONDS = 60.0
+MAX_RAPID_RESTARTS = 3
+BREAKER_COOLDOWN_SECONDS = 60.0
+
+
+class RestartBreakerOutcome(NamedTuple):
+    """The breaker's decision for one exited service this poll."""
+
+    should_restart: bool
+    should_block: bool
+    should_unblock: bool
+    new_restart_times: tuple[float, ...]
+    new_blocked_until: float | None
+
+
+def _evaluate_restart_breaker(
+    now: float,
+    restart_times: tuple[float, ...],
+    blocked_until: float | None,
+) -> RestartBreakerOutcome:
+    """Decide whether to restart, pause, or resume a crash-looping service.
+
+    Pure: all state is passed in and returned, so the breaker can be unit-tested
+    without tmux. A service stays blocked until its cooldown elapses; once it
+    does, the breaker resets (clearing the restart history) and allows one fresh
+    attempt -- unless that attempt would itself exceed the rapid-restart budget.
+    """
+    # Still inside an active cooldown: stay paused.
+    if blocked_until is not None and now < blocked_until:
+        return RestartBreakerOutcome(
+            should_restart=False,
+            should_block=False,
+            should_unblock=False,
+            new_restart_times=restart_times,
+            new_blocked_until=blocked_until,
+        )
+
+    # Either never blocked, or the cooldown just elapsed (a reset = unblock).
+    did_unblock = blocked_until is not None
+    recent_times = (
+        ()
+        if did_unblock
+        else tuple(t for t in restart_times if now - t < RAPID_RESTART_WINDOW_SECONDS)
+    )
+
+    # Too many recent restarts: trip the breaker and pause.
+    if len(recent_times) >= MAX_RAPID_RESTARTS:
+        return RestartBreakerOutcome(
+            should_restart=False,
+            should_block=True,
+            should_unblock=did_unblock,
+            new_restart_times=recent_times,
+            new_blocked_until=now + BREAKER_COOLDOWN_SECONDS,
+        )
+
+    # Within budget: restart and record the attempt.
+    return RestartBreakerOutcome(
+        should_restart=True,
+        should_block=False,
+        should_unblock=did_unblock,
+        new_restart_times=recent_times + (now,),
+        new_blocked_until=None,
+    )
+
 
 RUNTIME_DIR = Path("runtime")
 RUNTIME_PREEXISTING_DIR = Path("runtime.preexisting")
@@ -257,6 +331,10 @@ def _build_create_chat_command(host_name: str, labels: dict[str, str]) -> list[s
         "chat",
         "--message",
         "/welcome",
+        # Tags the initial chat as a user-created agent so the memory watchdog
+        # protects it at tier 5 (matching the New Chat / New Agent paths).
+        "--label",
+        "user_created=true",
         "--no-connect",
     ]
     workspace = _resolve_initial_chat_workspace_label(labels)
@@ -1035,6 +1113,10 @@ def main() -> None:
     # the file needlessly. So we load once per change and reuse the cache.
     desired: dict[str, dict] = {}
 
+    # Per-service crash-loop breaker state, keyed by service name.
+    restart_times_by_service: dict[str, tuple[float, ...]] = {}
+    blocked_until_by_service: dict[str, float] = {}
+
     while True:
         current_mtime = _get_file_mtime()
 
@@ -1053,8 +1135,34 @@ def main() -> None:
         # service would stay dead, and the `restart` policy would be inert.
         current = _list_managed_windows(session)
         exited = _list_exited_services(session, current)
+        now = time.monotonic()
         for name in _compute_restarts(desired, exited):
-            _restart_service(session, name, desired[name]["command"])
+            outcome = _evaluate_restart_breaker(
+                now,
+                restart_times_by_service.get(name, ()),
+                blocked_until_by_service.get(name),
+            )
+            restart_times_by_service[name] = outcome.new_restart_times
+            if outcome.new_blocked_until is None:
+                blocked_until_by_service.pop(name, None)
+            else:
+                blocked_until_by_service[name] = outcome.new_blocked_until
+            if outcome.should_unblock:
+                logger.info("Service {} cooldown elapsed; resuming restarts", name)
+                record_service_unblocked(name)
+            if outcome.should_block:
+                logger.warning(
+                    "Service {} crash-looped; pausing restarts for {}s",
+                    name,
+                    BREAKER_COOLDOWN_SECONDS,
+                )
+                record_service_blocked(
+                    name,
+                    f"crash-looped more than {MAX_RAPID_RESTARTS} times in "
+                    f"{RAPID_RESTART_WINDOW_SECONDS:g}s",
+                )
+            if outcome.should_restart:
+                _restart_service(session, name, desired[name]["command"])
 
         time.sleep(POLL_INTERVAL)
 

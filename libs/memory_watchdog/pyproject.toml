@@ -1,0 +1,20 @@
+[project]
+name = "memory-watchdog"
+version = "0.1.0"
+description = "Classifies the container's process tree into OOM-priority tiers, tags oom_score_adj, and sheds load under memory pressure"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "imbue-common",
+    "loguru>=0.7.0",
+]
+
+[project.scripts]
+memory-watchdog = "memory_watchdog.watchdog:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/memory_watchdog"]

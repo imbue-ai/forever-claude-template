@@ -56,7 +56,9 @@ from imbue.system_interface.models import CreateWorktreeRequest
 from imbue.system_interface.models import DestroyAgentResponse
 from imbue.system_interface.models import ErrorResponse
 from imbue.system_interface.models import InterruptAgentResponse
+from imbue.system_interface.models import MemoryStatusResponse
 from imbue.system_interface.models import RandomNameResponse
+from imbue.system_interface.models import RecentShedItem
 from imbue.system_interface.models import SendMessageRequest
 from imbue.system_interface.models import SendMessageResponse
 from imbue.system_interface.models import StartAgentResponse
@@ -676,6 +678,52 @@ def _random_name_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(content=RandomNameResponse(name=name).model_dump())
 
 
+# The memory watchdog publishes this file each poll; absence means the watchdog
+# has not started yet, which we report as "no pressure".
+_MEMORY_STATUS_RELATIVE_PATH = Path("runtime") / "memory_watchdog" / "status.json"
+
+
+def _read_memory_status() -> MemoryStatusResponse:
+    """Project the watchdog's status file into the banner's response shape.
+
+    Returns a healthy (no-pressure) status when the file is missing or
+    unreadable, so the banner stays hidden rather than erroring.
+    """
+    work_dir = os.environ.get("MNGR_AGENT_WORK_DIR", "")
+    status_path = (Path(work_dir) if work_dir else Path.cwd()) / _MEMORY_STATUS_RELATIVE_PATH
+    healthy = MemoryStatusResponse(
+        is_under_pressure=False, used_fraction=0.0, recently_shed=[], blocked_services=[]
+    )
+    if not status_path.exists():
+        return healthy
+    try:
+        raw = json.loads(status_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        _loguru_logger.warning("Failed to read memory watchdog status file: {}", e)
+        return healthy
+    recently_shed = [
+        RecentShedItem(
+            label=str(item.get("label", "")),
+            tier_rank=int(item.get("tier_rank", 0)),
+            count=int(item.get("count", 0)),
+            reclaimed_kb=int(item.get("reclaimed_kb", 0)),
+        )
+        for item in raw.get("recently_shed", [])
+        if isinstance(item, dict)
+    ]
+    return MemoryStatusResponse(
+        is_under_pressure=bool(raw.get("is_under_pressure", False)),
+        used_fraction=float(raw.get("used_fraction", 0.0)),
+        recently_shed=recently_shed,
+        blocked_services=[str(s) for s in raw.get("blocked_services", [])],
+    )
+
+
+def _memory_status_endpoint(request: Request) -> JSONResponse:
+    """Serve the current memory-pressure status for the UI banner."""
+    return JSONResponse(content=_read_memory_status().model_dump())
+
+
 async def _create_worktree_agent(request: Request) -> JSONResponse:
     """Create a new worktree agent."""
     agent_manager: AgentManager = request.app.state.agent_manager
@@ -1085,6 +1133,7 @@ def create_application(
     application.add_api_route("/api/agents/create-worktree", _create_worktree_agent, methods=["POST"])
     application.add_api_route("/api/agents/create-chat", _create_chat_agent, methods=["POST"])
     application.add_api_route("/api/random-name", _random_name_endpoint, methods=["GET"])
+    application.add_api_route("/api/memory-status", _memory_status_endpoint, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/events", _get_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/stream", _stream_events, methods=["GET"])
     application.add_api_route("/api/agents/{agent_id}/message", _send_message_endpoint, methods=["POST"])

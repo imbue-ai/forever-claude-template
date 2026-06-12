@@ -18,6 +18,16 @@ restart = "on-failure"
 command = "uv run app-watcher"
 restart = "on-failure"
 
+# Classifies the process tree into OOM-priority tiers, keeps each process's
+# oom_score_adj in sync, and sheds whole tiers (most-expendable first) under
+# sustained memory pressure so the container degrades gracefully instead of at
+# the kernel's whim. Also supervises the bootstrap/telegram/terminal windows,
+# the mirror of bootstrap restarting this watchdog -- together they close the
+# recovery loop. See libs/memory_watchdog/README.md.
+[services.memory-watchdog]
+command = "uv run memory-watchdog"
+restart = "on-failure"
+
 # Periodically commits + pushes runtime/ to mindsbackup/$MNGR_AGENT_ID so that
 # Claude memory, ticket state, transcripts, telegram history, etc. survive
 # container loss. The worktree itself (and the orphan branch) are created
