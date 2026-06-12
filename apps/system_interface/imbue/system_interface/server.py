@@ -7,7 +7,6 @@ import threading
 import traceback
 from collections.abc import AsyncIterator
 from collections.abc import Callable
-from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -351,12 +350,12 @@ def _get_events(agent_id: str, request: Request) -> Response:
     return JSONResponse(content={"events": events, "offset": offset, "total": total})
 
 
-def _stream_filtered_events(
+async def _stream_filtered_events(
     agent_id: str,
     event_queues: AgentEventQueues,
     event_queue: "queue.Queue[dict[str, Any] | None]",
     should_forward: Callable[[dict[str, Any]], bool],
-) -> Iterator[str]:
+) -> AsyncIterator[str]:
     """Yield SSE frames for queued events that pass ``should_forward``.
 
     Shared by the main agent stream and the per-subagent stream, which differ
@@ -366,25 +365,30 @@ def _stream_filtered_events(
     while the subagent stream keeps only its own session. Filtered-out events
     do not reset the keepalive counter. A ``None`` from the queue (shutdown
     sentinel) ends the stream.
+
+    The thread-safe queue is polled from the threadpool with a 1-second timeout
+    so the asyncio event loop is never blocked and no threadpool worker is
+    pinned for the lifetime of the connection: the worker is released on every
+    poll. Starlette throws ``GeneratorExit`` into this async generator when the
+    client disconnects; the ``finally`` unregisters the subscriber regardless.
     """
     keepalive_counter = 0
     try:
         while not event_queues.is_shutdown:
             try:
-                event = event_queue.get(timeout=1)
-                if event is None:
-                    break
-                if not should_forward(event):
-                    continue
-                keepalive_counter = 0
-                yield f"data: {json.dumps(event)}\n\n"
+                event = await run_in_threadpool(event_queue.get, timeout=1)
             except queue.Empty:
                 keepalive_counter += 1
                 if keepalive_counter >= 8:
                     keepalive_counter = 0
                     yield ": keepalive\n\n"
-    except GeneratorExit:
-        pass
+                continue
+            if event is None:
+                break
+            if not should_forward(event):
+                continue
+            keepalive_counter = 0
+            yield f"data: {json.dumps(event)}\n\n"
     finally:
         event_queues.unregister(agent_id, event_queue)
 

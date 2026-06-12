@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
 
+import anyio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -856,7 +857,13 @@ def test_stream_filtered_events_forwards_only_matching_events() -> None:
         session_id = event.get("session_id")
         return session_id is None or session_id == "main-1"
 
-    frames = list(_stream_filtered_events("agent-1", event_queues, event_queue, is_main_session_event))
+    async def _drive() -> list[str]:
+        return [
+            frame
+            async for frame in _stream_filtered_events("agent-1", event_queues, event_queue, is_main_session_event)
+        ]
+
+    frames = anyio.run(_drive)
     forwarded_ids = [json.loads(frame[len("data: ") :])["event_id"] for frame in frames if frame.startswith("data: ")]
 
     assert forwarded_ids == ["main-evt", "no-session"]
