@@ -76,6 +76,7 @@ from loguru import logger as _loguru_logger
 from watchdog.observers import Observer
 
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
+from imbue.system_interface.activity_state import read_process_started_at
 from imbue.system_interface.session_parser import parse_session_lines
 from imbue.system_interface.watcher_common import POLL_INTERVAL_SECONDS
 from imbue.system_interface.watcher_common import WakeOnChangeHandler
@@ -735,19 +736,6 @@ class AgentSessionWatcher:
             if mark_all_emitted:
                 state.emitted_count = len(state.locators)
 
-    def _read_process_started_at(self) -> float | None:
-        """Return the mtime of the agent's ``claude_process_started`` marker, or None.
-
-        mngr touches the marker on every startup/resume (a fresh, not-mid-turn
-        Claude process), so its mtime is the boundary the interrupted-delegation
-        check compares Agent tool_call timestamps against.
-        """
-        marker = self._agent_state_dir / "claude_process_started"
-        try:
-            return marker.stat().st_mtime
-        except OSError:
-            return None
-
     def _enrich_subagent_metadata(self, events: list[dict[str, Any]]) -> None:
         """Enrich Agent tool_use events with subagent metadata.
 
@@ -782,7 +770,7 @@ class AgentSessionWatcher:
         so holding the lock across the in-memory enrichment cannot deadlock on
         the fan-out.
         """
-        process_started_at = self._read_process_started_at()
+        process_started_at = read_process_started_at(self._agent_state_dir)
         with self._lock:
             subagent_by_tool_call: dict[str, str] = {}
 

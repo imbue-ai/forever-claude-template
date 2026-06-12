@@ -21,10 +21,31 @@ which the transcript alone cannot distinguish from work still in flight.
 from collections.abc import Sequence
 from datetime import datetime
 from enum import auto
+from pathlib import Path
 from typing import Any
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.pure import pure
+
+# Touched by mngr in the agent's state dir on every Claude startup/resume (a
+# fresh, not-mid-turn process). Its mtime is the restart boundary that the
+# staleness fences below compare transcript timestamps against.
+CLAUDE_PROCESS_STARTED_MARKER = "claude_process_started"
+
+
+def read_process_started_at(agent_state_dir: Path) -> float | None:
+    """Return the mtime of the agent's ``claude_process_started`` marker, or None.
+
+    The single accessor for the mngr marker contract (see
+    ``CLAUDE_PROCESS_STARTED_MARKER``); returns ``None`` when the marker does not
+    exist yet (e.g. an agent created before mngr started writing it), in which
+    case the staleness fences no-op.
+    """
+    marker = agent_state_dir / CLAUDE_PROCESS_STARTED_MARKER
+    try:
+        return marker.stat().st_mtime
+    except OSError:
+        return None
 
 
 class ActivityState(UpperCaseStrEnum):

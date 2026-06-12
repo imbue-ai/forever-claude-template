@@ -274,7 +274,7 @@ class TranscriptStore {
             this.#byId.set(event.event_id, event);
             added = true;
           }
-        } else if (mergeLateSubagentMetadata(prior, event)) {
+        } else if (mergeLateSubagentState(prior, event)) {
           merged = true;
         }
       }
@@ -468,7 +468,7 @@ export function getLastEventId(agentId: string): string | null {
  * Mutates `prior.tool_calls` in place (matched by tool_call_id) and returns
  * whether anything changed.
  */
-function mergeLateSubagentMetadata(prior: TranscriptEvent, incoming: TranscriptEvent): boolean {
+function mergeLateSubagentState(prior: TranscriptEvent, incoming: TranscriptEvent): boolean {
   if (prior.type !== "assistant_message" || incoming.type !== "assistant_message") {
     return false;
   }

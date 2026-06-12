@@ -40,6 +40,7 @@ from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import newest_unmatched_tool_use_timestamp
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
+from imbue.system_interface.activity_state import read_process_started_at
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.models import AgentCreationError
@@ -970,21 +971,6 @@ class AgentManager:
             self._last_event_timestamp_by_agent.pop(agent_id, None)
             self._activity_state_by_agent.pop(agent_id, None)
 
-    def _read_process_started_at(self, agent_id: str) -> float | None:
-        """Return the mtime of the agent's ``claude_process_started`` marker, or None.
-
-        mngr touches this marker on every startup/resume (a fresh, not-mid-turn
-        Claude process), so its mtime is the boundary the activity tracker
-        compares transcript timestamps against. Returns ``None`` when the marker
-        is absent (e.g. an agent that has not restarted since the marker was
-        introduced) so the staleness override simply does not fire.
-        """
-        marker = self._get_agent_state_dir(agent_id) / "claude_process_started"
-        try:
-            return marker.stat().st_mtime
-        except OSError:
-            return None
-
     def _recompute_activity_state(self, agent_id: str, *, broadcast_on_change: bool) -> None:
         """Recompute activity state for ``agent_id`` from cached transcript signals.
 
@@ -999,7 +985,7 @@ class AgentManager:
         # stat, not shared state). Re-read on every recompute so a restart that
         # touches the marker is reflected even when no new transcript events
         # arrive -- the post-restart observe snapshot drives the recompute.
-        process_started_at = self._read_process_started_at(agent_id)
+        process_started_at = read_process_started_at(self._get_agent_state_dir(agent_id))
         with self._lock:
             if agent_id not in self._activity_tracked_agents:
                 return
@@ -1052,10 +1038,12 @@ class AgentManager:
         with self._lock:
             if agent_id not in self._activity_tracked_agents:
                 return
-            old_pending = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
-            old_pending_timestamp = self._pending_tool_use_timestamp_by_agent.get(agent_id)
-            old_last_type = self._last_event_type_by_agent.get(agent_id)
-            if old_pending == new_pending and old_pending_timestamp == new_pending_timestamp and old_last_type == new_last_type:
+            old_signals = (
+                self._has_unmatched_tool_use_by_agent.get(agent_id, False),
+                self._pending_tool_use_timestamp_by_agent.get(agent_id),
+                self._last_event_type_by_agent.get(agent_id),
+            )
+            if old_signals == (new_pending, new_pending_timestamp, new_last_type):
                 return
             self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
             self._pending_tool_use_timestamp_by_agent[agent_id] = new_pending_timestamp
