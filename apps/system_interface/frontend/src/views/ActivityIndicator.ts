@@ -36,7 +36,7 @@
 
 import m from "mithril";
 import type { ToolCall, TranscriptEvent } from "../models/Response";
-import { getAgentById } from "../models/AgentManager";
+import { getEffectiveActivityState } from "../models/PendingMessages";
 
 // Note: Agent / Task are intentionally NOT in this map. labelForToolCall
 // short-circuits with the "Delegating to sub-agent…" label for those tools
@@ -210,8 +210,7 @@ interface ActivityIndicatorAttrs {
 export function ActivityIndicator(): m.Component<ActivityIndicatorAttrs> {
   return {
     view(vnode) {
-      const agent = getAgentById(vnode.attrs.agentId);
-      const state = agent?.activity_state ?? null;
+      const state = getEffectiveActivityState(vnode.attrs.agentId);
       const label = labelForActivityState(state, vnode.attrs.events);
       if (label === null) return null;
       return m("div.agent-activity-indicator", { "data-state": state, role: "status", "aria-live": "polite" }, [

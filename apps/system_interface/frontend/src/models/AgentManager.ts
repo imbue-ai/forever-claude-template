@@ -80,12 +80,22 @@ type WsEvent =
 
 export type LayoutOpListener = (event: LayoutOpEvent) => void;
 export type AgentsUpdatedListener = (agents: AgentState[]) => void;
+/**
+ * Notified when a single agent's ``activity_state`` changes between two
+ * consecutive ``agents_updated`` snapshots. ``previous`` is ``null`` when the
+ * agent had no prior tracked state (it just appeared, or its state was
+ * untracked). Computed here, in the agent-state authority, so consumers can act
+ * on a transition (e.g. working -> IDLE) without keeping their own shadow copy
+ * of the previous state.
+ */
+export type AgentActivityListener = (agentId: string, previous: string | null, current: string | null) => void;
 
 let agents: AgentState[] = [];
 let applications: ApplicationEntry[] = [];
 let protoAgents: ProtoAgent[] = [];
 let layoutOpListeners: LayoutOpListener[] = [];
 let agentsUpdatedListeners: AgentsUpdatedListener[] = [];
+let agentActivityListeners: AgentActivityListener[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let connected = false;
@@ -151,12 +161,26 @@ function scheduleReconnect(): void {
 
 function handleEvent(event: WsEvent): void {
   switch (event.type) {
-    case "agents_updated":
+    case "agents_updated": {
+      // Diff against the outgoing snapshot (still in `agents` here) so we can
+      // report per-agent activity transitions before replacing it. No separate
+      // previous-state bookkeeping is needed -- the prior array is the record.
+      const previousActivityById = new Map(agents.map((a) => [a.id, a.activity_state ?? null]));
       agents = event.agents;
       for (const listener of agentsUpdatedListeners) {
         listener(getAgents());
       }
+      for (const agent of agents) {
+        const current = agent.activity_state ?? null;
+        const previous = previousActivityById.get(agent.id) ?? null;
+        if (previous !== current) {
+          for (const listener of agentActivityListeners) {
+            listener(agent.id, previous, current);
+          }
+        }
+      }
       break;
+    }
 
     case "applications_updated":
       applications = event.applications;
@@ -244,4 +268,12 @@ export function addAgentsUpdatedListener(listener: AgentsUpdatedListener): void 
 
 export function removeAgentsUpdatedListener(listener: AgentsUpdatedListener): void {
   agentsUpdatedListeners = agentsUpdatedListeners.filter((l) => l !== listener);
+}
+
+export function addAgentActivityListener(listener: AgentActivityListener): void {
+  agentActivityListeners.push(listener);
+}
+
+export function removeAgentActivityListener(listener: AgentActivityListener): void {
+  agentActivityListeners = agentActivityListeners.filter((l) => l !== listener);
 }

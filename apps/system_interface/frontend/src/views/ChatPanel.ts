@@ -27,6 +27,7 @@ import {
   type ToolResultEvent,
 } from "../models/Response";
 import { computeVisibleWindow } from "../models/virtualWindow";
+import { nextUserScrolledUp } from "../models/scrollFollow";
 import {
   createRowMeasurer,
   OVERSCAN_PX,
@@ -50,6 +51,7 @@ import { buildAgentTerminalUrl, getTerminalUrl, openIframeTabForAgent } from "./
 import { buildSections, type SectionView } from "./turn-grouping";
 import { ProgressBlock } from "./ProgressBlock";
 import { ActivityIndicator } from "./ActivityIndicator";
+import { renderPendingMessages } from "./PendingMessageView";
 
 function getAgentTerminalUrl(agentId: string): string {
   // The ttyd dispatch script is invoked as `bash -c "$SCRIPT" <args...>` where
@@ -75,6 +77,10 @@ function openAgentTerminalTab(agentId: string): void {
 
 const SCROLL_BOTTOM_THRESHOLD_PX = 40;
 
+// Layout for the centered message column. Shared between the normal transcript
+// render and the empty-state branch that shows an optimistic first message, so
+// the two stay visually identical.
+const MESSAGE_LIST_CLASS = "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6";
 // Backfill fires when the viewport is within this many pixels of the top or
 // bottom edge of the loaded rows (and the server reports more history there).
 const BACKFILL_TRIGGER_PX = 600;
@@ -210,6 +216,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let scrollEl: HTMLElement | null = null;
   let viewportHeight = 0;
   let scrollTop = 0;
+  // Previous observed scroll position, for detecting scroll direction. Updated in
+  // lockstep with scrollTop at every programmatic scroll site (see handleScrollEvent).
+  let previousScrollTop = 0;
   const rowMeasurer = createRowMeasurer();
   let viewportResizeObserver: ResizeObserver | null = null;
   // Memoized turn-grouping output. buildSections walks the whole held
@@ -416,6 +425,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     currentAgentId = agentId;
     scrollTop = 0;
+    previousScrollTop = 0;
     userScrolledUp = false;
     backfillInFlight = false;
     scrollHeightBeforePrepend = 0;
@@ -501,6 +511,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       pendingPinToWindowTop = false;
       element.scrollTop = phantomTopHeight;
       scrollTop = element.scrollTop;
+      previousScrollTop = element.scrollTop;
       return;
     }
 
@@ -527,23 +538,30 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       if (delta !== 0) {
         element.scrollTop = Math.max(phantomTopHeight, element.scrollTop + delta);
         scrollTop = element.scrollTop;
+        previousScrollTop = element.scrollTop;
       }
     }
 
     if (!userScrolledUp) {
       scrollToBottom(element);
       scrollTop = element.scrollTop;
+      previousScrollTop = element.scrollTop;
     }
   }
 
   function handleScrollEvent(event: Event): void {
     const element = event.target as HTMLElement;
+    // applyScrollPosition keeps previousScrollTop in lockstep with its own
+    // programmatic re-pins, so only a genuine user scroll registers as movement.
+    const didScrollUp = element.scrollTop < previousScrollTop;
+    previousScrollTop = element.scrollTop;
     scrollTop = element.scrollTop;
 
-    // Following the live tail only when truly at the end -- at the bottom of the
-    // loaded rows AND with no newer history still unloaded (a jump leaves newer
-    // history below, so being near the bottom of a jumped window is not the tail).
-    userScrolledUp = !(isNearBottom(element) && !hasMoreAfter(currentAgentId ?? ""));
+    userScrolledUp = nextUserScrolledUp({
+      didScrollUp,
+      isNearBottom: isNearBottom(element),
+      hasMoreAfter: hasMoreAfter(currentAgentId ?? ""),
+    });
 
     if (currentAgentId !== null) {
       maybePage(currentAgentId, element);
@@ -643,11 +661,18 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     const events = getEventsForAgent(agentId);
 
     if (events.length === 0) {
-      return m(
-        "div",
-        { class: "message-list-empty flex items-center justify-center h-full" },
-        m("p", { class: "text-text-secondary" }, "No events yet for this agent."),
-      );
+      // No transcript yet -- but the user may have just sent their first
+      // message, which should still show immediately as an optimistic bubble
+      // rather than be hidden behind the empty-state placeholder.
+      const pendingNodes = renderPendingMessages(agentId);
+      if (pendingNodes.length === 0) {
+        return m(
+          "div",
+          { class: "message-list-empty flex items-center justify-center h-full" },
+          m("p", { class: "text-text-secondary" }, "No events yet for this agent."),
+        );
+      }
+      return m("div", { class: "message-list-wrapper" }, [m("div", { class: MESSAGE_LIST_CLASS }, pendingNodes)]);
     }
 
     const agent = getAgentById(agentId);
@@ -719,11 +744,9 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     );
 
     return m("div", { class: "message-list-wrapper" }, [
-      m(
-        "div",
-        { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
-        visibleRows,
-      ),
+      // Pending (optimistic) messages render after the virtualized rows so a
+      // just-sent bubble shows at the live tail until its real event lands.
+      m("div", { class: MESSAGE_LIST_CLASS }, [...visibleRows, ...renderPendingMessages(agentId)]),
     ]);
   }
 

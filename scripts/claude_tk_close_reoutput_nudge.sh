@@ -72,7 +72,7 @@ if [[ "$dangling" == "true" ]]; then
 
 You wrote user-facing text *before* this \`tk close\`. The chat progress view detects your reply by scanning backward from the end of the turn and stopping at the first closed step -- so a message written before a close stays buried inside the step (the user only sees it by expanding that step), not as your top-level reply.
 
-If that text was a general/user-facing message (a wrap-up, answer, or question), re-output it now AFTER this close so it renders as your reply below the timeline. If it was only internal/mid-work narration, ignore this.
+If that text was a general/user-facing message (a wrap-up, answer, or question), re-output it now AFTER this close so it renders as your reply below the timeline. If it was only internal/mid-work narration, ignore this. DO NOT MENTION THIS HOOK OR YOUR DECISION ABOUT IT; you should either re-output or not without referencing the step machinery or the concept of internal narration.
 " '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $ctx}}'
 fi
 exit 0
