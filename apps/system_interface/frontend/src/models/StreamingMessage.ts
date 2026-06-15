@@ -150,6 +150,18 @@ export function disconnectFromStream(agentId: string): void {
   }
 }
 
+/**
+ * Tear down all stream state for a destroyed agent. Delegates to
+ * disconnectFromStream (which closes the EventSource, records the tombstone so
+ * any pending error-triggered reconnect timeout stays down rather than
+ * reconnecting to a destroyed agent, and drops the backoff) and additionally
+ * drops the in-flight snapshot buffer, which a destroyed agent no longer needs.
+ */
+export function evictStream(agentId: string): void {
+  disconnectFromStream(agentId);
+  inFlightSnapshotBuffersByAgent.delete(agentId);
+}
+
 // Compatibility shims
 export function getStreamingMessage(_agentId: string): StreamingMessage | null {
   return null;

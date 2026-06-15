@@ -10,7 +10,7 @@ vi.mock("mithril", () => ({
   default: { request: mockRequest, redraw: mockRedraw },
 }));
 
-import { loadSnapshotWithStream } from "./StreamingMessage";
+import { connectToStream, evictStream, loadSnapshotWithStream } from "./StreamingMessage";
 import { getEventsForAgent, type TranscriptEvent } from "./Response";
 
 interface Deferred<T> {
@@ -90,5 +90,24 @@ describe("loadSnapshotWithStream", () => {
     const ids = getEventsForAgent(agentId).map((event) => event.event_id);
     expect(ids).toContain("snap-1");
     expect(ids).toContain("delta-1");
+  });
+});
+
+describe("evictStream", () => {
+  it("closes the active stream and drops it from the active set on agent destroy", () => {
+    const agentId = `agent-${agentCounter++}`;
+    connectToStream(agentId);
+    const eventSource = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    expect(eventSource).toBeDefined();
+    expect(eventSource?.closed).toBe(false);
+
+    evictStream(agentId);
+    expect(eventSource?.closed).toBe(true);
+
+    // The evicted stream was removed from the active set, not left dangling: a
+    // fresh connect opens a brand-new EventSource rather than reusing it.
+    const countBeforeReconnect = FakeEventSource.instances.length;
+    connectToStream(agentId);
+    expect(FakeEventSource.instances.length).toBe(countBeforeReconnect + 1);
   });
 });

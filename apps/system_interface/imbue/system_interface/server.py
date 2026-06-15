@@ -103,6 +103,20 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
     application.state.broadcaster = broadcaster
     application.state.agent_manager = agent_manager
+
+    def _evict_agent_resources(agent_id: str) -> None:
+        # Free per-agent resources that live on application.state rather than on
+        # the AgentManager: the session-watcher thread and the SSE event queues.
+        # Fires for every agent-removal path (REST destroy plus observe-driven
+        # destroy / host-destroy), mirroring the lifespan-local closure pattern
+        # already used by _graceful_shutdown_handler below.
+        session_watcher = application.state.watchers.pop(agent_id, None)
+        if session_watcher is not None:
+            _stop_watcher_safely(session_watcher, agent_id, "session")
+        event_queues.evict(agent_id)
+
+    agent_manager.add_agent_removed_listener(_evict_agent_resources)
+
     # Advisory in-process mutex serializing layout-mutating ops. The agent
     # script never auto-retries on contention -- it surfaces the 409 to the
     # agent along with the in-flight holder's metadata.
@@ -152,6 +166,22 @@ def _stop_all_watchers(application: FastAPI) -> None:
     for watcher in watchers.values():
         watcher.stop()
     watchers.clear()
+
+
+def _stop_watcher_safely(watcher: AgentSessionWatcher, agent_id: str, kind: str) -> None:
+    """Stop a watchdog-backed watcher, containing the errors its teardown can raise.
+
+    Stopping a watcher tears down its inotify emitter and joins its thread,
+    which can raise OSError (emitter teardown) or RuntimeError (observer /
+    thread state). We catch exactly those so a teardown hiccup neither kills the
+    caller's thread (the observe-reader thread, for the observe-driven removal
+    paths) nor skips the remaining eviction -- while a genuine programming error
+    still surfaces rather than being silently swallowed.
+    """
+    try:
+        watcher.stop()
+    except (OSError, RuntimeError) as e:
+        logger.opt(exception=e).error("Failed to stop {} watcher for agent {}", kind, agent_id)
 
 
 def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSessionWatcher:
@@ -837,7 +867,9 @@ async def _destroy_agent(agent_id: str, request: Request) -> JSONResponse:
 
     # Remove the agent from the system_interface's tracked state immediately
     # so the frontend reflects the destruction without waiting for mngr observe.
-    agent_manager.remove_agent(agent_id)
+    # Run off the event loop: remove_agent fires the agent-removed listeners,
+    # which stop the session-watcher thread (a bounded but blocking join).
+    await run_in_threadpool(agent_manager.remove_agent, agent_id)
 
     return JSONResponse(content=DestroyAgentResponse(status="ok").model_dump())
 

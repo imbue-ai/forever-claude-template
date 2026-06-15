@@ -462,6 +462,18 @@ export function evictOldEvents(agentId: string): number {
   return storeFor(agentId).evict();
 }
 
+/**
+ * Drop all cached event state for an agent. Called when an agent is destroyed
+ * so the per-agent caches don't accumulate entries for the lifetime of the
+ * page. Unlike evictOldEvents (which trims old events within a live agent's
+ * window), this removes the agent's entry entirely. Safe to call for an agent
+ * with no cached state.
+ */
+export function evictAgentEvents(agentId: string): void {
+  delete storeByAgent[agentId];
+  notFoundAgentIds.delete(agentId);
+}
+
 function placeWindow(agentId: string, result: EventsResponse): void {
   const offset = result.offset ?? 0;
   const total = result.total ?? offset + result.events.length;

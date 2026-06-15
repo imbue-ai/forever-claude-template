@@ -136,9 +136,7 @@ class AgentEventQueues:
         for event in events:
             self.broadcast(agent_id, {**event, "buffer_behavior": BufferBehavior.IGNORE})
 
-    def _evict_subscriber_locked(
-        self, agent_id: str, dead_queue: queue.Queue[dict[str, Any] | None]
-    ) -> None:
+    def _evict_subscriber_locked(self, agent_id: str, dead_queue: queue.Queue[dict[str, Any] | None]) -> None:
         """Drop a stalled subscriber and signal it to close. Caller holds ``self._lock``."""
         self._consecutive_full_by_id.pop(id(dead_queue), None)
         queues = self._queues.get(agent_id)

@@ -14,6 +14,7 @@ import {
   appendEvents,
   prependEvents,
   evictOldEvents,
+  evictAgentEvents,
   fetchEvents,
   fetchBackfillEvents,
   fetchForwardEvents,
@@ -288,6 +289,26 @@ describe("evictOldEvents", () => {
     prependEvents(agent, [reFetched]);
     expect(getFirstEventId(agent)).toBe("e0");
     expect(removed).toBeGreaterThan(0);
+  });
+});
+
+describe("evictAgentEvents", () => {
+  it("drops an agent's entire cached store on destroy", () => {
+    const agent = freshAgent();
+    appendEvents(
+      agent,
+      Array.from({ length: 5 }, (_v, i) => makeEvent(`e${i}`)),
+    );
+    expect(getEventCount(agent)).toBe(5);
+
+    evictAgentEvents(agent);
+
+    expect(getEventCount(agent)).toBe(0);
+    expect(getEventsForAgent(agent)).toEqual([]);
+  });
+
+  it("is safe to call for an agent with no cached state", () => {
+    expect(() => evictAgentEvents("never-seen-agent")).not.toThrow();
   });
 });
 
