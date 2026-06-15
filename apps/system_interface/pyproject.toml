@@ -14,7 +14,6 @@ dependencies = [
     "pluggy>=1.5",
     "pydantic-settings>=2.13.1",
     "starlette>=0.45",
-    "tk-command-parsing",
     "uvicorn>=0.34",
     "watchdog>=4.0",
     "websockets>=13.0",

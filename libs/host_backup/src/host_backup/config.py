@@ -73,7 +73,9 @@ class SnapshotSettings(FrozenModel):
         description=(
             "Where the live snapshot's `current/` slot is created on the btrfs "
             "filesystem (the outer's perspective for outer_trigger, the in-VM "
-            "view for btrfs_local). Required for btrfs_local and outer_trigger."
+            "view for btrfs_local). Required for btrfs_local and outer_trigger. "
+            "For outer_trigger only the PARENT directory is used (snapshots get "
+            "unique per-tick names under it); the `current` basename is vestigial."
         ),
     )
     snapshot_read_path: Path | None = Field(
@@ -81,7 +83,10 @@ class SnapshotSettings(FrozenModel):
         description=(
             "Path the in-container restic actually reads from. For outer_trigger "
             "this is /mngr-snapshots/current (the bind mount of the outer's "
-            "snapshot dir); for btrfs_local it equals snapshot_current_path."
+            "snapshot dir); for btrfs_local it equals snapshot_current_path. "
+            "For outer_trigger only the PARENT directory is used (the per-tick "
+            "snapshot name is appended at runtime); the `current` basename is "
+            "vestigial."
         ),
     )
     trigger_dir: Path | None = Field(
@@ -94,6 +99,15 @@ class SnapshotSettings(FrozenModel):
     outer_helper_timeout_seconds: float = Field(
         default=120.0,
         description="Hard cap on how long to wait for the outer helper's result.json",
+    )
+    max_local_snapshots: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "outer_trigger only: how many on-host btrfs snapshots to retain. "
+            "Each tick creates a new timestamped snapshot and deletes the "
+            "oldest beyond this count. Ignored by btrfs_local and direct."
+        ),
     )
 
 
@@ -328,6 +342,10 @@ def _snapshot_to_toml_table(snapshot: SnapshotSettings) -> tomlkit.items.Table:
     if snapshot.trigger_dir is not None:
         table["trigger_dir"] = str(snapshot.trigger_dir)
     table["outer_helper_timeout_seconds"] = snapshot.outer_helper_timeout_seconds
+    # max_local_snapshots only governs the outer_trigger retention loop; keep
+    # it out of btrfs_local / direct configs so those stay untouched.
+    if snapshot.method == SnapshotMethod.OUTER_TRIGGER:
+        table["max_local_snapshots"] = snapshot.max_local_snapshots
     return table
 
 

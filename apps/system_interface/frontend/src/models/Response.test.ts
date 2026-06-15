@@ -12,8 +12,6 @@ vi.mock("mithril", () => ({
 
 import {
   appendEvents,
-  applyEnrichmentSnapshot,
-  getEnrichmentForAgent,
   prependEvents,
   evictOldEvents,
   fetchEvents,
@@ -31,7 +29,6 @@ import {
   MAX_HELD_EVENTS,
   EVICT_TARGET_EVENTS,
   type AssistantMessageEvent,
-  type StepEnrichment,
   type ToolCall,
   type TranscriptEvent,
 } from "./Response";
@@ -140,44 +137,6 @@ describe("appendEvents subagent_metadata merge", () => {
     appendEvents(agentId, [assistantWithAgentToolCall("ev-2", "toolu_2")]);
 
     expect(getEventsForAgent(agentId)).toHaveLength(2);
-  });
-});
-
-function step(title: string, status: StepEnrichment["status"] = "open"): StepEnrichment {
-  return { title, summary: null, status, created_at: "2026-04-28T01:00:00.000000Z" };
-}
-
-describe("enrichment scope keying", () => {
-  it("keeps a subagent's steps out of the main view's enrichment table", () => {
-    const agentId = "agent-scope";
-    const subSession = "agent-sub1";
-
-    // The backend serves the main scope under no session id and the subagent
-    // scope tagged with its session id; the frontend stores them separately.
-    applyEnrichmentSnapshot(agentId, { "cod-main": step("Main step") });
-    applyEnrichmentSnapshot(agentId, { "cod-sub": step("Sub step") }, subSession);
-
-    // Main view (no session id): only the main step -- the subagent's pending
-    // step does NOT leak in, so it cannot appear in the main pending roster.
-    const main = getEnrichmentForAgent(agentId);
-    expect([...main.keys()]).toEqual(["cod-main"]);
-
-    // Subagent view (its session id): only its own step.
-    const sub = getEnrichmentForAgent(agentId, subSession);
-    expect([...sub.keys()]).toEqual(["cod-sub"]);
-  });
-
-  it("replaces a scope's table wholesale without touching another scope", () => {
-    const agentId = "agent-scope2";
-    const subSession = "agent-sub2";
-    applyEnrichmentSnapshot(agentId, { "cod-main": step("Main") });
-    applyEnrichmentSnapshot(agentId, { "cod-sub-a": step("A") }, subSession);
-
-    // A new subagent snapshot replaces only that subagent's table.
-    applyEnrichmentSnapshot(agentId, { "cod-sub-b": step("B") }, subSession);
-
-    expect([...getEnrichmentForAgent(agentId).keys()]).toEqual(["cod-main"]);
-    expect([...getEnrichmentForAgent(agentId, subSession).keys()]).toEqual(["cod-sub-b"]);
   });
 });
 
@@ -378,7 +337,7 @@ describe("render version", () => {
     expect(getRenderVersion(agent)).toBeGreaterThan(vAfterPrepend);
   });
 
-  it("bumps on a fetch (reset + enrichment snapshot)", async () => {
+  it("bumps on a fetch (window reset)", async () => {
     const agent = freshAgent();
     const v0 = getRenderVersion(agent);
     mockRequest.mockResolvedValueOnce({ events: [makeEvent("x")], offset: 0, total: 1 });

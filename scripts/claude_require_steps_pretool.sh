@@ -88,11 +88,11 @@ emit_reminder "
 
 You are about to do work without declaring any step records. The chat progress view requires steps to render your work as a structured timeline.
 
-Before continuing, declare your plan as step records:
-  S1=\$(tk create --step \"Description of first step\")
-  S2=\$(tk create --step \"Description of second step\")
+Before continuing, declare your plan as step records (each prints \`Created <id>: <title>\`):
+  tk create --step \"Description of first step\"
+  tk create --step \"Description of second step\"
   ...
-Then start the first step: tk start \"\$S1\"
+Then start the first step with its literal id: tk start <id>
 
 See CLAUDE.md > Task management for the full protocol.
 "

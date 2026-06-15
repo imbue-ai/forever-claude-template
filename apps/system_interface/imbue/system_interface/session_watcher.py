@@ -76,8 +76,6 @@ from loguru import logger as _loguru_logger
 from watchdog.observers import Observer
 
 from imbue.system_interface.session_parser import parse_session_lines
-from imbue.system_interface.step_attribution import StepAttribution
-from imbue.system_interface.step_attribution import extract_step_signals
 from imbue.system_interface.watcher_common import POLL_INTERVAL_SECONDS
 from imbue.system_interface.watcher_common import WakeOnChangeHandler
 
@@ -132,28 +130,6 @@ def _split_at_last_complete_line(data: bytes) -> tuple[bytes, bytes]:
     if newline_index == -1:
         return b"", data
     return data[: newline_index + 1], fragment
-
-
-def read_complete_lines_since_offset(file_path: Path, offset: int) -> tuple[int, list[str]]:
-    """Read the complete lines appended to ``file_path`` since byte ``offset``.
-
-    Returns ``(new_offset, lines)`` where ``new_offset`` advances past only the
-    bytes consumed (the complete lines) so a partial trailing line is left to be
-    re-read once the writer finishes it, and ``lines`` is the decoded text split
-    into individual lines (the raw JSONL the attribution scanner expects).
-
-    Reuses ``_split_at_last_complete_line`` so the boundary never falls inside an
-    in-progress record or a multi-byte UTF-8 sequence -- the same guarantee the
-    event-stream reader relies on. ``OSError`` is allowed to propagate; the
-    caller decides how to handle a missing or unreadable file.
-    """
-    with open(file_path, "rb") as f:
-        f.seek(offset)
-        new_data = f.read()
-    complete, _fragment = _split_at_last_complete_line(new_data)
-    if not complete:
-        return offset, []
-    return offset + len(complete), complete.decode("utf-8").splitlines()
 
 
 def _iter_line_spans(data: bytes, base_offset: int) -> list[tuple[int, int, bytes]]:
@@ -306,20 +282,6 @@ class AgentSessionWatcher:
         self._observer: Any = None
         self._thread: threading.Thread | None = None
 
-        # tk step attribution, derived from every session transcript (main +
-        # subagents). A native Agent-tool subagent shares the parent's
-        # TICKETS_DIR and agent name, so a step's session identity survives only
-        # in the transcript -- the session that printed its `Updated <id> ->`
-        # transition owns it, and the session that ran `tk create --step` made
-        # it. These maps let the tickets watcher split the commingled enrichment
-        # table into the main view's steps and each subagent's steps. Guarded by
-        # `_attribution_lock`; read incrementally from a dedicated per-session
-        # byte offset so repeated scans stay cheap on long transcripts.
-        self._attribution_lock = threading.Lock()
-        self._attribution_offsets: dict[str, int] = {}
-        self._transition_session_by_id: dict[str, str] = {}
-        self._create_titles_by_session: dict[str, list[str]] = {}
-
     def start(self) -> None:
         """Start watching session files in a background thread."""
         self._thread = threading.Thread(target=self._run, daemon=True, name=f"watcher-{self._agent_id}")
@@ -397,9 +359,7 @@ class AgentSessionWatcher:
         self._enrich_subagent_metadata(events)
         return events
 
-    def get_forward_events(
-        self, after_event_id: str, limit: int = 50, session_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    def get_forward_events(self, after_event_id: str, limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
         """Return up to ``limit`` events immediately AFTER ``after_event_id``.
 
         The mirror of :meth:`get_backfill_events`, for paging newer when the loaded
@@ -476,71 +436,6 @@ class AgentSessionWatcher:
         self._discover_sessions()
         with self._lock:
             return self._subagent_metadata.get(subagent_session_id)
-
-    def get_step_attribution(self) -> StepAttribution:
-        """Return the tk step attribution derived from every session transcript.
-
-        Scans each known session file (main + subagents) for the transcript
-        signals that reveal which session owns a step -- ``Updated <id> ->``
-        transitions and ``tk create --step`` titles -- reading only the bytes
-        appended since the last call, so this stays cheap on long conversations.
-        The tickets watcher joins the result onto its step records to split the
-        commingled enrichment table per session.
-        """
-        self._scan_attribution()
-        # `_main_session_ids` is guarded by `_lock` (see __init__), so snapshot it
-        # there before building the result -- never read it under
-        # `_attribution_lock` alone. The two locks are taken un-nested to avoid
-        # any ordering hazard.
-        with self._lock:
-            main_session_ids = tuple(self._main_session_ids)
-        with self._attribution_lock:
-            transition_ids_by_session: dict[str, list[str]] = {}
-            for ticket_id, session_id in self._transition_session_by_id.items():
-                transition_ids_by_session.setdefault(session_id, []).append(ticket_id)
-            return StepAttribution(
-                transition_ids_by_session={
-                    session_id: tuple(ids) for session_id, ids in transition_ids_by_session.items()
-                },
-                create_titles_by_session={
-                    session_id: tuple(titles) for session_id, titles in self._create_titles_by_session.items()
-                },
-                main_session_ids=main_session_ids,
-            )
-
-    def _scan_attribution(self) -> None:
-        """Update the attribution maps from every session file's newly-appended
-        lines. Uses a dedicated byte offset per session (independent of the
-        event-stream offset, which starts at EOF) so the first scan sees the
-        full history and later scans read only the tail.
-        """
-        self._discover_sessions()
-        # `_session_states` is guarded by `_lock`; snapshot it there (matching
-        # `_discover_sessions`, which copies the values under `_lock` before
-        # iterating) so the watcher thread can keep mutating the dict without a
-        # "dictionary changed size during iteration" race. Each SessionFileState's
-        # `file_path` / `session_id` are immutable after construction, so reading
-        # them from the snapshot outside `_lock` is safe -- the same assumption
-        # `_discover_sessions` relies on.
-        with self._lock:
-            states = list(self._session_states.values())
-        with self._attribution_lock:
-            for state in states:
-                if not state.file_path.exists():
-                    continue
-                offset = self._attribution_offsets.get(state.session_id, 0)
-                try:
-                    new_offset, lines = read_complete_lines_since_offset(state.file_path, offset)
-                except OSError:
-                    continue
-                self._attribution_offsets[state.session_id] = new_offset
-                if not lines:
-                    continue
-                signals = extract_step_signals(lines)
-                for ticket_id in signals.transition_ids:
-                    self._transition_session_by_id[ticket_id] = state.session_id
-                if signals.create_titles:
-                    self._create_titles_by_session.setdefault(state.session_id, []).extend(signals.create_titles)
 
     def is_main_session_event(self, event: dict[str, Any]) -> bool:
         """True if an event belongs to a main session rather than a subagent session.

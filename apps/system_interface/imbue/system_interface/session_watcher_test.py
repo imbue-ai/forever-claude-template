@@ -980,54 +980,6 @@ def test_watcher_handles_missing_session_file(tmp_path: Path) -> None:
     assert len(result) == 0
 
 
-def test_get_step_attribution_is_incremental_and_does_not_double_count(tmp_path: Path) -> None:
-    """get_step_attribution reads only bytes appended since the last call, so a
-    `tk create` already scanned is not counted twice -- otherwise residual
-    counting (creates minus started steps) would be corrupted on every refetch.
-    """
-    create_one = {
-        "type": "assistant",
-        "uuid": "a1",
-        "timestamp": "2026-01-01T00:00:01Z",
-        "message": {
-            "role": "assistant",
-            "content": [
-                {"type": "tool_use", "id": "tc1", "name": "Bash", "input": {"command": 'tk create --step "First"'}}
-            ],
-        },
-    }
-    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [create_one])
-    session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
-
-    watcher = AgentSessionWatcher(
-        agent_id="test-agent",
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=claude_config_dir,
-        on_events=lambda aid, evts: None,
-    )
-
-    first = watcher.get_step_attribution()
-    assert first.create_titles_by_session[session_id] == ("First",)
-
-    # Append a second create; the first must not be re-counted.
-    create_two = {
-        "type": "assistant",
-        "uuid": "a2",
-        "timestamp": "2026-01-01T00:00:02Z",
-        "message": {
-            "role": "assistant",
-            "content": [
-                {"type": "tool_use", "id": "tc2", "name": "Bash", "input": {"command": 'tk create --step "Second"'}}
-            ],
-        },
-    }
-    with session_file.open("a") as handle:
-        handle.write(json.dumps(create_two) + "\n")
-
-    second = watcher.get_step_attribution()
-    assert second.create_titles_by_session[session_id] == ("First", "Second")
-
-
 # --- Two-tier evicting cache + bounded tail/backfill ---
 
 

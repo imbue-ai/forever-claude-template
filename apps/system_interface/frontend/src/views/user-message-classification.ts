@@ -55,13 +55,15 @@ export function isHiddenUserMessage(content: string): boolean {
   // The minds desktop client seeds every new agent with "/welcome" as its
   // initial message so the welcome skill can produce a friendly greeting.
   // Claude Code expands that invocation into TWO transcript events:
-  //   1. the invocation itself, whose content wraps "/welcome" in
-  //      <command-name>.../</command-name> (plus a <command-message>...),
+  //   1. the invocation itself -- the session parser normalizes Claude Code's
+  //      slash-command expansion (<command-name>/welcome</command-name> + args)
+  //      back to the typed "/welcome" text (see _normalize_slash_command), so it
+  //      arrives here as exactly "/welcome",
   //   2. the skill expansion, which starts with
   //      "Base directory for this skill: .../skills/welcome/..." and
   //      carries the SKILL.md body.
   // Hide both so the first visible turn is just the assistant's greeting.
-  if (content.includes("<command-name>/welcome</command-name>")) {
+  if (content.trim() === "/welcome") {
     return true;
   }
   // Other skill expansions are folded into the corresponding "Tool: Skill"

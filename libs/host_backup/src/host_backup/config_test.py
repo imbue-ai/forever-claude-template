@@ -166,6 +166,23 @@ def test_render_default_backup_toml_parses_into_valid_config() -> None:
     assert "restic" not in parsed
 
 
+def test_render_default_backup_toml_includes_max_local_snapshots_for_outer_trigger() -> (
+    None
+):
+    rendered = render_default_backup_toml(_outer_trigger_snapshot())
+    config = BackupConfig.model_validate(tomllib.loads(rendered))
+    assert config.snapshot.max_local_snapshots == 5
+
+
+def test_render_default_backup_toml_omits_max_local_snapshots_for_other_methods() -> (
+    None
+):
+    # btrfs_local / direct ignore the knob, so it must not appear in their config.
+    for snapshot in (_btrfs_local_snapshot(), _direct_snapshot()):
+        parsed = tomllib.loads(render_default_backup_toml(snapshot))
+        assert "max_local_snapshots" not in parsed["snapshot"]
+
+
 def test_backup_config_loads_without_restic_section() -> None:
     config = BackupConfig(snapshot=_direct_snapshot())
     assert config.snapshot.method == SnapshotMethod.DIRECT

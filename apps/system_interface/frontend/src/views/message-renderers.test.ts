@@ -188,7 +188,7 @@ describe("renderSubagentCard", () => {
       description: "explore foo",
       subagent_type: "Explore",
     };
-    const vnode = renderSubagentCard(toolCall, "agent-1", true);
+    const vnode = renderSubagentCard(toolCall, "agent-1");
     const text = allText(vnode);
 
     expect(text).toContain("explore foo");
@@ -196,36 +196,6 @@ describe("renderSubagentCard", () => {
     // Not yet linked: shows the running placeholder, not a clickable conversation link.
     expect(text).toContain("Running");
     expect(text).not.toContain("View conversation");
-  });
-
-  it("shows a pulsing running dot on a green card while the sub-agent is working", () => {
-    const toolCall: ToolCall = {
-      tool_call_id: "t1",
-      tool_name: "Agent",
-      input_preview: "{}",
-      description: "explore foo",
-      subagent_type: "Explore",
-      subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
-    };
-    const classes = collectClasses(renderSubagentCard(toolCall, "agent-1", true)).join(" ");
-    expect(classes).toContain("subagent-card-status-dot--running");
-    expect(classes).not.toContain("subagent-card-status-check");
-    expect(classes).not.toContain("subagent-card--done");
-  });
-
-  it("switches to a checkmark and greys the card once the sub-agent finishes", () => {
-    const toolCall: ToolCall = {
-      tool_call_id: "t1",
-      tool_name: "Agent",
-      input_preview: "{}",
-      description: "explore foo",
-      subagent_type: "Explore",
-      subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
-    };
-    const classes = collectClasses(renderSubagentCard(toolCall, "agent-1", false)).join(" ");
-    expect(classes).toContain("subagent-card-status-check");
-    expect(classes).toContain("subagent-card--done");
-    expect(classes).not.toContain("subagent-card-status-dot--running");
   });
 
   it("renders a clickable conversation link once the subagent session is linked", () => {
@@ -237,7 +207,7 @@ describe("renderSubagentCard", () => {
       subagent_type: "Explore",
       subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
     };
-    const vnode = renderSubagentCard(toolCall, "agent-1", false);
+    const vnode = renderSubagentCard(toolCall, "agent-1");
     const text = allText(vnode);
 
     expect(text).toContain("View conversation");
@@ -251,25 +221,11 @@ describe("renderSubagentCard", () => {
       input_preview: "{}",
       subagent_metadata: { agent_type: "Explore", description: "from metadata", session_id: "agent-sub1" },
     };
-    const text = allText(renderSubagentCard(toolCall, "agent-1", false));
+    const text = allText(renderSubagentCard(toolCall, "agent-1"));
     expect(text).toContain("from metadata");
     expect(text).toContain("View conversation");
   });
 });
-
-// Walk a mithril vnode tree and collect every element's class string, so tests can assert
-// on structural state (e.g. the running vs done status dot) that allText can't see.
-function collectClasses(node: unknown): string[] {
-  if (node == null) return [];
-  if (Array.isArray(node)) return node.flatMap(collectClasses);
-  if (typeof node === "object") {
-    // Mithril normalizes the `class` hyperscript attr into `className` on the vnode.
-    const v = node as { attrs?: { className?: unknown }; children?: unknown };
-    const own = typeof v.attrs?.className === "string" ? [v.attrs.className] : [];
-    return [...own, ...collectClasses(v.children)];
-  }
-  return [];
-}
 
 function makeToolCall(inputPreview: string): ToolCall {
   return {

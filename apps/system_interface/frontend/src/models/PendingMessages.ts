@@ -177,6 +177,10 @@ export function getPendingMessages(agentId: string): PendingMessage[] {
   return pendingByAgent[agentId] ?? [];
 }
 
+function normalizeContentForMatch(content: string): string {
+  return content.trim().replace(/\s+/g, " ");
+}
+
 /**
  * Drop optimistic messages whose real transcript event has now arrived.
  *
@@ -185,13 +189,14 @@ export function getPendingMessages(agentId: string): PendingMessage[] {
  * claimed by an earlier pending message, so two identical sends reconcile
  * against two distinct transcript events rather than collapsing into one.
  *
- * Matching is by trimmed content: the send POST confirms delivery but returns
- * no server-assigned id to correlate on, and the backend persists the user's
- * text verbatim into the transcript, so equality holds
- * modulo the surrounding whitespace both sides trim. That verbatim-persistence
- * is the contract this relies on; if the backend ever rewrote user text the
- * bubble would not reconcile. (A server-returned correlation id would remove
- * that fragility, at the cost of a backend change -- a worthwhile follow-up.)
+ * Matching is by whitespace-normalized content: the send POST confirms
+ * delivery but returns no server-assigned id to correlate on, and the backend
+ * persists the user's text (modulo the slash-command normalization described in
+ * reconcilePendingMessages' body) into the transcript, so equality holds once
+ * both sides collapse whitespace. That persistence is the contract this relies
+ * on; if the backend ever rewrote user text the bubble would not reconcile. (A
+ * server-returned correlation id would remove that fragility, at the cost of a
+ * backend change -- a worthwhile follow-up.)
  *
  * Matching ignores the frontend's hidden-message classification (skill
  * expansions, /welcome, stop-hook feedback). That is safe because those are
@@ -206,20 +211,28 @@ export function reconcilePendingMessages(agentId: string, events: readonly Trans
   const claimed = new Set<string>();
   const remaining: PendingMessage[] = [];
   for (const pending of list) {
-    // FIXME: exact trimmed-content equality is brittle. It strands the bubble
-    // whenever the persisted text diverges from what we sent -- e.g. the user
-    // edits a queued message in the Claude terminal before it is submitted, so
-    // the real user_message arrives with different text and never matches. The
-    // working->IDLE safeguard (clearQueuedMessagesOnIdle) is the backstop that
-    // keeps such a bubble from lasting forever; if these strandings turn out to
-    // be common we should move to fuzzier matching (normalized/prefix/edit-
-    // distance) or a server-returned correlation id rather than exact equality.
+    // Matching is whitespace-normalized (runs of whitespace collapsed to a
+    // single space, then trimmed) rather than exact: a slash command is not
+    // persisted verbatim -- Claude Code expands it and the parser rebuilds
+    // "/name args" by joining the command and its arguments with a single space
+    // (see _normalize_slash_command), which differs from a bubble whose typed
+    // text separated them with a newline or several spaces. Normalizing both
+    // sides lets those reconcile.
+    //
+    // FIXME: even normalized equality is brittle. It still strands the bubble
+    // whenever the persisted text diverges non-trivially from what we sent --
+    // e.g. the user edits a queued message in the Claude terminal before it is
+    // submitted, so the real user_message arrives with different words and never
+    // matches. The working->IDLE safeguard (clearQueuedMessagesOnIdle) is the
+    // backstop that keeps such a bubble from lasting forever; the durable fix is
+    // a server-returned correlation id rather than content matching at all.
+    const normalizedPending = normalizeContentForMatch(pending.content);
     const match = events.find(
       (event) =>
         event.type === "user_message" &&
         !pending.prior_user_event_ids.has(event.event_id) &&
         !claimed.has(event.event_id) &&
-        event.content.trim() === pending.content,
+        normalizeContentForMatch(event.content) === normalizedPending,
     );
     if (match !== undefined) {
       claimed.add(match.event_id);

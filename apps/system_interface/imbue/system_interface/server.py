@@ -33,7 +33,6 @@ from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
-from imbue.system_interface.agent_discovery import read_tickets_dir_from_env_file
 from imbue.system_interface.agent_discovery import send_message
 from imbue.system_interface.agent_discovery import start_agent
 from imbue.system_interface.agent_manager import AgentManager
@@ -63,7 +62,6 @@ from imbue.system_interface.models import StartAgentResponse
 from imbue.system_interface.plugins import get_plugin_manager
 from imbue.system_interface.service_dispatcher import register_service_routes
 from imbue.system_interface.session_watcher import AgentSessionWatcher
-from imbue.system_interface.tickets_watcher import AgentTicketsWatcher
 from imbue.system_interface.welcome_resend import WelcomeResender
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
@@ -155,10 +153,6 @@ def _stop_all_watchers(application: FastAPI) -> None:
     for watcher in watchers.values():
         watcher.stop()
     watchers.clear()
-    tickets_watchers: dict[str, AgentTicketsWatcher] = application.state.tickets_watchers
-    for tickets_watcher in tickets_watchers.values():
-        tickets_watcher.stop()
-    tickets_watchers.clear()
 
 
 def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSessionWatcher:
@@ -202,41 +196,6 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
     # Seed transcript-derived activity signals once at watcher creation so the
     # indicator does not lag a turn behind on first connect.
     agent_manager.update_session_events(agent_info.id, watcher.get_all_events())
-    return watcher
-
-
-def _get_or_create_tickets_watcher(request: Request, agent_info: AgentInfo) -> AgentTicketsWatcher | None:
-    """Get an existing tickets watcher for an agent, or create one. Returns
-    None if the agent has no resolvable working directory (in which case
-    there's no .tickets/ to watch)."""
-    if agent_info.work_dir is None:
-        return None
-
-    tickets_watchers: dict[str, AgentTicketsWatcher] = request.app.state.tickets_watchers
-    event_queues: AgentEventQueues = request.app.state.event_queues
-
-    if agent_info.id in tickets_watchers:
-        return tickets_watchers[agent_info.id]
-
-    # The session watcher is the only place a step's session identity exists
-    # (synthesised from the transcript file location), so the tickets watcher
-    # leans on its attribution to scope each step to the main view or a subagent.
-    session_watcher = _get_or_create_watcher(request, agent_info)
-
-    # The tickets watcher emits a `step_enrichment` snapshot message per changed scope
-    # whenever ticket state changes. ``broadcast_all_ignored`` delivers it live without
-    # buffering: each snapshot is recomputed on every GET /events (via get_enrichment()),
-    # so buffering successive snapshots would grow unboundedly for no benefit. The
-    # frontend replaces its enrichment table for that scope each time one arrives.
-    watcher = AgentTicketsWatcher(
-        agent_id=agent_info.id,
-        agent_name=agent_info.name,
-        tickets_dir=read_tickets_dir_from_env_file(agent_info.agent_state_dir, Path(agent_info.work_dir)),
-        on_events=event_queues.broadcast_all_ignored,
-        attribution_provider=session_watcher.get_step_attribution,
-    )
-    tickets_watchers[agent_info.id] = watcher
-    watcher.start()
     return watcher
 
 
@@ -389,14 +348,7 @@ def _get_events(agent_id: str, request: Request) -> Response:
     # (offset + len < total) -- no separate has_more flag needed.
     total = watcher.get_total_event_count()
     offset = watcher.get_event_offset(events[0]["event_id"]) if events else total
-    # tk step enrichment ships as a separate, unpaginated snapshot (always
-    # complete regardless of where the transcript window is), joined to the
-    # transcript-derived steps by id on the frontend.
-    tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
-    step_enrichment = tickets_watcher.get_enrichment() if tickets_watcher is not None else {}
-    return JSONResponse(
-        content={"events": events, "offset": offset, "total": total, "step_enrichment": step_enrichment}
-    )
+    return JSONResponse(content={"events": events, "offset": offset, "total": total})
 
 
 def _stream_filtered_events(
@@ -444,7 +396,6 @@ def _stream_events(agent_id: str, request: Request) -> Response:
         return _agent_not_found_response(agent_id)
 
     watcher = _get_or_create_watcher(request, agent_info)
-    _get_or_create_tickets_watcher(request, agent_info)
 
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)
@@ -541,15 +492,7 @@ def _get_subagent_events(agent_id: str, subagent_session_id: str, request: Reque
     # Include metadata in the response
     metadata = watcher.get_subagent_metadata(subagent_session_id)
 
-    # The subagent's own steps, scoped to its session, so its conversation
-    # renders a real progress timeline (titles, summaries) with the same code as
-    # the main chat -- not raw tk Bash calls.
-    tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
-    step_enrichment = (
-        tickets_watcher.get_enrichment(session_id=subagent_session_id) if tickets_watcher is not None else {}
-    )
-
-    return JSONResponse(content={"events": events, "metadata": metadata, "step_enrichment": step_enrichment})
+    return JSONResponse(content={"events": events, "metadata": metadata})
 
 
 def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Request) -> Response:
@@ -559,10 +502,6 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str, request: Re
         return _agent_not_found_response(agent_id)
 
     _get_or_create_watcher(request, agent_info)
-    # Start the tickets watcher too, so this subagent's session-tagged
-    # step_enrichment messages get broadcast; the session_id filter below routes
-    # them to this stream (an untagged main-scope snapshot is dropped).
-    _get_or_create_tickets_watcher(request, agent_info)
 
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)
@@ -1092,7 +1031,6 @@ def create_application(
     # paths that construct the app without driving the lifespan, and would otherwise
     # have to defensively probe for these attributes.
     application.state.watchers = {}
-    application.state.tickets_watchers = {}
 
     plugin_manager = get_plugin_manager()
     plugin_manager.hook.endpoint(app=application)

@@ -241,7 +241,7 @@ export function renderAssistantMessage(
   );
 }
 
-export function renderSubagentCard(toolCall: ToolCall, agentId: string, isRunning: boolean): m.Vnode {
+export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode {
   const metadata = toolCall.subagent_metadata;
   // Description and agent type come from the tool call itself, so the card renders fully
   // even before the subagent session is linked; fall back to metadata if the tool input
@@ -250,36 +250,8 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string, isRunnin
   const agentType = toolCall.subagent_type || metadata?.agent_type || "";
   const sessionId = metadata?.session_id;
 
-  // The header status indicator communicates whether the sub-agent is still working: a pulsing
-  // green dot while the Agent call is in flight (no tool result yet), switching to a muted
-  // checkmark -- like a completed progress step -- once the sub-agent finishes. On completion the
-  // whole card also drops its green accent for neutral grey, since green reads as "active".
-  const statusIndicator = isRunning
-    ? m("span", {
-        class: "subagent-card-status-dot subagent-card-status-dot--running",
-        title: "Working",
-        "aria-label": "Sub-agent is working",
-      })
-    : m(
-        "svg.subagent-card-status-check",
-        {
-          width: 16,
-          height: 16,
-          viewBox: "0 0 16 16",
-          fill: "none",
-          title: "Finished",
-          "aria-label": "Sub-agent finished",
-        },
-        // Same filled-circle-with-check mark used for a done step in the progress timeline.
-        m.trust(
-          '<circle cx="8" cy="8" r="7" fill="currentColor"/>' +
-            '<path d="M4.5 8L7 10.5L11.5 6" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
-        ),
-      );
-
-  return m("div", { class: `subagent-card${isRunning ? "" : " subagent-card--done"}` }, [
+  return m("div", { class: "subagent-card" }, [
     m("div", { class: "subagent-card-header" }, [
-      statusIndicator,
       m("span", { class: "subagent-card-description" }, description),
       agentType ? m("span", { class: "subagent-card-type-badge" }, agentType) : null,
     ]),
@@ -452,10 +424,7 @@ export function renderAssistantMessageChildren(
     // input), even before its subagent session is linked; the card shows a non-clickable
     // "Running…" state until subagent_metadata.session_id arrives.
     if (toolCall.tool_name === "Agent" && (toolCall.subagent_metadata || toolCall.description)) {
-      // The Agent call's tool result arrives only when the sub-agent finishes, so its
-      // absence is our signal that the sub-agent is still actively working.
-      const subagentRunning = !toolResults.has(toolCall.tool_call_id);
-      children.push(renderSubagentCard(toolCall, agentId, subagentRunning));
+      children.push(renderSubagentCard(toolCall, agentId));
       continue;
     }
     const result = toolResults.get(toolCall.tool_call_id) ?? null;

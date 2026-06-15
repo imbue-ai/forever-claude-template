@@ -209,6 +209,68 @@ def test_blank_queued_command_not_emitted() -> None:
     assert events == []
 
 
+# Real Claude Code slash-command expansions. The tag ORDER differs between
+# custom commands (lead with <command-message>) and built-ins (lead with
+# <command-name>), and built-ins indent the trailing tags -- both verified
+# against real transcripts. Normalization must handle either.
+_CUSTOM_COMMAND_EXPANSION = (
+    "<command-message>rebase-merge</command-message>\n"
+    "<command-name>/rebase-merge</command-name>\n"
+    "<command-args>origin/main</command-args>"
+)
+_BUILTIN_COMMAND_EXPANSION = (
+    "<command-name>/compact</command-name>\n"
+    "            <command-message>compact</command-message>\n"
+    "            <command-args></command-args>"
+)
+
+
+def test_slash_command_expansion_normalized_to_typed_text() -> None:
+    """A slash command renders as the '/name args' the user actually typed.
+
+    Claude Code does not store a slash command verbatim; it expands it into an
+    XML-ish <command-name>/<command-args> block. The parser rebuilds the typed
+    text so (a) the user bubble shows '/rebase-merge origin/main' rather than the
+    raw expansion and (b) it matches what the frontend's optimistic bubble stored,
+    so reconciliation (whitespace-normalized content match) succeeds.
+    """
+    lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", _CUSTOM_COMMAND_EXPANSION)]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "/rebase-merge origin/main"
+
+
+def test_slash_command_expansion_with_empty_args_drops_trailing_space() -> None:
+    """A no-argument command (built-in tag order, indented, empty args) yields
+    just '/compact' -- the rebuilt text carries no dangling whitespace around the
+    (absent) args."""
+    lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", _BUILTIN_COMMAND_EXPANSION)]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["content"] == "/compact"
+
+
+def test_queued_slash_command_expansion_normalized() -> None:
+    """A slash command queued while the agent is busy is normalized the same way
+    on the queued_command path, so it too reconciles against its optimistic
+    bubble."""
+    lines = [_make_queued_command_line("uuid-q", "2026-01-01T00:00:00Z", _CUSTOM_COMMAND_EXPANSION)]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["content"] == "/rebase-merge origin/main"
+
+
+def test_non_command_text_with_angle_brackets_untouched() -> None:
+    """Ordinary user text that happens to contain angle brackets but no
+    <command-name> tag passes through unchanged."""
+    text = "does <Foo> compile when T <: Bar?"
+    lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", text)]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["content"] == text
+
+
 def test_parse_conversation_sequence() -> None:
     lines = [
         _make_user_line("uuid-1", "2026-01-01T00:00:00Z", "Hello"),
@@ -597,3 +659,58 @@ def test_tool_output_preserves_tk_transition_past_truncation() -> None:
     assert "Updated s1 -> closed" in events[0]["output"]
     # Still truncated overall (not the full verbose output).
     assert len(events[0]["output"]) < len(output)
+
+
+def test_tool_output_preserves_tk_step_decoration_past_truncation() -> None:
+    """The `tk-step <id> title|summary: ...` decoration lines that a step's
+    start/close emit are preserved past the output truncation limit, so the
+    progress view can read titles and summaries straight from the transcript."""
+    output = (
+        ("x" * 5000)
+        + "\nUpdated cod-step-abcd -> closed\n"
+        + "tk-step cod-step-abcd title: Register the new theme\n"
+        + "tk-step cod-step-abcd summary: Wired the theme into the toggle.\n"
+    )
+    lines = [_make_tool_result_line("uuid-dec", "2026-01-01T00:00:02Z", "toolu_1", output)]
+    events = parse_session_lines(lines)
+    preserved = events[0]["output"]
+    assert "Updated cod-step-abcd -> closed" in preserved
+    assert "tk-step cod-step-abcd title: Register the new theme" in preserved
+    assert "tk-step cod-step-abcd summary: Wired the theme into the toggle." in preserved
+    assert len(preserved) < len(output)
+
+
+def test_tk_lifecycle_input_preview_is_not_truncated() -> None:
+    """tk create/start/close inputs survive past the 200-char input-preview
+    limit so the historical input fallback can recover titles and summaries.
+    Batched `S1=$(tk create ...)` forms and long `tk close <id> "<summary>"`
+    calls both qualify; a long non-tk command is still truncated."""
+    batched_create = "\n".join(
+        f'S{i}=$(tk create --step "Step number {i} with a fairly long descriptive title here")'
+        for i in range(1, 6)
+    )
+    long_close = 'tk close cod-step-abcd "' + ("a very detailed summary of the work " * 6).strip() + '"'
+    long_non_tk = "echo " + ("y" * 400)
+    lines = [
+        _make_assistant_line(
+            "uuid-tk",
+            "2026-01-01T00:00:00Z",
+            "working",
+            tool_calls=[
+                {"id": "toolu_create", "name": "Bash", "input": {"command": batched_create}},
+                {"id": "toolu_close", "name": "Bash", "input": {"command": long_close}},
+                {"id": "toolu_echo", "name": "Bash", "input": {"command": long_non_tk}},
+            ],
+        ),
+    ]
+    events = parse_session_lines(lines)
+    calls = {tc["tool_call_id"]: tc["input_preview"] for tc in events[0]["tool_calls"]}
+    # tk lifecycle inputs kept in full (no truncation marker, full length).
+    assert len(calls["toolu_create"]) > 203
+    assert not calls["toolu_create"].endswith("...")
+    assert "Step number 5" in calls["toolu_create"]
+    assert len(calls["toolu_close"]) > 203
+    assert "detailed summary" in calls["toolu_close"]
+    # Non-tk input still truncated at the 200-char limit.
+    assert calls["toolu_echo"].endswith("...")
+    assert len(calls["toolu_echo"]) <= 203

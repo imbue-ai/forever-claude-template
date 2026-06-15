@@ -1,16 +1,22 @@
 import m from "mithril";
 import { apiUrl } from "../base-path";
-import {
-  applyEnrichmentSnapshot,
-  getEnrichmentForAgent,
-  type TranscriptEvent,
-  type StepEnrichment,
-  type SubagentMetadata,
+import type {
+  TranscriptEvent,
+  AssistantMessageEvent,
+  UserMessageEvent,
+  ToolResultEvent,
+  SubagentMetadata,
 } from "../models/Response";
 import { parseJsonMessage } from "../models/ws-json";
 import { computeVisibleWindow } from "../models/virtualWindow";
-import { createRowMeasurer, OVERSCAN_PX } from "./row-measurement";
-import { buildConversationRows, isSubagentRunning, type RowDescriptor } from "./conversation-rows";
+import { nextUserScrolledUp } from "../models/scrollFollow";
+import {
+  createRowMeasurer,
+  OVERSCAN_PX,
+  ESTIMATED_USER_HEIGHT_PX,
+  ESTIMATED_ASSISTANT_HEIGHT_PX,
+} from "./row-measurement";
+import { buildToolResultsWithSkillExpansions, renderAssistantMessageChildren } from "./message-renderers";
 
 interface SubagentViewAttrs {
   agentId: string;
@@ -20,9 +26,56 @@ interface SubagentViewAttrs {
 interface SubagentEventsResponse {
   events: TranscriptEvent[];
   metadata: SubagentMetadata | null;
-  // The subagent's own steps, scoped to its session, so its conversation
-  // renders a real progress timeline with the same code as the main chat.
-  step_enrichment?: Record<string, StepEnrichment>;
+}
+
+interface RowDescriptor {
+  key: string;
+  estimate: number;
+  render: () => m.Vnode;
+}
+
+function renderUserMessage(event: UserMessageEvent): m.Vnode {
+  return m("div", { id: event.event_id, class: "message message-user", key: event.event_id }, [
+    m("div", { class: "message-user-bubble" }, [
+      m("div", { class: "message-content whitespace-pre-wrap" }, event.content || ""),
+    ]),
+  ]);
+}
+
+function renderAssistantMessage(
+  event: AssistantMessageEvent,
+  toolResults: Map<string, ToolResultEvent>,
+  agentId: string,
+): m.Vnode {
+  return m(
+    "div",
+    { id: event.event_id, class: "message message-assistant", key: event.event_id },
+    m("div", renderAssistantMessageChildren(event, toolResults, agentId)),
+  );
+}
+
+function buildRows(agentId: string, events: TranscriptEvent[]): RowDescriptor[] {
+  // Skill-expansion user_messages are folded into their Skill tool call's output
+  // (same as the main panel) rather than rendered as separate rows.
+  const toolResults = buildToolResultsWithSkillExpansions(events);
+
+  const rows: RowDescriptor[] = [];
+  for (const event of events) {
+    if (event.type === "user_message") {
+      rows.push({
+        key: event.event_id,
+        estimate: ESTIMATED_USER_HEIGHT_PX,
+        render: () => renderUserMessage(event),
+      });
+    } else if (event.type === "assistant_message") {
+      rows.push({
+        key: event.event_id,
+        estimate: ESTIMATED_ASSISTANT_HEIGHT_PX,
+        render: () => renderAssistantMessage(event, toolResults, agentId),
+      });
+    }
+  }
+  return rows;
 }
 
 export function SubagentView(): m.Component<SubagentViewAttrs> {
@@ -43,17 +96,12 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
   let userScrolledUp = false;
   let previousScrollTop = 0;
   let viewportResizeObserver: ResizeObserver | null = null;
-  // Memoized rows. buildConversationRows walks the whole subagent transcript, so
-  // it is recomputed only when the inputs change -- not on every scroll redraw.
+  // Memoized rows. buildRows walks the whole subagent transcript, so it is
+  // recomputed only when the event set changes -- not on every scroll redraw.
   // The transcript is append-only here (no in-place upgrades, no eviction), so
-  // the event count plus the enrichment version (bumped whenever a scoped step
-  // snapshot is applied) is a sufficient cache key.
+  // the event count is a sufficient cache key.
   let rowsCacheKey = "";
   let cachedRows: RowDescriptor[] = [];
-  // Bumped on each applied step-enrichment snapshot so the row cache rebuilds
-  // when steps change (the scoped enrichment table has no render version of its
-  // own, unlike the main view's store).
-  let enrichmentVersion = 0;
 
   function addEvents(incoming: TranscriptEvent[]): boolean {
     let added = false;
@@ -82,8 +130,6 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
       eventIds.clear();
       addEvents(result.events);
       metadata = result.metadata ?? null;
-      applyEnrichmentSnapshot(agentId, result.step_enrichment, subagentSessionId);
-      enrichmentVersion++;
       loading = false;
     } catch (error) {
       loading = false;
@@ -102,22 +148,10 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     eventSource = new EventSource(url);
 
     eventSource.onmessage = (messageEvent: MessageEvent) => {
-      // A malformed frame must not throw out of the handler -- drop it and keep listening.
-      const raw = parseJsonMessage<{ type?: string }>(messageEvent.data);
-      if (raw === null) {
+      const event = parseJsonMessage<TranscriptEvent>(messageEvent.data);
+      if (event === null) {
         return;
       }
-      // A step_enrichment message (tagged with this subagent's session id by
-      // the backend) is a full enrichment snapshot, not a transcript event --
-      // replace this subagent's table and redraw.
-      if (raw.type === "step_enrichment") {
-        const snapshot = raw as { enrichment?: Record<string, StepEnrichment> };
-        applyEnrichmentSnapshot(agentId, snapshot.enrichment, subagentSessionId);
-        enrichmentVersion++;
-        m.redraw();
-        return;
-      }
-      const event = raw as TranscriptEvent;
       if (addEvents([event])) {
         m.redraw();
       }
@@ -152,13 +186,13 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     const didScrollUp = currentScrollTop < previousScrollTop;
     previousScrollTop = currentScrollTop;
     scrollTop = currentScrollTop;
-    if (didScrollUp) {
-      userScrolledUp = true;
-      return;
-    }
-    if (element.scrollHeight - element.scrollTop - element.clientHeight < 40) {
-      userScrolledUp = false;
-    }
+    // A subagent transcript is a single loaded list with no off-tail jump, so
+    // there is never newer unloaded history below: hasMoreAfter is always false.
+    userScrolledUp = nextUserScrolledUp({
+      didScrollUp,
+      isNearBottom: element.scrollHeight - element.scrollTop - element.clientHeight < 40,
+      hasMoreAfter: false,
+    });
   }
 
   // Refresh the cached viewport height and schedule a measure pass; the
@@ -170,19 +204,10 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     rowMeasurer.scheduleMeasure(() => scrollEl);
   }
 
-  function renderWindowedList(agentId: string, subagentSessionId: string): m.Vnode {
-    // A subagent has no server-derived activity_state, so derive idleness from
-    // the transcript tail. Idle settles the frontier spinner, so it is part of
-    // the cache key alongside the event count and the enrichment version.
-    const agentIsIdle = !isSubagentRunning(events);
-    const renderKey = `${events.length}|${enrichmentVersion}|${agentIsIdle ? 1 : 0}`;
+  function renderWindowedList(agentId: string): m.Vnode {
+    const renderKey = `${agentId}|${events.length}`;
     if (renderKey !== rowsCacheKey) {
-      // Same section -> rows pipeline as the main chat, so the subagent's
-      // conversation renders an identical progress timeline; only the enrichment
-      // scope (this subagent's session) and the idle source differ.
-      const enrichment = getEnrichmentForAgent(agentId, subagentSessionId);
-      cachedRows = buildConversationRows(agentId, events, enrichment, agentIsIdle);
-      rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
+      cachedRows = buildRows(agentId, events);
       rowsCacheKey = renderKey;
     }
     const rows = cachedRows;
@@ -195,7 +220,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
       overscanPx: OVERSCAN_PX,
     });
 
-    const visibleRows: m.Children[] = [];
+    const visibleRows: m.Vnode[] = [];
     visibleRows.push(m("div", { key: "__spacer_top", style: `height: ${windowResult.topPad}px` }));
     for (let i = windowResult.startIndex; i < windowResult.endIndex; i++) {
       visibleRows.push(rows[i].render());
@@ -229,7 +254,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     },
 
     view(vnode) {
-      const { agentId, subagentSessionId } = vnode.attrs;
+      const { agentId } = vnode.attrs;
       const title = metadata?.description || "Sub-agent conversation";
       const agentType = metadata?.agent_type || "";
 
@@ -259,7 +284,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
           m("p", { class: "text-text-secondary" }, "No events yet."),
         );
       } else {
-        content = renderWindowedList(agentId, subagentSessionId);
+        content = renderWindowedList(agentId);
       }
 
       return m("div", { class: "app-content-wrapper flex-1 flex flex-col min-h-0" }, [

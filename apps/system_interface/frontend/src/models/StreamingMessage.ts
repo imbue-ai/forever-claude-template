@@ -6,16 +6,9 @@
  * independently; each agent gets its own EventSource.
  */
 
-import m from "mithril";
 import { apiUrl } from "../base-path";
 import { ReconnectBackoff } from "./backoff";
-import {
-  appendEvents,
-  applyEnrichmentSnapshot,
-  fetchEvents,
-  type StepEnrichment,
-  type TranscriptEvent,
-} from "./Response";
+import { appendEvents, fetchEvents, type TranscriptEvent } from "./Response";
 import { parseJsonMessage } from "./ws-json";
 import { openLoginModal } from "./ClaudeAuth";
 
@@ -77,16 +70,6 @@ export function connectToStream(agentId: string): void {
   eventSource.onmessage = (messageEvent: MessageEvent) => {
     const raw = parseJsonMessage<{ type?: string }>(messageEvent.data);
     if (raw === null) {
-      return;
-    }
-    // A step_enrichment message is a full enrichment snapshot, not a
-    // transcript event -- replace the table for its scope and redraw. The main
-    // stream's snapshots are untagged (session_id absent) and key by agentId;
-    // a session_id, if present, scopes the snapshot to that subagent.
-    if (raw.type === "step_enrichment") {
-      const snapshot = raw as { enrichment?: Record<string, StepEnrichment>; session_id?: string };
-      applyEnrichmentSnapshot(agentId, snapshot.enrichment, snapshot.session_id);
-      m.redraw();
       return;
     }
     const event = raw as TranscriptEvent;
