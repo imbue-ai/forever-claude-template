@@ -1,0 +1,5 @@
+- A failed snapshot step now records a `SNAPSHOT_FAILED` event in the durable backup events stream (`events/backup/events.jsonl`), capturing the snapshot method and error detail (for the `outer_trigger` mechanism, the outer helper's exit code and stderr). Previously a snapshot failure produced only an ephemeral log line and left no trace in the events stream, unlike restic failures (`RESTIC_BACKUP_FAILED`), so a failed snapshot was invisible where operators look.
+
+- Snapshot-step and restic-backup failures are now logged at error level (they abort the backup -- no snapshot is taken or stored). Maintenance-path failures (snapshot cleanup, `restic forget`/`prune`) remain at warning, since the backup data is already safely stored when those fail.
+
+- The wait for the outer snapshot helper's `result.json` now keys on the request's unique `request_id` rather than on a `result.json` mtime change. The id match is the authoritative, race-free signal that the helper serviced this exact request; the previous mtime gate could miss a same-mtime rewrite on coarse-resolution filesystems.

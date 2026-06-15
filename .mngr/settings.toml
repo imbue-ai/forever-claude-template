@@ -311,23 +311,25 @@ pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
 post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
-# template for OVH VPS provider (the imbue-cloud pool-bake's default)
-[create_templates.ovh]
-provider = "ovh"
+# Provider-agnostic FCT pool-host build recipe (the imbue-cloud pool bake stacks
+# this on top of `main` for BOTH OVH VPSes and lima slices -- they build the same
+# container image). No `provider` is declared: the create address selects it
+# (`@host.ovh` for OVH, `@host.imbue_cloud_slice` for a slice), mirroring the
+# `aws` / `imbue_cloud` templates. Declaring `provider = "ovh"` here used to make
+# slice bakes fail ("conflicting providers": the slice address vs this template).
+[create_templates.pool_host]
 target_path = "/mngr/code/"
-# No plan / datacenter baked in: the pool-bake CLI
-# (``mngr imbue_cloud admin pool create``) appends
-# ``-b --vps-datacenter=<region>`` per invocation so a single bake
-# session can spread hosts across regions. Plan defaults come from
-# ``OvhProviderConfig.default_plan`` (``vps-2025-model1`` -- 1 vCPU /
-# 8 GB RAM / 80 GB SSD at ~$7.99/mo as of 2025-05). Operators who want
-# a different plan override per-invocation with ``-b --vps-plan=<code>``.
+# No plan / datacenter / sizing baked in: each pool-bake path appends its own per
+# invocation -- the OVH backend appends ``-b --vps-datacenter=<region>`` (plan
+# defaults from ``OvhProviderConfig.default_plan``), the slice backend passes the
+# box address + per-slice carve sizing via ``-S providers.imbue_cloud_slice.*``.
 build_arg__extend = ["--file=Dockerfile", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
 # gVisor runsc hardening for the agent container; see the vultr template comment.
-# runsc is installed+selected on the [providers.ovh] block above.
+# runsc is installed+selected by the chosen provider (the OVH/vultr provider block,
+# or the slice VM's own provisioning).
 start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
