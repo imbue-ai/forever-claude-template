@@ -29,8 +29,12 @@ interpreted the way a shell would.
 ## Consumers
 
 - `scripts/claude_tk_standalone_check.py` -- the PreToolUse gate that blocks a
-  non-standalone `tk start`/`tk close`. It imports this package under a bare
-  `python3` (no virtualenv) via an explicit `sys.path` entry, which is why this
-  package is **stdlib-only** and must stay that way.
-- `apps/system_interface` step attribution -- pulls `tk create --step` titles
-  out of session transcripts.
+  non-standalone `tk start`/`tk close`. It uses `parse_command` to split the
+  Bash command into segments and inspect the verbs. It imports this package
+  under a bare `python3` (no virtualenv) via an explicit `sys.path` entry, which
+  is why this package is **stdlib-only** and must stay that way.
+
+`extract_create_titles` / `flag_values` are part of the parsing surface for
+callers that need step titles out of a `tk create --step` command; keeping the
+title-extraction logic here means any such caller reuses the same shell-aware
+tokenizer rather than re-deriving it with a regex.
