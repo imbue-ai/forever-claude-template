@@ -316,6 +316,36 @@ pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
 post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
+# template for AWS EC2 VPS provider (aws mode)
+[create_templates.aws]
+target_path = "/mngr/code/"
+# No `provider` declared: minds addresses the create as
+# `system-services@<host>.aws-<region>`, which selects the region-specific
+# `[providers.aws-<region>]` block minds writes into its mngr profile settings
+# at startup (mirroring how the imbue_cloud template omits `provider` and lets
+# the `imbue_cloud_<slug>` address pick the instance). No region or instance
+# type is baked in: the region comes from the provider block's `default_region`
+# (and the matching `-b --aws-region=` minds passes), the instance type from
+# `AwsProviderConfig.default_instance_type`.
+build_arg__extend = ["--file=Dockerfile", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown. The
+# AWS provider's `auto_shutdown_seconds` max-lifetime cap is also left unset
+# (the minds-written provider blocks don't set it), so the EC2 instance stays
+# up for the whole user session rather than self-terminating after a timeout.
+idle_mode = "disabled"
+# gVisor runsc hardening for the agent container, matching the vultr/ovh
+# templates. runsc is installed+selected via `install_gvisor_runtime` /
+# `docker_runtime` on the minds-written `[providers.aws-<region>]` blocks; these
+# `docker run` args go via start_arg (vps_docker forwards start_arg to the inner
+# `docker run`): `--workdir=/` (runsc aborts when the image WORKDIR /mngr/code,
+# inside the mounted /mngr volume, already exists as the process cwd) and
+# `--security-opt=no-new-privileges`.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
+# Same forwarding as the docker template; see comment there.
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+
 # Template for imbue_cloud-leased pool hosts. minds invokes this as
 # `--template main --template imbue_cloud` (mirroring how the other modes
 # use `--template main --template <provider>`), so the imbue_cloud-specific

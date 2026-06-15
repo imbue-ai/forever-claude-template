@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import io
+import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -737,3 +738,262 @@ def test_parse_duration_accepts_suffixes(text: str, expected: float) -> None:
 def test_parse_duration_rejects_invalid(bad: str) -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         create_worker_mod._parse_duration(bad)
+
+
+# --- launch-sync / destroy / report parsing -------------------------------------
+
+
+def _write_launch_sync_task(task_file: Path, report_path: Path) -> None:
+    """Write a task file whose frontmatter points the wait at ``report_path``."""
+    task_file.write_text(
+        f"---\nlead_agent: lead\nfinish_report_path: {report_path}\n---\n\nbody\n"
+    )
+
+
+def _destroy_argvs(runner: _RecordingRunner) -> list[list[str]]:
+    return [c.argv for c in runner.calls if c.argv[:2] == ["mngr", "destroy"]]
+
+
+def test_parse_report_extracts_type_name_and_body() -> None:
+    result = create_worker_mod.parse_report(
+        "---\ntype: status\nname: done\n---\n\nall finished\n"
+    )
+    assert result.report_type == "status"
+    assert result.name == "done"
+    assert result.body == "all finished"
+    assert result.raw == "---\ntype: status\nname: done\n---\n\nall finished\n"
+
+
+def test_parse_report_tolerates_missing_frontmatter() -> None:
+    # An agent-authored report without frontmatter must not crash collection: the
+    # whole text is preserved so the caller can still surface the worker's output.
+    result = create_worker_mod.parse_report("just prose, no fences\n")
+    assert result.report_type is None
+    assert result.name is None
+    assert "just prose" in result.body
+    assert "just prose" in result.raw
+
+
+def test_parse_report_tolerates_malformed_yaml() -> None:
+    text = "---\ntype: : : bad yaml\n---\nbody\n"
+    result = create_worker_mod.parse_report(text)
+    assert result.report_type is None
+    assert result.name is None
+    assert result.raw == text
+
+
+def test_destroy_invokes_mngr_destroy_force() -> None:
+    runner = _RecordingRunner()
+    create_worker_mod.destroy("demo-worker", runner)
+    assert _destroy_argvs(runner) == [["mngr", "destroy", "demo-worker", "--force"]]
+
+
+def test_destroy_argv_accepted_by_live_cli() -> None:
+    # Guard against drift in the mngr CLI: the destroy argv we emit must stay valid.
+    runner = _RecordingRunner()
+    create_worker_mod.destroy("demo-worker", runner)
+    for call in runner.calls:
+        assert_mngr_argv_valid(call.argv)
+
+
+def test_launch_sync_collects_report_and_destroys(tmp_path: Path) -> None:
+    runtime, task, _ = _make_layout(tmp_path)
+    report = runtime / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("---\ntype: status\nname: done\n---\n\nshipped it\n")
+    _write_launch_sync_task(task, report)
+    result_json = tmp_path / "result.json"
+    runner = _RecordingRunner()
+    out = io.StringIO()
+
+    rc = create_worker_mod.launch_sync(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        timeout_seconds=1800,
+        poll_interval_seconds=5,
+        runner=runner,
+        sleeper=_no_sleep,
+        clock=lambda: 0.0,
+        out=out,
+        result_path=result_json,
+    )
+
+    assert rc == 0
+    # The worker is destroyed once its report is collected.
+    assert _destroy_argvs(runner) == [["mngr", "destroy", "demo-worker", "--force"]]
+    expected = {
+        "timed_out": False,
+        "type": "status",
+        "name": "done",
+        "body": "shipped it",
+        "branch": "mngr/demo-worker",
+        "raw_report": "---\ntype: status\nname: done\n---\n\nshipped it\n",
+    }
+    assert json.loads(result_json.read_text()) == expected
+    # Stdout carries the same JSON object for shell/human callers.
+    assert json.loads(out.getvalue()) == expected
+
+
+def test_launch_sync_keep_agent_skips_destroy(tmp_path: Path) -> None:
+    runtime, task, _ = _make_layout(tmp_path)
+    report = runtime / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("---\ntype: status\nname: done\n---\n\nok\n")
+    _write_launch_sync_task(task, report)
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch_sync(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        timeout_seconds=1800,
+        poll_interval_seconds=5,
+        destroy_on_finish=False,
+        runner=runner,
+        sleeper=_no_sleep,
+        clock=lambda: 0.0,
+        out=io.StringIO(),
+    )
+
+    assert rc == 0
+    assert _destroy_argvs(runner) == []
+
+
+def test_launch_sync_timeout_keeps_worker_alive(tmp_path: Path) -> None:
+    # No report ever appears: launch_sync returns the timeout code, marks the
+    # result timed_out, and must NOT destroy the worker (the report may still come).
+    runtime, task, _ = _make_layout(tmp_path)
+    report = runtime / "reports" / "report.md"
+    report.parent.mkdir(parents=True)  # dir exists; the report file never appears
+    _write_launch_sync_task(task, report)
+    result_json = tmp_path / "result.json"
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch_sync(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        timeout_seconds=30,
+        poll_interval_seconds=5,
+        runner=runner,
+        sleeper=_no_sleep,
+        clock=_FakeClock(step=20),
+        out=io.StringIO(),
+        result_path=result_json,
+    )
+
+    assert rc == create_worker_mod._AWAIT_TIMEOUT_RC
+    assert _destroy_argvs(runner) == []
+    payload = json.loads(result_json.read_text())
+    assert payload["timed_out"] is True
+    assert payload["branch"] == "mngr/demo-worker"
+    # The timeout arm carries the same key set as the success arm, so a consumer
+    # can read any field (e.g. raw_report) without a KeyError on the timeout path.
+    assert set(payload) == {
+        "timed_out",
+        "type",
+        "name",
+        "body",
+        "branch",
+        "raw_report",
+    }
+
+
+def test_launch_sync_surfaces_launch_failure(tmp_path: Path) -> None:
+    # A failed preflight (missing runtime dir) is returned verbatim; launch_sync
+    # never waits, never destroys, and never reaches mngr.
+    runtime, task, _ = _make_layout(tmp_path)
+    report = runtime / "reports" / "report.md"
+    _write_launch_sync_task(task, report)
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch_sync(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=tmp_path / "missing",
+        task_file=task,
+        workspace="ws-1",
+        timeout_seconds=30,
+        poll_interval_seconds=5,
+        runner=runner,
+        sleeper=_no_sleep,
+        clock=lambda: 0.0,
+        out=io.StringIO(),
+    )
+
+    assert rc == 2
+    assert runner.calls == []
+
+
+def test_launch_sync_missing_finish_report_path_raises_before_launch(
+    tmp_path: Path,
+) -> None:
+    # A task file lacking finish_report_path must fail BEFORE any worker is
+    # created, so a malformed task file can't orphan a half-launched worker.
+    runtime, task, _ = _make_layout(tmp_path)
+    task.write_text("---\nlead_agent: lead\n---\n\nbody\n")
+    runner = _RecordingRunner()
+
+    with pytest.raises(ValueError, match="finish_report_path"):
+        create_worker_mod.launch_sync(
+            name="demo-worker",
+            template="worker",
+            runtime_dir=runtime,
+            task_file=task,
+            workspace="ws-1",
+            timeout_seconds=30,
+            poll_interval_seconds=5,
+            runner=runner,
+            sleeper=_no_sleep,
+            clock=lambda: 0.0,
+            out=io.StringIO(),
+        )
+
+    assert runner.calls == []
+
+
+def test_main_launch_sync_emits_result_json(tmp_path: Path) -> None:
+    runtime, task, _ = _make_layout(tmp_path)
+    report = runtime / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("---\ntype: status\nname: done\n---\n\ndone\n")
+    _write_launch_sync_task(task, report)
+    result_json = tmp_path / "result.json"
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.main(
+        [
+            "launch-sync",
+            "--name",
+            "demo-worker",
+            "--template",
+            "worker",
+            "--runtime-dir",
+            str(runtime),
+            "--task-file",
+            str(task),
+            "--result-json",
+            str(result_json),
+        ],
+        runner=runner,
+    )
+
+    assert rc == 0
+    payload = json.loads(result_json.read_text())
+    assert payload["name"] == "done"
+    assert payload["branch"] == "mngr/demo-worker"
+    assert _destroy_argvs(runner) == [["mngr", "destroy", "demo-worker", "--force"]]
+
+
+def test_main_destroy_invokes_mngr(tmp_path: Path) -> None:
+    runner = _RecordingRunner()
+    rc = create_worker_mod.main(["destroy", "--name", "demo-worker"], runner=runner)
+    assert rc == 0
+    assert _destroy_argvs(runner) == [["mngr", "destroy", "demo-worker", "--force"]]

@@ -27,21 +27,11 @@ export interface ToolCall {
 }
 
 /**
- * Status vocabulary mirrored from the tk ticket tracker:
- *   - "open"        -> rendered as "pending" in the chat progress UI
- *   - "in_progress" -> rendered as "active"
- *   - "closed"      -> rendered as "done"
- * There is no failed state by design (every ticket terminates as closed
- * with a summary; see CLAUDE.md "Task management" in the FCT side).
- */
-export type TaskEventStatus = "open" | "in_progress" | "closed";
-
-/**
  * Fields shared by every event, regardless of `type`. The `/events` stream is
  * the session transcript (user/assistant/tool_result); these are the only
- * transport-level fields guaranteed on all variants. (tk step state is not in
- * this stream -- it ships as a separate enrichment snapshot, see
- * StepEnrichment.)
+ * transport-level fields guaranteed on all variants. tk step state (titles,
+ * summaries) is carried in the transcript itself -- the lines tk prints on
+ * stdout -- not in any side-channel.
  */
 export interface BaseTranscriptEvent {
   timestamp: string;
@@ -101,22 +91,6 @@ export interface ToolResultEvent extends BaseTranscriptEvent {
 }
 
 /**
- * Per-step enrichment, keyed by ticket id, delivered as a snapshot alongside
- * the transcript (the `step_enrichment` field on the events response and the
- * `step_enrichment` SSE message). tk owns this side-table: canonical title,
- * close summary, current status, and the creation timestamp (used only to
- * order not-yet-started steps). The progress view derives all structure from
- * the transcript and joins this in by id; it never determines order or
- * grouping.
- */
-export interface StepEnrichment {
-  title: string;
-  summary: string | null;
-  status: TaskEventStatus;
-  created_at: string;
-}
-
-/**
  * A single entry in the transcript event stream, discriminated by `type`.
  * Narrow on `event.type` before touching variant-specific fields.
  */
@@ -138,10 +112,6 @@ export interface ResponseItem {
 
 interface EventsResponse {
   events: TranscriptEvent[];
-  // Full, unpaginated snapshot of the agent's step enrichment keyed by ticket
-  // id. Always complete regardless of where the transcript window is, so a
-  // freshly-loaded tail still has titles/summaries for every visible step.
-  step_enrichment?: Record<string, StepEnrichment>;
   // Global index of the first returned event within the full transcript, and the
   // transcript's total length. Together they place the loaded window in the whole
   // conversation: the client sizes the scrollbar for `total` and derives whether
@@ -187,7 +157,6 @@ class TranscriptStore {
   #firstOffset = 0;
   // Total events in the full server-side transcript (see EventsResponse.total).
   #total = 0;
-  #enrichment = new Map<string, StepEnrichment>();
   #renderVersion = 0;
 
   get events(): TranscriptEvent[] {
@@ -210,10 +179,6 @@ class TranscriptStore {
 
   get renderVersion(): number {
     return this.#renderVersion;
-  }
-
-  get enrichment(): Map<string, StepEnrichment> {
-    return this.#enrichment;
   }
 
   /** Older history exists before the window (it doesn't start at 0). */
@@ -362,15 +327,6 @@ class TranscriptStore {
     });
   }
 
-  /** Replace the enrichment table from a snapshot (GET /events or the
-   *  `step_enrichment` SSE message); never merged. */
-  applyEnrichment(snapshot: Record<string, StepEnrichment> | undefined): void {
-    this.#commit(() => {
-      this.#enrichment = new Map(Object.entries(snapshot ?? {}));
-      return true;
-    });
-  }
-
   /** An older page came back empty: the window already starts at the beginning. */
   markReachedStart(total?: number): void {
     this.#commit(() => {
@@ -424,10 +380,6 @@ export function hasMoreBefore(agentId: string): boolean {
 
 export function hasMoreAfter(agentId: string): boolean {
   return storeByAgent[agentId]?.hasMoreAfter ?? false;
-}
-
-export function getEnrichmentForAgent(agentId: string): Map<string, StepEnrichment> {
-  return storeByAgent[agentId]?.enrichment ?? new Map();
 }
 
 export function isConversationNotFound(agentId: string): boolean {
@@ -510,18 +462,11 @@ export function evictOldEvents(agentId: string): number {
   return storeFor(agentId).evict();
 }
 
-/** Replace an agent's enrichment table from a snapshot. Does not redraw -- callers
- *  in a fetch/redraw flow already trigger one; the SSE path redraws explicitly. */
-export function applyEnrichmentSnapshot(agentId: string, snapshot: Record<string, StepEnrichment> | undefined): void {
-  storeFor(agentId).applyEnrichment(snapshot);
-}
-
 function placeWindow(agentId: string, result: EventsResponse): void {
   const offset = result.offset ?? 0;
   const total = result.total ?? offset + result.events.length;
   const store = storeFor(agentId);
   store.reset(result.events, offset, total);
-  store.applyEnrichment(result.step_enrichment);
 }
 
 export async function fetchEvents(agentId: string): Promise<TranscriptEvent[]> {

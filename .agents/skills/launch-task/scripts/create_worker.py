@@ -5,7 +5,7 @@
 # ///
 """Worker-creation driver for the launch-task family of skills.
 
-Two subcommands cover the two halves of the lead-side lifecycle:
+Four subcommands cover the lead-side lifecycle:
 
 ``launch``
     Runs the worker-creation lifecycle synchronously (``mngr create`` + the
@@ -23,11 +23,26 @@ Two subcommands cover the two halves of the lead-side lifecycle:
     answer-vs-escalate, consuming the report into ``consumed/``, and merging are
     all lead judgment and stay in ``lead-proxy.md``.
 
-Both subcommands take the same ``--task-file``: ``launch`` sends it to the
-worker, and ``await`` reads its ``finish_report_path`` to learn what to wait
-for. Putting the wait target in frontmatter (rather than deriving a fixed path)
-keeps the contract data-driven, so future flows can point ``await`` at a
-different report without a code change.
+``launch-sync``
+    The blocking one-call path for non-interactive callers (services): launch,
+    wait for the report in the *foreground*, emit a structured-result JSON
+    object (``timed_out`` plus the report ``type``/``name``/``body`` and the
+    worker ``branch``), and destroy the worker. ``--result-json`` also writes
+    that JSON to a caller-named file as the machine-readable contract.
+    ``--keep-agent`` skips the destroy; a timeout never destroys (the report may
+    still be coming).
+
+``destroy``
+    Destroys the worker agent (``mngr destroy <name> --force``). The git branch
+    ``mngr/<name>`` survives in the shared object store, so the work can still
+    be merged or inspected.
+
+The ``launch`` / ``await`` / ``launch-sync`` subcommands take the same
+``--task-file``: ``launch`` sends it to the worker, and ``await`` /
+``launch-sync`` read its ``finish_report_path`` to learn what to wait for.
+Putting the wait target in frontmatter (rather than deriving a fixed path) keeps
+the contract data-driven, so future flows can point the wait at a different
+report without a code change.
 
 The caller is responsible for writing the task file (with whatever YAML
 frontmatter the worker template requires) and for placing it -- and any
@@ -79,12 +94,14 @@ lead already pasted into the task body).
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Sequence, TextIO
+from typing import Callable, Mapping, NamedTuple, Sequence, TextIO
 
 import yaml
 
@@ -128,6 +145,31 @@ def _parse_duration(value: str) -> float:
     return magnitude * multiplier
 
 
+def _split_frontmatter(text: str) -> tuple[dict[str, object] | None, str]:
+    """Split leading YAML frontmatter from the body.
+
+    Returns ``(frontmatter, body)``. ``frontmatter`` is ``None`` when there is no
+    leading ``---`` fence, the closing fence is missing, or the parsed YAML is not
+    a mapping; otherwise it is the parsed mapping. ``body`` is the text below the
+    closing fence (``""`` when there is no fence). Raises ``yaml.YAMLError`` when a
+    fenced block contains invalid YAML -- callers decide whether to surface that
+    (an authoring bug in a deterministic input) or swallow it (tolerant parsing of
+    agent-authored runtime output). The shared scan/parse for both callers.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None, ""
+    try:
+        end_idx = lines.index("---", 1)
+    except ValueError:
+        return None, ""
+    frontmatter = yaml.safe_load("\n".join(lines[1:end_idx]))
+    body = "\n".join(lines[end_idx + 1 :]).strip("\n")
+    if not isinstance(frontmatter, dict):
+        return None, body
+    return frontmatter, body
+
+
 def _read_frontmatter_field(task_file: Path, key: str) -> str | None:
     """Return the string value of frontmatter ``key``, or ``None`` if absent.
 
@@ -142,20 +184,13 @@ def _read_frontmatter_field(task_file: Path, key: str) -> str | None:
     than silently degrading it to "field absent" and launching the worker with
     the wrong inputs.
     """
-    lines = task_file.read_text(encoding="utf-8").splitlines()
-    if not lines or lines[0].strip() != "---":
-        return None
     try:
-        end_idx = lines.index("---", 1)
-    except ValueError:
-        return None
-    try:
-        frontmatter = yaml.safe_load("\n".join(lines[1:end_idx]))
+        frontmatter, _body = _split_frontmatter(task_file.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
         raise ValueError(
             f"{task_file}: frontmatter block is present but contains invalid YAML"
         ) from exc
-    if not isinstance(frontmatter, dict):
+    if frontmatter is None:
         return None
     value = frontmatter.get(key)
     if value is None:
@@ -383,6 +418,169 @@ def await_report(
         sleeper(poll_interval_seconds)
 
 
+class ReportResult(NamedTuple):
+    """Structured view of a worker's terminal/gate report.
+
+    ``report_type`` and ``name`` are the frontmatter ``type``/``name`` fields, or
+    ``None`` when the report has no parseable frontmatter (caller treats that as a
+    failure). ``body`` is the prose below the frontmatter; ``raw`` is the verbatim
+    report text.
+    """
+
+    report_type: str | None
+    name: str | None
+    body: str
+    raw: str
+
+
+def parse_report(text: str) -> ReportResult:
+    """Parse a worker report's YAML frontmatter (``type``/``name``) and body.
+
+    Deliberately tolerant -- unlike ``_read_frontmatter_field``, which strictly
+    raises on a malformed *task file* (a lead-authored, deterministic input
+    where bad YAML is an authoring bug). A report is *agent-authored runtime
+    output*: an unparseable one yields ``report_type=None``/``name=None`` with
+    the whole text preserved as the body, so the caller (``launch_sync``) surfaces
+    the raw report as structured data for the calling process to handle, rather
+    than crashing the collection path and losing the worker's output. No data is
+    discarded -- ``raw`` always holds the verbatim text.
+    """
+    try:
+        frontmatter, body = _split_frontmatter(text)
+    except yaml.YAMLError:
+        return ReportResult(None, None, text, text)
+    if frontmatter is None:
+        # No parseable frontmatter: preserve the whole text as the body so no
+        # data is discarded (and the caller can still surface the raw report).
+        return ReportResult(None, None, text, text)
+    report_type = frontmatter.get("type")
+    name = frontmatter.get("name")
+    return ReportResult(
+        report_type=report_type if isinstance(report_type, str) else None,
+        name=name if isinstance(name, str) else None,
+        body=body,
+        raw=text,
+    )
+
+
+def destroy(name: str, runner: Runner | None = None) -> None:
+    """Destroy the worker agent. The git branch ``mngr/<name>`` survives.
+
+    ``mngr destroy`` removes the agent and its worktree; the branch persists in
+    the shared object store, so a caller can still merge or inspect the work.
+    """
+    runner = runner or Runner()
+    runner.run(["mngr", "destroy", name, "--force"], check=True)
+
+
+def _emit_run_result(
+    payload: Mapping[str, object], stream: TextIO, result_path: Path | None
+) -> None:
+    """Write the run-result JSON to stdout and, if given, to a dedicated file.
+
+    The file is the machine contract for programmatic callers: they read the exact
+    payload from a path they chose, rather than guessing which stdout line is the
+    result. Stdout still carries the JSON for humans and shell callers.
+    """
+    line = json.dumps(payload)
+    stream.write(line + "\n")
+    if result_path is not None:
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(line, encoding="utf-8")
+
+
+def launch_sync(
+    name: str,
+    template: str,
+    runtime_dir: Path,
+    task_file: Path,
+    workspace: str,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    destroy_on_finish: bool = True,
+    state_dir: Path | None = None,
+    runner: Runner | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    out: TextIO | None = None,
+    result_path: Path | None = None,
+) -> int:
+    """Launch a worker, wait for its report in the *foreground*, emit JSON, destroy.
+
+    The blocking path for non-interactive callers (services). Returns the
+    launch exit code if launch fails, the await timeout code if the report never
+    appears (without destroying -- the report may still be coming), or 0 once a
+    report is collected. Writes a single JSON object to ``out`` (default stdout)
+    describing the outcome: ``timed_out`` plus the report ``type``/``name``/``body``
+    and the worker ``branch``. When ``result_path`` is set, the same JSON is also
+    written there as the machine-readable contract for programmatic callers.
+    """
+    runner = runner or Runner()
+    stream: TextIO = sys.stdout if out is None else out
+
+    # Resolve the wait target *before* creating the worker: a missing/malformed
+    # ``finish_report_path`` is an authoring bug, and reading it up front keeps it
+    # from half-creating a worker (matching ``launch``'s preflight contract). The
+    # field comes from the task file's frontmatter, which already exists, so this
+    # is safe to read this early.
+    report_path = _read_finish_report_path(task_file)
+
+    launch_rc = launch(
+        name=name,
+        template=template,
+        runtime_dir=runtime_dir,
+        task_file=task_file,
+        workspace=workspace,
+        state_dir=state_dir,
+        runner=runner,
+    )
+    if launch_rc != 0:
+        return launch_rc
+
+    buffer = io.StringIO()
+    await_rc = await_report(
+        report_path=report_path,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        sleeper=sleeper,
+        clock=clock,
+        out=buffer,
+    )
+    branch = f"mngr/{name}"
+    if await_rc != 0:
+        # Timed out: leave the worker alive for liveness diagnosis.
+        _emit_run_result(
+            {
+                "timed_out": True,
+                "type": None,
+                "name": None,
+                "body": "",
+                "branch": branch,
+                "raw_report": "",
+            },
+            stream,
+            result_path,
+        )
+        return await_rc
+
+    report = parse_report(buffer.getvalue())
+    if destroy_on_finish:
+        destroy(name, runner)
+    _emit_run_result(
+        {
+            "timed_out": False,
+            "type": report.report_type,
+            "name": report.name,
+            "body": report.body,
+            "branch": branch,
+            "raw_report": report.raw,
+        },
+        stream,
+        result_path,
+    )
+    return 0
+
+
 def _run_launch(args: argparse.Namespace, runner: Runner | None) -> int:
     workspace = os.environ.get("MINDS_WORKSPACE_NAME", "default")
     state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR")
@@ -408,6 +606,34 @@ def _run_await(args: argparse.Namespace) -> int:
         timeout_seconds=args.timeout,
         poll_interval_seconds=args.poll_interval,
     )
+
+
+def _run_launch_sync(args: argparse.Namespace, runner: Runner | None) -> int:
+    # Validate the wait target up front so a missing/malformed field fails like
+    # await -- a ValueError here is an authoring bug, so let it raise with a full
+    # traceback rather than swallowing it.
+    _read_finish_report_path(args.task_file)
+    workspace = os.environ.get("MINDS_WORKSPACE_NAME", "default")
+    state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR")
+    state_dir = Path(state_dir_env) if state_dir_env else None
+    return launch_sync(
+        name=args.name,
+        template=args.template,
+        runtime_dir=args.runtime_dir,
+        task_file=args.task_file,
+        workspace=workspace,
+        timeout_seconds=args.timeout,
+        poll_interval_seconds=args.poll_interval,
+        destroy_on_finish=not args.keep_agent,
+        state_dir=state_dir,
+        runner=runner,
+        result_path=args.result_json,
+    )
+
+
+def _run_destroy(args: argparse.Namespace, runner: Runner | None) -> int:
+    destroy(args.name, runner)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int:
@@ -465,10 +691,73 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
         help=f"How often to check for the report (default {_DEFAULT_POLL_INTERVAL}).",
     )
 
+    launch_sync_parser = subparsers.add_parser(
+        "launch-sync",
+        help="Blocking launch + foreground await + structured-result JSON + "
+        "destroy, in one call. For non-interactive callers (services).",
+    )
+    launch_sync_parser.add_argument(
+        "--name", required=True, help="Worker name; becomes the mngr/<name> branch."
+    )
+    launch_sync_parser.add_argument(
+        "--template",
+        required=True,
+        help="mngr create template (e.g. 'worker', 'crystallize-worker').",
+    )
+    launch_sync_parser.add_argument(
+        "--runtime-dir",
+        required=True,
+        type=Path,
+        help="Existing runtime directory synced verbatim into the worker's worktree.",
+    )
+    launch_sync_parser.add_argument(
+        "--task-file",
+        required=True,
+        type=Path,
+        help="Markdown task file; its frontmatter `finish_report_path` names the "
+        "report to wait for.",
+    )
+    launch_sync_parser.add_argument(
+        "--timeout",
+        default=_DEFAULT_TIMEOUT,
+        type=_parse_duration,
+        help=f"Max wait for the report (default {_DEFAULT_TIMEOUT}).",
+    )
+    launch_sync_parser.add_argument(
+        "--poll-interval",
+        default=_DEFAULT_POLL_INTERVAL,
+        type=_parse_duration,
+        help=f"How often to check for the report (default {_DEFAULT_POLL_INTERVAL}).",
+    )
+    launch_sync_parser.add_argument(
+        "--keep-agent",
+        action="store_true",
+        help="Do not destroy the worker after a report is collected "
+        "(default: destroy). A timeout never destroys regardless.",
+    )
+    launch_sync_parser.add_argument(
+        "--result-json",
+        type=Path,
+        default=None,
+        help="Also write the result JSON to this path (the machine-readable "
+        "contract for programmatic callers; stdout still carries it too).",
+    )
+
+    destroy_parser = subparsers.add_parser(
+        "destroy",
+        help="Destroy a worker agent (mngr destroy --force). The mngr/<name> "
+        "branch survives.",
+    )
+    destroy_parser.add_argument("--name", required=True, help="Worker name to destroy.")
+
     args = parser.parse_args(argv)
 
     if args.command == "launch":
         return _run_launch(args, runner)
+    if args.command == "launch-sync":
+        return _run_launch_sync(args, runner)
+    if args.command == "destroy":
+        return _run_destroy(args, runner)
     return _run_await(args)
 
 

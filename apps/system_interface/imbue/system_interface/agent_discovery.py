@@ -117,36 +117,6 @@ def read_claude_config_dir_from_env_file(agent_state_dir: Path) -> Path:
     return Path.home() / ".claude"
 
 
-def read_tickets_dir_from_env_file(agent_state_dir: Path, work_dir: Path) -> Path:
-    """Resolve the TICKETS_DIR for an agent.
-
-    Priority:
-      1. ``TICKETS_DIR`` in the agent's env file at ``<agent_state_dir>/env``.
-      2. ``TICKETS_DIR`` in the system interface's own process environment.
-      3. ``<work_dir>/.tickets`` (tk's default).
-
-    Minds sets ``TICKETS_DIR=/code/runtime/tickets`` via ``host_env`` in
-    ``.mngr/settings.toml`` so tickets ride the runtime-backup branch.
-    ``host_env`` entries are forwarded to the container's process
-    environment but are *not* written into the per-agent env file, so the
-    env-file lookup alone misses them; the os.environ fallback catches
-    that case for the co-located system interface.
-    """
-    env_file = agent_state_dir / "env"
-    if env_file.exists():
-        try:
-            env_vars = parse_env_file(env_file.read_text())
-            tickets_dir = env_vars.get("TICKETS_DIR", "").strip()
-            if tickets_dir:
-                return Path(tickets_dir)
-        except OSError:
-            logger.debug("Failed to read env file: {}", env_file)
-    process_env_value = os.environ.get("TICKETS_DIR", "").strip()
-    if process_env_value:
-        return Path(process_env_value)
-    return work_dir / ".tickets"
-
-
 def discover_agents(
     provider_names: tuple[str, ...] | None = None,
     include_filters: tuple[str, ...] = (),

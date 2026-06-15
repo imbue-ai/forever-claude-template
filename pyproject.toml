@@ -14,6 +14,7 @@ dependencies = [
     "imbue-common",
     "tomlkit>=0.12",
     "playwright==1.58.0",
+    "litellm>=1.88.1",
 ]
 
 [dependency-groups]

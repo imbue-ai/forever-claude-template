@@ -232,12 +232,19 @@ _strip_summary_section() {
     ' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
+# Read a ticket's title (the first `# ` heading line, sans the marker).
+# Emitted on the chat-progress decoration lines that tk prints for steps.
+_extract_title() {
+    local file="$1"
+    awk '/^# / { print substr($0, 3); exit }' "$file"
+}
+
 cmd_create() {
     ensure_dir
 
     local title="" description="" design="" acceptance=""
     local priority=2 issue_type="task" assignee="" external_ref="" parent="" tags=""
-    local is_step=0 no_parent=0
+    local is_step=0
 
     # Default assignee to git user.name if available, BUT only when
     # running outside an mngr-managed agent. Inside an mngr context the
@@ -261,51 +268,12 @@ cmd_create() {
             --external-ref) external_ref="$2"; shift 2 ;;
             --parent) parent="$2"; shift 2 ;;
             --parent=*) parent="${1#--parent=}"; shift ;;
-            --no-parent) no_parent=1; shift ;;
             --step) is_step=1; shift ;;
             --tags) tags="$2"; shift 2 ;;
             -*) echo "Unknown option: $1" >&2; return 1 ;;
             *) title="$1"; shift ;;
         esac
     done
-
-    # Auto-nest steps under this agent's exactly-one in_progress ticket.
-    # Only when --step is set, no explicit --parent was given, --no-parent
-    # was not requested, and MNGR_AGENT_NAME is set (no agent context =
-    # no scope to auto-nest within). Zero in_progress tickets -> standalone
-    # step; exactly one -> nest; more than one -> error and demand
-    # disambiguation. We resolve the parent BEFORE the normal
-    # validate-and-resolve pass so it benefits from the same partial-id
-    # normalisation.
-    if [[ "$is_step" -eq 1 && -z "$parent" && "$no_parent" -eq 0 && -n "${MNGR_AGENT_NAME:-}" ]]; then
-        local candidates=()
-        local md
-        for md in "$TICKETS_DIR"/*.md; do
-            [[ -e "$md" ]] || continue
-            # Skip step records and non-in_progress tickets.
-            _grep -q "^step: true" "$md" && continue
-            _grep -q "^status: in_progress" "$md" || continue
-            # Only consider tickets currently assigned to me.
-            local their_assignee=""
-            their_assignee=$(yaml_field "$md" "assignee" || true)
-            [[ "$their_assignee" == "$MNGR_AGENT_NAME" ]] || continue
-            candidates+=("$md")
-        done
-        if [[ ${#candidates[@]} -eq 1 ]]; then
-            parent=$(basename "${candidates[0]}" .md)
-        elif [[ ${#candidates[@]} -gt 1 ]]; then
-            {
-                echo "Error: cannot auto-nest step -- multiple tickets in_progress for $MNGR_AGENT_NAME:"
-                local c their_title
-                for c in "${candidates[@]}"; do
-                    their_title=$(awk '/^# / { print substr($0, 3); exit }' "$c")
-                    echo "  $(basename "$c" .md) — ${their_title:-Untitled}"
-                done
-                echo "Pass --parent=<id> to pick one, or --no-parent for a standalone step."
-            } >&2
-            return 1
-        fi
-    fi
 
     # Validate and resolve parent if specified
     if [[ -n "$parent" ]]; then
@@ -367,7 +335,15 @@ cmd_create() {
         fi
     } > "$file"
 
-    echo "$id"
+    # For step records, print a decoration line pairing the id with its title
+    # so the chat progress view can read the title straight from tk's stdout
+    # (the transcript), with no side-channel. Regular tickets keep the bare-id
+    # stdout so existing `TICKET_ID=$(tk create ...)` captures are unaffected.
+    if [[ "$is_step" -eq 1 ]]; then
+        echo "Created $id: ${title//$'\n'/ }"
+    else
+        echo "$id"
+    fi
 }
 
 # Valid statuses
@@ -410,23 +386,21 @@ cmd_start() {
     local file
     file=$(ticket_path "$id") || return 1
 
+    local is_step=""
+    is_step=$(yaml_field "$file" "step" || true)
+
     # Auto-self-assignment only applies to regular tickets, not steps.
     # Steps are creator-private and don't carry an "owner-who-is-working-it"
     # signal -- the creator IS the worker by construction. For tickets,
-    # assignment is the load-bearing "this is now my work" signal that
-    # makes the ticket surface in the chat progress view (the watcher's
-    # filter rule).
-    if [[ -n "${MNGR_AGENT_NAME:-}" ]]; then
-        local is_step="" current_assignee=""
-        is_step=$(yaml_field "$file" "step" || true)
-        if [[ "$is_step" != "true" ]]; then
-            current_assignee=$(yaml_field "$file" "assignee" || true)
-            if [[ -z "$current_assignee" ]]; then
-                update_yaml_field "$file" "assignee" "$MNGR_AGENT_NAME"
-            elif [[ "$current_assignee" != "$MNGR_AGENT_NAME" ]]; then
-                echo "Warning: reassigning $(basename "$file" .md) from '$current_assignee' to '$MNGR_AGENT_NAME'" >&2
-                update_yaml_field "$file" "assignee" "$MNGR_AGENT_NAME"
-            fi
+    # assignment is the load-bearing "this is now my work" signal.
+    if [[ -n "${MNGR_AGENT_NAME:-}" && "$is_step" != "true" ]]; then
+        local current_assignee=""
+        current_assignee=$(yaml_field "$file" "assignee" || true)
+        if [[ -z "$current_assignee" ]]; then
+            update_yaml_field "$file" "assignee" "$MNGR_AGENT_NAME"
+        elif [[ "$current_assignee" != "$MNGR_AGENT_NAME" ]]; then
+            echo "Warning: reassigning $(basename "$file" .md) from '$current_assignee' to '$MNGR_AGENT_NAME'" >&2
+            update_yaml_field "$file" "assignee" "$MNGR_AGENT_NAME"
         fi
     fi
 
@@ -437,6 +411,15 @@ cmd_start() {
     update_yaml_field "$file" "started" "$(_iso_date)"
 
     cmd_status "$id" "in_progress"
+
+    # For steps, echo the title alongside the canonical id so the chat
+    # progress view can read decoration straight from tk's stdout.
+    if [[ "$is_step" == "true" ]]; then
+        local canonical_id title
+        canonical_id=$(basename "$file" .md)
+        title=$(_extract_title "$file")
+        echo "tk-step $canonical_id title: ${title//$'\n'/ }"
+    fi
 }
 
 cmd_close() {
@@ -482,6 +465,16 @@ cmd_close() {
     update_yaml_field "$file" "closed" "$(_iso_date)"
 
     cmd_status "$id" "closed"
+
+    # For steps, echo title and summary alongside the canonical id so the chat
+    # progress view can read the closed step's decoration from tk's stdout.
+    if [[ "$is_step" == "true" ]]; then
+        local canonical_id title
+        canonical_id=$(basename "$file" .md)
+        title=$(_extract_title "$file")
+        echo "tk-step $canonical_id title: ${title//$'\n'/ }"
+        echo "tk-step $canonical_id summary: ${summary//$'\n'/ }"
+    fi
 }
 
 # Explicit assignment helpers. `tk assign <id>` defaults to the current
@@ -1610,7 +1603,6 @@ Commands:
     -a, --assignee         Assignee
     --external-ref         External reference (e.g., gh-123, JIRA-456)
     --parent               Parent ticket ID
-    --no-parent            Disable auto-nest under in_progress ticket (steps only)
     --step                 Create as a turn-bound progress record (step)
     --tags                 Comma-separated tags (e.g., --tags ui,backend,urgent)
   start <id>               Set status to in_progress (auto-self-assigns)
