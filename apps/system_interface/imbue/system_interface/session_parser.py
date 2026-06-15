@@ -20,12 +20,29 @@ logger = _loguru_logger
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
-# tk lifecycle commands print `Updated <id> -> <status>` on each transition; the
-# chat progress view reads these from tool output to position a step's
-# open/close. They must survive output truncation (e.g. when a tk command is
-# batched after a verbose one whose output pushes the line past the limit), so a
-# step transition is never lost to truncation -- see `_truncate_tool_output`.
-_TK_TRANSITION_PATTERN = re.compile(r"Updated \S+ -> (?:open|in_progress|closed)")
+# tk lifecycle commands print machine-readable decoration on stdout that the
+# chat progress view reads back from the transcript: `Updated <id> -> <status>`
+# on every transition (positions a step's open/close) and, for steps,
+# `tk-step <id> title:`/`summary:` lines (carry the title and close summary).
+# The format is defined in `vendor/tk/ticket` (cmd_create/start/close) and also
+# parsed by the frontend (`turn-grouping.ts`); keep all three in sync.
+# These must survive output truncation (e.g. when a tk command is batched after
+# a verbose one whose output pushes the line past the limit), so a step's
+# structure and decoration are never lost to truncation -- see
+# `_truncate_tool_output`.
+_TK_OUTPUT_DECORATION_PATTERN = re.compile(
+    r"Updated \S+ -> (?:open|in_progress|closed)|tk-step \S+ (?:title|summary): .*"
+)
+
+# A Bash command that invokes a tk/ticket create|start|close as one of its
+# command words (start of string, or after `$(`, a pipe/semicolon/ampersand, or
+# whitespace -- so batched `S1=$(tk create ...)` forms and long `tk close <id>
+# "<summary>"` calls both match). Such commands carry the step titles/summaries
+# that the chat progress view's historical input-preview fallback reads, so
+# their `input_preview` is exempted from the 200-char truncation below.
+_TK_LIFECYCLE_COMMAND_PATTERN = re.compile(
+    r"(?:^|[\s;&|(])(?:tk|ticket)\s+(?:super\s+)?(?:create|start|close)\b"
+)
 
 _SOURCE = "claude/common_transcript"
 
@@ -60,6 +77,54 @@ _SYNTHETIC_MODEL = "<synthetic>"
 # continuation marker. The resume turn-pair is "Continue from where you left
 # off." -> "No response requested."; this is the reply half.
 _NO_RESPONSE_REQUESTED_TEXT = "No response requested."
+
+# Claude Code records a message the user typed while the agent was busy (a
+# "queued" message) not as a normal ``user`` line but as an ``attachment`` event
+# of this type. Its ``commandMode`` distinguishes the verbatim user prompt
+# (``prompt``) from background-task completion notices (``task-notification``),
+# which are framework-generated and not user turns. Without parsing the
+# ``prompt`` form, a queued user message yields no ``user_message`` event at all:
+# it never appears as a user bubble, and the frontend's optimistic "Queued"
+# bubble never reconciles -- so it stays up even after the agent has received and
+# answered the message. (Empirically a queued message is recorded EITHER as this
+# attachment OR, on older Claude Code versions, as a plain ``user`` line, never
+# both, so parsing it here does not double-render.)
+_QUEUED_COMMAND_ATTACHMENT_TYPE = "queued_command"
+_QUEUED_COMMAND_PROMPT_MODE = "prompt"
+
+# A slash command the user types (``/foo bar``) is not recorded verbatim: Claude
+# Code expands it into an XML-ish block carrying the command name, a display
+# message, and the trailing arguments, e.g.
+#     <command-message>foo</command-message>
+#     <command-name>/foo</command-name>
+#     <command-args>bar</command-args>
+# The three tags appear in varying order (built-ins lead with <command-name>,
+# custom commands with <command-message>), so they are matched individually
+# rather than positionally. We rebuild the original ``/foo bar`` text so (a) the
+# rendered user bubble shows what the user actually typed instead of the raw
+# expansion and (b) the frontend's optimistic-message reconciliation -- which
+# matches a pending bubble to its transcript event by whitespace-normalized
+# content -- finds the match (otherwise the bubble is stranded; see
+# PendingMessages.ts).
+_COMMAND_NAME_PATTERN = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
+_COMMAND_ARGS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
+
+
+def _normalize_slash_command(text: str) -> str:
+    """Rebuild ``/name args`` from a Claude Code slash-command expansion.
+
+    Returns ``text`` unchanged when it is not a command expansion (no
+    ``<command-name>`` tag, or an empty command name).
+    """
+    name_match = _COMMAND_NAME_PATTERN.search(text)
+    if name_match is None:
+        return text
+    command = name_match.group(1).strip()
+    if not command:
+        return text
+    args_match = _COMMAND_ARGS_PATTERN.search(text)
+    args = args_match.group(1).strip() if args_match is not None else ""
+    return f"{command} {args}".strip()
 
 
 def _extract_text_content(content: str | list[dict[str, Any]] | Any) -> str:
@@ -116,15 +181,29 @@ def _make_event_id(uuid: str, suffix: str) -> str:
     return f"{uuid}-{suffix}"
 
 
+def _is_tk_lifecycle_call(tool_name: str, tool_input: Any) -> bool:
+    """True for a Bash call whose command invokes a tk/ticket create|start|close.
+    Their `input_preview` is exempted from truncation so batched multi-create
+    commands and long close summaries survive intact for the chat progress
+    view's historical input-preview fallback."""
+    if tool_name != "Bash" or not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command", "")
+    if not isinstance(command, str):
+        return False
+    return _TK_LIFECYCLE_COMMAND_PATTERN.search(command) is not None
+
+
 def _truncate_tool_output(content: str) -> str:
-    """Truncate a tool result to the head limit, but keep any tk transition
-    lines (`Updated <id> -> <status>`) that fall past the cut, appended after
-    the truncation marker. This preserves the progress view's step-transition
-    signal even when a tk command's output is pushed past the limit."""
+    """Truncate a tool result to the head limit, but keep any tk decoration
+    lines (`Updated <id> -> <status>` and `tk-step <id> title|summary: ...`)
+    that fall past the cut, appended after the truncation marker. This preserves
+    the progress view's step structure and decoration even when a tk command's
+    output is pushed past the limit."""
     if len(content) <= _MAX_OUTPUT_LENGTH:
         return content
     head = content[:_MAX_OUTPUT_LENGTH]
-    preserved = [m.group(0) for m in _TK_TRANSITION_PATTERN.finditer(content) if m.end() > _MAX_OUTPUT_LENGTH]
+    preserved = [m.group(0) for m in _TK_OUTPUT_DECORATION_PATTERN.finditer(content) if m.end() > _MAX_OUTPUT_LENGTH]
     if preserved:
         return head + "...\n" + "\n".join(preserved)
     return head + "..."
@@ -210,6 +289,8 @@ def parse_session_lines(
             )
         elif event_type == "user":
             _parse_user_message(raw, uuid, timestamp, existing_event_ids, tool_name_by_call_id, new_events, session_id)
+        elif event_type == "attachment":
+            _parse_queued_command_attachment(raw, uuid, timestamp, existing_event_ids, new_events, session_id)
         # Skip: progress, file-history-snapshot, system, result, etc.
 
     new_events.sort(key=lambda x: x[0])
@@ -255,7 +336,7 @@ def _parse_assistant_message(
             tool_name: str = block.get("name", "")
             tool_input = block.get("input", {})
             input_preview = json.dumps(tool_input, separators=(",", ":"))
-            if len(input_preview) > _MAX_INPUT_PREVIEW_LENGTH:
+            if len(input_preview) > _MAX_INPUT_PREVIEW_LENGTH and not _is_tk_lifecycle_call(tool_name, tool_input):
                 input_preview = input_preview[:_MAX_INPUT_PREVIEW_LENGTH] + "..."
 
             if call_id and tool_name:
@@ -333,7 +414,7 @@ def _parse_user_message(
     if not _has_tool_results_only(content):
         event_id = _make_event_id(uuid, "user")
         if event_id not in existing_event_ids:
-            text = _extract_text_content(content)
+            text = _normalize_slash_command(_extract_text_content(content))
             if text and text.strip() != _INTERRUPT_SENTINEL_TEXT and not _is_resume_continuation_marker(raw):
                 event: dict[str, Any] = {
                     "timestamp": timestamp,
@@ -405,3 +486,53 @@ def _parse_user_message(
 
             existing_event_ids.add(event_id)
             new_events.append((timestamp, event))
+
+
+def _parse_queued_command_attachment(
+    raw: dict[str, Any],
+    uuid: str,
+    timestamp: str,
+    existing_event_ids: set[str],
+    new_events: list[tuple[str, dict[str, Any]]],
+    session_id: str | None = None,
+) -> None:
+    """Emit a ``user_message`` event for a message the user queued while busy.
+
+    Claude Code writes such a message as a ``queued_command`` attachment (see
+    ``_QUEUED_COMMAND_ATTACHMENT_TYPE``) rather than a normal ``user`` line.
+    Only the ``prompt`` command mode carries verbatim user text; the
+    ``task-notification`` mode is a framework-generated background-task notice
+    and is left unparsed (it is not a user turn).
+    """
+    attachment = raw.get("attachment")
+    if not isinstance(attachment, dict):
+        return
+    if attachment.get("type") != _QUEUED_COMMAND_ATTACHMENT_TYPE:
+        return
+    if attachment.get("commandMode") != _QUEUED_COMMAND_PROMPT_MODE:
+        return
+    prompt = attachment.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return
+    # A queued message can itself be a slash command; normalize it the same way
+    # a non-queued one is handled in ``_parse_user_message`` so it renders as the
+    # typed text and reconciles against its optimistic bubble.
+    prompt = _normalize_slash_command(prompt)
+
+    event_id = _make_event_id(uuid, "queued")
+    if event_id in existing_event_ids:
+        return
+
+    event: dict[str, Any] = {
+        "timestamp": timestamp,
+        "type": "user_message",
+        "event_id": event_id,
+        "source": _SOURCE,
+        "role": "user",
+        "content": prompt,
+        "message_uuid": uuid,
+    }
+    if session_id is not None:
+        event["session_id"] = session_id
+    existing_event_ids.add(event_id)
+    new_events.append((timestamp, event))

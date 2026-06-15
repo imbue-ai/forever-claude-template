@@ -51,7 +51,9 @@ latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
 The body must be a JSON object with exactly four fields:
 `agent_id` (use `$MNGR_AGENT_ID`), `rationale`, `type` (use "file-sharing"), and `payload`.
 
-`payload` must be an object with exactly two string fields: `path` and `access`. `path` must be absolute, `access` must be "READ" or "WRITE".
+`payload` must be an object with exactly two string fields: `path` and `access`. `path` should be absolute, `access` must be "READ" or "WRITE".
+
+If you don't know the absolute path to the user's home directory, you can use "~" in your permission request. The backend will expand it to the full path, which you can use to work with the files once your request is approved.
 
 After posting, wait for a message indicating whether the user approved or denied the permission request.
 

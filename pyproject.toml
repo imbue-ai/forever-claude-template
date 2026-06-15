@@ -11,10 +11,10 @@ dependencies = [
     "web-server",
     "runtime-backup",
     "host-backup",
-    "ai-integration",
     "imbue-common",
     "tomlkit>=0.12",
     "playwright==1.58.0",
+    "litellm>=1.88.1",
 ]
 
 [dependency-groups]
@@ -50,7 +50,7 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/ai_integration", "libs/mngr_cli_contract", "apps/system_interface"]
+members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "apps/system_interface"]
 
 [tool.uv.sources]
 telegram-bot = { workspace = true }
@@ -60,7 +60,6 @@ app-watcher = { workspace = true }
 web-server = { workspace = true }
 runtime-backup = { workspace = true }
 host-backup = { workspace = true }
-ai-integration = { workspace = true }
 mngr-cli-contract = { workspace = true }
 imbue-common = { path = "vendor/mngr/libs/imbue_common", editable = true }
 imbue-mngr = { path = "vendor/mngr/libs/mngr", editable = true }

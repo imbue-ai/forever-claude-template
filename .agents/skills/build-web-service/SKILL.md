@@ -147,10 +147,10 @@ there's no markup to design.
 ### Calling Claude from your service
 
 If your service needs to call Claude (classify/summarize content, run a one-shot
-agentic task, or launch a full agent), use the `use-ai-integration` skill and the
-`ai_integration` library rather than hand-rolling API or `claude -p` calls -- it
-handles credentialing, the `claude -p` environment fix, billing-path selection,
-and spend control.
+agentic task, or launch a full agent), follow the `use-ai-integration` skill: it
+picks the path (a keyed `litellm` call or the keyless `claude_p.py` helper),
+covers the `claude -p` environment fix and the cost model, and saves you from
+hand-rolling the call.
 
 ### Always surface the raw data and its source
 

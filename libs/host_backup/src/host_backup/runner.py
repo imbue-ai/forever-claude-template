@@ -29,7 +29,12 @@ from host_backup.restic import backup as restic_backup
 from host_backup.restic import extract_snapshot_id_from_backup_output
 from host_backup.restic import forget as restic_forget
 from host_backup.restic import prune as restic_prune
-from host_backup.snapshot import SnapshotError, SnapshotResult, make_snapshot_taker
+from host_backup.snapshot import (
+    SnapshotCleanupError,
+    SnapshotError,
+    SnapshotResult,
+    make_snapshot_taker,
+)
 
 LOG_FILE = Path("/tmp/host-backup.log")
 
@@ -268,32 +273,56 @@ def _take_snapshot(*, state: _LoopState, config: BackupConfig) -> SnapshotResult
 def _cleanup_snapshot(
     *, state: _LoopState, config: BackupConfig, snapshot: SnapshotResult
 ) -> None:
-    """Delete the post-backup `current/` snapshot; emit SNAPSHOT_DELETED."""
+    """Reclaim snapshots after the backup; emit one SNAPSHOT_DELETED per deletion.
+
+    For outer_trigger this prunes old snapshots down to max_local_snapshots; for
+    btrfs_local it deletes the single `current` snapshot; for direct it is a
+    no-op (and emits nothing).
+    """
     try:
         taker = make_snapshot_taker(config.snapshot)
-        taker.delete_snapshot()
-    except SnapshotError as e:
+        deleted_paths = taker.cleanup_after_backup()
+    except SnapshotCleanupError as e:
+        # A keep-N cleanup failed partway: log the deletions that did succeed,
+        # then a failure event naming the exact snapshot whose deletion failed.
         logger.warning("Snapshot cleanup failed: {}", e)
-        write_event(
-            state.events_dir,
-            make_event(
-                BackupEventType.SNAPSHOT_DELETED,
-                tick_id=state.current_tick_id,
-                method=snapshot.method.value,
-                snapshot_path=snapshot.snapshot_path,
-                success=False,
-                error_message=str(e),
-            ),
+        for deleted_path in e.deleted:
+            _emit_snapshot_deleted(state, snapshot, deleted_path, success=True)
+        _emit_snapshot_deleted(
+            state, snapshot, e.failed_target, success=False, error_message=str(e)
         )
         return
+    except SnapshotError as e:
+        logger.warning("Snapshot cleanup failed: {}", e)
+        _emit_snapshot_deleted(
+            state,
+            snapshot,
+            snapshot.snapshot_path,
+            success=False,
+            error_message=str(e),
+        )
+        return
+    for deleted_path in deleted_paths:
+        _emit_snapshot_deleted(state, snapshot, deleted_path, success=True)
+
+
+def _emit_snapshot_deleted(
+    state: _LoopState,
+    snapshot: SnapshotResult,
+    snapshot_path: str,
+    *,
+    success: bool,
+    error_message: str = "",
+) -> None:
     write_event(
         state.events_dir,
         make_event(
             BackupEventType.SNAPSHOT_DELETED,
             tick_id=state.current_tick_id,
             method=snapshot.method.value,
-            snapshot_path=snapshot.snapshot_path,
-            success=True,
+            snapshot_path=snapshot_path,
+            success=success,
+            error_message=error_message,
         ),
     )
 

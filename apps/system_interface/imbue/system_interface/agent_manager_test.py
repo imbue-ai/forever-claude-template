@@ -809,8 +809,11 @@ def test_chat_create_argv_accepted_by_live_cli() -> None:
 
 
 def test_observe_argv_accepted_by_live_cli() -> None:
-    argv = _build_observe_command_argv("mngr", Path("/tmp/events"))
+    argv = _build_observe_command_argv("mngr")
     assert_mngr_argv_valid(argv)
+    # Discovery-only must not pass --events-dir: mngr rejects the combination,
+    # and the discovery log always lives under the default host dir.
+    assert "--events-dir" not in argv
 
 
 def test_resolve_observe_cwd_prefers_existing_work_dir(

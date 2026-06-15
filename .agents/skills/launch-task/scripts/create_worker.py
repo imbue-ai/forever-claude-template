@@ -8,47 +8,41 @@
 Four subcommands cover the lead-side lifecycle:
 
 ``launch``
-    Runs the worker-creation lifecycle (``mngr create`` + the runtime-dir sync +
-    the task message) and returns while the worker keeps running. Callers run
-    this in the *foreground* so a failed launch surfaces immediately rather than
-    as a delayed background notification.
+    Runs the worker-creation lifecycle synchronously (``mngr create`` + the
+    runtime-dir sync + the task message) and returns. Callers run this in the
+    *foreground* so a failed launch surfaces immediately rather than as a
+    delayed background notification.
 
 ``await``
-    A generic *poll-until-file-exists* primitive. It reads the
-    ``finish_report_path`` field from the task file's frontmatter, blocks until
-    that file appears, prints its contents to stdout, and returns 0; on timeout
-    it returns non-zero (code 124). It is deliberately dumb -- it only waits and
-    cats. It knows nothing about gates: parsing the report, deciding
+    Reads the ``finish_report_path`` field from the task file's frontmatter and
+    blocks until that file appears, prints its contents to stdout, and returns
+    0. On timeout it returns non-zero so the caller drops into the liveness
+    diagnosis described in ``.agents/shared/references/lead-proxy.md``. Callers
+    run this in the *background* and re-invoke it once per gate cycle; it is
+    deliberately dumb -- it only waits and cats. Parsing the report, deciding
     answer-vs-escalate, consuming the report into ``consumed/``, and merging are
-    all caller judgment.
-
-    The interactive lead-proxy flow happens to re-invoke ``await`` in the
-    *background* once per gate cycle (see ``.agents/shared/references/lead-proxy.md``),
-    but that gate loop is just one caller pattern. A non-interactive caller --
-    e.g. a service that launches a tightly-scoped agent and waits for its single
-    finish report -- uses the same primitive with no gate handling at all.
+    all lead judgment and stay in ``lead-proxy.md``.
 
 ``launch-sync``
-    The blocking, wait-for-completion counterpart to ``launch``, for
-    non-interactive callers (services): ``launch`` + a *foreground* ``await`` +
-    structured-result extraction + (optionally) ``destroy``, in one blocking
-    call that returns only once the worker reports. It prints a single JSON
-    object describing the terminal report (``type``/``name``/``body``/``branch``,
-    or ``timed_out``) so the calling process can act on it programmatically
-    without re-parsing markdown frontmatter. On timeout it does NOT destroy the
-    worker (the report may still be coming -- preserve it for liveness
-    diagnosis).
+    The blocking one-call path for non-interactive callers (services): launch,
+    wait for the report in the *foreground*, emit a structured-result JSON
+    object (``timed_out`` plus the report ``type``/``name``/``body`` and the
+    worker ``branch``), and destroy the worker. ``--result-json`` also writes
+    that JSON to a caller-named file as the machine-readable contract.
+    ``--keep-agent`` skips the destroy; a timeout never destroys (the report may
+    still be coming).
 
 ``destroy``
     Destroys the worker agent (``mngr destroy <name> --force``). The git branch
-    (``mngr/<name>``) survives the agent's removal, so a caller can still merge
-    or inspect the work afterwards.
+    ``mngr/<name>`` survives in the shared object store, so the work can still
+    be merged or inspected.
 
-The subcommands share the same ``--task-file``: ``launch``/``launch-sync`` send
-it to the worker, and ``await``/``launch-sync`` read its ``finish_report_path``
-to learn what to wait for. Putting the wait target in frontmatter (rather than deriving a
-fixed path) keeps the contract data-driven, so future flows can point ``await``
-at a different report without a code change.
+The ``launch`` / ``await`` / ``launch-sync`` subcommands take the same
+``--task-file``: ``launch`` sends it to the worker, and ``await`` /
+``launch-sync`` read its ``finish_report_path`` to learn what to wait for.
+Putting the wait target in frontmatter (rather than deriving a fixed path) keeps
+the contract data-driven, so future flows can point the wait at a different
+report without a code change.
 
 The caller is responsible for writing the task file (with whatever YAML
 frontmatter the worker template requires) and for placing it -- and any
@@ -524,6 +518,13 @@ def launch_sync(
     runner = runner or Runner()
     stream: TextIO = sys.stdout if out is None else out
 
+    # Resolve the wait target *before* creating the worker: a missing/malformed
+    # ``finish_report_path`` is an authoring bug, and reading it up front keeps it
+    # from half-creating a worker (matching ``launch``'s preflight contract). The
+    # field comes from the task file's frontmatter, which already exists, so this
+    # is safe to read this early.
+    report_path = _read_finish_report_path(task_file)
+
     launch_rc = launch(
         name=name,
         template=template,
@@ -536,7 +537,6 @@ def launch_sync(
     if launch_rc != 0:
         return launch_rc
 
-    report_path = _read_finish_report_path(task_file)
     buffer = io.StringIO()
     await_rc = await_report(
         report_path=report_path,
@@ -556,6 +556,7 @@ def launch_sync(
                 "name": None,
                 "body": "",
                 "branch": branch,
+                "raw_report": "",
             },
             stream,
             result_path,
@@ -666,10 +667,8 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
 
     await_parser = subparsers.add_parser(
         "await",
-        help="Block until the worker's report file (finish_report_path) appears, "
-        "then print it. A generic poll-until-file primitive -- knows nothing "
-        "about gates. The lead-proxy gate loop runs it in the background; a "
-        "non-interactive caller can run it in the foreground for a single wait.",
+        help="Block until the worker's report file appears, then print it. "
+        "Run in the background; re-invoke once per gate cycle.",
     )
     await_parser.add_argument(
         "--task-file",

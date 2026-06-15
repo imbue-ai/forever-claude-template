@@ -13,12 +13,9 @@ Checks (in order, short-circuit on first failure per check):
 - Frontmatter has `name` matching the directory basename.
 - Frontmatter has `description`, 1-1024 characters.
 - SKILL.md body (after frontmatter) is at most 500 lines.
-- If `scripts/run.py` exists, it begins with either a PEP 723 `# /// script`
-  header (self-contained script) or a `# workspace-script:` marker (a script
-  that runs in the monorepo's uv workspace venv -- e.g. to import an
-  unpublished workspace lib like `ai_integration`). (`run.py` is optional
-  even for crystallized skills -- a skill may be pure SKILL.md prose if every
-  step is executor meta-work or uses existing tools.)
+- If `scripts/run.py` exists, it begins with a PEP 723 `# /// script` header.
+  (`run.py` is optional even for crystallized skills -- a skill may be pure
+  SKILL.md prose if every step is judgement or uses existing tools.)
 
 Exits 0 and prints `ok` when valid; exits 1 with a human-readable error to
 stderr otherwise.
@@ -41,8 +38,6 @@ _MAX_DESC_LEN = 1024
 _MIN_NAME_LEN = 1
 _MAX_NAME_LEN = 64
 _NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-_PEP723_HEADER = "# /// script"
-_WORKSPACE_MARKER = "# workspace-script:"
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], list[str]]:
@@ -70,35 +65,13 @@ def _split_frontmatter(text: str) -> tuple[dict[str, Any], list[str]]:
 
 
 def _validate_run_py(skill_dir: Path) -> str | None:
-    """If scripts/run.py exists, require either a PEP 723 header or a
-    ``# workspace-script:`` marker. Absent run.py is OK.
-
-    A PEP 723 header declares a self-contained script (its deps resolve from
-    the inline metadata). The ``# workspace-script:`` marker declares a script
-    that instead runs in the monorepo's uv workspace venv -- the intended form
-    for a step that imports an unpublished workspace lib such as
-    ``ai_integration`` (which cannot be reached from an isolated PEP 723 env
-    without a brittle relative path source).
-    """
+    """If scripts/run.py exists, require a PEP 723 header. Absent run.py is OK."""
     run_py = skill_dir / "scripts" / "run.py"
     if not run_py.is_file():
         return None
     first_few = run_py.read_text(encoding="utf-8").splitlines()[:5]
-    has_pep723 = any(line.strip().startswith(_PEP723_HEADER) for line in first_few)
-    has_marker = any(line.strip().startswith(_WORKSPACE_MARKER) for line in first_few)
-    if has_pep723 and has_marker:
-        return (
-            f"{run_py} has both a PEP 723 `# /// script` header and a "
-            f"`{_WORKSPACE_MARKER}` marker; use exactly one. The PEP 723 header "
-            f"forces an isolated env, which defeats the marker's purpose "
-            f"(importing a workspace lib from the synced workspace venv)."
-        )
-    if not (has_pep723 or has_marker):
-        return (
-            f"{run_py} must begin with a PEP 723 `# /// script` header "
-            f"(self-contained) or a `{_WORKSPACE_MARKER}` marker "
-            f"(runs in the monorepo uv workspace venv)"
-        )
+    if not any(line.strip().startswith("# /// script") for line in first_few):
+        return f"{run_py} is missing a PEP 723 `# /// script` header"
     return None
 
 

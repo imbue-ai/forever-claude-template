@@ -31,8 +31,8 @@ just re-surfaces the design for an approval pass.
 "Repeatable" covers deterministic extensions (an extra flag, a new output
 format), model-judgement extensions (an additional judgement step with a
 stable recipe), and executor meta-work. The first two are scripted -- a
-deterministic step in `scripts/`, a model-judgement step as an
-`ai_integration` call (`[ai-script]`) -- and only executor meta-work fits as
+deterministic step in `scripts/`, a model-judgement step as a
+`claude_p.py` call (`[ai-script]`) -- and only executor meta-work fits as
 SKILL.md prose. See `.agents/shared/references/spec-summary.md`.
 
 **Principle.** Reliability is the floor; simplicity is the target.

@@ -39,8 +39,8 @@ pointers.
 "Repeatable" covers deterministic extensions (extra flag, new output
 format), model-judgement extensions (an additional judgement step with a
 stable recipe), and executor meta-work. The first two are scripted -- a
-deterministic step under `scripts/`, a model-judgement step as an
-`ai_integration` call (`[ai-script]`; see
+deterministic step under `scripts/`, a model-judgement step as a
+`claude_p.py` call (`[ai-script]`; see
 `.agents/shared/references/spec-summary.md`) -- so the flow stays runnable
 headless. Only genuine executor meta-work lands as SKILL.md prose.
 

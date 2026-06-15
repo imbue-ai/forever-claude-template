@@ -33,7 +33,7 @@ classify each step:
 The identical and structurally-same parts are the skill's deterministic
 substructure. The judgement parts are ALSO part of the skill -- when the
 same criteria run every time with only the data varying, they are scripted
-as `ai_integration` model calls (`[ai-script]`) so the flow runs headless.
+as `claude_p.py` model calls (`[ai-script]`) so the flow runs headless.
 Only judgement that needs the executor in the loop stays in SKILL.md as
 prose.
 
@@ -47,14 +47,14 @@ A skill is a SKILL.md (process description) plus any supporting scripts,
 references, or assets. The SKILL.md reads like a recipe: "do X, then Y,
 then Z." Any given step is one of three kinds (see
 `.agents/shared/references/spec-summary.md`): `[script]` (deterministic),
-`[ai-script]` (model judgement scripted via `ai_integration`), or `[prose]`
+`[ai-script]` (model judgement scripted via `claude_p.py`), or `[prose]`
 (executor meta-work the agent using the skill performs).
 
 This means model-judgement steps are scripted by default, not parked in
 prose. A process like:
 
 1. Fetch from N sources (`[script]`)
-2. Apply natural-language filters via an `ai_integration` call (`[ai-script]`)
+2. Apply natural-language filters via a `claude_p.py` call (`[ai-script]`)
 3. Normalize, dedupe, format (`[script]`)
 
 ...is a fully headless skill -- it can be refreshed or scheduled with no
@@ -62,7 +62,7 @@ extra wiring, because step 2 is a scripted model call rather than work the
 executor must do by hand.
 
 Do not require end-to-end *determinism* before crystallizing: model steps
-are scripted via `ai_integration`, and any remaining executor meta-work
+are scripted via `claude_p.py`, and any remaining executor meta-work
 lives in SKILL.md as prose. What matters is whether the *process* is stable
 across runs.
 
@@ -77,7 +77,7 @@ Before you decline, check whether your reasoning matches any of these:
   filters, which approach) is often a one-time cost paid during the
   first run. The crystallized skill captures the *post-setup* process.
   Ongoing judgement steps within the process are scripted as
-  `ai_integration` model calls by default; only executor meta-work stays in
+  `claude_p.py` model calls by default; only executor meta-work stays in
   SKILL.md as prose.
 - **"No sub-process is clean enough."** You don't need the whole turn
   to be crystallizable. A stable inner loop (fetch-dedupe-rank,

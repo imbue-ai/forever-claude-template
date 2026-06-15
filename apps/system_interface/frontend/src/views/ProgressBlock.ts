@@ -3,9 +3,9 @@
  *
  * The section is a flat, ordered list of timeline items produced by the
  * transcript walk (see turn-grouping): step nodes, ungrouped work/prose runs
- * (rendered inline, thread-breaking), and chips. Step nodes carry their own
- * grouped events; expanding a step reveals that grouped work. The wrap-up
- * reply renders below the timeline.
+ * (rendered inline, thread-breaking -- including a step's ejected closing
+ * prose), and chips. Step nodes carry their own grouped events; expanding a step
+ * reveals that grouped work. The wrap-up reply renders below the timeline.
  *
  * This component renders structure it is given; it does no grouping or
  * ordering itself.
@@ -27,6 +27,9 @@ interface ProgressBlockAttrs {
    *  only references a subset. */
   toolResults: Map<string, ToolResultEvent>;
   agentId: string;
+  /** Optional DOM id for the root, so a virtualized list can measure this
+   *  block's height by querying ``.message-list > [id]``. */
+  id?: string;
 }
 
 function statusIcon(status: StepStatus, is_frontier: boolean): m.Vnode {
@@ -130,24 +133,6 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
               : null,
           ],
         ),
-        // The step's backing .tickets file is gone (the directory was cleared),
-        // so the title fell back to the raw id and the summary is unavailable.
-        // A "?" marker signals this, with a CSS tooltip (data-tooltip + ::after)
-        // rather than the native `title` attribute -- the desktop client renders
-        // in a webview where native title tooltips don't reliably appear.
-        // aria-label carries the same text for assistive tech.
-        step.file_missing
-          ? m(
-              "span.pv-tl-missing",
-              {
-                "data-tooltip":
-                  "The ticket file backing this step is missing. Rich information (title, closing summary) is unavailable.",
-                "aria-label":
-                  "The ticket file backing this step is missing. Rich information (title, closing summary) is unavailable.",
-              },
-              "?",
-            )
-          : null,
         renderStepCaption(step, isExpanded),
         isExpanded ? m("div.pv-tl-expanded", renderExpandedStepBody(step, toolResults, agentId)) : null,
       ]),
@@ -156,7 +141,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
   return {
     view(vnode) {
-      const { items, trailing_reply, toolResults, agentId } = vnode.attrs;
+      const { items, trailing_reply, toolResults, agentId, id } = vnode.attrs;
 
       // Index of the last step item, so only it gets the `--last` thread cap.
       let lastStepIdx = -1;
@@ -167,8 +152,9 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
           return renderStepNode(item.step, idx === lastStepIdx, toolResults, agentId);
         }
         if (item.kind === "ungrouped") {
-          // Real work / prose that happened with no step open: rendered inline
-          // as a thread-breaking block, exactly like a no-steps turn.
+          // Real work / prose that happened with no step open -- including a
+          // step's ejected closing prose: rendered inline as a thread-breaking
+          // block, exactly like a no-steps turn.
           return m(
             "div.pv-ungrouped",
             { key: item.key },
@@ -179,7 +165,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
         return m("div.pv-stophook", { key: `chip-${item.event.event_id}` }, renderUserMessage(item.event));
       });
 
-      return m("div.progress-block", [
+      return m("div.progress-block", { id }, [
         m("div.pv.pv--timeline", [
           m("div.pv-timeline-thread", { "aria-hidden": "true" }),
           m("div.pv-timeline-nodes", timelineNodes),

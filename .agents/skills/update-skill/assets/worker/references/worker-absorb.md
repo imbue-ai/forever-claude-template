@@ -28,9 +28,9 @@ Include:
 - Inputs, outputs, step-by-step flow. Tag each step `[script]`,
   `[ai-script]`, or `[prose]` per
   `.agents/shared/references/spec-summary.md`; model-judgement steps default
-  to `[ai-script]` (scripted via `ai_integration`).
+  to `[ai-script]` (scripted via `claude_p.py`).
 - Prose justification: for any model-judgement step you keep as `[prose]`,
-  state why a scripted `ai_integration` call cannot do it.
+  state why a scripted `claude_p.py` call cannot do it.
 - Justification: for any subcommand or subflow in the planned flow, what
   invariant makes it separate vs. inlined? If no invariant demands
   separation, inline it.
@@ -57,7 +57,7 @@ user's reply (delivered via `mngr message`) before coding.
 
 - Edit the relevant parts of the skill in place: scripts under `scripts/`,
   SKILL.md prose, or both. A new deterministic step goes in `scripts/`; a
-  new model-judgement step is scripted as an `ai_integration` call
+  new model-judgement step is scripted as a `claude_p.py` call
   (`[ai-script]`) in `scripts/`, not added as prose; only executor meta-work
   goes in SKILL.md as prose. Preserve the existing contract for current
   callers unless the outline explicitly calls for a breaking change.

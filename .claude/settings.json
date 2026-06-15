@@ -31,11 +31,11 @@
           },
           {
             "type": "command",
-            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_require_steps_pretool.sh"
+            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_tk_standalone.sh"
           },
           {
             "type": "command",
-            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_tk_close_reoutput_nudge.sh"
+            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_require_steps_pretool.sh"
           }
         ]
       }

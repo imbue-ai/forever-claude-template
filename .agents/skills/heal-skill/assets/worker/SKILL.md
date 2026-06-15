@@ -56,7 +56,7 @@ Valid `name:` values for this worker:
   root cause was an ambiguous or wrong prose instruction, the fix is a
   SKILL.md edit even if the skill has scripts. If the root cause is a
   model-judgement step the executor was performing inconsistently from
-  prose, the minimal fix may be to script it as an `ai_integration` call
+  prose, the minimal fix may be to script it as a `claude_p.py` call
   (`[ai-script]`; see `.agents/shared/references/spec-summary.md`) -- but if
   that grows into a redesign, escalate to `update-skill` per below.
 - Keep the fix minimal. Don't refactor unrelated code or prose.

@@ -26,6 +26,21 @@ host_env__extend = [
     # subdirs too. /mngr/code/ is the container WORKDIR (set by the Dockerfile);
     # a /code -> /mngr/code symlink is kept in the image as a safety net.
     "TICKETS_DIR=/mngr/code/runtime/tickets",
+    # Workaround for an Apple M5 lima-VZ guest CPU mismatch: the Debian 12
+    # guest kernel advertises SVE / SVE2 in /proc/cpuinfo, but lima-VZ on M5
+    # traps the `cntb` SVE instruction emitted by OpenSSL's
+    # `_armv8_sve_get_vl_bytes` during CPU-cap init -- so cryptography>=47's
+    # Rust openssl binding SIGILLs on import (rc=132), taking down any tool
+    # that transitively imports paramiko (mngr CLI, system-interface, etc.).
+    # OPENSSL_armcap=0 disables OpenSSL's CPU-cap detection so it falls back
+    # to NEON-only paths; runs cleanly on both real M-series silicon and
+    # lima-VZ. Performance impact is negligible for this workload (TLS / SSH
+    # session setup only). Drop when lima-VZ on M5 correctly virtualizes SVE
+    # or when upstream OpenSSL guards `cntb` behind hwcap2. Empirically
+    # bisected to `_armv8_sve_get_vl_bytes+0: cntb x0` via gdb on a fresh
+    # Debian 12 lima VM on the launch-to-msg M5 runner; Ubuntu 24.04 lima
+    # guests don't advertise SVE so they don't hit this.
+    "OPENSSL_armcap=0",
 ]
 worktree_base_folder = "/mngr/worktree/"
 # claude_subagent_proxy is upstream mngr's experimental Claude-Code-Task ->
@@ -117,23 +132,16 @@ docker_runtime = "runsc"
 # the plugin) still parses it. The lima create still works because `@<name>.lima`
 # resolves the provider by name regardless of is_enabled (same as @<name>.docker).
 is_enabled = false
-# Run the minds workspace inside a Docker container *in* the Lima VM (built from
-# the same Dockerfile as the docker/vultr providers). is_host_in_docker forces the
-# in-VM btrfs additional-disk layout, so is_host_data_volume_exposed must be false.
-# These live on the provider block (not the lima template's setting__extend)
-# because template `--setting` entries don't reach provider config (imbue-ai/mngr#1914).
-is_host_in_docker = true
+# Run the minds workspace directly in the Lima VM as root (uid 0) -- no nested
+# Docker container. is_run_as_root gives the agent the same "no sudo, install
+# anything" posture it has inside a docker/vps_docker container (the VM is the
+# isolation boundary). Root cannot traverse the 9p bind mount, so is_run_as_root
+# requires the in-VM btrfs additional-disk layout: is_host_data_volume_exposed
+# must be false. These live on the provider block (not the lima template's
+# setting__extend) because template `--setting` entries don't reach provider
+# config (imbue-ai/mngr#1914).
 is_host_data_volume_exposed = false
-# Run the in-VM agent container under the stock `runc` runtime (NOT gVisor/runsc).
-# The Lima VM already provides a hardware-virtualization boundary, so layering runsc
-# inside it adds download size + provisioning complexity for no extra isolation that
-# matters here. install_gvisor_runtime=false skips the runsc install at provisioning
-# time, and docker_runtime="runc" selects the default runtime for the agent
-# `docker run`. The runsc-specific `default_container_run_args` workarounds
-# (`--workdir=/`, `--security-opt=no-new-privileges`) are unnecessary under runc, so
-# they are omitted. (docker/vultr/ovh still run under runsc; only lima opts out.)
-install_gvisor_runtime = false
-docker_runtime = "runc"
+is_run_as_root = true
 
 # vultr VPS provider (cloud mode). is_enabled=false mirrors the lima/docker blocks:
 # the vps_docker backend plugin is not installed in the agent container, so a parsed
@@ -229,19 +237,32 @@ start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
 # Mirror the docker template: flip the (default-disabled) lima provider on for
 # this create. Redundant in practice -- `@<name>.lima` resolves the provider by
 # name regardless of is_enabled -- but kept for parity/intent with docker.
+# (Docker-in-Lima mode and its is_host_in_docker provider config are gone; the
+# agent now runs directly in the VM as root -- see [providers.lima]. Offline
+# reads via `mngr event` / `mngr transcript` against a stopped Lima host do not
+# work in the btrfs layout until the host is started.)
+#
+# The pinned claude binary is installed on the fresh VM during provisioning by
+# the claude plugin itself (is_remote_agent_installation_allowed defaults to
+# True, so a missing remote claude is auto-installed at the pinned version);
+# setup_system.sh below then re-installs it as part of the full toolchain. No
+# version-check disable is needed.
 setting__extend = ["providers.lima.is_enabled=true"]
-# Docker-in-Lima mode (is_host_in_docker / is_host_data_volume_exposed) is
-# configured on the [providers.lima] block above, not here -- template
-# `setting__extend` entries don't reach provider config (imbue-ai/mngr#1914).
-# Offline reads via `mngr event` / `mngr transcript` against a stopped Lima
-# host stop working in this mode until the host is started.
-# Build the project image inside the VM, exactly like the docker template.
-build_arg__extend = ["--file=Dockerfile", "."]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
-# Same first-boot seed as the docker template; see comment there. Runs in the
-# container (the host), where /usr/local/bin/fct-seed is baked into the image.
-post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# Run the SAME setup as a Dockerfile-built workspace, directly in the VM as root.
+# These run after the project is synced to /mngr/code (agent-level provisioning,
+# post work_dir sync) and reuse the exact scripts the Dockerfile RUNs. There is
+# no docker build (so no `--file=Dockerfile` build arg) and no /docker_build_code
+# relocation (the repo lands straight on the VM's btrfs /mngr disk), so the
+# docker template's build_arg + post_host_create_command (fct-seed) are
+# intentionally absent here. extra_provision_command__extend stacks after the
+# main template's entry.
+extra_provision_command__extend = [
+    "bash /mngr/code/scripts/setup_system.sh",
+    "bash /mngr/code/scripts/install_dependencies.sh",
+    "bash /mngr/code/scripts/build_workspace.sh",
+]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]
@@ -289,6 +310,36 @@ build_arg__extend = ["--file=Dockerfile", "."]
 idle_mode = "disabled"
 # gVisor runsc hardening for the agent container; see the vultr template comment.
 # runsc is installed+selected on the [providers.ovh] block above.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
+# Same forwarding as the docker template; see comment there.
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+
+# template for AWS EC2 VPS provider (aws mode)
+[create_templates.aws]
+target_path = "/mngr/code/"
+# No `provider` declared: minds addresses the create as
+# `system-services@<host>.aws-<region>`, which selects the region-specific
+# `[providers.aws-<region>]` block minds writes into its mngr profile settings
+# at startup (mirroring how the imbue_cloud template omits `provider` and lets
+# the `imbue_cloud_<slug>` address pick the instance). No region or instance
+# type is baked in: the region comes from the provider block's `default_region`
+# (and the matching `-b --aws-region=` minds passes), the instance type from
+# `AwsProviderConfig.default_instance_type`.
+build_arg__extend = ["--file=Dockerfile", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown. The
+# AWS provider's `auto_shutdown_seconds` max-lifetime cap is also left unset
+# (the minds-written provider blocks don't set it), so the EC2 instance stays
+# up for the whole user session rather than self-terminating after a timeout.
+idle_mode = "disabled"
+# gVisor runsc hardening for the agent container, matching the vultr/ovh
+# templates. runsc is installed+selected via `install_gvisor_runtime` /
+# `docker_runtime` on the minds-written `[providers.aws-<region>]` blocks; these
+# `docker run` args go via start_arg (vps_docker forwards start_arg to the inner
+# `docker run`): `--workdir=/` (runsc aborts when the image WORKDIR /mngr/code,
+# inside the mounted /mngr volume, already exists as the process cwd) and
+# `--security-opt=no-new-privileges`.
 start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]

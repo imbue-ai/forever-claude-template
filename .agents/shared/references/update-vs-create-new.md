@@ -21,7 +21,7 @@ be useful on its own -- in a context that does not involve the existing skill.
 Step kind (`[script]` / `[ai-script]` / `[prose]`, per
 `.agents/shared/references/spec-summary.md`) is orthogonal to this decision.
 An update-in-place can land as a new deterministic script step, a new
-`ai_integration` model-call step, a new prose step, or any mix. Same for a
+`claude_p.py` model-call step, a new prose step, or any mix. Same for a
 create-new-skill.
 
 If update-in-place would double the size of the original SKILL.md or blur its
@@ -31,7 +31,7 @@ standalone-use-case check above).
 If the extra work was **one-off creative or exploratory** with no repeatable
 pattern, it is NOT an update candidate -- it stays with the main agent.
 Model-judgement work with a repeatable recipe IS a candidate; by default it
-becomes a scripted `ai_integration` step (`[ai-script]`), with prose
+becomes a scripted `claude_p.py` step (`[ai-script]`), with prose
 reserved for executor meta-work.
 
 In the `verify` flow the decision has already been made by the committed

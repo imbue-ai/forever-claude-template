@@ -26,7 +26,6 @@ def _write_skill(
     metadata_crystallized: bool = False,
     include_run_py: bool | None = None,
     run_py_has_pep723: bool = True,
-    run_py_has_workspace_marker: bool = False,
     frontmatter_override: str | None = None,
 ) -> Path:
     """Build a skill directory on disk; return the skill path."""
@@ -43,11 +42,7 @@ def _write_skill(
     if include_run_py:
         scripts = skill / "scripts"
         scripts.mkdir()
-        header = ""
-        if run_py_has_pep723:
-            header += "# /// script\n# requires-python = \">=3.11\"\n# ///\n"
-        if run_py_has_workspace_marker:
-            header += "# workspace-script: runs in the monorepo uv workspace venv\n"
+        header = "# /// script\n# requires-python = \">=3.11\"\n# ///\n" if run_py_has_pep723 else ""
         (scripts / "run.py").write_text(f"#!/usr/bin/env python3\n{header}print('hi')\n")
     return skill
 
@@ -97,52 +92,24 @@ def test_crystallized_without_run_py_is_ok(tmp_path: Path) -> None:
     assert validate_skill.validate(skill) is None
 
 
-def test_run_py_without_header_or_marker_is_invalid(tmp_path: Path) -> None:
-    """A run.py with neither a PEP 723 header nor a workspace marker is invalid."""
+def test_run_py_without_pep723_is_invalid(tmp_path: Path) -> None:
+    """If run.py is present (crystallized or not), it must have a PEP 723 header."""
     skill = _write_skill(
         tmp_path, "s", metadata_crystallized=True, run_py_has_pep723=False
     )
     error = validate_skill.validate(skill)
     assert error is not None
-    assert "PEP 723" in error and "workspace-script" in error
+    assert "PEP 723" in error
 
 
-def test_non_crystallized_run_py_also_needs_header_or_marker(tmp_path: Path) -> None:
-    """The run.py header/marker requirement holds even when not crystallized."""
+def test_non_crystallized_run_py_also_needs_pep723(tmp_path: Path) -> None:
+    """run.py must have PEP 723 even when the skill is not crystallized."""
     skill = _write_skill(
         tmp_path, "s", include_run_py=True, run_py_has_pep723=False
     )
     error = validate_skill.validate(skill)
     assert error is not None
-    assert "PEP 723" in error and "workspace-script" in error
-
-
-def test_run_py_with_workspace_marker_is_ok(tmp_path: Path) -> None:
-    """A header-less run.py is valid when it carries the workspace-script marker
-    (the form used for steps that import an unpublished workspace lib)."""
-    skill = _write_skill(
-        tmp_path,
-        "s",
-        metadata_crystallized=True,
-        run_py_has_pep723=False,
-        run_py_has_workspace_marker=True,
-    )
-    assert validate_skill.validate(skill) is None
-
-
-def test_run_py_with_both_header_and_marker_is_invalid(tmp_path: Path) -> None:
-    """A run.py carrying both a PEP 723 header and the workspace marker is
-    invalid -- the header would force isolation and defeat the marker."""
-    skill = _write_skill(
-        tmp_path,
-        "s",
-        metadata_crystallized=True,
-        run_py_has_pep723=True,
-        run_py_has_workspace_marker=True,
-    )
-    error = validate_skill.validate(skill)
-    assert error is not None
-    assert "both" in error and "workspace-script" in error
+    assert "PEP 723" in error
 
 
 def test_crystallized_with_pep723_ok(tmp_path: Path) -> None:

@@ -211,21 +211,47 @@ def test_get_events_caps_initial_load_to_tail(client: TestClient, tmp_path: Path
     with patch("imbue.system_interface.server._find_agent", return_value=agent_info):
         response = client.get("/api/agents/agent-123/events")
         assert response.status_code == 200
-        events = response.json()["events"]
+        body = response.json()
+        events = body["events"]
         # Only the most recent _DEFAULT_TAIL_COUNT events are returned.
         assert len(events) == _DEFAULT_TAIL_COUNT
         assert events[0]["content"] == f"Message {total_events - _DEFAULT_TAIL_COUNT}"
         assert events[-1]["content"] == f"Message {total_events - 1}"
+        # offset + total place the tail window in the full conversation: the first
+        # tail event sits at index (total - tail), so offset > 0 tells the client
+        # there is older history above to page in.
+        assert body["total"] == total_events
+        assert body["offset"] == total_events - _DEFAULT_TAIL_COUNT
 
         # Older events are still reachable by paging backwards from the oldest
         # event in the initial tail.
         oldest_in_tail = events[0]["event_id"]
         backfill = client.get(f"/api/agents/agent-123/events?before={oldest_in_tail}")
         assert backfill.status_code == 200
-        backfill_events = backfill.json()["events"]
+        backfill_body = backfill.json()
+        backfill_events = backfill_body["events"]
         assert len(backfill_events) == total_events - _DEFAULT_TAIL_COUNT
         assert backfill_events[0]["content"] == "Message 0"
         assert backfill_events[-1]["content"] == f"Message {total_events - _DEFAULT_TAIL_COUNT - 1}"
+        # The page reached the very first event (offset 0 => no more history above).
+        assert backfill_body["offset"] == 0
+        assert backfill_body["total"] == total_events
+
+        # A jump lands a window at an arbitrary global offset in one request,
+        # rather than paging through everything before it.
+        jump = client.get("/api/agents/agent-123/events?offset=5&limit=4")
+        assert jump.status_code == 200
+        jump_body = jump.json()
+        assert [e["content"] for e in jump_body["events"]] == [f"Message {i}" for i in range(5, 9)]
+        assert jump_body["offset"] == 5
+
+        # From that jumped window the client can page *newer* (toward the tail).
+        after_id = jump_body["events"][-1]["event_id"]
+        forward = client.get(f"/api/agents/agent-123/events?after={after_id}&limit=3")
+        assert forward.status_code == 200
+        forward_body = forward.json()
+        assert [e["content"] for e in forward_body["events"]] == [f"Message {i}" for i in range(9, 12)]
+        assert forward_body["offset"] == 9
 
         # A non-positive limit must not defeat the cap (``[-0:]`` would return
         # the whole list); it falls back to the default tail count.

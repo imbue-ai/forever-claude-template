@@ -118,14 +118,19 @@ def _build_chat_create_command(
     return cmd
 
 
-def _build_observe_command_argv(mngr_binary: str, events_dir: Path) -> list[str]:
-    """Build the ``mngr observe`` discovery-only argv. Pure (see above)."""
+def _build_observe_command_argv(mngr_binary: str) -> list[str]:
+    """Build the ``mngr observe`` discovery-only argv. Pure (see above).
+
+    ``--discovery-only`` streams discovery events as JSONL to stdout (which we
+    consume directly) and tails the single shared discovery log under the
+    default host dir. We deliberately do NOT pass ``--events-dir``: that flag
+    only relocates the *full* observer's event files + lock and has no effect in
+    discovery-only mode -- mngr now rejects the combination outright.
+    """
     return [
         mngr_binary,
         "observe",
         "--discovery-only",
-        "--events-dir",
-        str(events_dir),
     ]
 
 
@@ -676,17 +681,6 @@ class AgentManager:
         except (OSError, ValueError, RuntimeError, MngrError) as e:
             _loguru_logger.opt(exception=e).error("Agent refresh failed")
 
-    def _resolve_observe_events_dir(self) -> Path:
-        """Return the path to the mngr observe events directory.
-
-        Does not create the directory; ``_start_observe`` creates it before
-        spawning the subprocess.
-        """
-        agent_state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
-        if agent_state_dir:
-            return Path(agent_state_dir) / "system_interface" / "observe"
-        return Path.home() / ".mngr" / "system_interface" / "observe"
-
     def _resolve_observe_cwd(self) -> Path:
         """Return the cwd for the mngr observe subprocess.
 
@@ -706,16 +700,11 @@ class AgentManager:
         return Path.home()
 
     def _build_observe_command(self) -> list[str]:
-        """Build the argv for the mngr observe discovery-only subprocess.
-
-        Pure: no side effects (does not create the events directory).
-        """
-        events_dir = self._resolve_observe_events_dir()
-        return _build_observe_command_argv(self._mngr_binary, events_dir)
+        """Build the argv for the mngr observe discovery-only subprocess. Pure."""
+        return _build_observe_command_argv(self._mngr_binary)
 
     def _start_observe(self) -> None:
         """Start the mngr observe subprocess and a watchdog for early exit."""
-        self._resolve_observe_events_dir().mkdir(parents=True, exist_ok=True)
         cmd = self._build_observe_command()
 
         self._observe_cg = ConcurrencyGroup(name="agent-manager-observe")

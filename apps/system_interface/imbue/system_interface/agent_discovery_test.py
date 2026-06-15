@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
-from imbue.system_interface.agent_discovery import read_tickets_dir_from_env_file
 
 
 def test_reads_claude_config_dir_from_env_file(tmp_path: Path) -> None:
@@ -95,36 +94,3 @@ def test_falls_back_to_home_claude_when_nothing_else_exists(monkeypatch: pytest.
     result = read_claude_config_dir_from_env_file(agent_state_dir)
 
     assert result == Path.home() / ".claude"
-
-
-def test_tickets_dir_read_from_agent_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-    (agent_state_dir / "env").write_text("TICKETS_DIR=/from/env/file\n")
-    monkeypatch.setenv("TICKETS_DIR", "/from/process/env")
-
-    result = read_tickets_dir_from_env_file(agent_state_dir, tmp_path / "work")
-
-    assert result == Path("/from/env/file")
-
-
-def test_tickets_dir_falls_back_to_process_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-    (agent_state_dir / "env").write_text("OTHER=x\n")
-    monkeypatch.setenv("TICKETS_DIR", "/from/process/env")
-
-    result = read_tickets_dir_from_env_file(agent_state_dir, tmp_path / "work")
-
-    assert result == Path("/from/process/env")
-
-
-def test_tickets_dir_falls_back_to_work_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-    monkeypatch.delenv("TICKETS_DIR", raising=False)
-    work_dir = tmp_path / "work"
-
-    result = read_tickets_dir_from_env_file(agent_state_dir, work_dir)
-
-    assert result == work_dir / ".tickets"

@@ -33,7 +33,6 @@ from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
-from imbue.system_interface.agent_discovery import read_tickets_dir_from_env_file
 from imbue.system_interface.agent_discovery import send_message
 from imbue.system_interface.agent_discovery import start_agent
 from imbue.system_interface.agent_manager import AgentManager
@@ -63,7 +62,6 @@ from imbue.system_interface.models import StartAgentResponse
 from imbue.system_interface.plugins import get_plugin_manager
 from imbue.system_interface.service_dispatcher import register_service_routes
 from imbue.system_interface.session_watcher import AgentSessionWatcher
-from imbue.system_interface.tickets_watcher import AgentTicketsWatcher
 from imbue.system_interface.welcome_resend import WelcomeResender
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
@@ -155,10 +153,6 @@ def _stop_all_watchers(application: FastAPI) -> None:
     for watcher in watchers.values():
         watcher.stop()
     watchers.clear()
-    tickets_watchers: dict[str, AgentTicketsWatcher] = application.state.tickets_watchers
-    for tickets_watcher in tickets_watchers.values():
-        tickets_watcher.stop()
-    tickets_watchers.clear()
 
 
 def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSessionWatcher:
@@ -202,35 +196,6 @@ def _get_or_create_watcher(request: Request, agent_info: AgentInfo) -> AgentSess
     # Seed transcript-derived activity signals once at watcher creation so the
     # indicator does not lag a turn behind on first connect.
     agent_manager.update_session_events(agent_info.id, watcher.get_all_events())
-    return watcher
-
-
-def _get_or_create_tickets_watcher(request: Request, agent_info: AgentInfo) -> AgentTicketsWatcher | None:
-    """Get an existing tickets watcher for an agent, or create one. Returns
-    None if the agent has no resolvable working directory (in which case
-    there's no .tickets/ to watch)."""
-    if agent_info.work_dir is None:
-        return None
-
-    tickets_watchers: dict[str, AgentTicketsWatcher] = request.app.state.tickets_watchers
-    event_queues: AgentEventQueues = request.app.state.event_queues
-
-    if agent_info.id in tickets_watchers:
-        return tickets_watchers[agent_info.id]
-
-    # The tickets watcher emits a single `step_enrichment` snapshot message whenever
-    # ticket state changes. ``broadcast_all_ignored`` delivers it live without buffering:
-    # it is a full snapshot recomputed on every GET /events (via get_enrichment()), so
-    # buffering successive snapshots would grow unboundedly for no benefit. The frontend
-    # replaces its enrichment table each time one arrives.
-    watcher = AgentTicketsWatcher(
-        agent_id=agent_info.id,
-        agent_name=agent_info.name,
-        tickets_dir=read_tickets_dir_from_env_file(agent_info.agent_state_dir, Path(agent_info.work_dir)),
-        on_events=event_queues.broadcast_all_ignored,
-    )
-    tickets_watchers[agent_info.id] = watcher
-    watcher.start()
     return watcher
 
 
@@ -343,32 +308,47 @@ def _get_events(agent_id: str, request: Request) -> Response:
         return _agent_not_found_response(agent_id)
 
     before_event_id = request.query_params.get("before")
+    after_event_id = request.query_params.get("after")
+    offset_str = request.query_params.get("offset")
     limit_str = request.query_params.get("limit", str(_DEFAULT_TAIL_COUNT))
     try:
         limit = int(limit_str)
     except ValueError:
         limit = _DEFAULT_TAIL_COUNT
-    # A non-positive limit would defeat the tail cap (``[-0:]`` returns the whole
-    # list) and break backfill slicing, so fall back to the default.
+    # A non-positive limit would defeat the window cap and break slicing, so fall
+    # back to the default.
     if limit <= 0:
         limit = _DEFAULT_TAIL_COUNT
 
     watcher = _get_or_create_watcher(request, agent_info)
     if before_event_id:
+        # Page older: the `limit` events immediately before the cursor.
         events = watcher.get_backfill_events(before_event_id, limit=limit)
+    elif after_event_id:
+        # Page newer: the `limit` events immediately after the cursor (used when
+        # the loaded window has been moved off the live tail by a jump).
+        events = watcher.get_forward_events(after_event_id, limit=limit)
+    elif offset_str is not None:
+        # Jump: a `limit`-event window starting at an arbitrary global index, so
+        # the client can land at a far scroll position in one bounded read.
+        try:
+            offset = int(offset_str)
+        except ValueError:
+            offset = 0
+        events = watcher.get_events_at_offset(offset, limit)
     else:
-        # Tail-first load: return only the most recent `limit` main-session
-        # events (not subagent events). The client pages further back via the
-        # `before` backfill branch above, so capping here bounds the initial
-        # payload without hiding history.
-        events = watcher.get_all_events()[-limit:]
+        # Initial load: the newest `limit` events (the live tail). Bounded read
+        # from the end; the client pages/jumps from here.
+        events = watcher.get_tail_events(limit)
 
-    # tk step enrichment ships as a separate, unpaginated snapshot (always
-    # complete regardless of where the transcript window is), joined to the
-    # transcript-derived steps by id on the frontend.
-    tickets_watcher = _get_or_create_tickets_watcher(request, agent_info)
-    step_enrichment = tickets_watcher.get_enrichment() if tickets_watcher is not None else {}
-    return JSONResponse(content={"events": events, "step_enrichment": step_enrichment})
+    # `total` is the full transcript length and `offset` is the global index of the
+    # first returned event. Together they place the loaded window in the whole
+    # conversation, so the client sizes the scrollbar for the full length and
+    # derives whether more history exists above (offset > 0) and below
+    # (offset + len < total) -- no separate has_more flag needed.
+    total = watcher.get_total_event_count()
+    offset = watcher.get_event_offset(events[0]["event_id"]) if events else total
+    return JSONResponse(content={"events": events, "offset": offset, "total": total})
 
 
 def _stream_filtered_events(
@@ -416,7 +396,6 @@ def _stream_events(agent_id: str, request: Request) -> Response:
         return _agent_not_found_response(agent_id)
 
     watcher = _get_or_create_watcher(request, agent_info)
-    _get_or_create_tickets_watcher(request, agent_info)
 
     event_queues: AgentEventQueues = request.app.state.event_queues
     event_queue = event_queues.register(agent_id)
@@ -1052,7 +1031,6 @@ def create_application(
     # paths that construct the app without driving the lifespan, and would otherwise
     # have to defensively probe for these attributes.
     application.state.watchers = {}
-    application.state.tickets_watchers = {}
 
     plugin_manager = get_plugin_manager()
     plugin_manager.hook.endpoint(app=application)
