@@ -10,6 +10,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.api.list import ErrorBehavior
@@ -17,6 +18,7 @@ from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import load_config
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
@@ -174,10 +176,20 @@ def send_message(agent_name: str, message: str) -> bool:
     """
     mngr_ctx, cg = _get_mngr_context()
     try:
+        address = AgentAddress(agent=AgentName(agent_name))
+        try:
+            matches = find_all_agents(
+                addresses=(address,),
+                filter_all=False,
+                target_state=None,
+                mngr_ctx=mngr_ctx,
+            )
+        except AgentNotFoundError:
+            return False
         result = send_message_to_agents(
             mngr_ctx=mngr_ctx,
             message_content=message,
-            include_filters=(f'(name == "{agent_name}" || id == "{agent_name}")',),
+            agents_to_message=matches,
             error_behavior=ErrorBehavior.CONTINUE,
             is_start_desired=True,
         )
