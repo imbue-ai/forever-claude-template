@@ -52,11 +52,14 @@ STREAMING_MESSAGE_TYPE = "assistant_streaming"
 
 # How often to re-read the stream buffer. Conservative on purpose: the buffer is
 # only a live preview that is superseded by the durable transcript event, and a
-# tighter interval mostly just adds SSE fan-out churn. mngr captures the pane no
-# faster than ~1s, so reading every 2s keeps end-to-end latency in the low
-# single-digit seconds while halving our wake-ups. Lower this (and/or the mngr
-# streaming_snapshot_interval_seconds) only if the UI feels laggy.
-STREAM_POLL_INTERVAL_SECONDS = 2.0
+# tighter interval mostly just adds SSE fan-out churn. This is one of the two
+# streaming intervals; the other is mngr's streaming_snapshot_interval_seconds
+# (the tmux-capture cadence). The two loops are independent, so average
+# end-to-end preview latency is roughly the sum of their half-intervals --
+# pairing this 5s read with mngr's 5s capture targets a ~5s average update.
+# Lower this (and/or the mngr streaming_snapshot_interval_seconds) only if the UI
+# feels laggy.
+STREAM_POLL_INTERVAL_SECONDS = 5.0
 
 
 class AgentStreamWatcher:
