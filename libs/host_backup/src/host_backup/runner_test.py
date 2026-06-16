@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 
 from host_backup.config import BackupConfig, SnapshotMethod, SnapshotSettings
-from host_backup.runner import _LoopState, _should_tick_now
+from host_backup.runner import _LoopState, _should_tick_now, _take_snapshot
 
 
 def _build_config(
@@ -100,3 +102,34 @@ def test_should_tick_now_refuses_when_config_unavailable() -> None:
     )
     assert decision is False
     assert reason == "no_config"
+
+
+def test_take_snapshot_emits_snapshot_failed_event_on_failure(tmp_path: Path) -> None:
+    """A failed snapshot step writes a SNAPSHOT_FAILED event and returns None.
+
+    Without this, a non-zero helper result.json (or any snapshot error) was only
+    logged ephemerally and never appeared in the durable events stream, unlike
+    restic failures.
+    """
+    events_dir = tmp_path / "events"
+    state = _LoopState()
+    state.events_dir = events_dir
+    state.current_tick_id = "tick-under-test"
+    # OUTER_TRIGGER with no paths makes make_snapshot_taker raise SnapshotError,
+    # exercising the failure branch without needing a (timing-dependent) helper.
+    config = BackupConfig(
+        snapshot=SnapshotSettings(method=SnapshotMethod.OUTER_TRIGGER)
+    )
+
+    result = _take_snapshot(state=state, config=config)
+
+    assert result is None
+    events = [
+        json.loads(line)
+        for line in (events_dir / "events.jsonl").read_text().splitlines()
+    ]
+    failed_events = [event for event in events if event["type"] == "SNAPSHOT_FAILED"]
+    assert len(failed_events) == 1
+    assert failed_events[0]["tick_id"] == "tick-under-test"
+    assert failed_events[0]["method"] == "OUTER_TRIGGER"
+    assert failed_events[0]["error_message"]
