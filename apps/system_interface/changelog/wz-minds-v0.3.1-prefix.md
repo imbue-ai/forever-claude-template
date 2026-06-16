@@ -1,0 +1,3 @@
+Refresh `vendor/mngr` to the minds-0.3.1 mngr SHA and update the `system_interface` message consumer to match.
+
+The refreshed `vendor/mngr` includes mngr's `send_message_to_agents` refactor (CEL `include_filters` → pre-resolved `agents_to_message: Sequence[AgentMatch]`). `agent_discovery.send_message` was still passing the removed `include_filters=` kwarg, which would raise `TypeError: missing a required argument: 'agents_to_message'` and hang launch-to-first-message. It now resolves the target via `find_all_agents([AgentAddress(agent=AgentName(agent_name))], ...)` and passes the result as `agents_to_message`, mirroring `start_agent`'s existing address-resolution path. Name/ID matching and STOPPED-agent auto-start (`is_start_desired=True`) are preserved.
