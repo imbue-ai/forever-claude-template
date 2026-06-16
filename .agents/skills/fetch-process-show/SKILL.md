@@ -13,9 +13,9 @@ interacts with.
 
 **Read `.agents/shared/references/interactive-delivery.md` first.** It carries
 the generic skeleton (the 8 phases) and the cross-cutting principles. This file
-only binds that skeleton's task-specific hooks for data work. Where a phase below
-says "(skeleton phase N)", the generic behavior lives in that reference; this
-file adds the data-specific filling.
+only fills in that skeleton's phases for data work. Where a phase below says
+"(skeleton phase N)", the generic behavior lives in that reference; this file
+adds the data-specific filling.
 
 The non-negotiable data principle on top of the skeleton: **the confirmed sample
 is the single source of truth.** It gates crystallization, seeds the first
@@ -72,9 +72,9 @@ For browser auth, add: "Need to launch the latchkey setup flow -- sign in in the
 pop-up browser." For `latchkey auth set`, include the exact command for the user
 to run. Wait for approval before any further work.
 
-## Validate auth/latchkey first (skeleton phase 4: validate-risky-dependency)
+## Validate auth/latchkey first (skeleton phase 4)
 
-The risky-dependency hook for data work is **the data source's auth**.
+The risky dependency for data work is **the data source's auth**.
 
 **If latchkey is involved in any component of the task, authenticate and test it
 first -- before anything else.** Even if the latchkey-backed piece is a small
@@ -94,7 +94,7 @@ combined operation.
 Keep validation code simple -- inline bash, `uv run python -c`, or short scripts
 under `runtime/fetch-process-show/$SLUG/` if substantive.
 
-## The sample loop (skeleton phase 5: cheap-throwaway-artifact)
+## The sample loop (skeleton phase 5)
 
 The throwaway artifact for data work is a **small real sample** put in front of
 the user in their intended delivery channel. It is a *feedback instrument, not
@@ -160,8 +160,8 @@ confirmed the sample across every data shape.** Crystallizing or building a
 surface on an unconfirmed process bakes the wrong process into code *and* into a
 background worker that cannot see the corrections the user hasn't made yet.
 
-Once the user has confirmed, the harden-ratify hook (skeleton phase 7) is bound
-to a **`crystallize-task` worker**:
+Once the user has confirmed, the harden/ratify pass (skeleton phase 7) runs as
+a **`crystallize-task` worker**:
 
 1. **Kick off `crystallize-task`** with `source_artifacts_dir:
    runtime/fetch-process-show/$SLUG/`.

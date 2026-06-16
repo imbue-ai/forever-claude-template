@@ -49,7 +49,7 @@ Pick the flow that fits the ask:
   `.agents/shared/references/interactive-delivery.md`: clarify only what blocks,
   a fast feasibility pass, a small plan, validate the risky dependency first, a
   cheap throwaway artifact looped to explicit confirmation, then hardening in the
-  background. Bind the skeleton's hooks to the specifics of the task at hand.
+  background. Fill in the skeleton's phases with the specifics of the task at hand.
 
 Load the routed skill and proceed; do not re-implement its flow here.
 

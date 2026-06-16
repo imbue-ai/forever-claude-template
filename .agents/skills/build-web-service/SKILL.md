@@ -21,8 +21,8 @@ flows go through the `edit-services` skill.
 view is not a "scaffold, implement, ship" recipe -- it is an *interactive* flow:
 you confirm the look-and-feel on a cheap throwaway mock *before* building the real
 thing, build to a usable state in the foreground, and defer the thorough
-testing + review gates to a background worker. The phases below bind that shared
-skeleton's hooks for web work. The single biggest mistake this skill exists to
+testing + review gates to a background worker. The phases below fill in that
+shared skeleton for web work. The single biggest mistake this skill exists to
 prevent is building (and testing, and hardening) a whole site before the user has
 confirmed the basic shape is what they want.
 
@@ -187,7 +187,7 @@ look-and-feel is the tripwire: do not.** Instead, serve a *throwaway mock* of th
 proposed UI as a route inside the scaffolded service, so the user sees it as a
 real tab and reacts to the actual look-and-feel.
 
-This is the cheap-throwaway-artifact hook (skeleton phase 5). Keep it disposable:
+This is skeleton phase 5 (the cheap throwaway artifact). Keep it disposable:
 
 - The mock renders **static / hard-coded content** that demonstrates the proposed
   layout and interactions -- no real fetching, no persistence, no backend logic.
@@ -331,7 +331,7 @@ is hidden).
 The foreground work stops at a usable, surfaced site. The thorough pass --
 extending Playwright coverage, the full test suite and ratchets, `/autofix`, and
 the code-guardian gates -- runs in a **background finalization worker**, never in
-the main agent. This is the harden-ratify hook (skeleton phase 7).
+the main agent. This is skeleton phase 7 (harden / ratify).
 
 **The trigger is an explicit confirmation on the *working* site -- never your own
 sense that the code looks done.** Once the usable site is in front of the user,
