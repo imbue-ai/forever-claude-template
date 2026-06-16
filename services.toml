@@ -21,6 +21,9 @@ restart = "on-failure"
 # Scans every tmux window in the session for /error|exception/i output and,
 # on newly-appeared matches, sends one message to a random mngr agent. Skips
 # its own window. See libs/error_watcher/README.md.
+# Keep this service named "error-watcher": the watcher hard-codes its own
+# window name (svc-error-watcher, OWN_WINDOW in watcher.py) to skip it and
+# avoid alerting on its own alert text.
 [services.error-watcher]
 command = "uv run error-watcher"
 restart = "on-failure"

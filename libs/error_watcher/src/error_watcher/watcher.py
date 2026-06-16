@@ -35,7 +35,11 @@ MAX_ALERT_LINE_LENGTH: Final[int] = 500
 POLL_INTERVAL_SECONDS: Final[int] = 5
 
 # The watcher's own service window, skipped while scanning so its alert text
-# (which contains "error") does not re-trigger a match (REQ-SCAN-2).
+# (which contains "error") does not re-trigger a match (REQ-SCAN-2). The
+# bootstrap manager names each service's window svc-<service-name>, so this
+# MUST stay in sync with the [services.error-watcher] key in services.toml --
+# renaming the service there without updating this constant would silently
+# re-enable the feedback loop.
 OWN_WINDOW: Final[str] = "svc-error-watcher"
 
 # mngr refuses to message an agent in this lifecycle state (REQ-NOTIFY-3).
