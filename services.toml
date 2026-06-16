@@ -18,6 +18,13 @@ restart = "on-failure"
 command = "uv run app-watcher"
 restart = "on-failure"
 
+# Scans every tmux window in the session for /error|exception/i output and,
+# on newly-appeared matches, sends one message to a random mngr agent. Skips
+# its own window. See libs/error_watcher/README.md.
+[services.error-watcher]
+command = "uv run error-watcher"
+restart = "on-failure"
+
 # Periodically commits + pushes runtime/ to mindsbackup/$MNGR_AGENT_ID so that
 # Claude memory, ticket state, transcripts, telegram history, etc. survive
 # container loss. The worktree itself (and the orphan branch) are created
