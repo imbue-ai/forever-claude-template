@@ -460,21 +460,13 @@ def _recover_running_state(
     Unlike :func:`_apply_reveal`, nothing here raises -- this is the last line of
     defense, so a failed step just means "not recovered" (exit 3)."""
     try:
-        if changes.frontend_manifest:
-            _run_checked(runner, ["npm", "ci"], repo_root / FRONTEND_DIR, "npm ci")
+        _refresh_dependencies(changes, repo_root, runner)
         if changes.frontend:
             _run_checked(
                 runner,
                 ["npm", "run", "build"],
                 repo_root / FRONTEND_DIR,
                 "npm run build",
-            )
-        if changes.backend_manifest:
-            _run_checked(
-                runner,
-                ["uv", "tool", "install", "-e", APP_DIR, "--reinstall"],
-                repo_root,
-                "uv tool install --reinstall",
             )
         if changes.backend:
             _run_checked(
