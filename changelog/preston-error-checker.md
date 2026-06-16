@@ -38,3 +38,9 @@ genuinely exited with status 1.
 - The watcher now also handles `SIGHUP` -- the signal the bootstrap manager
 actually sends when it closes a service window -- so it shuts down cleanly on the
 real stop path, and can be launched via `python -m error_watcher.watcher`.
+
+- Fixed the timeout path so a partial payload a command printed before it hung is
+actually preserved. On a timeout the command's output comes back as bytes (not
+text), and the previous type check silently dropped it; the bytes are now decoded
+and kept, so a still-valid agent list from a hung `mngr list` is no longer thrown
+away.

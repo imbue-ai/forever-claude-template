@@ -341,6 +341,19 @@ def test_default_command_runner_times_out_with_the_failure_sentinel() -> None:
     assert result.returncode != 1  # distinct from a real exit-1
 
 
+def test_default_command_runner_preserves_partial_output_on_timeout() -> None:
+    # A command that prints before it hangs must have that partial stdout
+    # preserved (finding #6), not discarded -- subprocess hands back the buffered
+    # output as bytes on the timeout path even under text=True, so the runner has
+    # to decode it. `printf` writes immediately and the sleep far outlasts the
+    # timeout, so the marker is buffered before the timeout fires.
+    result = _default_command_runner(
+        ["sh", "-c", "printf partial-payload; sleep 5"], timeout=0.2
+    )
+    assert result.returncode == RUNNER_FAILURE_RETURNCODE
+    assert result.stdout == "partial-payload"
+
+
 def test_default_command_runner_failure_sentinel_is_not_a_real_exit_code() -> None:
     # Guards the contract that the sentinel cannot collide with a process exit
     # status (which is always >= 0).

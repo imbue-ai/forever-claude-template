@@ -295,6 +295,22 @@ def compile_error_pattern(override: str | None) -> re.Pattern[str]:
         return DEFAULT_ERROR_PATTERN
 
 
+def _decode_timeout_output(output: str | bytes | None) -> str:
+    """Normalize a TimeoutExpired stdout/stderr payload to str.
+
+    On a timeout, subprocess attaches the buffered output as bytes even when the
+    process was started with text=True (it skips the decode it would do on a
+    normal return), so this accepts str, bytes, or None. Bytes are decoded with
+    errors="replace" so a multibyte character truncated at the timeout boundary
+    cannot raise UnicodeDecodeError into the never-raise runner.
+    """
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    return output
+
+
 def _default_command_runner(
     command: Sequence[str], timeout: float = _COMMAND_TIMEOUT_SECONDS
 ) -> CommandResult:
@@ -309,9 +325,12 @@ def _default_command_runner(
         # Never raise: a hung tmux/mngr must surface as a runner failure the
         # caller logs and skips, not a crash of the poll loop. Preserve whatever
         # the command managed to emit before the timeout so a caller that can
-        # use a partial payload is not robbed of it (finding #6).
-        partial_stdout = e.stdout if isinstance(e.stdout, str) else ""
-        partial_stderr = e.stderr if isinstance(e.stderr, str) else ""
+        # use a partial payload is not robbed of it (finding #6). On the timeout
+        # path subprocess hands back the buffered output as bytes even under
+        # text=True (it skips the usual decode when the timeout kills the
+        # process), so decode it ourselves rather than dropping a bytes payload.
+        partial_stdout = _decode_timeout_output(e.stdout)
+        partial_stderr = _decode_timeout_output(e.stderr)
         return CommandResult(
             returncode=RUNNER_FAILURE_RETURNCODE,
             stdout=partial_stdout,
