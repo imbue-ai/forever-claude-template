@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import os
+import threading
+from collections.abc import Callable
+from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger as _loguru_logger
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
+from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import load_config
@@ -167,30 +174,102 @@ def discover_agents(
     return agents
 
 
-def send_message(agent_name: str, message: str) -> bool:
-    """Send a message to an agent. Returns True on success.
+class _AgentMatchCache(MutableModel):
+    """Thread-safe cache of resolved agent locations, keyed by agent name."""
 
-    STOPPED agents are automatically started before the message is sent
-    (`is_start_desired=True`), so messaging is possible regardless of agent state.
-    """
-    mngr_ctx, cg = _get_mngr_context()
-    try:
-        matches = find_all_agents(
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _matches: dict[str, AgentMatch] = PrivateAttr(default_factory=dict)
+
+    def get(self, agent_name: str) -> AgentMatch | None:
+        with self._lock:
+            return self._matches.get(agent_name)
+
+    def put(self, agent_name: str, match: AgentMatch) -> None:
+        with self._lock:
+            self._matches[agent_name] = match
+
+    def invalidate(self, agent_name: str) -> None:
+        with self._lock:
+            self._matches.pop(agent_name, None)
+
+
+_AGENT_MATCH_CACHE = _AgentMatchCache()
+
+
+class _AgentResolver(MutableModel):
+    """Resolves an agent name to its mngr locations within a fixed context."""
+
+    mngr_ctx: MngrContext
+
+    def __call__(self, agent_name: str) -> Sequence[AgentMatch]:
+        return find_all_agents(
             addresses=(AgentAddress(agent=AgentName(agent_name)),),
             filter_all=False,
             target_state=None,
-            mngr_ctx=mngr_ctx,
+            mngr_ctx=self.mngr_ctx,
         )
-        result = send_message_to_agents(
-            mngr_ctx=mngr_ctx,
-            message_content=message,
+
+
+class _AgentSender(MutableModel):
+    """Sends a fixed message to pre-resolved agents, auto-starting STOPPED ones."""
+
+    mngr_ctx: MngrContext
+    message: str
+
+    def __call__(self, matches: Sequence[AgentMatch]) -> MessageResult:
+        return send_message_to_agents(
+            mngr_ctx=self.mngr_ctx,
+            message_content=self.message,
             agents_to_message=matches,
             error_behavior=ErrorBehavior.CONTINUE,
             is_start_desired=True,
         )
+
+
+def _send_to_cached_agent(
+    agent_name: str,
+    cache: _AgentMatchCache,
+    resolve: Callable[[str], Sequence[AgentMatch]],
+    send_to: Callable[[Sequence[AgentMatch]], MessageResult],
+) -> bool:
+    """Route a message to ``agent_name``, resolving its location only when needed.
+
+    On a cache hit the message goes straight to the known location -- no mngr
+    discovery. If that send reaches no agent (the cached location is stale: the
+    agent was destroyed, recreated, or moved hosts), the entry is dropped and the
+    agent is re-resolved from scratch. A uniquely-resolved location is cached for
+    reuse; a name that resolves to several agents is never cached, so every such
+    send still reaches all of them.
+    """
+    cached = cache.get(agent_name)
+    if cached is not None:
+        if send_to((cached,)).successful_agents:
+            return True
+        cache.invalidate(agent_name)
+    matches = tuple(resolve(agent_name))
+    if len(matches) == 1:
+        cache.put(agent_name, matches[0])
+    return bool(send_to(matches).successful_agents)
+
+
+def send_message(agent_name: str, message: str) -> bool:
+    """Send a message to an agent. Returns True on success.
+
+    The agent's location is resolved via mngr discovery once and cached, so
+    repeat messages to the same agent skip discovery and go straight to its host
+    (this is what mngr's pre-resolved ``agents_to_message`` API enables). STOPPED
+    agents are auto-started (`is_start_desired=True`) regardless of cache state.
+    """
+    mngr_ctx, cg = _get_mngr_context()
+    try:
+        return _send_to_cached_agent(
+            agent_name,
+            _AGENT_MATCH_CACHE,
+            _AgentResolver(mngr_ctx=mngr_ctx),
+            _AgentSender(mngr_ctx=mngr_ctx, message=message),
+        )
     finally:
         cg.__exit__(None, None, None)
-    return len(result.successful_agents) > 0
 
 
 def start_agent(agent_name: str) -> None:
