@@ -1,2 +1,2 @@
-# Vendored snapshots (mngr, tk) -- not authored here; collapse in PR diffs.
+# Vendored snapshots (mngr, etc.) -- not authored here; collapse in PR diffs.
 vendor/** linguist-generated=true
