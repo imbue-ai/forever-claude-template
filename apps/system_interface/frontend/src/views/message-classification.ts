@@ -91,7 +91,7 @@ const PERMISSION_REQUEST_POST_RE = /-X\s*POST|--request\s*POST/i;
  *  latchkey permission-requests host. Detected from the tool *input* alone, so a
  *  request is recognised the moment it is issued -- even while it is still
  *  pending with no result yet, which is exactly when the user most needs to see
- *  and act on it. (Contrast `parsePermissionRequest` in message-renderers, which
+ *  and act on it. (Contrast `parsePermissionRequest` in permission-card, which
  *  additionally needs a successful result to pull out the request id for the
  *  modal button.) */
 export function isPermissionRequestCall(tc: ToolCall): boolean {
