@@ -11,6 +11,13 @@ for that per-service endpoint.
 The frontend calls this to label a permission-request card with the real service
 name and to show permission descriptions, rather than bundling a copy of the
 gateway catalog that would drift over time.
+
+The gateway calls are synchronous: resolving one scope is one or two sequential
+catalog lookups with no concurrency to exploit, and the rest of this inner chat
+interface is plain sync request handlers, so a sync ``httpx.Client`` keeps it
+simple. A gateway that can't be reached or answers with an error status is
+surfaced to the frontend as a 502 (distinct from a genuine 404 "no such scope"),
+rather than being swallowed.
 """
 
 from __future__ import annotations
@@ -59,8 +66,8 @@ def candidate_services(scope: str) -> list[str]:
     return ["-".join(parts[:count]) for count in range(len(parts), 0, -1)]
 
 
-async def _get_service_catalog(
-    client: httpx.AsyncClient,
+def _get_service_catalog(
+    client: httpx.Client,
     base_url: str,
     headers: dict[str, str],
     service: str,
@@ -68,29 +75,22 @@ async def _get_service_catalog(
 ) -> ServiceCatalog | None:
     """Fetch (and cache) the gateway's catalog entries for one service.
 
-    Returns the entries, or ``None`` when the service is unknown (404) or the
-    gateway call fails. Only a definitive 404 is cached; transient errors are
-    not, so a later request can retry.
+    Returns the entries, or ``None`` when the gateway has no such service (a
+    404 -- expected while walking the scope's service-name candidates). Raises
+    ``httpx.HTTPError`` when the gateway can't be reached or answers with a
+    non-404 error status, so the caller can surface a 502 rather than a
+    misleading 404. Only a definitive 404 is cached; an error propagates
+    uncached so a later request can retry.
     """
     if service in cache:
         return cache[service]
     url = f"{base_url.rstrip('/')}/permissions/available/{service}"
-    try:
-        response = await client.get(url, headers=headers)
-    except httpx.HTTPError as error:
-        logger.warning("latchkey gateway request for service {!r} failed: {}", service, error)
-        return None
+    response = client.get(url, headers=headers)
     if response.status_code == 404:
         cache[service] = None
         return None
-    if response.status_code != 200:
-        logger.warning("latchkey gateway returned {} for service {!r}", response.status_code, service)
-        return None
-    try:
-        data = response.json()
-    except ValueError:
-        logger.warning("latchkey gateway returned non-JSON for service {!r}", service)
-        return None
+    response.raise_for_status()
+    data = response.json()
     if not isinstance(data, list):
         return None
     entries = tuple(entry for entry in data if isinstance(entry, dict))
@@ -123,8 +123,8 @@ def _to_scope_info(scope: str, entry: dict[str, Any]) -> LatchkeyScopeInfo | Non
     )
 
 
-async def resolve_scope_info(
-    client: httpx.AsyncClient,
+def resolve_scope_info(
+    client: httpx.Client,
     base_url: str,
     password: str,
     permissions_override: str,
@@ -134,11 +134,12 @@ async def resolve_scope_info(
     """Resolve a scope to its catalog entry via the gateway, or ``None``.
 
     Walks the scope's service-name candidates (longest prefix first) and returns
-    the entry from the first service whose catalog contains the scope.
+    the entry from the first service whose catalog contains the scope. Propagates
+    ``httpx.HTTPError`` from the gateway calls.
     """
     headers = {_HEADER_PASSWORD: password, _HEADER_PERMISSIONS_OVERRIDE: permissions_override}
     for service in candidate_services(scope):
-        entries = await _get_service_catalog(client, base_url, headers, service, cache)
+        entries = _get_service_catalog(client, base_url, headers, service, cache)
         if entries is None:
             continue
         for entry in entries:
@@ -147,11 +148,12 @@ async def resolve_scope_info(
     return None
 
 
-async def get_scope_info(request: Request) -> JSONResponse:
+def get_scope_info(request: Request) -> JSONResponse:
     """GET /api/latchkey/scopes/{scope} -- catalog info for a permission scope.
 
     503 when the gateway env isn't configured (e.g. running outside an agent
-    container); 404 when the scope isn't in the gateway catalog.
+    container); 502 when the gateway can't be reached or errors; 404 when the
+    scope isn't in the gateway catalog.
     """
     scope = request.path_params["scope"]
     base_url = os.environ.get(_ENV_GATEWAY)
@@ -159,9 +161,13 @@ async def get_scope_info(request: Request) -> JSONResponse:
     permissions_override = os.environ.get(_ENV_GATEWAY_PERMISSIONS_OVERRIDE)
     if not base_url or not password or not permissions_override:
         return JSONResponse({"detail": "latchkey gateway is not configured"}, status_code=503)
-    client: httpx.AsyncClient = request.app.state.http_client
+    client: httpx.Client = request.app.state.latchkey_http_client
     cache: CatalogCache = request.app.state.latchkey_catalog_cache
-    info = await resolve_scope_info(client, base_url, password, permissions_override, scope, cache)
+    try:
+        info = resolve_scope_info(client, base_url, password, permissions_override, scope, cache)
+    except httpx.HTTPError as error:
+        logger.warning("latchkey gateway request for scope {!r} failed: {}", scope, error)
+        return JSONResponse({"detail": "latchkey gateway request failed"}, status_code=502)
     if info is None:
         return JSONResponse({"detail": f"no catalog entry for scope {scope!r}"}, status_code=404)
     return JSONResponse(content=info.model_dump())

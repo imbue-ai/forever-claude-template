@@ -110,11 +110,18 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     # agent along with the in-flight holder's metadata.
     application.state.layout_mutex = LayoutMutex()
 
-    # Single shared httpx client for the /service/<name>/ forwarding layer and the
-    # latchkey catalog proxy. Tests can inject one (with a mock transport) via
-    # create_application; otherwise build a real one here.
+    # Single shared async httpx client for the /service/<name>/ forwarding layer.
+    # Tests can inject one (with a mock transport) via create_application;
+    # otherwise build a real one here.
     application.state.http_client = application.state.preconfigured_http_client or httpx.AsyncClient(
         follow_redirects=False,
+        timeout=30.0,
+    )
+    # Separate synchronous httpx client for the latchkey catalog proxy, whose
+    # handler is a plain sync request handler (no concurrency to exploit). Tests
+    # inject one (with a mock transport) via create_application; otherwise build
+    # a real one here.
+    application.state.latchkey_http_client = application.state.preconfigured_latchkey_http_client or httpx.Client(
         timeout=30.0,
     )
 
@@ -147,6 +154,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         agent_manager.stop()
     _stop_all_watchers(application)
     await application.state.http_client.aclose()
+    application.state.latchkey_http_client.close()
     if is_main_thread and original_sigint_handler is not None:
         signal.signal(signal.SIGINT, original_sigint_handler)
 
@@ -1009,6 +1017,7 @@ def create_application(
     claude_auth_service: ClaudeAuthService | None = None,
     welcome_resender: WelcomeResender | None = None,
     http_client: httpx.AsyncClient | None = None,
+    latchkey_http_client: httpx.Client | None = None,
 ) -> FastAPI:
     application = FastAPI(lifespan=_lifespan)
 
@@ -1035,9 +1044,12 @@ def create_application(
     # paths that construct the app without driving the lifespan, and would otherwise
     # have to defensively probe for these attributes.
     application.state.watchers = {}
-    # An optional pre-built httpx client (used by tests to inject a mock gateway
-    # transport); the lifespan falls back to a real client when this is None.
+    # Optional pre-built httpx clients (used by tests to inject mock transports):
+    # the async one backs the /service forwarding layer, the sync one backs the
+    # latchkey catalog proxy. The lifespan falls back to real clients when these
+    # are None.
     application.state.preconfigured_http_client = http_client
+    application.state.preconfigured_latchkey_http_client = latchkey_http_client
     # Per-service latchkey catalog cache, seeded here (like the watcher registry
     # above) so the attribute always exists on ``app.state``.
     application.state.latchkey_catalog_cache = {}

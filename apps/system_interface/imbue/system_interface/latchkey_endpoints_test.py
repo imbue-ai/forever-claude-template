@@ -1,10 +1,9 @@
 """Tests for the latchkey scope-resolution endpoint.
 
 The gateway is faked with an ``httpx.MockTransport`` injected into the app via
-``create_application(http_client=...)``, so the resolver (service-prefix walking,
-scope matching, caching, malformed-entry handling) is exercised end-to-end
-through the FastAPI test client without a real latchkey gateway -- and without
-driving the event loop directly.
+``create_application(latchkey_http_client=...)``, so the resolver (service-prefix
+walking, scope matching, caching, malformed-entry handling) is exercised
+end-to-end through the FastAPI test client without a real latchkey gateway.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ GITHUB_CATALOG = [
 ]
 
 
-def _mock_gateway_client(catalogs: dict[str, list[dict[str, Any]]], calls: list[str]) -> httpx.AsyncClient:
+def _mock_gateway_client(catalogs: dict[str, list[dict[str, Any]]], calls: list[str]) -> httpx.Client:
     """An httpx client whose transport serves the gateway's per-service catalog
     endpoint from ``catalogs`` (404 for unknown services), recording each
     requested service name in ``calls``."""
@@ -51,7 +50,7 @@ def _mock_gateway_client(catalogs: dict[str, list[dict[str, Any]]], calls: list[
             return httpx.Response(200, json=catalogs[service])
         return httpx.Response(404, json={"detail": "unknown service"})
 
-    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return httpx.Client(transport=httpx.MockTransport(handler))
 
 
 def _configure_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,7 +68,7 @@ def test_candidate_services_yields_longest_prefix_first() -> None:
 def test_resolves_simple_scope_via_service_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_gateway(monkeypatch)
     calls: list[str] = []
-    application = create_application(http_client=_mock_gateway_client({"slack": SLACK_CATALOG}, calls))
+    application = create_application(latchkey_http_client=_mock_gateway_client({"slack": SLACK_CATALOG}, calls))
     with TestClient(application) as client:
         response = client.get("/api/latchkey/scopes/slack-api")
     assert response.status_code == 200
@@ -85,7 +84,7 @@ def test_resolves_simple_scope_via_service_prefix(monkeypatch: pytest.MonkeyPatc
 def test_resolves_multi_segment_service_disambiguating_github(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_gateway(monkeypatch)
     calls: list[str] = []
-    application = create_application(http_client=_mock_gateway_client({"github": GITHUB_CATALOG}, calls))
+    application = create_application(latchkey_http_client=_mock_gateway_client({"github": GITHUB_CATALOG}, calls))
     with TestClient(application) as client:
         response = client.get("/api/latchkey/scopes/github-rest-api")
     assert response.status_code == 200
@@ -97,7 +96,7 @@ def test_resolves_multi_segment_service_disambiguating_github(monkeypatch: pytes
 def test_caches_catalog_across_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_gateway(monkeypatch)
     calls: list[str] = []
-    application = create_application(http_client=_mock_gateway_client({"github": GITHUB_CATALOG}, calls))
+    application = create_application(latchkey_http_client=_mock_gateway_client({"github": GITHUB_CATALOG}, calls))
     with TestClient(application) as client:
         assert client.get("/api/latchkey/scopes/github-rest-api").status_code == 200
         assert client.get("/api/latchkey/scopes/github-git").status_code == 200
@@ -108,27 +107,42 @@ def test_caches_catalog_across_requests(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_unknown_scope_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_gateway(monkeypatch)
-    application = create_application(http_client=_mock_gateway_client({"slack": SLACK_CATALOG}, []))
+    application = create_application(latchkey_http_client=_mock_gateway_client({"slack": SLACK_CATALOG}, []))
     with TestClient(application) as client:
         assert client.get("/api/latchkey/scopes/madeup-api").status_code == 404
 
 
 def test_malformed_entry_without_display_name_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
     _configure_gateway(monkeypatch)
-    application = create_application(http_client=_mock_gateway_client({"x": [{"scope": "x-api"}]}, []))
+    application = create_application(latchkey_http_client=_mock_gateway_client({"x": [{"scope": "x-api"}]}, []))
     with TestClient(application) as client:
         assert client.get("/api/latchkey/scopes/x-api").status_code == 404
 
 
-def test_gateway_error_returns_404(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unreachable_gateway_returns_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A gateway we can't reach is distinct from a scope that genuinely has no
+    # catalog entry: surface it as a 502, not a misleading 404.
     _configure_gateway(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("gateway down", request=request)
 
-    application = create_application(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    application = create_application(latchkey_http_client=httpx.Client(transport=httpx.MockTransport(handler)))
     with TestClient(application) as client:
-        assert client.get("/api/latchkey/scopes/slack-api").status_code == 404
+        assert client.get("/api/latchkey/scopes/slack-api").status_code == 502
+
+
+def test_gateway_error_status_returns_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A non-404 error status from the gateway (e.g. a 500) is an upstream
+    # failure, surfaced as a 502 rather than swallowed into a 404.
+    _configure_gateway(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "boom"})
+
+    application = create_application(latchkey_http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    with TestClient(application) as client:
+        assert client.get("/api/latchkey/scopes/slack-api").status_code == 502
 
 
 def test_returns_503_when_gateway_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
