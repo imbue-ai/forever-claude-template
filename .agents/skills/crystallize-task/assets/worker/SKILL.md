@@ -13,7 +13,8 @@ transcript via `mngr transcript`. Follow these stages to go from
 "task handed off" to "new skill committed on your branch".
 
 **Principle.** Reliability is the floor; simplicity is the target. Default to
-a single entry point and one flow. Add surface only when a specific invariant
+a subcommand per cleanly-separable step plus a `run all` that chains them (see
+`spec-summary.md`); add surface beyond that only when a specific invariant
 demands it.
 
 Consult `.agents/shared/references/spec-summary.md` for the agentskills.io
@@ -68,9 +69,10 @@ Produce a short outline with:
   Tag `[prose]` only when the user must be in the loop while the skill runs;
   neither a model's judgement nor needing the conversation justifies it. Keep
   any genuine prose at the edges, not wedged between two scripted sections.
-- Subcommand justification: for any subcommand or subflow in the planned
-  flow, what invariant makes it separate vs. inlined? If no invariant
-  demands separation, inline it.
+- Subcommand structure: a subcommand per cleanly-separable step, plus a
+  `run all` that chains them (see `spec-summary.md`). Note any step you keep
+  inlined (e.g. it hands the next a live handle) and any subflow beyond the
+  natural steps -- those need a specific invariant.
 - A skill with zero `[script]`/`[ai-script]` steps (pure prose recipe) is
   valid only when every step is genuine executor meta-work -- do not invent
   scripts where judgement is the executor's, but do not park model

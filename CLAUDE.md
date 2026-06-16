@@ -318,6 +318,15 @@ The upstream is defined in `parent.toml`.
 - **Prefer an applicable skill over reinventing.** Skill descriptions are
   injected so you can match by purpose, not by name.
 
+- **Run a skill's steps step by step in chat.** When you invoke a skill in a
+  chat turn and it exposes per-step subcommands (plus a `run all`), drive the
+  subcommands one at a time -- mirror each as a `tk` step and surface its
+  output -- so the user gets a rich progress view, rather than running one
+  opaque `run all`. This is not a watch-and-steer mode: run straight through,
+  pausing for the user only at the skill's declared `[prose]` steps. Reserve
+  `run all` for headless or scheduled runs, where there is no chat to show
+  progress in.
+
 - **Live first, ratify at turn-end via the worker pipeline.** All four
   lifecycle skills (`do-something-new`, `crystallize-task`, `heal-skill`,
   `update-skill`) follow the same shape: handle the user's immediate

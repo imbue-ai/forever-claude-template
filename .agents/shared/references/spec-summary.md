@@ -106,14 +106,26 @@ only when every step is `[prose]` executor meta-work; if any flow step is
 deterministic or model-driven, it belongs in a script. Use scripts where
 they earn their keep; don't force a script for genuine executor meta-work.
 
-When you do include `run.py`, keep it as simple as the invariants allow
--- default to a single entry point and one flow, and only add subcommands
-or subflows when a specific invariant demands the separation.
+When you do include `run.py`, write the flow's logic as small helper
+functions (one per step) and expose them two ways:
+
+- **A subcommand per step**, whenever the step's inputs and outputs serialize
+  cleanly -- data, not live handles. (A step that hands the next one an open
+  browser session, a DB connection, or a large in-memory object stays inlined;
+  splitting it is not reasonable.) Once the steps are already helper functions
+  the split is cheap, and it pays off twice: an agent running the skill in a
+  chat turn can drive the steps one at a time for a rich per-step progress
+  view, and each boundary leaves an inspectable intermediate artifact.
+- **A `run all` subcommand** that chains the steps in-process -- just function
+  calls, no serialization cost -- for headless and scheduled runs.
+
+Both entry styles call the same helper functions, so the logic has one source
+of truth. The per-step split *is* the structure; don't invent subflows beyond
+the skill's natural steps.
 
 If the process interleaves deterministic and model-judgement steps, script
-*both* (the model steps become `[ai-script]` calls -- see below) so the chain
-runs end-to-end. Only split into subcommands when a `[prose]` step genuinely
-sits between two scripted sections.
+*both* (the model steps become `[ai-script]` calls -- see below) so the whole
+chain runs end-to-end.
 
 ### Scripting a model step (`[ai-script]`)
 
@@ -155,8 +167,10 @@ anyio.run(main)
   # ///
   ```
 - `argparse` entry point; no interactive prompts.
-- Stateless by default. If persisted state is genuinely needed, flag it at
-  Gate 2 -- don't invent a persistence scheme unilaterally.
+- Stateless across runs by default -- transient per-step I/O between
+  subcommands is fine, durable cross-run state is not. If durable state is
+  genuinely needed, flag it at Gate 2 -- don't invent a persistence scheme
+  unilaterally.
 - Fail loudly: exit non-zero on error, write the error to stderr.
 - Document the invocation in SKILL.md:
   `uv run .agents/skills/<name>/scripts/run.py <args>`

@@ -33,9 +33,10 @@ Include:
   Tag `[prose]` only when the user must be in the loop while the skill runs;
   neither a model's judgement nor needing the conversation justifies it. Keep
   any genuine prose at the edges, not between scripted sections.
-- Justification: for any subcommand or subflow in the planned flow, what
-  invariant makes it separate vs. inlined? If no invariant demands
-  separation, inline it.
+- Subcommand structure: a subcommand per cleanly-separable step, plus a
+  `run all` that chains them (see `spec-summary.md`). Note any step you keep
+  inlined (e.g. it hands the next a live handle) and any subflow beyond the
+  natural steps -- those need a specific invariant.
 - 2-3 scenarios you will run.
 
 ### Gate 1: outline approval

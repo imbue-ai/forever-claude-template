@@ -36,7 +36,8 @@ model call (`[ai-script]`) -- and only executor meta-work fits as
 SKILL.md prose. See `.agents/shared/references/spec-summary.md`.
 
 **Principle.** Reliability is the floor; simplicity is the target.
-Default to a single entry point and one flow. Add surface only when a
+Default to a subcommand per cleanly-separable step plus a `run all` that
+chains them (see `spec-summary.md`); add surface beyond that only when a
 specific invariant demands it.
 
 Whether to update-in-place or split a new sibling skill is a decision the

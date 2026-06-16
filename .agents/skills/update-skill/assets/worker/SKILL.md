@@ -45,7 +45,8 @@ model call (`[ai-script]`; see
 headless. Only genuine executor meta-work lands as SKILL.md prose.
 
 **Reliability is the floor; simplicity is the target.** Default to a
-single entry point and one flow. Add surface only when a specific
+subcommand per cleanly-separable step plus a `run all` that chains them
+(see `spec-summary.md`); add surface beyond that only when a specific
 invariant demands it.
 
 Consult `.agents/shared/references/spec-summary.md` for the layout,
