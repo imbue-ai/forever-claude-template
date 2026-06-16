@@ -31,13 +31,10 @@ classify each step:
   deciding "is this result trustworthy," "does this belong in the output."
 
 The identical and structurally-same parts are the skill's deterministic
-substructure. The judgement parts are ALSO part of the skill -- they are
-scripted as `[ai-script]` model calls so the flow runs headless (a script can
-even fetch the transcript and feed it in, so "needs the conversation" is no
-excuse). A step stays `[prose]` only when the skill needs the *user* in the
-loop while it runs -- their live input/approval, or interactive
-follow-along -- per the execution-mode test in
-`.agents/shared/references/spec-summary.md`.
+substructure. The judgement parts are ALSO part of the skill -- scripted as
+`[ai-script]` model calls so the flow runs headless. A step stays `[prose]`
+only when the skill needs the *user* in the loop while it runs, per the
+execution-mode test in `.agents/shared/references/spec-summary.md`.
 
 If much of the re-run would be literally the same work, you have a
 candidate. Diff the original run against the hypothetical re-run; what's
@@ -45,28 +42,16 @@ shared is the skill's process.
 
 ## A skill captures a process, not just a script
 
-A skill is a SKILL.md (process description) plus any supporting scripts,
-references, or assets. The SKILL.md reads like a recipe: "do X, then Y,
-then Z." Any given step is one of three kinds (see
-`.agents/shared/references/spec-summary.md`): `[script]` (deterministic),
-`[ai-script]` (model judgement scripted as an AI call), or `[prose]`
-(executor meta-work the agent using the skill performs).
+A skill is a SKILL.md recipe ("do X, then Y, then Z") plus supporting
+scripts, references, or assets. Each step is `[script]`, `[ai-script]`, or
+`[prose]` (see `.agents/shared/references/spec-summary.md`). Model-judgement
+steps are scripted as `[ai-script]` calls by default, not parked in prose, so
+a process like fetch (`[script]`) -> natural-language filter (`[ai-script]`)
+-> dedupe and format (`[script]`) runs fully headless.
 
-This means model-judgement steps are scripted by default, not parked in
-prose. A process like:
-
-1. Fetch from N sources (`[script]`)
-2. Apply natural-language filters via a model call (`[ai-script]`)
-3. Normalize, dedupe, format (`[script]`)
-
-...is a fully headless skill -- it can be refreshed or scheduled with no
-extra wiring, because step 2 is a scripted model call rather than work the
-executor must do by hand.
-
-Do not require end-to-end *determinism* before crystallizing: model steps
-are scripted as `[ai-script]` calls, and any remaining executor meta-work
-lives in SKILL.md as prose. What matters is whether the *process* is stable
-across runs.
+So do not require end-to-end *determinism* before crystallizing -- what
+matters is whether the *process* is stable across runs, not whether every
+step is deterministic.
 
 ## Reasoning traps
 
@@ -76,11 +61,10 @@ Before you decline, check whether your reasoning matches any of these:
 - **"The data sources change too fast."** Fragility is manageable via `heal-skill` when the skill is
   used often. You can flag to the user if you think this is a serious concern, but it shouldn't by itself be a reason not to crystallize.
 - **"The hard part was judgement."** Setup judgement (which sites, which
-  filters, which approach) is often a one-time cost paid during the
-  first run. The crystallized skill captures the *post-setup* process.
-  Ongoing judgement steps within the process are scripted as
-  `[ai-script]` model calls by default; only executor meta-work stays in
-  SKILL.md as prose.
+  filters, which approach) is often a one-time cost paid during the first
+  run; the crystallized skill captures the *post-setup* process. Ongoing
+  judgement steps are scripted as `[ai-script]` calls, not a reason to
+  decline.
 - **"No sub-process is clean enough."** You don't need the whole turn
   to be crystallizable. A stable inner loop (fetch-dedupe-rank,
   filter-and-diff, lint-and-report) is sufficient. Extract just that.

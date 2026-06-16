@@ -26,9 +26,7 @@ Summary:
 2. **Re-run test**: if the user asked you to do this again with different
    inputs, much of the process would be recognizably the same -- same
    sources, same steps, same criteria, just different data. Model-judgement
-   steps in the middle of a flow are fine; by default they are scripted as
-   `[ai-script]` calls so the flow stays runnable headless, leaving only
-   executor meta-work as SKILL.md prose.
+   steps in the middle of a flow do not disqualify it.
 3. You expect this task (or one like it) to recur, either because the user suggested it might or because it seems like a useful task to repeat.
 
 A skill is a SKILL.md (process recipe) plus scripts for its flow steps --

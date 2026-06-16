@@ -59,24 +59,15 @@ Produce a short outline with:
   hands back to the user).
 - A step-by-step flow of the skill's process. Tag each step as one of the
   three kinds defined in `.agents/shared/references/spec-summary.md`:
-  - `[script]` -- deterministic; lives in `scripts/`.
-  - `[ai-script]` -- model judgement that is a fixed part of the flow;
-    scripted as a model call (see spec-summary's "Scripting a model step"
-    and the `use-ai-integration` skill for picking the path). **This is the
-    default for any model-performed step** -- the
-    re-run test puts a step here, not in prose, whenever the same
-    prompt/criteria run every time with only the data varying.
-  - `[prose]` -- user-in-the-loop work: steps that need the user present
-    while the skill runs (live input/approval, or interactive follow-along).
+  `[script]` (deterministic), `[ai-script]` (model judgement scripted as a
+  model call -- the default for any model step), or `[prose]`
+  (user-in-the-loop work). Use the re-run test: a step whose same
+  prompt/criteria run every time with only the data varying is `[ai-script]`,
+  not `[prose]`.
 - Prose justification: apply the execution-mode test in `spec-summary.md`.
-  Neither needing a model's judgement nor needing the conversation justifies
-  prose -- a script can fetch the transcript and run headless. Only tag
-  `[prose]` when the user must be in the loop while the skill runs: it needs
-  their live input/approval, or they invoke it interactively to follow along
-  and steer. If no user involvement is required, every step is scriptable
-  (`[script]`/`[ai-script]`). Keep any genuine prose at the edges of the flow,
-  not wedged between two scripted sections. The aim is a flow that runs
-  headless so refresh and scheduling work with no extra wiring.
+  Tag `[prose]` only when the user must be in the loop while the skill runs;
+  neither a model's judgement nor needing the conversation justifies it. Keep
+  any genuine prose at the edges, not wedged between two scripted sections.
 - Subcommand justification: for any subcommand or subflow in the planned
   flow, what invariant makes it separate vs. inlined? If no invariant
   demands separation, inline it.

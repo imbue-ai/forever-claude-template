@@ -19,70 +19,50 @@ then Y, then Z." Each step of that process is one of three kinds:
   "Scripting a model step" below). This is the **default for any
   model-performed step** -- a step does not drop to prose just because it
   needs judgement.
-- **`[prose]`** -- *user-in-the-loop work*: steps that need the user present
-  while the skill runs, either for their live input (an approval, a decision,
-  an answer to a clarifying question) or because they invoke the skill
-  interactively to follow along and steer. Written in SKILL.md as
+- **`[prose]`** -- *user-in-the-loop work*: a step that needs the user
+  present while the skill runs (see the test below). Written in SKILL.md as
   instructions the agent using the skill follows.
 
 The point of `[ai-script]` is that the whole flow stays runnable headless:
-when every flow step (deterministic or model-driven) is scripted, the skill
-can be refreshed or scheduled with no additional wiring. Prose is reserved
-for the work that genuinely needs the executor in the loop -- not for any
-step that happens to require a model.
+once every flow step is scripted, the skill can be refreshed or scheduled
+with no extra wiring. `[prose]` is reserved for work that genuinely needs the
+executor in the loop -- never for a step that merely needs a model.
 
 ### The test: `[ai-script]` vs `[prose]`
 
-Two things that feel like reasons for prose are not:
+Two things that feel like reasons for prose are not. **Needing a model's
+judgement** isn't one -- that's exactly what `[ai-script]` is for. **Needing
+the current conversation** isn't one either -- a script can fetch the
+transcript and pass it into the prompt (this skill's own crystallize/update
+workers run headless that way). So a script can assemble its own inputs, and
+the decisive question is not about any single step but about the skill's
+**execution mode**:
 
-- **Needing a model's judgement** is not a reason -- that's exactly what
-  `[ai-script]` is for.
-- **Needing the current conversation** is not a reason -- a script can fetch
-  the transcript (or the relevant slice) and pass it into the prompt. This
-  skill's own crystallize/update workers run that way: they read the
-  transcript programmatically and do their judgement headless.
+> Does this skill need the user *in the loop while it runs* -- for their live
+> input (an approval, a decision, an answer to a clarifying question), or
+> because they invoke it interactively to follow along and steer?
 
-A script can always assemble its own inputs, so almost any step can run
-unattended. The decisive question is about the skill's **execution mode**,
-not any single step:
+- **If no** -- the typical fetch / transform / judge skill, and the vast
+  majority of cases -- every step is scriptable (`[script]` / `[ai-script]`)
+  and the skill has no `[prose]`.
+- **If yes** -- the steps that genuinely need the user are `[prose]`. You
+  must be able to name which kind of involvement each needs; if you can't, it
+  belongs in `[ai-script]`.
 
-> Does this skill need the user *in the loop while it runs* -- either for
-> their live input (an approval, a decision, an answer to a clarifying
-> question), or because they invoke it interactively to follow along and
-> steer?
-
-- **If no** -- the work runs the same whether or not anyone is watching (the
-  typical fetch / transform / judge skill, and the vast majority of cases) --
-  then every step is scriptable (`[script]` / `[ai-script]`). There is no
-  reason to run it interactively, so it has no `[prose]` steps.
-- **If yes** -- the steps that genuinely need the user are `[prose]`. That
-  means user-input or approval gates, and skills the user deliberately drives
-  interactively to watch and steer.
-
-So `[prose]` marks user-in-the-loop work -- not judgement work, and not
-transcript-dependent work. When you tag a step `[prose]`, you must be able to
-say which kind of user involvement it needs; if you can't, it belongs in
-`[ai-script]`.
-
-(Observability is not a counterexample: if the user just wants to *watch* an
-otherwise-automatable skill run, script it and stream its progress/output --
-don't move the logic into prose.)
+(Merely wanting to *watch* an automatable skill run is not a reason for
+prose: script it and stream its output.)
 
 ### Push prose to the edges
 
-When a skill is interactive, the user involvement usually lands at the
-*edges* -- an approval or input choice at the front, a decision about the
-result at the back. So the healthy shape is **prose at the edges, scripted
-steps in the middle**.
-
-A `[prose]` step wedged *between* two scripted sections is the expensive
-case: it splits the pipeline into two halves that can't compose, which is
-exactly what stops the flow from ever running unattended. Only accept
-prose-in-the-middle when the user must genuinely intervene mid-run -- e.g. a
-mandatory sign-off gate before a destructive step, or a human reading
-intermediate output and steering what runs next. If you reach for
-prose-in-the-middle for any other reason, there is almost certainly an
-`[ai-script]` you haven't written yet.
+Interactive involvement usually lands at the *edges* -- an approval or input
+choice up front, a decision about the result at the back -- so the healthy
+shape is **prose at the edges, scripted steps in the middle**. A `[prose]`
+step wedged *between* two scripted sections is the expensive case: it splits
+the pipeline into two halves that can't compose, which is what stops the flow
+from running unattended. Only accept it when the user must genuinely intervene
+mid-run (a mandatory sign-off before a destructive step, a human steering
+what runs next); otherwise there is almost certainly an `[ai-script]` you
+haven't written yet.
 
 A mixed flow of all three kinds is the norm for useful skills.
 
@@ -130,11 +110,10 @@ When you do include `run.py`, keep it as simple as the invariants allow
 -- default to a single entry point and one flow, and only add subcommands
 or subflows when a specific invariant demands the separation.
 
-If the process interleaves deterministic steps with model-judgement steps,
-script *both*: the model-judgement steps become `[ai-script]` calls (below)
-so the whole chain runs end-to-end without the executor in the loop. Only
-break the flow into separate subcommands when a `[prose]` executor step
-genuinely sits between two scripted sections.
+If the process interleaves deterministic and model-judgement steps, script
+*both* (the model steps become `[ai-script]` calls -- see below) so the chain
+runs end-to-end. Only split into subcommands when a `[prose]` step genuinely
+sits between two scripted sections.
 
 ### Scripting a model step (`[ai-script]`)
 
