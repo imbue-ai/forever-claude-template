@@ -279,7 +279,6 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
             request_payload["target"] = target
         request_path = trigger_dir / "request.json"
         result_path = trigger_dir / "result.json"
-        previous_result_mtime = _safe_mtime(result_path)
 
         tmp_path = trigger_dir / "request.json.tmp"
         tmp_path.write_text(json.dumps(request_payload))
@@ -291,27 +290,25 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
             request_path,
         )
 
+        # The request_id is unique per request (a microsecond timestamp for
+        # snapshots, a uuid for cleanups), so result.json carrying our id
+        # unambiguously means the helper serviced *this* request -- we key on that
+        # rather than on a result.json mtime change. The old mtime gate could both
+        # miss a same-mtime rewrite (coarse-resolution filesystems) and accept a
+        # stale result from a prior request whose id happened to be re-read; the
+        # id match is the authoritative, race-free freshness signal.
         deadline = time.monotonic() + self.settings.outer_helper_timeout_seconds
         while True:
-            current_mtime = _safe_mtime(result_path)
-            if current_mtime is not None and current_mtime != previous_result_mtime:
-                parsed = _parse_helper_result(result_path)
-                if parsed is not None and parsed.request_id == request_id:
-                    return parsed
-                # Stale or unparseable result; keep polling.
+            parsed = _parse_helper_result(result_path)
+            if parsed is not None and parsed.request_id == request_id:
+                return parsed
+            # Absent, unparseable, or a result for a different request: keep polling.
             if time.monotonic() >= deadline:
                 raise SnapshotError(
                     f"Timed out after {self.settings.outer_helper_timeout_seconds}s "
                     f"waiting for outer helper result for request_id={request_id}"
                 )
             time.sleep(_HELPER_POLL_INTERVAL_SECONDS)
-
-
-def _safe_mtime(path: Path) -> float | None:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
 
 
 def _parse_helper_result(path: Path) -> _HelperResult | None:
