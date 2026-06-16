@@ -21,11 +21,12 @@ from error_watcher.watcher import (
     choose_recipient,
     compile_error_pattern,
     format_alert,
+    mark_alerted,
     match_lines,
-    new_matches,
     parse_agent_summaries,
     run_one_poll,
     select_messageable_names,
+    unseen_matches,
 )
 
 
@@ -60,37 +61,40 @@ def test_match_lines_naively_matches_benign_substrings() -> None:
     ]
 
 
-def test_new_matches_returns_and_records_on_first_sight() -> None:
+def test_unseen_matches_returns_fresh_lines_without_recording_them() -> None:
     seen: dict[str, set[str]] = {}
-    assert new_matches("svc-web", ["Error: boom"], seen) == ["Error: boom"]
-    assert seen["svc-web"] == {"Error: boom"}
+    # unseen_matches is read-only: it must NOT mark the line as alerted, so a
+    # line is only suppressed once mark_alerted records a delivered alert.
+    assert unseen_matches("svc-web", ["Error: boom"], seen) == ["Error: boom"]
+    assert seen == {}
 
 
-def test_new_matches_suppresses_already_alerted_lines() -> None:
+def test_unseen_matches_suppresses_lines_after_they_are_marked_alerted() -> None:
     seen: dict[str, set[str]] = {}
-    new_matches("svc-web", ["Error: boom"], seen)
+    fresh = unseen_matches("svc-web", ["Error: boom"], seen)
+    mark_alerted({"svc-web": fresh}, seen)
     # The same error still on screen on the next poll must not re-alert.
-    assert new_matches("svc-web", ["Error: boom"], seen) == []
+    assert unseen_matches("svc-web", ["Error: boom"], seen) == []
 
 
-def test_new_matches_returns_only_the_newly_appeared_line() -> None:
+def test_unseen_matches_returns_only_the_newly_appeared_line() -> None:
     seen: dict[str, set[str]] = {}
-    new_matches("svc-web", ["Error: boom"], seen)
-    assert new_matches("svc-web", ["Error: boom", "Exception: later"], seen) == [
+    mark_alerted({"svc-web": ["Error: boom"]}, seen)
+    assert unseen_matches("svc-web", ["Error: boom", "Exception: later"], seen) == [
         "Exception: later"
     ]
 
 
-def test_new_matches_tracks_windows_independently() -> None:
+def test_unseen_matches_tracks_windows_independently() -> None:
     seen: dict[str, set[str]] = {}
-    new_matches("svc-web", ["Error: boom"], seen)
+    mark_alerted({"svc-web": ["Error: boom"]}, seen)
     # The same text in a different window is new for that window.
-    assert new_matches("svc-api", ["Error: boom"], seen) == ["Error: boom"]
+    assert unseen_matches("svc-api", ["Error: boom"], seen) == ["Error: boom"]
 
 
-def test_new_matches_deduplicates_within_a_single_capture() -> None:
+def test_unseen_matches_deduplicates_within_a_single_capture() -> None:
     seen: dict[str, set[str]] = {}
-    assert new_matches("svc-web", ["Error: boom", "Error: boom"], seen) == [
+    assert unseen_matches("svc-web", ["Error: boom", "Error: boom"], seen) == [
         "Error: boom"
     ]
 
@@ -252,6 +256,7 @@ class _FakeCommandRunner(NamedTuple):
     list_stdout: str
     message_sends: list[list[str]]
     failing_windows: frozenset[str] = frozenset()
+    send_fails: bool = False
 
     def __call__(self, command: Sequence[str]) -> CommandResult:
         argv = list(command)
@@ -268,6 +273,8 @@ class _FakeCommandRunner(NamedTuple):
             return CommandResult(0, self.list_stdout, "")
         if argv[:2] == ["mngr", "message"]:
             self.message_sends.append(argv)
+            if self.send_fails:
+                return CommandResult(1, "", "delivery failed")
             return CommandResult(0, "", "")
         return CommandResult(127, "", f"unexpected command: {argv}")
 
@@ -349,6 +356,75 @@ def test_run_one_poll_skips_when_no_messageable_agent() -> None:
     )
     assert run_one_poll(runner, {}, random.Random(0), DEFAULT_ERROR_PATTERN) is None
     assert sends == []
+
+
+def test_run_one_poll_realerts_once_an_agent_becomes_messageable() -> None:
+    # An undelivered alert must not mark the error as seen, so the still-visible
+    # error is alerted on a later poll once a messageable agent exists. Two
+    # runners share `seen` and `sends`; only the messageable set differs.
+    sends: list[list[str]] = []
+    seen: dict[str, set[str]] = {}
+    windows = ("svc-web",)
+    pane_text = {"svc-web": "Exception: boom"}
+    only_stopped = _FakeCommandRunner(
+        session="agent-session",
+        windows=windows,
+        pane_text_by_window=pane_text,
+        list_stdout=_ONLY_STOPPED_AGENT,
+        message_sends=sends,
+    )
+    now_messageable = _FakeCommandRunner(
+        session="agent-session",
+        windows=windows,
+        pane_text_by_window=pane_text,
+        list_stdout=_TWO_MESSAGEABLE_AGENTS,
+        message_sends=sends,
+    )
+    assert (
+        run_one_poll(only_stopped, seen, random.Random(0), DEFAULT_ERROR_PATTERN)
+        is None
+    )
+    assert sends == []
+    # The error is still on screen and an agent is now reachable: it must alert.
+    assert (
+        run_one_poll(now_messageable, seen, random.Random(0), DEFAULT_ERROR_PATTERN)
+        == "agent-api"
+    )
+    assert len(sends) == 1
+    assert "Exception: boom" in sends[0][-1]
+
+
+def test_run_one_poll_realerts_after_a_failed_send() -> None:
+    # A send that fails (mngr message returns non-zero) must not mark the error
+    # as seen, so the next poll retries it rather than dropping it silently.
+    sends: list[list[str]] = []
+    seen: dict[str, set[str]] = {}
+    windows = ("svc-web",)
+    pane_text = {"svc-web": "Exception: boom"}
+    failing = _FakeCommandRunner(
+        session="agent-session",
+        windows=windows,
+        pane_text_by_window=pane_text,
+        list_stdout=_TWO_MESSAGEABLE_AGENTS,
+        message_sends=sends,
+        send_fails=True,
+    )
+    succeeding = _FakeCommandRunner(
+        session="agent-session",
+        windows=windows,
+        pane_text_by_window=pane_text,
+        list_stdout=_TWO_MESSAGEABLE_AGENTS,
+        message_sends=sends,
+    )
+    assert run_one_poll(failing, seen, random.Random(0), DEFAULT_ERROR_PATTERN) is None
+    # The failed send is still recorded as an attempt, but the error is not
+    # marked seen, so the next poll retries and this time succeeds.
+    assert len(sends) == 1
+    assert (
+        run_one_poll(succeeding, seen, random.Random(0), DEFAULT_ERROR_PATTERN)
+        == "agent-api"
+    )
+    assert len(sends) == 2
 
 
 def test_run_one_poll_tolerates_a_window_capture_failure() -> None:

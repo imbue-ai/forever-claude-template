@@ -6,3 +6,8 @@ window to avoid a feedback loop, alerts only on newly-appeared output (a static
 error on screen is reported once), and quietly skips when no agent can currently
 be messaged. The match pattern is overridable via the `ERROR_WATCHER_PATTERN`
 environment variable.
+
+- An error is now recorded as reported only after its alert is actually
+delivered. If no agent can currently be messaged, or the send fails, the error
+is no longer silently dropped: it stays eligible and is re-alerted on a later
+poll once an agent becomes reachable.

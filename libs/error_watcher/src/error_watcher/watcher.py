@@ -79,24 +79,41 @@ def match_lines(text: str, pattern: re.Pattern[str]) -> list[str]:
     return [line for line in text.splitlines() if pattern.search(line)]
 
 
-def new_matches(
-    window: str, current: Sequence[str], seen: dict[str, set[str]]
+def unseen_matches(
+    window: str, current: Sequence[str], seen: Mapping[str, set[str]]
 ) -> list[str]:
-    """Return the matching lines for `window` not already alerted on, recording them as seen.
+    """Return the matching lines for `window` not already alerted on (read-only).
 
     `seen` maps window name -> set of lines already alerted on. A line present
-    in `seen[window]` is suppressed; every other line is returned (once) and
-    added to `seen[window]`, so a static error on screen alerts exactly once
-    (REQ-MATCH-3).
+    in `seen[window]` is suppressed; every other line is returned at most once
+    (duplicates within a single capture collapse to one). This does NOT mutate
+    `seen`: a line is only recorded as alerted once an alert is actually sent
+    (see `mark_alerted`), so an error whose alert could not be delivered is
+    reconsidered on the next poll rather than silently dropped (REQ-MATCH-3).
     """
-    already_alerted = seen.setdefault(window, set())
+    already_alerted = seen.get(window, frozenset())
     fresh_lines: list[str] = []
+    emitted: set[str] = set()
     for line in current:
-        if line in already_alerted:
+        if line in already_alerted or line in emitted:
             continue
-        already_alerted.add(line)
+        emitted.add(line)
         fresh_lines.append(line)
     return fresh_lines
+
+
+def mark_alerted(
+    matches_by_window: Mapping[str, Sequence[str]], seen: dict[str, set[str]]
+) -> None:
+    """Record every line in a just-alerted batch as seen so it is not re-alerted.
+
+    Called only after an alert is actually dispatched, so that an undelivered
+    alert (no messageable agent, enumeration failure, or a failed send) leaves
+    `seen` untouched and the error is retried on a later poll.
+    """
+    for window, lines in matches_by_window.items():
+        already_alerted = seen.setdefault(window, set())
+        already_alerted.update(lines)
 
 
 def _truncate_line(line: str) -> str:
@@ -266,8 +283,10 @@ def _alert_random_agent(
 ) -> str | None:
     """Enumerate messageable agents and send `message` to one chosen at random.
 
-    Returns the chosen recipient, or None when enumeration failed or no agent is
-    messageable (REQ-NOTIFY-4). A failed send is logged, not raised (REQ-SPAWN-4).
+    Returns the recipient only when the message was actually delivered. Returns
+    None when enumeration failed, no agent is messageable (REQ-NOTIFY-4), or the
+    send itself failed -- so the caller does not record the error as alerted and
+    retries it on a later poll. A failed send is logged, not raised (REQ-SPAWN-4).
     """
     list_result = run(build_list_command())
     if list_result.returncode != 0:
@@ -289,8 +308,8 @@ def _alert_random_agent(
         logger.warning(
             "Failed to alert agent {}: {}", recipient, send_result.stderr.strip()
         )
-    else:
-        logger.info("Alerted agent {} about new error output", recipient)
+        return None
+    logger.info("Alerted agent {} about new error output", recipient)
     return recipient
 
 
@@ -317,12 +336,18 @@ def run_one_poll(
         matched_lines = match_lines(capture_window(run, session, window), pattern)
         if not matched_lines:
             continue
-        fresh_lines = new_matches(window, matched_lines, seen)
+        fresh_lines = unseen_matches(window, matched_lines, seen)
         if fresh_lines:
             matches_by_window[window] = fresh_lines
     if not matches_by_window:
         return None
-    return _alert_random_agent(run, format_alert(session, matches_by_window), rng)
+    recipient = _alert_random_agent(run, format_alert(session, matches_by_window), rng)
+    # Only record these lines as alerted once the message was actually
+    # delivered, so an undelivered alert (no messageable agent / failed send)
+    # is retried on a later poll instead of being silently dropped (REQ-MATCH-3).
+    if recipient is not None:
+        mark_alerted(matches_by_window, seen)
+    return recipient
 
 
 def main() -> None:
