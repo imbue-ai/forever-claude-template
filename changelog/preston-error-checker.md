@@ -34,3 +34,7 @@ a valid agent list (for example when one provider failed), the watcher now uses
 that list instead of skipping the alert. Internally, commands that could not run
 at all (missing binary, timeout) are now distinguished from a command that
 genuinely exited with status 1.
+
+- The watcher now also handles `SIGHUP` -- the signal the bootstrap manager
+actually sends when it closes a service window -- so it shuts down cleanly on the
+real stop path, and can be launched via `python -m error_watcher.watcher`.

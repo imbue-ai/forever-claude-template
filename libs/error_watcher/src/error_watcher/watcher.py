@@ -463,6 +463,11 @@ def run_one_poll(
     return recipient
 
 
+def _handle_signal(signum: int, frame: object) -> None:
+    """Exit cleanly on a stop signal so the poll loop terminates (REQ-SPAWN-2)."""
+    sys.exit(0)
+
+
 def main() -> None:
     """Run the poll loop until terminated, alerting on newly-detected errors."""
     logger.info("Starting error watcher (polling every {}s)", POLL_INTERVAL_SECONDS)
@@ -471,12 +476,17 @@ def main() -> None:
     seen: dict[str, set[str]] = {}
     rng = random.Random()
 
-    def _handle_signal(signum: int, frame: object) -> None:
-        sys.exit(0)
-
+    # SIGHUP is the signal the bootstrap manager actually delivers when it stops
+    # a service (via `tmux kill-window`); SIGTERM/SIGINT are handled too so a
+    # manual stop also exits cleanly (REQ-SPAWN-2).
+    signal.signal(signal.SIGHUP, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
     while True:
         run_one_poll(runner, seen, rng, pattern)
         time.sleep(POLL_INTERVAL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()

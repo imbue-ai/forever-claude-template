@@ -7,9 +7,11 @@ of the `list`/`message` subcommand or one of its flags fails here at merge time.
 
 import json
 import random
+import signal
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
+import pytest
 from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from error_watcher.watcher import (
@@ -19,6 +21,7 @@ from error_watcher.watcher import (
     AgentSummary,
     CommandResult,
     _default_command_runner,
+    _handle_signal,
     build_list_command,
     build_message_command,
     choose_recipient,
@@ -342,6 +345,14 @@ def test_default_command_runner_failure_sentinel_is_not_a_real_exit_code() -> No
     # Guards the contract that the sentinel cannot collide with a process exit
     # status (which is always >= 0).
     assert RUNNER_FAILURE_RETURNCODE < 0
+
+
+def test_handle_signal_exits_cleanly() -> None:
+    # The stop-signal handler must exit 0 so the poll loop terminates cleanly
+    # when the bootstrap manager stops the service (REQ-SPAWN-2).
+    with pytest.raises(SystemExit) as exc_info:
+        _handle_signal(signal.SIGHUP, None)
+    assert exc_info.value.code == 0
 
 
 # Two agents that can both receive a message; with random.Random(0) the chosen
