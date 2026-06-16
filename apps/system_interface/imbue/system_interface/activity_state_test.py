@@ -6,9 +6,11 @@ from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
+from imbue.system_interface.activity_state import is_pending_tool_use_stale
 from imbue.system_interface.activity_state import is_transcript_tail_stale
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
+from imbue.system_interface.activity_state import newest_unmatched_tool_use_timestamp
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
 
 
@@ -80,6 +82,57 @@ def test_has_unmatched_tool_use(events: list[dict[str, Any]], expected: bool) ->
 )
 def test_last_event_type(events: list[dict[str, Any]], expected: str | None) -> None:
     assert last_event_type(events) == expected
+
+
+def _assistant_with_tool_calls_at(timestamp: str, *tool_call_ids: str) -> dict[str, Any]:
+    event = _assistant_with_tool_calls(*tool_call_ids)
+    event["timestamp"] = timestamp
+    return event
+
+
+@pytest.mark.parametrize(
+    "events, expected",
+    [
+        pytest.param([], None, id="empty_transcript"),
+        pytest.param(
+            [_assistant_with_tool_calls_at("2026-01-01T00:00:00.000Z", "call_a"), _tool_result("call_a")],
+            None,
+            id="all_matched",
+        ),
+        pytest.param(
+            [_assistant_with_tool_calls_at("2026-01-01T00:00:00.000Z", "call_a")],
+            "2026-01-01T00:00:00.000Z",
+            id="single_unmatched",
+        ),
+        # The dangling-delegation shape: an old unmatched tool_use followed by a
+        # newer, fully matched turn. The newest *unmatched* message is the old one.
+        pytest.param(
+            [
+                _assistant_with_tool_calls_at("2026-01-01T00:00:00.000Z", "call_a"),
+                _assistant_with_tool_calls_at("2026-01-02T00:00:00.000Z", "call_b"),
+                _tool_result("call_b"),
+            ],
+            "2026-01-01T00:00:00.000Z",
+            id="newest_unmatched_is_older_message",
+        ),
+        # Two unmatched messages: the newest one governs.
+        pytest.param(
+            [
+                _assistant_with_tool_calls_at("2026-01-01T00:00:00.000Z", "call_a"),
+                _assistant_with_tool_calls_at("2026-01-02T00:00:00.000Z", "call_b"),
+            ],
+            "2026-01-02T00:00:00.000Z",
+            id="newest_of_two_unmatched",
+        ),
+        pytest.param(
+            [_assistant_with_tool_calls("call_a")],
+            None,
+            id="unmatched_without_timestamp",
+        ),
+    ],
+)
+def test_newest_unmatched_tool_use_timestamp(events: list[dict[str, Any]], expected: str | None) -> None:
+    assert newest_unmatched_tool_use_timestamp(events) == expected
 
 
 @pytest.mark.parametrize(
@@ -231,5 +284,76 @@ def test_derive_activity_state_fresh_tail_still_reports_working() -> None:
         tail_event_type="assistant_message",
         tail_event_at=300.0,
         process_started_at=200.0,
+        pending_tool_use_at=300.0,
+    )
+    assert state == ActivityState.TOOL_RUNNING
+
+
+@pytest.mark.parametrize(
+    "pending_tool_use_at, process_started_at, expected",
+    [
+        pytest.param(100.0, 200.0, True, id="pending_before_process_start_is_stale"),
+        pytest.param(200.0, 100.0, False, id="pending_after_process_start_is_fresh"),
+        pytest.param(100.0, 100.0, False, id="pending_equal_to_process_start_is_fresh"),
+        pytest.param(None, 200.0, False, id="missing_pending_is_not_stale"),
+        pytest.param(100.0, None, False, id="missing_marker_is_not_stale"),
+    ],
+)
+def test_is_pending_tool_use_stale(
+    pending_tool_use_at: float | None, process_started_at: float | None, expected: bool
+) -> None:
+    assert (
+        is_pending_tool_use_stale(pending_tool_use_at=pending_tool_use_at, process_started_at=process_started_at)
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "tail_event_type, expected",
+    [
+        pytest.param("user_message", ActivityState.THINKING, id="fresh_user_tail_thinks"),
+        pytest.param("assistant_message", ActivityState.IDLE, id="fresh_assistant_tail_is_idle"),
+    ],
+)
+def test_derive_activity_state_stale_pending_tool_use_defers_to_tail(
+    tail_event_type: str, expected: ActivityState
+) -> None:
+    """An unmatched tool_use issued before the current process must not pin TOOL_RUNNING.
+
+    This is the stop-button case: the user interrupts a running sub-agent, the
+    restart abandons the Agent tool_use (no tool_result is ever written), and the
+    user then sends a new message. The fresh tail postdates the marker so the
+    stale-tail guard no longer applies; without the pending fence the dangling
+    tool_use would read as TOOL_RUNNING for the rest of the transcript's life.
+    """
+    state = derive_activity_state(
+        is_agent_running=True,
+        has_pending_tool_use=True,
+        tail_event_type=tail_event_type,
+        tail_event_at=300.0,
+        process_started_at=200.0,
+        pending_tool_use_at=100.0,
+    )
+    assert state == expected
+
+
+@pytest.mark.parametrize(
+    "pending_tool_use_at, process_started_at",
+    [
+        pytest.param(None, 200.0, id="pending_without_timestamp"),
+        pytest.param(100.0, None, id="no_marker"),
+    ],
+)
+def test_derive_activity_state_unfenceable_pending_tool_use_still_runs(
+    pending_tool_use_at: float | None, process_started_at: float | None
+) -> None:
+    """Without positive evidence of staleness the pending-tool signal stands."""
+    state = derive_activity_state(
+        is_agent_running=True,
+        has_pending_tool_use=True,
+        tail_event_type="assistant_message",
+        tail_event_at=300.0,
+        process_started_at=process_started_at,
+        pending_tool_use_at=pending_tool_use_at,
     )
     assert state == ActivityState.TOOL_RUNNING

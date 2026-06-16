@@ -472,8 +472,9 @@ async def _interrupt_agent_endpoint(agent_id: str, request: Request) -> JSONResp
 
     # The restart abandons the session transcript mid-turn, so the
     # transcript-derived activity state would stay pinned at THINKING /
-    # TOOL_RUNNING until the user sends another message. Reset it to IDLE
-    # now so the activity indicator clears immediately after the stop.
+    # TOOL_RUNNING until the claude_process_started marker (touched by the
+    # restart) fences the abandoned turn out. Reset it to IDLE now so the
+    # activity indicator clears immediately after the stop.
     agent_manager: AgentManager = request.app.state.agent_manager
     agent_manager.reset_activity_state(agent_id)
 

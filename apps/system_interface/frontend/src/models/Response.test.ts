@@ -138,6 +138,24 @@ describe("appendEvents subagent_metadata merge", () => {
 
     expect(getEventsForAgent(agentId)).toHaveLength(2);
   });
+
+  it("merges a late is_interrupted mark onto an already-stored assistant message", () => {
+    const agentId = freshAgent();
+
+    // Parent Agent tool_call streamed while the delegation was running.
+    appendEvents(agentId, [assistantWithAgentToolCall("ev-1", "toolu_1")]);
+    expect(toolCallsOf(getEventsForAgent(agentId)[0])[0].is_interrupted).toBeUndefined();
+
+    // The stop kills the delegation before linkage ever lands; the backend
+    // re-broadcasts the same event marked interrupted.
+    const interrupted = assistantWithAgentToolCall("ev-1", "toolu_1");
+    interrupted.tool_calls[0].is_interrupted = true;
+    appendEvents(agentId, [interrupted]);
+
+    const after = getEventsForAgent(agentId);
+    expect(after).toHaveLength(1);
+    expect(toolCallsOf(after[0])[0].is_interrupted).toBe(true);
+  });
 });
 
 describe("dedup", () => {

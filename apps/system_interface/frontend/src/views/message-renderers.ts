@@ -189,6 +189,15 @@ export function countSubagentCards(toolCalls: ToolCall[] | undefined): number {
   return count;
 }
 
+export function countInterruptedSubagentCards(toolCalls: ToolCall[] | undefined): number {
+  if (!toolCalls) return 0;
+  let count = 0;
+  for (const tc of toolCalls) {
+    if (tc.is_interrupted) count++;
+  }
+  return count;
+}
+
 export function StableAssistantMessage(): m.Component<{
   event: AssistantMessageEvent;
   toolResults: Map<string, ToolResultEvent>;
@@ -197,19 +206,23 @@ export function StableAssistantMessage(): m.Component<{
   let renderedEventId: string | null = null;
   let renderedToolResultCount = 0;
   let renderedSubagentCardCount = 0;
+  let renderedInterruptedCardCount = 0;
   return {
     onbeforeupdate(vnode) {
       const { event, toolResults } = vnode.attrs;
       const currentToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
-      // A subagent card can appear after the message was first rendered: the
+      // A subagent card can change after the message was first rendered: the
       // backend re-broadcasts the parent with subagent_metadata once a running
-      // subagent's linkage lands. Repaint when that count grows so the plain
-      // tool-call block upgrades to the rich card.
+      // subagent's linkage lands, or with is_interrupted once a stop kills a
+      // delegation that never linked. Repaint when either count grows so the
+      // card upgrades (rich link / "Stopped") instead of staying "Running…".
       const currentSubagentCardCount = countSubagentCards(event.tool_calls);
+      const currentInterruptedCardCount = countInterruptedSubagentCards(event.tool_calls);
       return (
         event.event_id !== renderedEventId ||
         currentToolResultCount !== renderedToolResultCount ||
-        currentSubagentCardCount !== renderedSubagentCardCount
+        currentSubagentCardCount !== renderedSubagentCardCount ||
+        currentInterruptedCardCount !== renderedInterruptedCardCount
       );
     },
     view(vnode) {
@@ -219,6 +232,7 @@ export function StableAssistantMessage(): m.Component<{
       renderedEventId = event.event_id;
       renderedToolResultCount = countResolvedToolResults(event.tool_calls, toolResults);
       renderedSubagentCardCount = countSubagentCards(event.tool_calls);
+      renderedInterruptedCardCount = countInterruptedSubagentCards(event.tool_calls);
 
       return m("div", renderAssistantMessageChildren(event, toolResults, agentId));
     },
@@ -241,7 +255,21 @@ export function renderAssistantMessage(
   );
 }
 
-export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode {
+/**
+ * Pick the non-clickable status label for a subagent card with no session to
+ * open. "Running…" only while the delegation can actually still be running: a
+ * tool_result (the delegation ended -- finished without a recoverable
+ * transcript, was denied, or errored) or the backend's is_interrupted mark
+ * (the issuing Claude process was killed, e.g. by the stop button, before any
+ * linkage or result could land) are both terminal.
+ */
+function subagentCardStatusLabel(toolCall: ToolCall, result: ToolResultEvent | null): string {
+  if (result !== null && !result.is_error) return "Finished";
+  if (result !== null || toolCall.is_interrupted) return "Stopped";
+  return "Running…";
+}
+
+export function renderSubagentCard(toolCall: ToolCall, agentId: string, result: ToolResultEvent | null): m.Vnode {
   const metadata = toolCall.subagent_metadata;
   // Description and agent type come from the tool call itself, so the card renders fully
   // even before the subagent session is linked; fall back to metadata if the tool input
@@ -256,7 +284,7 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode
       agentType ? m("span", { class: "subagent-card-type-badge" }, agentType) : null,
     ]),
     // The click-through needs the subagent session_id, which only arrives once the call is
-    // linked. Until then show a non-clickable "running" state so the card is still rich.
+    // linked. Until then show a non-clickable status so the card is still rich.
     sessionId
       ? m(
           "a",
@@ -271,7 +299,11 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string): m.Vnode
           },
           "View conversation",
         )
-      : m("span", { class: "subagent-card-link subagent-card-link--pending" }, "Running…"),
+      : m(
+          "span",
+          { class: "subagent-card-link subagent-card-link--pending" },
+          subagentCardStatusLabel(toolCall, result),
+        ),
   ]);
 }
 
@@ -420,14 +452,15 @@ export function renderAssistantMessageChildren(
     children.push(m(MarkdownContent, { content: textContent }));
   }
   for (const toolCall of toolCalls) {
+    const result = toolResults.get(toolCall.tool_call_id) ?? null;
     // Render the rich card as soon as we have the Agent call's description (from the tool
     // input), even before its subagent session is linked; the card shows a non-clickable
-    // "Running…" state until subagent_metadata.session_id arrives.
+    // status until subagent_metadata.session_id arrives (or the delegation terminates
+    // without one -- see subagentCardStatusLabel).
     if (toolCall.tool_name === "Agent" && (toolCall.subagent_metadata || toolCall.description)) {
-      children.push(renderSubagentCard(toolCall, agentId));
+      children.push(renderSubagentCard(toolCall, agentId, result));
       continue;
     }
-    const result = toolResults.get(toolCall.tool_call_id) ?? null;
     // For a successful permission request, render the button as a footer inside
     // the tool block so the affordance is visually bound to the request. The
     // block stays in place (the footer is appended within it once the result

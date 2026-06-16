@@ -1203,6 +1203,67 @@ def test_stale_transcript_tail_after_restart_shows_idle(agent_manager: AgentMana
         assert agent_manager._agents["agent-1"].activity_state == ActivityState.IDLE.value
 
 
+def test_interrupted_delegation_does_not_pin_tool_running(agent_manager: AgentManager, tmp_path: Path) -> None:
+    """An unmatched tool_use abandoned by an interrupt must not pin TOOL_RUNNING.
+
+    Reproduces the stop-button-during-sub-agent case: the Agent tool_use never
+    gets a tool_result (the restart kills Claude and nothing closes the call,
+    not even a later resume), mngr touches ``claude_process_started`` on the
+    restart, and the user then sends a new message. The fresh tail postdates
+    the marker so the stale-tail guard no longer applies; the dangling
+    tool_use predates the marker so it must not read as a running tool. Only
+    the fresh tail drives the state: THINKING after the user message, IDLE
+    once the reply lands, TOOL_RUNNING only for a tool the new turn issues.
+    """
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+
+    # The delegation turn abandoned by the stop: an Agent tool_use with no result.
+    abandoned: list[dict[str, Any]] = [
+        {
+            "type": "assistant_message",
+            "tool_calls": [{"tool_call_id": "call_agent", "tool_name": "Agent"}],
+            "timestamp": "2020-01-01T00:00:00.000Z",
+        }
+    ]
+    agent_manager.update_session_events("agent-1", abandoned)
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.TOOL_RUNNING
+
+    # The interrupt restarts Claude; mngr touches the marker ("now", after 2020).
+    (state_dir / "claude_process_started").touch()
+
+    # The user sends a new message (timestamped after the marker).
+    after_user = abandoned + [{"type": "user_message", "content": "go", "timestamp": "2999-01-01T00:00:00.000Z"}]
+    agent_manager.update_session_events("agent-1", after_user)
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
+
+    # The new turn runs a tool of its own: that fresh pending tool_use wins.
+    after_new_tool = after_user + [
+        {
+            "type": "assistant_message",
+            "tool_calls": [{"tool_call_id": "call_new", "tool_name": "Bash"}],
+            "timestamp": "2999-01-01T00:00:01.000Z",
+        }
+    ]
+    agent_manager.update_session_events("agent-1", after_new_tool)
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.TOOL_RUNNING
+
+    # The turn finishes cleanly: back to IDLE even though the 2020 tool_use is
+    # still unmatched in the transcript.
+    finished = after_new_tool + [
+        {"type": "tool_result", "tool_call_id": "call_new", "timestamp": "2999-01-01T00:00:02.000Z"},
+        {"type": "assistant_message", "tool_calls": [], "timestamp": "2999-01-01T00:00:03.000Z"},
+    ]
+    agent_manager.update_session_events("agent-1", finished)
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+
+
 def test_stop_activity_tracking_clears_caches(agent_manager: AgentManager, tmp_path: Path) -> None:
     state_dir = tmp_path / "agents" / "agent-1"
     state_dir.mkdir(parents=True)

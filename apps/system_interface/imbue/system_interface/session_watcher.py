@@ -75,6 +75,8 @@ from typing import Callable
 from loguru import logger as _loguru_logger
 from watchdog.observers import Observer
 
+from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
+from imbue.system_interface.activity_state import read_process_started_at
 from imbue.system_interface.session_parser import parse_session_lines
 from imbue.system_interface.watcher_common import POLL_INTERVAL_SECONDS
 from imbue.system_interface.watcher_common import WakeOnChangeHandler
@@ -753,12 +755,22 @@ class AgentSessionWatcher:
            Claude Code versions whose meta.json predates `toolUseId`, or whose
            subagent files are no longer on disk.
 
+        An Agent tool_call that has NO linkage from either source and was issued
+        before the current Claude process started (the ``claude_process_started``
+        marker mtime) is annotated ``is_interrupted``: the process that issued it
+        is dead and no tool_result will ever arrive, so the delegation cannot
+        still be running. This is the stop-button-kills-the-delegation case --
+        without the mark, the card would read "Running..." forever. Linked calls
+        are never marked: their transcript exists, so the card already has a
+        terminal state to show.
+
         Accumulating tool_result linkage mutates shared maps, and the metadata
         lookups read shared maps, so the whole body runs under ``_lock``. The
         ``events`` list and its dicts are not handed to ``on_events`` from here,
         so holding the lock across the in-memory enrichment cannot deadlock on
         the fan-out.
         """
+        process_started_at = read_process_started_at(self._agent_state_dir)
         with self._lock:
             subagent_by_tool_call: dict[str, str] = {}
 
@@ -790,6 +802,12 @@ class AgentSessionWatcher:
                         continue
                     sub_id = subagent_by_tool_call.get(tc["tool_call_id"])
                     if not sub_id:
+                        # Never linked: mark it interrupted if its issuing process
+                        # is dead (see docstring). Only on positive evidence --
+                        # missing marker or timestamp leaves the call "running".
+                        event_at = parse_iso_timestamp_to_epoch(event.get("timestamp"))
+                        if event_at is not None and process_started_at is not None and event_at < process_started_at:
+                            tc["is_interrupted"] = True
                         continue
                     # The agentId in tool results is bare (e.g. "af25b729465418580")
                     # but session files are named "agent-af25b729465418580.jsonl",
@@ -1039,7 +1057,7 @@ class AgentSessionWatcher:
             agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
             if not agent_tool_calls:
                 continue
-            if self._is_fully_linked(event):
+            if self._is_fully_resolved(event):
                 continue
             message_uuid = event.get("message_uuid", "")
             if message_uuid:
@@ -1047,39 +1065,45 @@ class AgentSessionWatcher:
                     self._unlinked_agent_parent_events[message_uuid] = event
 
     def _rebroadcast_relinked_parents(self) -> None:
-        """Re-emit cached parent events that gained subagent links since broadcast.
+        """Re-emit cached parent events whose Agent tool_calls changed state since broadcast.
 
         A subagent's linkage can appear after the parent Agent tool_call was already
         streamed: the subagent's meta.json (with toolUseId) shows up a cycle later, or its
         tool_result lands later still. Re-enriching the cached parent and re-broadcasting it
         once it links lets the frontend upgrade the plain tool-call block into the rich card
-        without a page refresh. Parents whose Agent tool_calls are all linked are dropped
-        from the cache.
+        without a page refresh. The same applies to the interrupted mark: when a stop kills
+        the delegation before linkage ever lands, the re-broadcast flips the card out of its
+        "Running..." state live. Parents whose Agent tool_calls are all resolved (linked or
+        interrupted -- both terminal) are dropped from the cache.
 
         The cache snapshot and removals run under ``_lock`` (they mutate shared state), but
-        ``_enrich_subagent_metadata`` / ``_is_fully_linked`` take the lock themselves and the
+        ``_enrich_subagent_metadata`` / ``_is_fully_resolved`` take the lock themselves and the
         ``on_events`` fan-out runs unlocked, so the lock is never held across either.
         """
         with self._lock:
             cached = list(self._unlinked_agent_parent_events.items())
 
-        relinked: list[dict[str, Any]] = []
-        fully_linked_uuids: list[str] = []
+        changed: list[dict[str, Any]] = []
+        resolved_uuids: list[str] = []
         for message_uuid, event in cached:
-            before = self._linked_agent_tool_call_ids(event)
+            before_linked = self._linked_agent_tool_call_ids(event)
+            before_interrupted = self._interrupted_agent_tool_call_ids(event)
             self._enrich_subagent_metadata([event])
-            if self._linked_agent_tool_call_ids(event) != before:
-                relinked.append(event)
-            if self._is_fully_linked(event):
-                fully_linked_uuids.append(message_uuid)
+            if (
+                self._linked_agent_tool_call_ids(event) != before_linked
+                or self._interrupted_agent_tool_call_ids(event) != before_interrupted
+            ):
+                changed.append(event)
+            if self._is_fully_resolved(event):
+                resolved_uuids.append(message_uuid)
 
-        if fully_linked_uuids:
+        if resolved_uuids:
             with self._lock:
-                for message_uuid in fully_linked_uuids:
+                for message_uuid in resolved_uuids:
                     self._unlinked_agent_parent_events.pop(message_uuid, None)
 
-        if relinked:
-            self._on_events(self._agent_id, relinked)
+        if changed:
+            self._on_events(self._agent_id, changed)
 
     @staticmethod
     def _linked_agent_tool_call_ids(event: dict[str, Any]) -> frozenset[str]:
@@ -1090,15 +1114,27 @@ class AgentSessionWatcher:
             if tc.get("tool_name") == "Agent" and "subagent_metadata" in tc
         )
 
-    def _is_fully_linked(self, event: dict[str, Any]) -> bool:
-        """True if every Agent tool_call in ``event`` is linked to a subagent.
+    @staticmethod
+    def _interrupted_agent_tool_call_ids(event: dict[str, Any]) -> frozenset[str]:
+        """tool_call_ids of Agent tool_calls in ``event`` already marked interrupted."""
+        return frozenset(
+            tc.get("tool_call_id", "")
+            for tc in event.get("tool_calls", [])
+            if tc.get("tool_name") == "Agent" and tc.get("is_interrupted")
+        )
+
+    def _is_fully_resolved(self, event: dict[str, Any]) -> bool:
+        """True if every Agent tool_call in ``event`` is linked to a subagent or interrupted.
 
         Linkage is resolved by toolUseId (meta.json) or tool_result agentId; both are read
         from disk. A tool_call counts as linked once it appears in either source's map, even
         if no metadata could be attached (e.g. the subagent's files were cleaned up), so such
-        a parent is not retried forever.
+        a parent is not retried forever. An interrupted mark is equally terminal: the issuing
+        process is dead, so linkage can no longer arrive.
         """
         with self._lock:
             linked = set(self._subagent_tool_use_id.values()) | set(self._subagent_id_by_tool_call.keys())
         agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
-        return bool(agent_tool_calls) and all(tc.get("tool_call_id") in linked for tc in agent_tool_calls)
+        return bool(agent_tool_calls) and all(
+            tc.get("tool_call_id") in linked or tc.get("is_interrupted") for tc in agent_tool_calls
+        )

@@ -20,10 +20,13 @@ export interface ToolCall {
   // For Agent tool calls: the description and subagent_type from the tool input, present
   // as soon as the call appears so the rich card can render before the subagent session is
   // linked. subagent_metadata (with the session_id for the click-through) is filled in once
-  // the linkage is resolved.
+  // the linkage is resolved. is_interrupted marks a delegation whose Claude process was
+  // killed (stop button) before any linkage or tool_result could land -- terminal, so the
+  // card must not show "Running..." for it.
   description?: string;
   subagent_type?: string;
   subagent_metadata?: SubagentMetadata;
+  is_interrupted?: boolean;
 }
 
 /**
@@ -236,7 +239,7 @@ class TranscriptStore {
             this.#byId.set(event.event_id, event);
             added = true;
           }
-        } else if (mergeLateSubagentMetadata(prior, event)) {
+        } else if (mergeLateSubagentState(prior, event)) {
           merged = true;
         }
       }
@@ -403,19 +406,21 @@ export function getLastEventId(agentId: string): string | null {
 }
 
 /**
- * Merge late-arriving subagent_metadata from a re-broadcast assistant message
- * onto an already-stored one.
+ * Merge late-arriving subagent state (subagent_metadata / is_interrupted) from
+ * a re-broadcast assistant message onto an already-stored one.
  *
  * A running subagent's parent Agent tool_call is streamed before the subagent's
  * session linkage is known, so it first arrives with no subagent_metadata. The
  * backend re-broadcasts the same assistant_message (same event_id) once linkage
- * lands; without this merge appendEvents would discard the re-broadcast as a
- * duplicate and the plain tool-call block would never upgrade to the rich card.
+ * lands -- or once the delegation is marked interrupted (stopped before linkage
+ * could ever land); without this merge appendEvents would discard the
+ * re-broadcast as a duplicate and the card would never leave its "Running..."
+ * state.
  *
  * Mutates `prior.tool_calls` in place (matched by tool_call_id) and returns
  * whether anything changed.
  */
-function mergeLateSubagentMetadata(prior: TranscriptEvent, incoming: TranscriptEvent): boolean {
+function mergeLateSubagentState(prior: TranscriptEvent, incoming: TranscriptEvent): boolean {
   if (prior.type !== "assistant_message" || incoming.type !== "assistant_message") {
     return false;
   }
@@ -425,12 +430,13 @@ function mergeLateSubagentMetadata(prior: TranscriptEvent, incoming: TranscriptE
   }
   let changed = false;
   for (const tc of prior.tool_calls ?? []) {
-    if (tc.subagent_metadata !== undefined) {
-      continue;
-    }
     const incomingTc = incomingByCallId.get(tc.tool_call_id);
-    if (incomingTc?.subagent_metadata !== undefined) {
+    if (tc.subagent_metadata === undefined && incomingTc?.subagent_metadata !== undefined) {
       tc.subagent_metadata = incomingTc.subagent_metadata;
+      changed = true;
+    }
+    if (!tc.is_interrupted && incomingTc?.is_interrupted) {
+      tc.is_interrupted = true;
       changed = true;
     }
   }

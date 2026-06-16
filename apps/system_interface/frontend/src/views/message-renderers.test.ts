@@ -180,15 +180,32 @@ function allText(node: unknown): string {
 }
 
 describe("renderSubagentCard", () => {
-  it("renders a rich card from the tool call alone, with a non-clickable pending state", () => {
-    const toolCall: ToolCall = {
+  function agentToolCall(overrides: Partial<ToolCall> = {}): ToolCall {
+    return {
       tool_call_id: "t1",
       tool_name: "Agent",
       input_preview: "{}",
       description: "explore foo",
       subagent_type: "Explore",
+      ...overrides,
     };
-    const vnode = renderSubagentCard(toolCall, "agent-1");
+  }
+
+  function agentResult(isError: boolean): ToolResultEvent {
+    return {
+      timestamp: "2026-01-01T00:00:09Z",
+      type: "tool_result",
+      event_id: "evt-agent-result",
+      source: "test",
+      tool_call_id: "t1",
+      tool_name: "Agent",
+      output: isError ? "The user doesn't want to proceed" : "done",
+      is_error: isError,
+    };
+  }
+
+  it("renders a rich card from the tool call alone, with a non-clickable pending state", () => {
+    const vnode = renderSubagentCard(agentToolCall(), "agent-1", null);
     const text = allText(vnode);
 
     expect(text).toContain("explore foo");
@@ -199,15 +216,10 @@ describe("renderSubagentCard", () => {
   });
 
   it("renders a clickable conversation link once the subagent session is linked", () => {
-    const toolCall: ToolCall = {
-      tool_call_id: "t1",
-      tool_name: "Agent",
-      input_preview: "{}",
-      description: "explore foo",
-      subagent_type: "Explore",
+    const toolCall = agentToolCall({
       subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
-    };
-    const vnode = renderSubagentCard(toolCall, "agent-1");
+    });
+    const vnode = renderSubagentCard(toolCall, "agent-1", null);
     const text = allText(vnode);
 
     expect(text).toContain("View conversation");
@@ -221,9 +233,46 @@ describe("renderSubagentCard", () => {
       input_preview: "{}",
       subagent_metadata: { agent_type: "Explore", description: "from metadata", session_id: "agent-sub1" },
     };
-    const text = allText(renderSubagentCard(toolCall, "agent-1"));
+    const text = allText(renderSubagentCard(toolCall, "agent-1", null));
     expect(text).toContain("from metadata");
     expect(text).toContain("View conversation");
+  });
+
+  it("shows Stopped instead of Running for an interrupted, never-linked delegation", () => {
+    // The stop button killed Claude before the subagent's linkage could land;
+    // the backend marks the call is_interrupted. The card must not claim the
+    // delegation is still running.
+    const text = allText(renderSubagentCard(agentToolCall({ is_interrupted: true }), "agent-1", null));
+    expect(text).toContain("Stopped");
+    expect(text).not.toContain("Running");
+    expect(text).not.toContain("View conversation");
+  });
+
+  it("shows Stopped for an unlinked delegation whose tool_result is an error", () => {
+    // A denied or errored delegation has a tool_result but never links to a
+    // subagent session -- it is over, not running.
+    const text = allText(renderSubagentCard(agentToolCall(), "agent-1", agentResult(true)));
+    expect(text).toContain("Stopped");
+    expect(text).not.toContain("Running");
+  });
+
+  it("shows Finished for an unlinked delegation whose tool_result succeeded", () => {
+    // Completed, but the subagent's transcript is not available to link to
+    // (e.g. its session files were cleaned up).
+    const text = allText(renderSubagentCard(agentToolCall(), "agent-1", agentResult(false)));
+    expect(text).toContain("Finished");
+    expect(text).not.toContain("Running");
+  });
+
+  it("prefers the conversation link over the terminal labels when linked", () => {
+    const toolCall = agentToolCall({
+      is_interrupted: true,
+      subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
+    });
+    const text = allText(renderSubagentCard(toolCall, "agent-1", agentResult(false)));
+    expect(text).toContain("View conversation");
+    expect(text).not.toContain("Stopped");
+    expect(text).not.toContain("Finished");
   });
 });
 

@@ -943,6 +943,174 @@ def test_tool_result_in_later_poll_relinks_cached_parent(tmp_path: Path) -> None
     assert relinked_tc["subagent_metadata"]["description"] == "explore tr"
 
 
+def test_interrupted_unlinked_delegation_is_marked_on_read(tmp_path: Path) -> None:
+    """A never-linked Agent tool_call from before the current Claude process is
+    marked interrupted on the read path.
+
+    The stop button kills Claude before the subagent's meta.json was discovered
+    (and no tool_result will ever land), so linkage never arrives. Once mngr
+    touches ``claude_process_started`` on the restart, the dangling call cannot
+    still be running and must stop reading as "Running..." forever.
+    """
+    parent_events: list[dict[str, Any]] = [
+        _make_agent_tool_use_assistant(
+            uuid="assistant-uuid-dead",
+            timestamp="2026-01-01T00:00:01Z",
+            tool_use_id="toolu_dead",
+            description="killed sub",
+        ),
+    ]
+    agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, parent_events)
+    # mngr touches the marker on the restart; its mtime ("now") postdates the event.
+    (agent_state_dir / "claude_process_started").touch()
+
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: None,
+    )
+
+    events = watcher.get_all_events()
+    assistant = next(e for e in events if e["type"] == "assistant_message")
+    agent_tc = next(tc for tc in assistant["tool_calls"] if tc["tool_name"] == "Agent")
+    assert agent_tc.get("is_interrupted") is True
+    assert "subagent_metadata" not in agent_tc
+
+
+def test_unlinked_delegation_not_marked_without_marker_or_when_fresh(tmp_path: Path) -> None:
+    """No interrupted mark without positive evidence: missing marker, or a call
+    issued after the current process started (a live delegation whose linkage
+    simply hasn't landed yet)."""
+    parent_events: list[dict[str, Any]] = [
+        _make_agent_tool_use_assistant(
+            uuid="assistant-uuid-live",
+            timestamp="2999-01-01T00:00:01Z",
+            tool_use_id="toolu_live",
+            description="live sub",
+        ),
+    ]
+    agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, parent_events)
+
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: None,
+    )
+
+    # No marker at all: the signal stands as "running".
+    events = watcher.get_all_events()
+    assistant = next(e for e in events if e["type"] == "assistant_message")
+    agent_tc = next(tc for tc in assistant["tool_calls"] if tc["tool_name"] == "Agent")
+    assert "is_interrupted" not in agent_tc
+
+    # Marker present but the call postdates it (2999 > now): still running.
+    (agent_state_dir / "claude_process_started").touch()
+    events = watcher.get_all_events()
+    assistant = next(e for e in events if e["type"] == "assistant_message")
+    agent_tc = next(tc for tc in assistant["tool_calls"] if tc["tool_name"] == "Agent")
+    assert "is_interrupted" not in agent_tc
+
+
+def test_linked_delegation_is_not_marked_interrupted(tmp_path: Path) -> None:
+    """A linked delegation keeps its rich card even when it predates the marker:
+    the transcript exists, so "View conversation" is already a terminal state."""
+    parent_events: list[dict[str, Any]] = [
+        _make_agent_tool_use_assistant(
+            uuid="assistant-uuid-linkdead",
+            timestamp="2026-01-01T00:00:01Z",
+            tool_use_id="toolu_linkdead",
+            description="linked sub",
+        ),
+    ]
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, parent_events)
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+    _write_subagent_session(
+        parent_session_file,
+        agent_id="linkdeadsub",
+        tool_use_id="toolu_linkdead",
+        first_timestamp="2026-01-01T00:00:02Z",
+        description="linked sub",
+    )
+    (agent_state_dir / "claude_process_started").touch()
+
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: None,
+    )
+
+    events = watcher.get_all_events()
+    assistant = next(e for e in events if e["type"] == "assistant_message")
+    agent_tc = next(tc for tc in assistant["tool_calls"] if tc["tool_name"] == "Agent")
+    assert "subagent_metadata" in agent_tc
+    assert "is_interrupted" not in agent_tc
+
+
+def test_interrupt_rebroadcasts_cached_unlinked_parent(tmp_path: Path) -> None:
+    """A live-streamed unlinked parent upgrades to the interrupted state without
+    a page refresh, and the cache stops retrying it afterwards.
+
+    Sequence: the parent Agent tool_call is broadcast while running (no linkage
+    yet), the user clicks stop (Claude is killed before linkage ever lands, and
+    mngr touches ``claude_process_started`` on the restart), and the next
+    rebroadcast cycle re-emits the parent marked interrupted -- terminal, so
+    later cycles leave it alone.
+    """
+    parent_assistant_uuid = "assistant-uuid-stopped"
+    tool_use_id = "toolu_stopped"
+    parent_event = _make_agent_tool_use_assistant(
+        uuid=parent_assistant_uuid,
+        timestamp="2026-01-01T00:00:01Z",
+        tool_use_id=tool_use_id,
+        description="stopped sub",
+    )
+
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+
+    watcher._discover_sessions()
+    watcher._prime_caches()
+
+    # The delegation starts: parent line lands, no subagent linkage yet.
+    with open(parent_session_file, "a") as f:
+        f.write(json.dumps(parent_event) + "\n")
+    watcher._poll_for_changes()
+    watcher._rebroadcast_relinked_parents()
+    broadcast_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert broadcast_tc is not None
+    assert "is_interrupted" not in broadcast_tc, "still running before the stop"
+
+    emissions_before = len(collected)
+
+    # The stop: Claude is killed and restarted; mngr touches the marker.
+    (agent_state_dir / "claude_process_started").touch()
+
+    watcher._discover_sessions()
+    watcher._rebroadcast_relinked_parents()
+
+    assert len(collected) == emissions_before + 1, "parent should be re-broadcast once marked interrupted"
+    stopped_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert stopped_tc is not None
+    assert stopped_tc.get("is_interrupted") is True
+
+    # Terminal: nothing further to re-broadcast or retry.
+    emissions_after = len(collected)
+    watcher._rebroadcast_relinked_parents()
+    assert len(collected) == emissions_after
+    assert parent_assistant_uuid not in watcher._unlinked_agent_parent_events
+
+
 def test_is_main_session_event_excludes_subagent_sessions(tmp_path: Path) -> None:
     """The predicate that keeps subagent-session events out of the main stream."""
     agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
