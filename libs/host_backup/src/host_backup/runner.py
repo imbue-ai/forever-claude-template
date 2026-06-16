@@ -252,7 +252,20 @@ def _take_snapshot(*, state: _LoopState, config: BackupConfig) -> SnapshotResult
         taker = make_snapshot_taker(config.snapshot)
         result = taker.take_snapshot()
     except SnapshotError as e:
-        logger.warning("Snapshot step failed: {}", e)
+        # A failed snapshot aborts the whole tick before restic runs, so surface
+        # it as a structured event (parity with RESTIC_BACKUP_FAILED) rather than
+        # only an ephemeral log line -- otherwise a non-zero helper result.json is
+        # invisible in the durable events stream.
+        logger.error("Snapshot step failed: {}", e)
+        write_event(
+            state.events_dir,
+            make_event(
+                BackupEventType.SNAPSHOT_FAILED,
+                tick_id=state.current_tick_id,
+                method=config.snapshot.method.value,
+                error_message=str(e),
+            ),
+        )
         return None
     write_event(
         state.events_dir,
@@ -357,7 +370,7 @@ def _run_restic_backup(
                 stderr=result.stderr,
             ),
         )
-        logger.warning(
+        logger.error(
             "restic backup failed (rc={}): {}", result.returncode, result.stderr.strip()
         )
         return False
