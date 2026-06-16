@@ -1,6 +1,6 @@
 ---
 name: build-web-service
-description: Use when you want to create a new web view for the user. Covers scaffolding a new FastAPI service (canonical path) and the escape hatch for wrapping a pre-existing third-party server, plus diagnostic references when things misbehave.
+description: "Use when you want to create a new web view for the user -- a page, dashboard, or app they can open as a tab. Runs an interactive flow: confirm the look and feel on a cheap throwaway mock first, then build the real site to a usable state, then harden it in the background. Covers scaffolding a new FastAPI service (canonical path) and the escape hatch for wrapping a pre-existing third-party server."
 metadata:
   crystallized: true
 ---
@@ -14,6 +14,62 @@ through the system_interface.
 There is one canonical path (scaffold a new FastAPI lib) and one
 escape hatch (wrap a pre-existing third-party server). Modify/remove
 flows go through the `edit-services` skill.
+
+## This is the web specialization of the interactive-delivery shape
+
+**Read `.agents/shared/references/interactive-delivery.md` first.** Building a web
+view is not a "scaffold, implement, ship" recipe -- it is an *interactive* flow:
+you confirm the look-and-feel on a cheap throwaway mock *before* building the real
+thing, build to a usable state in the foreground, and defer the thorough
+testing + review gates to a background worker. The phases below bind that shared
+skeleton's hooks for web work. The single biggest mistake this skill exists to
+prevent is building (and testing, and hardening) a whole site before the user has
+confirmed the basic shape is what they want.
+
+Map of the flow:
+
+- **Step 0 -- clarify and plan** (skeleton phases 1-3): blocking questions only,
+  in business terms; a small plan; wait for approval.
+- **Step 1 -- scaffold + throwaway mock** (skeleton phases 4-6): scaffold the
+  service, put a mock UI in front of the user, loop to explicit confirmation of
+  the look-and-feel. Hard gate.
+- **Step 2-4 -- build to a usable site** (the existing build mechanics, run
+  *after* confirmation): implement real routes, verify, surface the tab.
+- **Step 5 -- finalize in the background** (skeleton phase 7): once the user
+  confirms the *working* site looks right, hand thorough testing + the review
+  gates to a background worker. The main agent never runs those itself.
+
+If you were sent here by `fetch-process-show` for a web view over fetched data,
+the data sample is already confirmed -- but you still run your own mock
+confirmation here, because the data sample confirms the data *shape*, not the UI
+shape. Render the handed-off `sample.json` in the mock so the user judges the UI
+against real data.
+
+## Step 0: Clarify and plan (business terms only)
+
+Ask only the questions that block, and phrase **every** architectural choice as
+the user-visible consequence that motivates it -- never as a technical term. This
+system serves non-technical users; build-web-service exists precisely so you do
+not ask them questions they cannot answer. Default to the simplest conventional
+choice and to a **single user**, state the default in one line, and only ask when
+a fork is both genuinely uncertain and expensive to reverse.
+
+Worked examples (generate the actual questions per task -- this is not a fixed
+list):
+
+- Persistence: "Should what you do here still be saved when you come back
+  tomorrow, or is it fine for it to reset each time?" -- not "flat file or
+  database?".
+- Multi-user: "Is this just for you, or will other people open the same page and
+  need to see their own version?" -- not "do we need auth / multi-tenancy?".
+- Freshness: "Should this update on its own, or only when you reload?" -- not
+  "do we need websockets / polling?".
+- History: "Do you want to look back at older ones, or only ever see the latest?"
+  -- not "do we need a time-series store?".
+
+Record the answers (and your stated defaults) -- they are the architecture you
+build once, after the mock converges. Do not build any of it yet. Then propose a
+small plan and wait for approval.
 
 ## Decide which path applies
 
@@ -124,7 +180,47 @@ window to a file (`tmux capture-pane -t bootstrap -p > /tmp/bootstrap.txt`)
 and read it -- do not pipe `tmux capture-pane` through `tail`/`head`,
 since CLAUDE.md disallows that.
 
-## Step 2: Implement your routes
+### Put a throwaway mock in front of the user (the confirmation gate)
+
+Scaffolding the service is fine before confirmation -- it is cheap and reversible.
+**Building the real data layer or state architecture before the user confirms the
+look-and-feel is the tripwire: do not.** Instead, serve a *throwaway mock* of the
+proposed UI as a route inside the scaffolded service, so the user sees it as a
+real tab and reacts to the actual look-and-feel.
+
+This is the cheap-throwaway-artifact hook (skeleton phase 5). Keep it disposable:
+
+- The mock renders **static / hard-coded content** that demonstrates the proposed
+  layout and interactions -- no real fetching, no persistence, no backend logic.
+  Invoke the `frontend-design` skill before writing the markup (see Step 2).
+- If you were handed a confirmed `sample.json` (the `fetch-process-show` hybrid),
+  render *that real data* in the mock so the user judges the UI against real
+  content. Otherwise use representative placeholder data that covers the shapes
+  the real view will show (including an empty state and a busy/overflow state).
+- `layout.py open <name>` to surface it (see Step 4 for the command), then loop:
+  present -> take feedback -> update the mock so the change is *visible* ->
+  re-present. Do not accept feedback and move on having only asserted you'll apply
+  it.
+- Loop until the user **explicitly confirms** the look-and-feel is right.
+
+**Hard gate (skeleton phase 6).** Do not implement real routes, data, or state
+(Step 2 onward) until that confirmation. The mock is the single source of truth
+for the UI shape: if later work changes the look-and-feel, re-confirm before
+calling the site done.
+
+For the **escape-hatch path** (wrapping a third-party tool) there is no markup you
+author, so there is no mock to build -- the demonstration is the wrapped tool
+itself. Stand it up, show it to the user, and confirm it's what they wanted before
+investing in configuration or integration around it.
+
+## Step 2: Build the real routes to a usable site (after confirmation)
+
+Everything from here runs **only after** the user has confirmed the mock. The
+goal of the foreground work is a *usable* site the user can actually try -- not a
+fully hardened one. Implement the real routes (replacing the mock), wire in the
+data/state architecture you recorded in Step 0, run the Step 3 smoke verify, and
+surface the tab (Step 4). Then **stop and hand the running site to the user** --
+the thorough testing and review gates happen in the background (Step 5), not here.
 
 The starter `runner.py` has just `GET /` (a placeholder HTML page)
 and `GET /health` (returns `{"status": "ok"}`). Replace the
@@ -232,6 +328,69 @@ when the user is asking about what tabs are available (it prints every
 user-facing registered service plus every mngr-level agent, with
 open/running flags; the workspace chrome's own `system_interface` entry
 is hidden).
+
+## Step 5: Finalize in the background (after the user confirms the working site)
+
+The foreground work stops at a usable, surfaced site. The thorough pass --
+extending Playwright coverage, the full test suite and ratchets, `/autofix`, and
+the code-guardian gates -- runs in a **background finalization worker**, never in
+the main agent. This is the harden-ratify hook (skeleton phase 7).
+
+**The trigger is an explicit confirmation on the *working* site -- never your own
+sense that the code looks done.** Once the usable site is in front of the user,
+ask a plain "this generally looks good?" and only spawn the worker once they
+confirm. Agent-judged completeness is not the signal; the user exercising the real
+behavior and approving it is. (The mock confirmed the UX *shape*; this confirms
+the real *behavior* -- the point where deep changes actually surface, so
+finalizing earlier risks hardening an architecture the user is about to
+invalidate.)
+
+Reading the confirmation signal:
+
+- If the user keeps asking for changes, each one is a **cheap foreground
+  iteration that resets the clock** -- you have run no gates or thorough tests
+  yet, so pivots stay cheap. Do not spawn the worker until their response is a
+  confirmation rather than a change request.
+- If the user starts asking for surface-level (cosmetic) tweaks, or pivots to a
+  slightly unrelated task or follow-up, treat that as a sign the core is settled:
+  still ask, but ground it -- "seems like we've got the core thing settled here
+  -- good to lock it in?" -- rather than leaving it open-ended.
+- Wait for an explicit confirmation rather than firing on a timeout or silence.
+  The user is never blocked: they already hold the usable site.
+
+On confirmation, spawn the worker via the `launch-task` mechanics, with two
+specifics:
+
+- **Launch with `--template subskill-worker`** (not the default `worker`). That
+  template installs the bundled `build-web-service-worker` sub-skill into the
+  worker's `.agents/skills/` tree.
+- **Keep the task brief short and point it at the sub-skill** -- you do not
+  restate how the worker tests or hardens anything; that lives in the sub-skill.
+  The brief needs only: which service was built (lib path, service name, the URL
+  segment), what it does, and the standing line *follow the
+  `build-web-service-worker` sub-skill for how to test, harden, verify, and what
+  not to touch; report `done` only when its testing contract and the review gates
+  all pass.*
+
+```bash
+uv run .agents/skills/launch-task/scripts/create_worker.py launch \
+    --name finalize-<service-name> \
+    --template subskill-worker \
+    --runtime-dir runtime/launch-task/finalize-<service-name>/ \
+    --task-file runtime/launch-task/finalize-<service-name>/task.md
+```
+
+Then background-poll the report per `launch-task` (its Step 3-4 and
+`.agents/shared/references/lead-proxy.md`): on `done`, merge the worker's branch;
+on `stuck` or a dead-worker timeout, surface to the user -- do not retry silently.
+The confirmed mock plus the confirmed working site remain the single source of
+truth: if finalization changes the look-and-feel, re-confirm with the user before
+calling the work done.
+
+**`build-web-service` is invocation-agnostic.** It behaves identically whether
+invoked directly, from `do-something-new`, or from `fetch-process-show`. It never
+reaches back to a `crystallize-task` worker -- that coupling lives only in the
+data flow. Its own hardening always goes through the finalization worker above.
 
 ## Escape hatch: wrap an existing server
 

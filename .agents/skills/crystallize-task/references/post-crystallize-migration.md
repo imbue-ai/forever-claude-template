@@ -15,14 +15,14 @@ consumer ever ran against the runtime path), and that's fine.
 
 Look for code on the merged branch that referenced either:
 
-- `runtime/do-something-new/<slug>/...`
+- `runtime/fetch-process-show/<slug>/...`
 - `runtime/<other-calling-skill>/<slug>/...`
 - A symlink, env var, or hardcoded constant pointing at one of the above.
 
 Use ripgrep (or your grep tool) with the slug as the search anchor:
 
 ```bash
-rg -n "runtime/do-something-new/<slug>" -g '!runtime/'
+rg -n "runtime/fetch-process-show/<slug>" -g '!runtime/'
 rg -n "<slug>/fetch.py" -g '!runtime/'
 ```
 
@@ -31,8 +31,8 @@ crystallized skill path. The standard switch is:
 
 | Old reference                                                  | New reference                                            |
 | -------------------------------------------------------------- | -------------------------------------------------------- |
-| `runtime/do-something-new/<slug>/fetch.py`                     | `.agents/skills/<name>/scripts/run.py`                   |
-| `runtime/do-something-new/<slug>/sample.json`                  | run the skill with `--output <path>` to regenerate       |
+| `runtime/fetch-process-show/<slug>/fetch.py`                     | `.agents/skills/<name>/scripts/run.py`                   |
+| `runtime/fetch-process-show/<slug>/sample.json`                  | run the skill with `--output <path>` to regenerate       |
 | Inline import of the fetch script                              | `subprocess.run(["uv", "run", "python", "<skill-path>"])`|
 
 If a consumer has explicit fallback logic (e.g. "use the skill if
@@ -84,8 +84,8 @@ Two kinds of consumer to update:
 
 - **Code consumers** keying on a field name or exit code -- the rename
   breaks them silently; grep for the old names and update.
-- **Surfaces** built during `do-something-new` Step 7 (web views, etc.)
-  that render the sample/pipeline output. Point them at the new output
+- **Surfaces** built during `fetch-process-show`'s deliver phase (web
+  views, etc.) that render the sample/pipeline output. Point them at the new output
   and update their rendering to the new shape.
 
 **If the shape changed, re-confirm with the user.** They signed off on

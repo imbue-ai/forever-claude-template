@@ -60,7 +60,7 @@ Pick a short kebab-case slug `$NAME` for this crystallization (e.g.
 
 Use that same slug everywhere below.
 
-If you were invoked from `do-something-new`, reuse its slug (`$SLUG`) as
+If you were invoked from `fetch-process-show`, reuse its slug (`$SLUG`) as
 `$NAME` -- the `source_artifacts_dir` frontmatter assumes matched paths.
 
 ## Step 1: Confirm
@@ -71,7 +71,7 @@ Triggers that count as explicit invocation:
 - The user typed `/crystallize-task`, said "crystallize this / yes
   crystallize / make a skill out of this" in the immediately-prior
   turn, or otherwise named the skill by hand.
-- The calling skill is `do-something-new` (sample-approval at its Step 5 is the go-ahead).
+- The calling skill is `fetch-process-show` (its sample-approval is the go-ahead).
 
 In any of those cases go straight to Step 2 -- asking again is
 redundant and annoying.
@@ -202,7 +202,7 @@ Fill in the `## What was done` and `## Anchors` sections with real
 content drawn from your conversation -- do not leave the placeholders.
 
 **Optional: source artifacts handoff.** If a calling skill (e.g.
-`/do-something-new`) handed you a directory of pre-existing artifacts
+`fetch-process-show`) handed you a directory of pre-existing artifacts
 (scripts, sample data) that the worker should have access to, add an
 extra line to the frontmatter heredoc above:
 
@@ -242,7 +242,7 @@ uv run .agents/skills/launch-task/scripts/create_worker.py await \
 ```
 
 You still own this poll even if you reached this step from another skill
-(e.g. `do-something-new`) and now move on to unrelated work. Do not
+(e.g. `fetch-process-show`) and now move on to unrelated work. Do not
 assume "fire and forget" -- without the poll, Gate 1 / Gate 2 reports
 never reach the user and the worker deadlocks waiting for approval.
 

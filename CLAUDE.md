@@ -318,13 +318,22 @@ The upstream is defined in `parent.toml`.
 - **Prefer an applicable skill over reinventing.** Skill descriptions are
   injected so you can match by purpose, not by name.
 
-- **Live first, ratify at turn-end via the worker pipeline.** All four
-  lifecycle skills (`do-something-new`, `crystallize-task`, `heal-skill`,
-  `update-skill`) follow the same shape: handle the user's immediate
+- **Live first, ratify at turn-end via the worker pipeline.** The
+  lifecycle skills follow the same shape: handle the user's immediate
   request *live* in the current chat to keep the conversation interactive
-  and iterative; at turn-end, invoke the appropriate worker-backed skill
-  to formalize the work through validation, scenario testing, and proper
-  commits. If you find yourself committing a change to any
+  and iterative; at turn-end, formalize the work through a background
+  worker that runs validation, scenario testing, the review gates, and
+  proper commits. Both halves now have a shared core. The **live** half is
+  the interactive-delivery shape in
+  `.agents/shared/references/interactive-delivery.md`, specialized by
+  `do-something-new`'s routes (`fetch-process-show` for data,
+  `build-web-service` for web views). The **ratify** half is
+  `lead-proxy.md` + `worker-reporting.md`, shared by `crystallize-task`,
+  `heal-skill`, and `update-skill`. The harden/ratify phase **always runs
+  in a background worker** -- the main agent never runs the code-guardian
+  gates or the thorough test passes itself (the stop hook deliberately
+  does not nudge the main agent to run them; do not start those flows in
+  the main agent). If you find yourself committing a change to any
   contract-bearing file (a skill, a hook script with a documented
   contract, an invariant elsewhere) and stopping there, you've skipped
   the ratify step. The live phase is necessary but not sufficient -- the
@@ -333,8 +342,11 @@ The upstream is defined in `parent.toml`.
 
   Concrete cases:
   - **Net-new task needing research / experimentation**: invoke
-    `do-something-new` to drive the live phase. It hands off to
-    `crystallize-task` at the end.
+    `do-something-new`. It routes to `fetch-process-show` (data) or
+    `build-web-service` (web view) -- or applies the shared
+    interactive-delivery shape directly when neither fits -- to drive the
+    live phase. The data flow hands off to `crystallize-task`; the web
+    flow hands off to its own background finalization worker.
   - **Stop-hook crystallization nudge** after a normal turn that turned
     out to be cohesive, likely to recur, and mostly deterministic:
     invoke `crystallize-task` to ratify the just-finished work.

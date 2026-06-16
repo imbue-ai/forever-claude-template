@@ -24,8 +24,9 @@ Suppression rules (in priority order):
 1. Worker sub-agent — workers run their own crystallization lifecycle.
 2. Latest turn already invoked a crystallized skill successfully.
 3. Latest turn is below the tool-call threshold.
-4. A lifecycle skill (do-something-new, crystallize-task) was invoked in
-   this transcript and no successful ``git commit`` has happened since.
+4. A lifecycle skill (do-something-new, fetch-process-show,
+   crystallize-task) was invoked in this transcript and no successful
+   ``git commit`` has happened since.
    The live phase is still in progress; the skill itself handles
    crystallization at the commit boundary.
 5. We already nudged once for the current commit count — wait for the
@@ -62,7 +63,7 @@ QUALIFYING_CALL_THRESHOLD: int = 8
 # already drive crystallization on their own schedule, so a generic nudge
 # during them is pure noise.
 LIFECYCLE_SKILL_NAMES: frozenset[str] = frozenset(
-    {"do-something-new", "crystallize-task"}
+    {"do-something-new", "fetch-process-show", "crystallize-task"}
 )
 
 # Path (relative to workdir) where we persist nudge state across hook fires

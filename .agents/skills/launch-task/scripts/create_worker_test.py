@@ -75,7 +75,7 @@ def _make_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     runtime.mkdir(parents=True)
     task = runtime / "task.md"
     task.write_text("---\nlead_agent: lead\n---\n\nbody\n")
-    artifacts = tmp_path / "runtime" / "do-something-new" / "demo"
+    artifacts = tmp_path / "runtime" / "fetch-process-show" / "demo"
     artifacts.mkdir(parents=True)
     (artifacts / "sample.json").write_text("{}")
     return runtime, task, artifacts
