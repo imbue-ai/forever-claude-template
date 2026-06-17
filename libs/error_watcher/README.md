@@ -34,6 +34,39 @@ reported once an alert is actually delivered, the still-visible error is
 re-alerted on a later poll once an agent becomes reachable. The match pattern
 can be overridden via the `ERROR_WATCHER_PATTERN` environment variable.
 
+## Architecture
+
+The watcher is split into three loosely-coupled layers so the *where errors come
+from* and the *where alerts go* can each be replaced without touching the core
+logic. `watcher.py` (the `main()` entry point) is just the wiring that picks one
+concrete input and one concrete output and runs the poll loop.
+
+- **Input layer (`inputs.py`).** `ErrorInput` is the abstract contract: `read()`
+  returns an `ErrorReading` (an `origin` plus a list of `(name, content)`
+  sources). `TmuxWindowErrorInput` is the only implementation today -- it wraps
+  the tmux session-discovery and pane-capture work and excludes the watcher's own
+  window. A different source (e.g. a systemd/journald reader) is a drop-in
+  sibling that returns the same `ErrorReading`.
+
+- **Routing layer (`routing.py`).** `ErrorRouter` is the main work and depends
+  only on the two layer interfaces. It matches each source's content against the
+  pattern, suppresses output it has already alerted on (per source, with
+  number-insensitive dedup), and forwards genuinely-new matches to the output as
+  one batched `ErrorAlert`. It records an error as alerted only after the output
+  confirms delivery, so an undelivered alert is retried on a later poll.
+
+- **Output layer (`outputs.py`).** `ErrorOutput` is the abstract contract:
+  `deliver(alert)` returns a delivery id (the recipient) or `None`.
+  `MngrAgentErrorOutput` implements delivery via the mngr CLI but leaves *which*
+  agent(s) to target to an overridable `choose_recipients` method;
+  `RandomMngrAgentErrorOutput` is the default uniform-random policy. Replacing the
+  recipient choice later (e.g. routing to the agent best placed to fix the error)
+  is a one-method subclass, with the delivery mechanics unchanged.
+
+The two layers communicate only through the `ErrorReading` / `ErrorAlert` value
+types and the `CommandRunner` seam (`commands.py`), which is the single point
+where real subprocesses are run and is faked wholesale in tests.
+
 ## Non-goals
 
 - **Deliberately naive matching.** Any line containing "error" or "exception"

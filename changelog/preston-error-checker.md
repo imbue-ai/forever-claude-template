@@ -44,3 +44,15 @@ actually preserved. On a timeout the command's output comes back as bytes (not
 text), and the previous type check silently dropped it; the bytes are now decoded
 and kept, so a still-valid agent list from a hung `mngr list` is no longer thrown
 away.
+
+- Restructured the error-watcher into three loosely-coupled layers so the source
+of errors and the destination of alerts can each be swapped without touching the
+core. The input layer (`ErrorInput`, with `TmuxWindowErrorInput` over the
+existing tmux work) reads each source's content; the routing layer
+(`ErrorRouter`) does the matching, dedup, and batching; and the output layer
+(`ErrorOutput`) decides where the alert goes. The mngr output exposes recipient
+selection as an overridable `choose_recipients` policy (today's behavior is the
+uniform-random `RandomMngrAgentErrorOutput`), so a future error-fixing policy
+that targets a specific agent is a one-method subclass. Behavior is unchanged;
+the alert wording is now source-agnostic (it names the origin and each source by
+name rather than hard-coding the words "session"/"window").
