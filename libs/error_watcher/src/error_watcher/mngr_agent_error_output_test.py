@@ -10,9 +10,8 @@ import random
 
 from mngr_cli_contract.contract import assert_mngr_argv_valid
 
-from error_watcher.outputs import (
+from error_watcher.mngr_agent_error_output import (
     AgentSummary,
-    ErrorAlert,
     RandomMngrAgentErrorOutput,
     build_list_command,
     build_message_command,
@@ -20,6 +19,7 @@ from error_watcher.outputs import (
     parse_agent_summaries,
     select_messageable_names,
 )
+from error_watcher.outputs import ErrorAlert
 from error_watcher.testing import FakeCommandRunner
 
 # Two agents that can both receive a message; with random.Random(0) the chosen

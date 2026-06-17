@@ -25,9 +25,9 @@ from typing import Final
 from loguru import logger
 
 from error_watcher.commands import default_command_runner
-from error_watcher.inputs import TmuxWindowErrorInput
-from error_watcher.outputs import RandomMngrAgentErrorOutput
+from error_watcher.mngr_agent_error_output import RandomMngrAgentErrorOutput
 from error_watcher.routing import ErrorRouter, compile_error_pattern
+from error_watcher.tmux_window_error_input import TmuxWindowErrorInput
 
 # Poll cadence, matching the bootstrap service manager's interval (REQ-SPAWN-2).
 POLL_INTERVAL_SECONDS: Final[int] = 5

@@ -56,3 +56,11 @@ uniform-random `RandomMngrAgentErrorOutput`), so a future error-fixing policy
 that targets a specific agent is a one-method subclass. Behavior is unchanged;
 the alert wording is now source-agnostic (it names the origin and each source by
 name rather than hard-coding the words "session"/"window").
+
+- Split each layer's interface away from its implementation into separate files
+so the contracts are easier to read at a glance. `inputs.py` and `outputs.py`
+now hold only the abstract `ErrorInput`/`ErrorOutput` contracts and the
+`ErrorReading`/`ErrorSource`/`ErrorAlert` value types the layers exchange; the
+concrete tmux input moved to `tmux_window_error_input.py` and the mngr output to
+`mngr_agent_error_output.py` (with their unit tests renamed to match). No
+behavior changed.

@@ -10,8 +10,8 @@ Three layers of coverage:
 
 import random
 
-from error_watcher.inputs import ErrorReading, ErrorSource, TmuxWindowErrorInput
-from error_watcher.outputs import RandomMngrAgentErrorOutput
+from error_watcher.inputs import ErrorReading, ErrorSource
+from error_watcher.mngr_agent_error_output import RandomMngrAgentErrorOutput
 from error_watcher.routing import (
     DEFAULT_ERROR_PATTERN,
     MAX_SEEN_KEYS_PER_SOURCE,
@@ -28,6 +28,7 @@ from error_watcher.testing import (
     RecordingErrorOutput,
     SequencedErrorInput,
 )
+from error_watcher.tmux_window_error_input import TmuxWindowErrorInput
 
 _OWN_WINDOW = "svc-error-watcher"
 

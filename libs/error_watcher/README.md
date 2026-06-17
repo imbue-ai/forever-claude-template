@@ -41,12 +41,14 @@ from* and the *where alerts go* can each be replaced without touching the core
 logic. `watcher.py` (the `main()` entry point) is just the wiring that picks one
 concrete input and one concrete output and runs the poll loop.
 
-- **Input layer (`inputs.py`).** `ErrorInput` is the abstract contract: `read()`
-  returns an `ErrorReading` (an `origin` plus a list of `(name, content)`
-  sources). `TmuxWindowErrorInput` is the only implementation today -- it wraps
-  the tmux session-discovery and pane-capture work and excludes the watcher's own
-  window. A different source (e.g. a systemd/journald reader) is a drop-in
-  sibling that returns the same `ErrorReading`.
+- **Input layer.** `inputs.py` holds just the contract: `ErrorInput` (whose
+  `read()` returns an `ErrorReading` -- an `origin` plus a list of
+  `(name, content)` sources) and the `ErrorReading` / `ErrorSource` value types.
+  The only implementation today, `TmuxWindowErrorInput`, lives in its own
+  `tmux_window_error_input.py`: it wraps the tmux session-discovery and
+  pane-capture work and excludes the watcher's own window. A different source
+  (e.g. a systemd/journald reader) is a drop-in sibling that returns the same
+  `ErrorReading`.
 
 - **Routing layer (`routing.py`).** `ErrorRouter` is the main work and depends
   only on the two layer interfaces. It matches each source's content against the
@@ -55,13 +57,14 @@ concrete input and one concrete output and runs the poll loop.
   one batched `ErrorAlert`. It records an error as alerted only after the output
   confirms delivery, so an undelivered alert is retried on a later poll.
 
-- **Output layer (`outputs.py`).** `ErrorOutput` is the abstract contract:
-  `deliver(alert)` returns a delivery id (the recipient) or `None`.
-  `MngrAgentErrorOutput` implements delivery via the mngr CLI but leaves *which*
-  agent(s) to target to an overridable `choose_recipients` method;
-  `RandomMngrAgentErrorOutput` is the default uniform-random policy. Replacing the
-  recipient choice later (e.g. routing to the agent best placed to fix the error)
-  is a one-method subclass, with the delivery mechanics unchanged.
+- **Output layer.** `outputs.py` holds just the contract: `ErrorOutput` (whose
+  `deliver(alert)` returns a delivery id -- the recipient -- or `None`) and the
+  `ErrorAlert` value type. The mngr-backed implementation lives in its own
+  `mngr_agent_error_output.py`: `MngrAgentErrorOutput` delivers via the mngr CLI
+  but leaves *which* agent(s) to target to an overridable `choose_recipients`
+  method, and `RandomMngrAgentErrorOutput` is the default uniform-random policy.
+  Replacing the recipient choice later (e.g. routing to the agent best placed to
+  fix the error) is a one-method subclass, with the delivery mechanics unchanged.
 
 The two layers communicate only through the `ErrorReading` / `ErrorAlert` value
 types and the `CommandRunner` seam (`commands.py`), which is the single point

@@ -1,7 +1,8 @@
 """Unit tests for the tmux error-input layer."""
 
-from error_watcher.inputs import ErrorSource, TmuxWindowErrorInput
+from error_watcher.inputs import ErrorSource
 from error_watcher.testing import FakeCommandRunner
+from error_watcher.tmux_window_error_input import TmuxWindowErrorInput
 
 _OWN_WINDOW = "svc-error-watcher"
 
