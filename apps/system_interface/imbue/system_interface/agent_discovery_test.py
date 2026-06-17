@@ -1,21 +1,22 @@
 """Tests for agent_discovery module."""
 
+from collections.abc import Iterator
 from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from pydantic import Field
 
-from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.message import MessageResult
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.system_interface.agent_discovery import _AgentMatchCache
-from imbue.system_interface.agent_discovery import _send_to_cached_agent
+from imbue.system_interface.agent_discovery import _AGENT_LOCATION_CACHE
+from imbue.system_interface.agent_discovery import _get_mngr_context
+from imbue.system_interface.agent_discovery import _send_message_to_agent
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 
 
@@ -118,96 +119,113 @@ def _make_match(name: str, host: str = "host-a") -> AgentMatch:
     )
 
 
-class _RecordingResolver(MutableModel):
-    """Stand-in for find_all_agents: returns a fixed result and records calls."""
-
-    result: tuple[AgentMatch, ...]
-    calls: list[str] = Field(default_factory=list)
-
-    def __call__(self, agent_name: str) -> Sequence[AgentMatch]:
-        self.calls.append(agent_name)
-        return self.result
-
-
-class _RecordingSender(MutableModel):
-    """Stand-in for send_message_to_agents: reaches only the live agents given."""
-
-    live_agent_ids: frozenset[AgentId]
-    calls: list[tuple[AgentMatch, ...]] = Field(default_factory=list)
-
-    def __call__(self, matches: Sequence[AgentMatch]) -> MessageResult:
-        self.calls.append(tuple(matches))
-        reached = [str(m.agent_name) for m in matches if m.agent_id in self.live_agent_ids]
-        return MessageResult(successful_agents=reached)
+@pytest.fixture
+def mngr_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[MngrContext]:
+    """A real MngrContext rooted at empty tmp dirs (no project config files to load)."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "host"))
+    ctx, cg = _get_mngr_context()
+    try:
+        yield ctx
+    finally:
+        cg.__exit__(None, None, None)
 
 
-def test_cache_miss_resolves_caches_and_sends() -> None:
-    cache = _AgentMatchCache()
+@pytest.fixture(autouse=True)
+def _clear_agent_location_cache() -> Iterator[None]:
+    _AGENT_LOCATION_CACHE.clear()
+    yield
+    _AGENT_LOCATION_CACHE.clear()
+
+
+def test_cache_miss_resolves_caches_and_sends(mngr_ctx: MngrContext) -> None:
     match = _make_match("alpha")
-    resolver = _RecordingResolver(result=(match,))
-    sender = _RecordingSender(live_agent_ids=frozenset({match.agent_id}))
+    resolve_calls: list[str] = []
+    send_calls: list[tuple[AgentMatch, ...]] = []
 
-    assert _send_to_cached_agent("alpha", cache, resolver, sender) is True
-    assert resolver.calls == ["alpha"]
-    assert sender.calls == [(match,)]
-    assert cache.get("alpha") == match
+    def _resolve(name: str, ctx: MngrContext) -> Sequence[AgentMatch]:
+        resolve_calls.append(name)
+        return (match,)
+
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        send_calls.append(tuple(matches))
+        return MessageResult(successful_agents=[str(m.agent_name) for m in matches])
+
+    assert _send_message_to_agent("alpha", "hi", mngr_ctx, resolve=_resolve, send=_send) is True
+    assert resolve_calls == ["alpha"]
+    assert send_calls == [(match,)]
+    assert _AGENT_LOCATION_CACHE["alpha"] == match
 
 
-def test_cache_hit_skips_resolution() -> None:
-    cache = _AgentMatchCache()
+def test_cache_hit_skips_resolution(mngr_ctx: MngrContext) -> None:
     match = _make_match("alpha")
-    cache.put("alpha", match)
-    resolver = _RecordingResolver(result=(_make_match("alpha"),))
-    sender = _RecordingSender(live_agent_ids=frozenset({match.agent_id}))
+    _AGENT_LOCATION_CACHE["alpha"] = match
+    resolve_calls: list[str] = []
+    send_calls: list[tuple[AgentMatch, ...]] = []
 
-    assert _send_to_cached_agent("alpha", cache, resolver, sender) is True
-    assert resolver.calls == []
-    assert sender.calls == [(match,)]
+    def _resolve(name: str, ctx: MngrContext) -> Sequence[AgentMatch]:
+        resolve_calls.append(name)
+        return (_make_match("alpha"),)
+
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        send_calls.append(tuple(matches))
+        return MessageResult(successful_agents=[str(m.agent_name) for m in matches if m.agent_id == match.agent_id])
+
+    assert _send_message_to_agent("alpha", "hi", mngr_ctx, resolve=_resolve, send=_send) is True
+    assert resolve_calls == []
+    assert send_calls == [(match,)]
 
 
-def test_stale_cache_hit_reresolves_and_updates() -> None:
-    cache = _AgentMatchCache()
+def test_stale_cache_hit_reresolves_and_updates(mngr_ctx: MngrContext) -> None:
     stale = _make_match("alpha")
     fresh = _make_match("alpha")
-    cache.put("alpha", stale)
-    resolver = _RecordingResolver(result=(fresh,))
-    sender = _RecordingSender(live_agent_ids=frozenset({fresh.agent_id}))
+    _AGENT_LOCATION_CACHE["alpha"] = stale
+    resolve_calls: list[str] = []
+    send_calls: list[tuple[AgentMatch, ...]] = []
 
-    assert _send_to_cached_agent("alpha", cache, resolver, sender) is True
-    assert resolver.calls == ["alpha"]
-    assert sender.calls == [(stale,), (fresh,)]
-    assert cache.get("alpha") == fresh
+    def _resolve(name: str, ctx: MngrContext) -> Sequence[AgentMatch]:
+        resolve_calls.append(name)
+        return (fresh,)
+
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        send_calls.append(tuple(matches))
+        return MessageResult(successful_agents=[str(m.agent_name) for m in matches if m.agent_id == fresh.agent_id])
+
+    assert _send_message_to_agent("alpha", "hi", mngr_ctx, resolve=_resolve, send=_send) is True
+    assert resolve_calls == ["alpha"]
+    assert send_calls == [(stale,), (fresh,)]
+    assert _AGENT_LOCATION_CACHE["alpha"] == fresh
 
 
-def test_multiple_matches_are_not_cached() -> None:
-    cache = _AgentMatchCache()
+def test_multiple_matches_are_not_cached(mngr_ctx: MngrContext) -> None:
     first = _make_match("alpha", host="host-a")
     second = _make_match("alpha", host="host-b")
-    resolver = _RecordingResolver(result=(first, second))
-    sender = _RecordingSender(live_agent_ids=frozenset({first.agent_id, second.agent_id}))
+    send_calls: list[tuple[AgentMatch, ...]] = []
 
-    assert _send_to_cached_agent("alpha", cache, resolver, sender) is True
-    assert sender.calls == [(first, second)]
-    assert cache.get("alpha") is None
+    def _resolve(name: str, ctx: MngrContext) -> Sequence[AgentMatch]:
+        return (first, second)
 
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        send_calls.append(tuple(matches))
+        return MessageResult(successful_agents=[str(m.agent_name) for m in matches])
 
-def test_no_match_returns_false_and_caches_nothing() -> None:
-    cache = _AgentMatchCache()
-    resolver = _RecordingResolver(result=())
-    sender = _RecordingSender(live_agent_ids=frozenset())
-
-    assert _send_to_cached_agent("ghost", cache, resolver, sender) is False
-    assert resolver.calls == ["ghost"]
-    assert cache.get("ghost") is None
+    assert _send_message_to_agent("alpha", "hi", mngr_ctx, resolve=_resolve, send=_send) is True
+    assert send_calls == [(first, second)]
+    assert "alpha" not in _AGENT_LOCATION_CACHE
 
 
-def test_agent_match_cache_put_get_invalidate() -> None:
-    cache = _AgentMatchCache()
-    match = _make_match("alpha")
+def test_no_match_returns_false_and_caches_nothing(mngr_ctx: MngrContext) -> None:
+    resolve_calls: list[str] = []
 
-    assert cache.get("alpha") is None
-    cache.put("alpha", match)
-    assert cache.get("alpha") == match
-    cache.invalidate("alpha")
-    assert cache.get("alpha") is None
-    cache.invalidate("alpha")
+    def _resolve(name: str, ctx: MngrContext) -> Sequence[AgentMatch]:
+        resolve_calls.append(name)
+        return ()
+
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        return MessageResult(successful_agents=[])
+
+    assert _send_message_to_agent("ghost", "hi", mngr_ctx, resolve=_resolve, send=_send) is False
+    assert resolve_calls == ["ghost"]
+    assert "ghost" not in _AGENT_LOCATION_CACHE
