@@ -135,7 +135,12 @@ class AgentStreamWatcher:
         """
         try:
             content = self._buffer_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except OSError as e:
+            # The common case (file absent because streaming is disabled) is
+            # expected and benign; logging at debug keeps it quiet by default
+            # while still surfacing genuine read failures (permission/I/O errors)
+            # for diagnosis -- matching the sibling AgentSessionWatcher.
+            logger.debug("Failed to read stream buffer {}: {}", self._buffer_path, e)
             return None
         # The buffer always has at least the id line; split off that first line
         # and keep the rest verbatim as the body (it may itself be empty).
