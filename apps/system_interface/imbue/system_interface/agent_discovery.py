@@ -216,8 +216,6 @@ def _send_message_to_agent(
     agent was destroyed, recreated, or moved hosts), the entry is dropped and the
     agent is re-resolved. A uniquely-resolved location is cached for reuse; a name
     matching several agents is never cached, so every such send reaches all of them.
-
-    ``resolve``/``send`` default to the real mngr calls and are injected in tests.
     """
     cached = _AGENT_LOCATION_CACHE.get(agent_name)
     if cached is not None:
