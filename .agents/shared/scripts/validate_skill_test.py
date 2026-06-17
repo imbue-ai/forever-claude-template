@@ -182,6 +182,12 @@ def test_name_too_long(tmp_path: Path) -> None:
 
 # --- Runnability check (check_runnable) -------------------------------------
 
+# The real-`uv`-run tests below resolve a PEP 723 environment in a subprocess.
+# On a cold uv cache that can far exceed the suite's global 10s per-test
+# timeout, so give those tests the same generous budget the validator itself
+# allows for a cold resolution (validate_skill._RUN_HELP_TIMEOUT_SECONDS).
+_REAL_UV_RUN_TIMEOUT_SECONDS = 180
+
 _PEP723_HEADER = '# /// script\n# requires-python = ">=3.11"\n# ///\n'
 
 # A deps-free script whose argparse `--help` exits 0.
@@ -210,12 +216,14 @@ def test_check_runnable_no_run_py(tmp_path: Path) -> None:
     assert validate_skill.check_runnable(skill) is None
 
 
+@pytest.mark.timeout(_REAL_UV_RUN_TIMEOUT_SECONDS)
 def test_check_runnable_good_script(tmp_path: Path) -> None:
     """A script that imports cleanly and supports --help passes (real uv run)."""
     skill = _skill_with_run_py(tmp_path, _GOOD_RUN_PY)
     assert validate_skill.check_runnable(skill) is None
 
 
+@pytest.mark.timeout(_REAL_UV_RUN_TIMEOUT_SECONDS)
 def test_check_runnable_broken_import(tmp_path: Path) -> None:
     """A top-level import error is caught by the --help run (real uv run)."""
     skill = _skill_with_run_py(tmp_path, _BROKEN_RUN_PY)
