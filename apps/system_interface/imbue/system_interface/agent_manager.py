@@ -32,6 +32,8 @@ from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
@@ -133,6 +135,17 @@ def _build_observe_command_argv(mngr_binary: str) -> list[str]:
         "observe",
         "--discovery-only",
     ]
+
+
+def _build_agent_match(agent: DiscoveredAgent, host_name: HostName) -> AgentMatch:
+    """Assemble an AgentMatch (the messaging location) from a discovered agent."""
+    return AgentMatch(
+        agent_id=agent.agent_id,
+        agent_name=agent.agent_name,
+        host_id=agent.host_id,
+        host_name=host_name,
+        provider_name=agent.provider_name,
+    )
 
 
 def _safe_log_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
@@ -250,7 +263,7 @@ class AgentManager:
     _broadcaster: WebSocketBroadcaster
     _lock: threading.Lock
     _agents: dict[str, AgentStateItem]
-    # agent id -> its discovery location (host/provider), kept in lockstep with
+    # agent id -> its discovered location (host/provider), kept in lockstep with
     # _agents from the snapshot/destroy events, so messaging can resolve an
     # agent's location without a fresh find_all_agents discovery.
     _match_by_agent_id: dict[str, AgentMatch]
@@ -844,13 +857,7 @@ class AgentManager:
             host_name = host_name_by_id.get(agent.host_id)
             if host_name is None:
                 continue
-            new_matches[str(agent.agent_id)] = AgentMatch(
-                agent_id=agent.agent_id,
-                agent_name=agent.agent_name,
-                host_id=agent.host_id,
-                host_name=host_name,
-                provider_name=agent.provider_name,
-            )
+            new_matches[str(agent.agent_id)] = _build_agent_match(agent, host_name)
 
         with self._lock:
             old_ids = set(self._agents.keys())
@@ -884,6 +891,17 @@ class AgentManager:
 
         with self._lock:
             self._agents[agent_id] = agent_state
+            # The delta lacks the host's name, but any other agent already known
+            # on the same host carries it. When derivable, record the location now
+            # so the first message to a just-created agent skips discovery instead
+            # of waiting for the next full snapshot. A first-agent-on-a-new-host
+            # has no donor entry, so it stays discovery-resolved until the snapshot.
+            host_name = next(
+                (match.host_name for match in self._match_by_agent_id.values() if match.host_id == agent.host_id),
+                None,
+            )
+            if host_name is not None:
+                self._match_by_agent_id[agent_id] = _build_agent_match(agent, host_name)
 
         if agent_id == self._own_agent_id and agent_state.work_dir:
             self._start_app_watcher(agent_id, Path(agent_state.work_dir))

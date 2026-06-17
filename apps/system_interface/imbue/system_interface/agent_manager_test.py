@@ -446,6 +446,35 @@ def test_remove_agent_drops_location(agent_manager: AgentManager) -> None:
     assert agent_manager.get_agent_matches_by_id(str(agent_id)) == []
 
 
+def test_discovered_agent_on_known_host_is_located_immediately(agent_manager: AgentManager) -> None:
+    """A discovered-agent delta on an already-known host records the location at once
+    (host_name derived from an existing same-host entry), so the first message to a
+    just-created agent skips discovery instead of waiting for the next snapshot."""
+    host_id = HostId()
+    existing, host = _located("existing", host_name="shared-host", host_id=host_id)
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([existing], [host]))
+
+    fresh, _ = _located("freshly-created", host_id=host_id)
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(fresh))
+
+    matches = agent_manager.get_agent_matches_by_id(str(fresh.agent_id))
+    assert len(matches) == 1
+    assert str(matches[0].agent_name) == "freshly-created"
+    assert str(matches[0].host_id) == str(host_id)
+    assert str(matches[0].host_name) == "shared-host"
+
+
+def test_discovered_agent_on_unknown_host_is_not_located(agent_manager: AgentManager) -> None:
+    """A discovered-agent delta whose host has never appeared in a snapshot can't have
+    its host_name derived, so no location is recorded (the caller falls back to
+    discovery)."""
+    fresh, _ = _located("orphan")
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(fresh))
+
+    assert agent_manager.get_agent_matches_by_id(str(fresh.agent_id)) == []
+    assert len(agent_manager.get_agents()) == 1
+
+
 def test_on_applications_changed(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
 ) -> None:
