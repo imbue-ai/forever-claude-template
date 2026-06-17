@@ -21,7 +21,6 @@ from typing import Any
 from typing import assert_never
 
 import click
-from click_option_group import optgroup
 from google.auth import exceptions as google_auth_exceptions
 from loguru import logger
 
@@ -253,8 +252,7 @@ def gcp_cli_group() -> None:
 
 
 @gcp_cli_group.command(name="prepare")
-@optgroup.group("Provider")
-@optgroup.option(
+@click.option(
     "--provider",
     "provider",
     default="gcp",
@@ -266,13 +264,13 @@ def gcp_cli_group() -> None:
         "defaults are used as the fallback. CLI options below override either source."
     ),
 )
-@optgroup.option(
+@click.option(
     "--project",
     "project_id",
     default=None,
     help="GCP project ID. Defaults to the resolved provider config's project_id (or the gcloud/ADC default).",
 )
-@optgroup.option(
+@click.option(
     "--zone",
     "zone",
     default=None,
@@ -281,13 +279,13 @@ def gcp_cli_group() -> None:
         "defaults to the resolved provider config's default_zone."
     ),
 )
-@optgroup.option(
+@click.option(
     "--firewall-name",
     "firewall_name",
     default=None,
     help="Firewall rule name to create / reuse. Defaults to the resolved provider config's firewall_name.",
 )
-@optgroup.option(
+@click.option(
     "--firewall-target-tag",
     "firewall_target_tag",
     default=None,
@@ -296,13 +294,13 @@ def gcp_cli_group() -> None:
         "resolved provider config's firewall_target_tag."
     ),
 )
-@optgroup.option(
+@click.option(
     "--network",
     "network",
     default=None,
     help="VPC network the rule applies to. Defaults to the resolved provider config's network.",
 )
-@optgroup.option(
+@click.option(
     "--allowed-ssh-cidr",
     "allowed_ssh_cidrs",
     multiple=True,
@@ -354,8 +352,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
 
 
 @gcp_cli_group.command(name="cleanup")
-@optgroup.group("Provider")
-@optgroup.option(
+@click.option(
     "--provider",
     "provider",
     default="gcp",
@@ -366,19 +363,19 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         "GcpProviderConfig class defaults are used as the fallback."
     ),
 )
-@optgroup.option(
+@click.option(
     "--project",
     "project_id",
     default=None,
     help="GCP project ID. Defaults to the resolved provider config's project_id (or the gcloud/ADC default).",
 )
-@optgroup.option(
+@click.option(
     "--firewall-name",
     "firewall_name",
     default=None,
     help="Firewall rule name to delete. Defaults to the resolved provider config's firewall_name.",
 )
-@optgroup.option(
+@click.option(
     "--network",
     "network",
     default=None,

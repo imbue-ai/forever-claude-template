@@ -20,7 +20,6 @@ from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
-from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -84,10 +83,7 @@ def destroy_new_host_on_create_failure(
                 )
                 try:
                     provider.destroy_host(host)
-                except (MngrError, OSError, CleanupFailedGroup) as destroy_error:
-                    # Best-effort rollback in a finally: a destroy failure (including leftover
-                    # resources surfaced as a CleanupFailedGroup) must not mask the original
-                    # create error that triggered this rollback.
+                except (MngrError, OSError) as destroy_error:
                     logger.opt(exception=destroy_error).warning(
                         "Failed to destroy host {} after a failed create", host.id
                     )

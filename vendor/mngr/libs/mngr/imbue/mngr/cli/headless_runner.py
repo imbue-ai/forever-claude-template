@@ -16,7 +16,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
-from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -85,11 +84,11 @@ def destroy_agent_on_exit(host: OnlineHostInterface, agent: AgentInterface) -> I
     finally:
         try:
             host.stop_agents([agent.id])
-        except (OSError, MngrError, CleanupFailedGroup) as exc:
+        except (OSError, MngrError) as exc:
             logger.warning("Failed to stop agent {}: {}", agent.name, exc)
         try:
             host.destroy_agent(agent)
-        except (OSError, MngrError, CleanupFailedGroup) as exc:
+        except (OSError, MngrError) as exc:
             logger.warning("Failed to destroy agent {}: {}", agent.name, exc)
 
 

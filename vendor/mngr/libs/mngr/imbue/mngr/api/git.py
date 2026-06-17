@@ -16,7 +16,6 @@ around a sync operation.
 
 import os
 import shlex
-import subprocess
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterator
@@ -44,7 +43,6 @@ from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.git_utils import get_current_branch
 from imbue.mngr.utils.git_utils import is_git_repository
-from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
 _SshConnectionInfo = tuple[str, str, int, Path]
@@ -513,32 +511,12 @@ def _default_push_refspec(
     return f"{local_branch}:{result.stdout.strip()}"
 
 
-def _run_git_command(cmd: list[str], env: dict[str, str] | None, cg: ConcurrencyGroup, run_in_terminal: bool) -> None:
-    """Run ``cmd`` either via cg (captured) or with terminal-stdio passthrough.
-
-    In the terminal-passthrough path, stdin is redirected to /dev/null so git
-    can't block waiting for input it shouldn't be asking for (e.g. a credential
-    prompt against an SSH-keyed remote); stdout/stderr still flow to the
-    terminal so progress and error output remain visible.
-    """
-    if run_in_terminal:
-        result = run_interactive_subprocess(cmd, stdin=subprocess.DEVNULL, env=env)
-        if result.returncode != 0:
-            raise GitSyncError(f"git exited with status {result.returncode}")
-        return
-    try:
-        cg.run_process_to_completion(cmd, env=env)
-    except ProcessError as e:
-        raise GitSyncError(e.stderr) from e
-
-
 def git_push(
     local_path: Path,
     remote_host: OnlineHostInterface,
     remote_path: Path,
     extra_args: Sequence[str],
     cg: ConcurrencyGroup,
-    run_in_terminal: bool = False,
 ) -> None:
     """Run ``git push`` from ``local_path`` to ``remote_path`` on ``remote_host``.
 
@@ -549,13 +527,7 @@ def git_push(
     ``<local_current_branch>:<remote_current_branch>`` so ``mngr git push my-agent``
     works on mngr's worktree-style agents (where the agent has its own branch).
 
-    With ``run_in_terminal=True``, ``git`` is run as a plain subprocess with the
-    user's stdout/stderr (no redirection), so progress and errors flow directly
-    to the terminal -- intended for use from ``mngr git push``. stdin is
-    redirected to /dev/null: any push-time prompt (credential, host-key
-    confirmation, etc.) is a misconfiguration, not something the user should
-    be asked to resolve interactively. Raises :class:`GitSyncError` on a
-    non-zero exit either way.
+    Raises :class:`GitSyncError` on any failure of the underlying git command.
     """
     add_safe_directory_on_remote(remote_host, remote_path)
     _configure_push_destination(remote_host, remote_path)
@@ -565,7 +537,10 @@ def git_push(
         positionals = [_default_push_refspec(local_path, remote_host, remote_path, cg)]
     cmd = ["git", "-C", str(local_path), "push", *options, url, *positionals]
     logger.debug("Running git push: {}", shlex.join(cmd))
-    _run_git_command(cmd, env, cg, run_in_terminal)
+    try:
+        cg.run_process_to_completion(cmd, env=env)
+    except ProcessError as e:
+        raise GitSyncError(e.stderr) from e
 
 
 def git_pull(
@@ -574,7 +549,6 @@ def git_pull(
     remote_path: Path,
     extra_args: Sequence[str],
     cg: ConcurrencyGroup,
-    run_in_terminal: bool = False,
 ) -> None:
     """Run ``git pull`` into ``local_path`` from ``remote_path`` on ``remote_host``.
 
@@ -582,16 +556,14 @@ def git_pull(
     starting with ``-`` (up to the first non-option) go before the constructed URL
     so they're parsed as options; the rest go after the URL as refspecs.
 
-    With ``run_in_terminal=True``, ``git`` is run as a plain subprocess with the
-    user's stdout/stderr (no redirection), so progress, merge-prompt text, and
-    pager output flow directly to the terminal -- intended for use from
-    ``mngr git pull``. stdin is redirected to /dev/null: any prompt is a
-    misconfiguration we'd rather fail fast on than leave the agent hanging.
-    Raises :class:`GitSyncError` on a non-zero exit either way.
+    Raises :class:`GitSyncError` on any failure of the underlying git command.
     """
     add_safe_directory_on_remote(remote_host, remote_path)
     url, env = _build_git_url_and_env(remote_host, remote_path, is_push=False)
     options, positionals = _split_options_and_positionals(extra_args)
     cmd = ["git", "-C", str(local_path), "pull", *options, url, *positionals]
     logger.debug("Running git pull: {}", shlex.join(cmd))
-    _run_git_command(cmd, env, cg, run_in_terminal)
+    try:
+        cg.run_process_to_completion(cmd, env=env)
+    except ProcessError as e:
+        raise GitSyncError(e.stderr) from e

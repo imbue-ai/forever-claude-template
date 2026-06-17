@@ -21,7 +21,6 @@ from typing import assert_never
 
 import click
 from botocore.exceptions import BotoCoreError
-from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
@@ -142,10 +141,10 @@ def _build_operator_client(
 
 
 def _perform_cleanup(client: AwsVpsClient) -> str | None:
-    """Core of ``mngr aws cleanup``: refuse if any instance exists, else delete the SG.
+    """Core of ``mngr aws cleanup``: refuse if instances exist, else delete the SG.
 
-    Returns the deleted security-group id, or ``None`` when it was already absent
-    (idempotent). Raises ``click.ClickException`` when any mngr-managed instance
+    Returns the deleted security group id, or ``None`` when there was nothing
+    to delete. Raises ``click.ClickException`` when any mngr-managed instance
     still exists in the region, so cleanup never strands a running agent. Split
     from the click callback so the refuse/delete decision is unit-testable
     against a stubbed client, without the click runtime or real credentials.
@@ -224,8 +223,7 @@ def aws_cli_group() -> None:
 
 
 @aws_cli_group.command(name="prepare")
-@optgroup.group("Provider")
-@optgroup.option(
+@click.option(
     "--provider",
     "provider",
     default="aws",
@@ -237,25 +235,25 @@ def aws_cli_group() -> None:
         "fallback. CLI options below override either source."
     ),
 )
-@optgroup.option(
+@click.option(
     "--region",
     "region",
     default=None,
     help="AWS region. Defaults to the resolved provider config's default_region.",
 )
-@optgroup.option(
+@click.option(
     "--sg-name",
     "sg_name",
     default=None,
     help="Security group name to create / reuse. Defaults to the provider config's SG name.",
 )
-@optgroup.option(
+@click.option(
     "--vpc-id",
     "vpc_id",
     default=None,
     help="VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise.",
 )
-@optgroup.option(
+@click.option(
     "--allowed-ssh-cidr",
     "allowed_ssh_cidrs",
     multiple=True,
@@ -267,17 +265,13 @@ def aws_cli_group() -> None:
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
-    """Provision the AWS security group for mngr-managed instances.
+    """Create (or reuse) the AWS security group for mngr-managed instances.
 
-    Creates (or reuses) the `mngr-aws` security group (ingress on tcp/22 +
-    tcp/<container_ssh_port> per allowed_ssh_cidrs). Idempotent: re-running
-    re-authorizes any missing ingress rules without duplicating. Needs
-    ec2:DescribeSecurityGroups + ec2:CreateSecurityGroup +
-    ec2:AuthorizeSecurityGroupIngress. After this succeeds, `mngr create
+    Idempotent: re-running re-authorizes any missing ingress rules but does
+    not duplicate. Needs ec2:DescribeSecurityGroups + ec2:CreateSecurityGroup
+    + ec2:AuthorizeSecurityGroupIngress. After this succeeds, `mngr create
     --provider aws` only needs RunInstances + DescribeSecurityGroups +
-    DescribeInstances + ImportKeyPair etc. (no SG-management permissions, and no
-    IAM at all -- idle self-stop powers the host off rather than calling the EC2
-    API, so it needs no instance profile).
+    DescribeInstances + ImportKeyPair etc. (no SG-management permissions).
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -303,8 +297,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
 
 
 @aws_cli_group.command(name="cleanup")
-@optgroup.group("Provider")
-@optgroup.option(
+@click.option(
     "--provider",
     "provider",
     default="aws",
@@ -315,19 +308,19 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         "AwsProviderConfig class defaults are used as the fallback."
     ),
 )
-@optgroup.option(
+@click.option(
     "--region",
     "region",
     default=None,
     help="AWS region. Defaults to the resolved provider config's default_region.",
 )
-@optgroup.option(
+@click.option(
     "--sg-name",
     "sg_name",
     default=None,
     help="Security group name to delete. Defaults to the provider config's SG name.",
 )
-@optgroup.option(
+@click.option(
     "--vpc-id",
     "vpc_id",
     default=None,
@@ -341,18 +334,18 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     The safe inverse of `prepare`. Refuses (non-zero exit, deletes nothing) if
     any mngr-managed instance still exists in the region -- destroy those first
     with `mngr destroy <agent>` so a running agent is never stranded. With no
-    instances present, deletes the auto-created security group. The SG name comes
+    instances present, deletes the auto-created security group. The name comes
     from `--sg-name` if supplied; otherwise from the resolved
     `[providers.<--provider>]` block's `security_group.name` when that block
     configures an `AutoCreateSecurityGroup`; otherwise (block missing, non-AWS,
-    or configured with an `ExistingSecurityGroup` -- which carries an `id` rather
-    than a name) the default `mngr-aws` is used. Idempotent: a no-op (exit 0)
-    when it is already gone.
+    or configured with an `ExistingSecurityGroup` -- which carries an `id`
+    rather than a name) the default `mngr-aws` is used. Idempotent: a no-op
+    (exit 0) when the security group is already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
     ec2:DeleteSecurityGroup. Does not touch per-host keypairs -- those are
-    created and deleted by the create/destroy lifecycle, not by `prepare` or
-    `cleanup`.
+    created and deleted by the create/destroy lifecycle, not by `prepare`
+    or `cleanup`.
     """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,

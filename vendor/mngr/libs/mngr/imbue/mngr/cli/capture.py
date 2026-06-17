@@ -22,7 +22,6 @@ class CaptureCliOptions(CommonCliOptions):
     agent: AgentAddress | None
     start: bool
     full: bool
-    window: str | None
 
 
 @click.command()
@@ -39,12 +38,6 @@ class CaptureCliOptions(CommonCliOptions):
     default=False,
     show_default=True,
     help="Capture the full scrollback buffer instead of just the visible pane",
-)
-@optgroup.option(
-    "--window",
-    "-w",
-    default=None,
-    help="tmux window (index or name) to capture, instead of the agent's primary window",
 )
 @add_common_options
 @click.pass_context
@@ -68,16 +61,9 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
     )
 
     logger.debug("Capturing pane content for agent: {}", agent.name)
-    content = agent.capture_pane_content(include_scrollback=opts.full, window=opts.window)
+    content = agent.capture_pane_content(include_scrollback=opts.full)
     if content is None:
-        if opts.window is None:
-            logger.error("Failed to capture pane content for agent {}", agent.name)
-        else:
-            logger.error(
-                "Failed to capture pane content for agent {} window {!r} (does it exist?)",
-                agent.name,
-                opts.window,
-            )
+        logger.error("Failed to capture pane content for agent {}", agent.name)
         ctx.exit(1)
         return
 
@@ -90,7 +76,7 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="capture",
     one_line_description="Capture and display an agent's tmux pane content",
-    synopsis="mngr capture [AGENT] [--full] [--window WINDOW] [--start/--no-start]",
+    synopsis="mngr capture [AGENT] [--full] [--start/--no-start]",
     description="""Captures the current tmux pane content for the specified agent and
 prints it to stdout. Useful for debugging agent state without connecting
 to the agent's terminal.
@@ -98,14 +84,10 @@ to the agent's terminal.
 By default, captures only the visible pane content. Use --full to capture
 the entire scrollback buffer.
 
-By default, captures the agent's primary window. Use --window to capture a
-different tmux window in the agent's session, by index (e.g. 1) or name.
-
 If no agent is specified and running interactively, shows a selector.""",
     examples=(
         ("Capture visible pane content", "mngr capture my-agent"),
         ("Capture full scrollback buffer", "mngr capture my-agent --full"),
-        ("Capture a specific tmux window", "mngr capture my-agent --window 1"),
         ("Capture without auto-starting", "mngr capture my-agent --no-start"),
     ),
     see_also=(
