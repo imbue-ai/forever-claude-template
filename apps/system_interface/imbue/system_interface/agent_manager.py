@@ -354,15 +354,16 @@ class AgentManager:
         with self._lock:
             return self._agents.get(agent_id)
 
-    def get_agent_matches_by_name(self, agent_name: str) -> list[AgentMatch]:
-        """Return the discovery locations of all agents with this name.
+    def get_agent_matches_by_id(self, agent_id: str) -> list[AgentMatch]:
+        """Return the discovery location of the agent with this id (0- or 1-element).
 
         Sourced from the live observe stream, so a caller can message the agent
-        without running a fresh discovery. Empty when the name is not (yet) in
-        the latest snapshot -- the caller falls back to discovery in that case.
+        without running a fresh discovery. Empty when the id is not (yet) in the
+        latest snapshot -- the caller falls back to discovery in that case.
         """
         with self._lock:
-            return [match for match in self._match_by_agent_id.values() if str(match.agent_name) == agent_name]
+            match = self._match_by_agent_id.get(agent_id)
+            return [match] if match is not None else []
 
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from the tracked state and broadcast the update.

@@ -42,6 +42,8 @@ from pathlib import Path
 from loguru import logger as _loguru_logger
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentNameOrId
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import send_message
 from imbue.system_interface.session_watcher import AgentSessionWatcher
@@ -61,7 +63,7 @@ class WelcomeResendError(RuntimeError):
 
 
 TranscriptReadFn = Callable[[str], str | None]
-MessageSendFn = Callable[[str, str], bool]
+MessageSendFn = Callable[[AgentNameOrId, str], bool]
 
 
 def _strip_frontmatter(body: str) -> str:
@@ -250,7 +252,7 @@ class WelcomeResender(FrozenModel):
         logger.info(
             "Resending /welcome to agent {} (transcript missing opening line)", agent_name
         )
-        sent = self.send_message_fn(agent_name, _WELCOME_COMMAND)
+        sent = self.send_message_fn(AgentName(agent_name), _WELCOME_COMMAND)
         if not sent:
             logger.warning("Failed to dispatch /welcome to agent {}", agent_name)
             return False

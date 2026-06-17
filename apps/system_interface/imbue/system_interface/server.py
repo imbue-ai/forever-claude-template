@@ -28,6 +28,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import AgentId
 from imbue.system_interface import claude_auth_endpoints
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
@@ -418,9 +419,9 @@ def _send_message_endpoint(agent_id: str, send_message_request: SendMessageReque
 
     agent_manager: AgentManager = request.app.state.agent_manager
     success = send_message(
-        agent_info.name,
+        AgentId(agent_info.id),
         send_message_request.message,
-        lookup_locations=agent_manager.get_agent_matches_by_name,
+        lookup_locations=agent_manager.get_agent_matches_by_id,
     )
     if not success:
         error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}' (0 successful agents)")

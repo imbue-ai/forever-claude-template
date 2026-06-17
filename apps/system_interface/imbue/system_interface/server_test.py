@@ -261,9 +261,10 @@ def test_get_events_caps_initial_load_to_tail(client: TestClient, tmp_path: Path
 
 
 def test_send_message_success(client: TestClient) -> None:
-    """Sending a message to a known agent succeeds."""
+    """Sending a message to a known agent addresses it by id and succeeds."""
+    agent_id = "agent-00000000000000000000000000000001"
     agent_info = AgentInfo(
-        id="agent-123",
+        id=agent_id,
         name="test-agent",
         state="RUNNING",
         agent_state_dir=Path("/tmp/test"),
@@ -273,12 +274,13 @@ def test_send_message_success(client: TestClient) -> None:
         patch("imbue.system_interface.server._find_agent", return_value=agent_info),
         patch("imbue.system_interface.server.send_message", return_value=True) as mock_send,
     ):
-        response = client.post("/api/agents/agent-123/message", json={"message": "hello"})
+        response = client.post(f"/api/agents/{agent_id}/message", json={"message": "hello"})
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert mock_send.call_count == 1
-    assert mock_send.call_args.args == ("test-agent", "hello")
+    # The endpoint addresses the agent by id (exact agent), not by name.
+    assert mock_send.call_args.args == (agent_id, "hello")
     assert "lookup_locations" in mock_send.call_args.kwargs
 
 

@@ -148,7 +148,9 @@ def test_known_location_is_messaged_without_discovery(mngr_ctx: MngrContext) -> 
         send_calls.append(tuple(matches))
         return MessageResult(successful_agents=[str(m.agent_name) for m in matches])
 
-    assert _send_message_to_agent("alpha", "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
+    assert _send_message_to_agent(
+        AgentName("alpha"), "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send
+    )
     assert discover_calls == []
     assert send_calls == [(match,)]
 
@@ -169,7 +171,9 @@ def test_empty_lookup_falls_back_to_discovery(mngr_ctx: MngrContext) -> None:
         send_calls.append(tuple(matches))
         return MessageResult(successful_agents=[str(m.agent_name) for m in matches])
 
-    assert _send_message_to_agent("alpha", "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
+    assert _send_message_to_agent(
+        AgentName("alpha"), "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send
+    )
     assert discover_calls == ["alpha"]
     assert send_calls == [(discovered,)]
 
@@ -193,7 +197,9 @@ def test_stale_known_location_falls_back_to_discovery(mngr_ctx: MngrContext) -> 
         reached = [str(m.agent_name) for m in matches if m.agent_id == fresh.agent_id]
         return MessageResult(successful_agents=reached)
 
-    assert _send_message_to_agent("alpha", "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
+    assert _send_message_to_agent(
+        AgentName("alpha"), "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send
+    )
     assert discover_calls == ["alpha"]
     assert send_calls == [(stale,), (fresh,)]
 
@@ -209,7 +215,9 @@ def test_returns_false_when_nothing_reachable(mngr_ctx: MngrContext) -> None:
         return MessageResult(successful_agents=[])
 
     assert (
-        _send_message_to_agent("ghost", "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
+        _send_message_to_agent(
+            AgentName("ghost"), "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send
+        )
         is False
     )
 
@@ -232,6 +240,8 @@ def test_multiple_known_locations_are_all_messaged_without_discovery(mngr_ctx: M
         send_calls.append(tuple(matches))
         return MessageResult(successful_agents=[str(m.agent_name) for m in matches])
 
-    assert _send_message_to_agent("twin", "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
+    assert _send_message_to_agent(
+        AgentName("twin"), "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send
+    )
     assert discover_calls == []
     assert send_calls == [(match_a, match_b)]
