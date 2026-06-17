@@ -27,6 +27,13 @@ interface ProgressBlockAttrs {
    *  only references a subset. */
   toolResults: Map<string, ToolResultEvent>;
   agentId: string;
+  /** The live, in-progress assistant text (mngr's preview of the response being
+   *  typed), or null when nothing is streaming. Rendered at the tail of the
+   *  frontier step's expanded body so the live output collapses under the open
+   *  step rather than trailing below the whole block. Only the frontier step
+   *  consumes it; the finalized narration caption is left untouched (it swaps,
+   *  it does not grow). */
+  streamingPreview?: string | null;
   /** Optional DOM id for the root, so a virtualized list can measure this
    *  block's height by querying ``.message-list > [id]``. */
   id?: string;
@@ -79,10 +86,27 @@ function renderStepCaption(step: StepNode, isExpanded: boolean): m.Vnode | null 
   return m(`div.${captionClass}.markdown-content`, m.trust(renderMarkdown(step.narration)));
 }
 
-function renderExpandedStepBody(step: StepNode, toolResults: Map<string, ToolResultEvent>, agentId: string): m.Vnode {
+function renderExpandedStepBody(
+  step: StepNode,
+  toolResults: Map<string, ToolResultEvent>,
+  agentId: string,
+  streamingPreview: string | null,
+): m.Vnode {
   const children: m.Children[] = [];
   for (const e of step.events) {
     children.push(...renderAssistantMessageChildren(e, toolResults, agentId));
+  }
+  // The in-progress response, appended after the finalized work, dimmed with a
+  // soft pulse so it reads as not-yet-final. Replaced by the real event the
+  // moment the turn lands.
+  if (streamingPreview !== null) {
+    children.push(
+      m(
+        "div.pv-expanded-streaming.markdown-content",
+        { "aria-live": "polite" },
+        m(MarkdownContent, { content: streamingPreview }),
+      ),
+    );
   }
   return m("div.pv-expanded.markdown-content", children);
 }
@@ -103,8 +127,15 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
     is_last: boolean,
     toolResults: Map<string, ToolResultEvent>,
     agentId: string,
+    streamingPreview: string | null,
   ): m.Vnode {
-    const canExpand = step.events.length > 0;
+    // The live preview belongs only to the frontier step (the one the agent is
+    // actively working in). A non-empty preview makes the step expandable even
+    // before its first finalized event, so a freshly-opened step that is mid-way
+    // through streaming its first message can still be opened to watch it.
+    const stepStreaming =
+      streamingPreview !== null && streamingPreview !== "" && step.is_frontier ? streamingPreview : null;
+    const canExpand = step.events.length > 0 || stepStreaming !== null;
     const isExpanded = expanded.has(step.ticket_id);
     const nodeClasses = [
       "pv-tl-node",
@@ -134,7 +165,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
           ],
         ),
         renderStepCaption(step, isExpanded),
-        isExpanded ? m("div.pv-tl-expanded", renderExpandedStepBody(step, toolResults, agentId)) : null,
+        isExpanded ? m("div.pv-tl-expanded", renderExpandedStepBody(step, toolResults, agentId, stepStreaming)) : null,
       ]),
     ]);
   }
@@ -142,6 +173,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
   return {
     view(vnode) {
       const { items, trailing_reply, toolResults, agentId, id } = vnode.attrs;
+      const streamingPreview = vnode.attrs.streamingPreview ?? null;
 
       // Index of the last step item, so only it gets the `--last` thread cap.
       let lastStepIdx = -1;
@@ -149,7 +181,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
       const timelineNodes: m.Children[] = items.map((item, idx) => {
         if (item.kind === "step") {
-          return renderStepNode(item.step, idx === lastStepIdx, toolResults, agentId);
+          return renderStepNode(item.step, idx === lastStepIdx, toolResults, agentId, streamingPreview);
         }
         if (item.kind === "ungrouped") {
           // Real work / prose that happened with no step open -- including a

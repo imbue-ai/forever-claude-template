@@ -403,6 +403,28 @@ export function getLastEventId(agentId: string): string | null {
 }
 
 /**
+ * Text of the most recent finalized assistant message with non-empty prose, or
+ * null if none is loaded. Used to suppress the live streaming preview once its
+ * text has been committed to the transcript: mngr's stream buffer keeps the last
+ * assistant block as the "in-progress" body until the agent goes idle, so the
+ * preview would otherwise re-show the message that already rendered as a real
+ * bubble (and re-appear next turn before new output streams).
+ */
+export function getLatestAssistantText(agentId: string): string | null {
+  const events = storeByAgent[agentId]?.events;
+  if (events === undefined) {
+    return null;
+  }
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.type === "assistant_message" && event.text.trim() !== "") {
+      return event.text;
+    }
+  }
+  return null;
+}
+
+/**
  * Merge late-arriving subagent_metadata from a re-broadcast assistant message
  * onto an already-stored one.
  *

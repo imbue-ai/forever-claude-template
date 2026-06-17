@@ -16,6 +16,7 @@ import {
   getEventsForAgent,
   getEventCount,
   getFirstOffset,
+  getLatestAssistantText,
   getRenderVersion,
   getTotalEventCount,
   evictOldEvents,
@@ -33,7 +34,14 @@ import {
   ESTIMATED_USER_HEIGHT_PX,
   ESTIMATED_ASSISTANT_HEIGHT_PX,
 } from "./row-measurement";
-import { connectToStream, disconnectFromStream, loadSnapshotWithStream } from "../models/StreamingMessage";
+import {
+  connectToStream,
+  disconnectFromStream,
+  getStreamingPreview,
+  loadSnapshotWithStream,
+  shouldShowStreamingPreview,
+} from "../models/StreamingMessage";
+import { MarkdownContent } from "../markdown";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { openLoginModal } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
@@ -47,7 +55,7 @@ import {
 } from "./message-renderers";
 import { isHiddenUserMessage } from "./user-message-classification";
 import { buildAgentTerminalUrl, getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import { buildSections, type SectionView } from "./turn-grouping";
+import { buildSections, tailFrontierStep, type SectionView } from "./turn-grouping";
 import { ProgressBlock } from "./ProgressBlock";
 import { ActivityIndicator } from "./ActivityIndicator";
 import { renderPendingMessages } from "./PendingMessageView";
@@ -125,6 +133,47 @@ function isProtoAgent(agentId: string): boolean {
 }
 
 /**
+ * The live, in-progress assistant text to show right now, or null when nothing
+ * is streaming. It is shown only at the live tail and only while genuinely
+ * in-progress -- ``shouldShowStreamingPreview`` suppresses it when the agent is
+ * idle or when its text adds nothing beyond the latest finalized message (mngr
+ * keeps the last assistant block in the buffer after it commits, so without this
+ * it would double the just-rendered turn and re-appear at the start of the next
+ * one).
+ *
+ * Depending on the tail turn's structure this same text renders in one of two
+ * places (see renderMessages): collapsed under the open frontier step (inside
+ * its expanded body, via ProgressBlock) when one is open, or as a standalone
+ * trailing bubble (``renderStreamingPreviewBubble``) otherwise.
+ */
+function getGatedStreamingPreview(agentId: string): string | null {
+  const text = getStreamingPreview(agentId);
+  const show = shouldShowStreamingPreview({
+    previewText: text,
+    latestAssistantText: getLatestAssistantText(agentId),
+    activityState: getAgentById(agentId)?.activity_state,
+    hasMoreAfter: hasMoreAfter(agentId),
+  });
+  return show && text !== null ? text : null;
+}
+
+/** The standalone "response being typed" bubble, rendered with the assistant
+ *  message styling (plus a streaming modifier class). Used for the live tail
+ *  when no open step owns the stream (a no-steps turn, or a steps turn whose
+ *  steps have all closed and the agent is typing the wrap-up). */
+function renderStreamingPreviewBubble(text: string): m.Vnode {
+  return m(
+    "div",
+    {
+      key: "__streaming_preview",
+      class: "message message-assistant message-assistant--streaming",
+      "aria-live": "polite",
+    },
+    m(MarkdownContent, { content: text }),
+  );
+}
+
+/**
  * Flatten the turn-grouped sections into the virtualized list's top-level rows.
  *
  * Each row is one mounted node in the message list: a user message, a whole
@@ -159,6 +208,11 @@ function buildRows(
       rows.push({
         key,
         estimate: ESTIMATED_PROGRESS_HEIGHT_PX,
+        // The streaming preview is read live in the render closure (re-invoked
+        // every redraw), not baked into the memoized rows, so a streaming frame
+        // never busts the rows cache. ProgressBlock consumes it only for its
+        // frontier step; a block with no frontier (any non-tail section) ignores
+        // it. The trailing-bubble path below is gated on the same frontier check.
         render: () =>
           m(ProgressBlock, {
             id: key,
@@ -167,6 +221,7 @@ function buildRows(
             trailing_reply: section.trailing_reply,
             toolResults,
             agentId,
+            streamingPreview: getGatedStreamingPreview(agentId),
           }),
       });
       continue;
@@ -225,6 +280,12 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   // on the render version + idle flag), not on every scroll-driven redraw.
   let rowsCacheKey: string | null = null;
   let cachedRows: RowDescriptor[] = [];
+  // Whether the tail turn has an open frontier step that owns the streaming
+  // preview. Cached alongside the rows (same key) because it derives from the
+  // same buildSections walk; when true the live preview renders inside that
+  // step's expanded body, so the standalone trailing bubble is suppressed to
+  // avoid showing the in-progress text twice.
+  let cachedTailHasFrontier = false;
   // Heights reserved above/below the loaded window for history that exists on the
   // server but isn't loaded yet (see renderMessages). Shared so the scroll handler
   // can tell when the viewport is over a reserved region and page/jump/overlay
@@ -664,14 +725,21 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       // message, which should still show immediately as an optimistic bubble
       // rather than be hidden behind the empty-state placeholder.
       const pendingNodes = renderPendingMessages(agentId);
-      if (pendingNodes.length === 0) {
+      // The agent can start streaming a response before its first transcript
+      // event lands, so show the preview here too (after any optimistic bubble).
+      // There are no sections (and so no frontier step) yet, so it always renders
+      // as a standalone bubble.
+      const previewText = getGatedStreamingPreview(agentId);
+      const tailNodes: m.Children[] =
+        previewText !== null ? [...pendingNodes, renderStreamingPreviewBubble(previewText)] : [...pendingNodes];
+      if (tailNodes.length === 0) {
         return m(
           "div",
           { class: "message-list-empty flex items-center justify-center h-full" },
           m("p", { class: "text-text-secondary" }, "No events yet for this agent."),
         );
       }
-      return m("div", { class: "message-list-wrapper" }, [m("div", { class: MESSAGE_LIST_CLASS }, pendingNodes)]);
+      return m("div", { class: "message-list-wrapper" }, [m("div", { class: MESSAGE_LIST_CLASS }, tailNodes)]);
     }
 
     const agent = getAgentById(agentId);
@@ -694,6 +762,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       // side-channel enrichment.
       const sections = buildSections(visibleEvents, toolResults, agentIsIdle);
       cachedRows = buildRows(agentId, sections, toolResults);
+      cachedTailHasFrontier = tailFrontierStep(sections) !== null;
       rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
       rowsCacheKey = renderKey;
     }
@@ -740,11 +809,20 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       m("div", { key: "__spacer_bottom", style: `height: ${windowResult.bottomPad + phantomBottomHeight}px` }),
     );
 
-    return m("div", { class: "message-list-wrapper" }, [
-      // Pending (optimistic) messages render after the virtualized rows so a
-      // just-sent bubble shows at the live tail until its real event lands.
-      m("div", { class: MESSAGE_LIST_CLASS }, [...visibleRows, ...renderPendingMessages(agentId)]),
-    ]);
+    // Pending (optimistic) messages render after the virtualized rows so a
+    // just-sent bubble shows at the live tail until its real event lands; the
+    // in-progress assistant preview follows them. Built imperatively because
+    // every sibling here is keyed and a null hole alongside keyed vnodes throws.
+    const tailNodes: m.Children[] = [...visibleRows, ...renderPendingMessages(agentId)];
+    // When the tail turn has an open frontier step, the preview is rendered
+    // inside that step's expanded body by its ProgressBlock, so suppress the
+    // standalone bubble here to avoid double-rendering the same text.
+    const previewText = getGatedStreamingPreview(agentId);
+    if (previewText !== null && !cachedTailHasFrontier) {
+      tailNodes.push(renderStreamingPreviewBubble(previewText));
+    }
+
+    return m("div", { class: "message-list-wrapper" }, [m("div", { class: MESSAGE_LIST_CLASS }, tailNodes)]);
   }
 
   return {

@@ -85,6 +85,22 @@ export type TimelineItem =
   /** A non-boundary user message shown inline (e.g. a stop-hook chip). */
   | { kind: "chip"; event: UserMessageEvent };
 
+/** The live frontier step of the tail section -- the open step the agent is
+ *  actively working in (see StepNode.is_frontier) -- or null when none is open
+ *  (the agent is idle, or between steps typing the wrap-up). This is the step an
+ *  in-progress streaming preview belongs under: when it exists the chat panel
+ *  routes the preview into its expanded body, rather than rendering a trailing
+ *  bubble below the whole progress block. Only the tail section can hold a
+ *  frontier step, so this looks no further back. */
+export function tailFrontierStep(sections: SectionView[]): StepNode | null {
+  const tail = sections[sections.length - 1];
+  if (tail === undefined) return null;
+  for (const item of tail.items) {
+    if (item.kind === "step" && item.step.is_frontier) return item.step;
+  }
+  return null;
+}
+
 /** A turn: the user message, its timeline, and the wrap-up reply below it. */
 export interface SectionView {
   /** The boundary user message that opened this section, or null for content

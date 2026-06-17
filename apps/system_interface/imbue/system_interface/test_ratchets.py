@@ -278,7 +278,11 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # (a ``threading.Lock`` and a holder dict mutated under that lock) that
     # is not a natural fit for a Pydantic model, matching the precedent
     # already set by session_watcher / event_queues entries here.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(5))
+    # +1 for stream_watcher.AgentStreamWatcher.__init__ -- the in-progress
+    # response-streaming watcher, the same stateful-background-watcher shape as
+    # AgentSessionWatcher above (a thread, a stop event, and an mtime-free poll
+    # cursor), so it carries a hand-written __init__ for the same reason it does.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
 
 
 def test_prevent_cast_usage() -> None:

@@ -78,6 +78,18 @@ version = "2.1.160"
 # bootstrap writes. Disabled below on the "main" type, which still owns
 # the per-agent config dir that everyone else points at.
 use_env_config_dir = true
+# Approximate response streaming: a background watcher captures the agent's
+# tmux pane on this interval, reverse-maps the rendered assistant text to
+# markdown, and writes it to $MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer
+# (the system interface tails that file to show in-progress responses live).
+# This is the continuously-running, comparatively expensive half of streaming
+# (a tmux capture + reverse-map every interval, per agent), so keep it
+# conservative. This is one of the two streaming intervals; average end-to-end
+# preview latency is roughly (this interval + the system interface's
+# STREAM_POLL_INTERVAL_SECONDS) / 2, so 5s here paired with 5s there targets a
+# ~5s average update. Lower it only if responses feel laggy in the UI. Set to 0
+# to disable streaming entirely.
+streaming_snapshot_interval_seconds = 5.0
 
 # The "main" (services) agent type -- inherits everything from claude, then
 # disables every path that pulls user-local content into the workspace. The
@@ -104,6 +116,12 @@ command = "sleep infinity && claude"
 # the "worker" agent type -- the default for delegated tasks
 [agent_types.worker]
 parent_type = "claude"
+# Disable approximate response streaming for delegated workers. Workers run
+# headless on behalf of another agent; nobody is watching their tmux pane live,
+# so the per-interval pane capture + reverse-map is pure overhead. Overrides the
+# inherited claude default (set above). Applies to every worker-typed template
+# (worker, crystallize-worker).
+streaming_snapshot_interval_seconds = 0
 
 # --- Provider configurations ---
 

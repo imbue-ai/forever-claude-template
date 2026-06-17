@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEvent, ToolResultEvent, AssistantMessageEvent, UserMessageEvent } from "../models/Response";
 import type { StepNode, TimelineItem } from "./turn-grouping";
-import { buildSections } from "./turn-grouping";
+import { buildSections, tailFrontierStep } from "./turn-grouping";
 
 // --- Event builders ---
 
@@ -774,5 +774,71 @@ describe("step-id fallback (no decoration in the loaded window)", () => {
     const steps = stepItems(sections[0].items);
     expect(steps).toHaveLength(0);
     expect(sections[0].items.some((i) => i.kind === "ungrouped")).toBe(true);
+  });
+});
+
+// tailFrontierStep tells the chat panel which (if any) step owns the live
+// streaming preview: the open step the agent is actively working in, on the tail
+// turn. It is what routes the preview under that step instead of below the block.
+describe("tailFrontierStep", () => {
+  it("returns the open step of the tail turn while the agent is active", () => {
+    const events = [
+      userMsg("t0", "go"),
+      tkMsg("t1", "tk start s1", "k1"),
+      result("t1", "k1", startOut("s1", "Do it")),
+      workMsg("t2", "Edit", "w1"),
+      result("t2", "w1", "ok"),
+    ];
+    const frontier = tailFrontierStep(run(events, /* idle */ false));
+    expect(frontier?.ticket_id).toBe("s1");
+    expect(frontier?.is_frontier).toBe(true);
+  });
+
+  it("returns null when the agent is idle (no live step)", () => {
+    const events = [
+      userMsg("t0", "go"),
+      tkMsg("t1", "tk start s1", "k1"),
+      result("t1", "k1", startOut("s1", "Do it")),
+      workMsg("t2", "Edit", "w1"),
+      result("t2", "w1", "ok"),
+    ];
+    expect(tailFrontierStep(run(events, /* idle */ true))).toBeNull();
+  });
+
+  it("returns null when every step has closed (agent typing the wrap-up)", () => {
+    const events = [
+      userMsg("t0", "go"),
+      tkMsg("t1", "tk start s1", "k1"),
+      result("t1", "k1", startOut("s1", "Do it")),
+      workMsg("t2", "Edit", "w1"),
+      result("t2", "w1", "ok"),
+      tkMsg("t3", "tk close s1", "k2"),
+      result("t3", "k2", closeOut("s1", "Do it", "did it")),
+    ];
+    expect(tailFrontierStep(run(events, /* idle */ false))).toBeNull();
+  });
+
+  it("returns null for a tail turn with no steps", () => {
+    const events = [userMsg("t0", "go"), workMsg("t1", "Edit", "w1"), result("t1", "w1", "ok")];
+    expect(tailFrontierStep(run(events, /* idle */ false))).toBeNull();
+  });
+
+  it("looks only at the tail turn, ignoring a closed step in an earlier turn", () => {
+    const events = [
+      // Turn 1: a step opened and closed.
+      userMsg("t0", "first"),
+      tkMsg("t1", "tk start s1", "k1"),
+      result("t1", "k1", startOut("s1", "First")),
+      tkMsg("t2", "tk close s1", "k2"),
+      result("t2", "k2", closeOut("s1", "First", "done")),
+      // Turn 2 (tail): a different step left open.
+      userMsg("t3", "second"),
+      tkMsg("t4", "tk start s2", "k3"),
+      result("t4", "k3", startOut("s2", "Second")),
+      workMsg("t5", "Edit", "w1"),
+      result("t5", "w1", "ok"),
+    ];
+    const frontier = tailFrontierStep(run(events, /* idle */ false));
+    expect(frontier?.ticket_id).toBe("s2");
   });
 });

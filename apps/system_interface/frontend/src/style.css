@@ -245,6 +245,30 @@ body {
   margin-bottom: 20px;
 }
 
+/* The in-progress response preview: same layout as a finalized assistant
+   message, slightly dimmed with a soft pulse so it reads as not-yet-final.
+   Replaced by the real message the moment the turn lands. */
+.message-assistant--streaming {
+  opacity: 0.7;
+  animation: streaming-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes streaming-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-assistant--streaming {
+    animation: none;
+  }
+}
+
 /* ── Lifted Composer ── */
 .app-footer {
   padding: 0 32px 24px;
@@ -1942,6 +1966,20 @@ body {
 }
 .pv-expanded .tool-call-block {
   margin: 0.5em 0;
+}
+
+/* The in-progress streaming preview at the tail of a frontier step's expanded
+   body: same content styling as the rest of the panel, dimmed with a soft pulse
+   so it reads as not-yet-final. Reuses the streaming-pulse keyframes defined for
+   the standalone preview bubble. */
+.pv-expanded-streaming {
+  opacity: 0.7;
+  animation: streaming-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pv-expanded-streaming {
+    animation: none;
+  }
 }
 
 /* Final (trailing) assistant reply under the progress timeline */
