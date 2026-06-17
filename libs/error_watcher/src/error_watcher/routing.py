@@ -26,7 +26,7 @@ DEFAULT_ERROR_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 
 # Upper bound on the number of dedup keys retained per source. This is a memory
-# ceiling for the permanent process: with number-insensitive dedup
+# ceiling for the permanent process (finding #5): with number-insensitive dedup
 # keys (see `dedup_key`) a source rarely accumulates many distinct keys, so this
 # is reached only by a source emitting thousands of structurally-distinct error
 # lines. When exceeded, arbitrary excess keys are dropped; the worst case is
@@ -46,7 +46,7 @@ def dedup_key(line: str) -> str:
     Runs of digits (timestamps, counters, numeric request ids) collapse to a
     single '#', so a re-stamped copy of the same error -- '[12:00:05] ERROR x'
     then '[12:00:10] ERROR x' -- shares one key and alerts once rather than on
-    every 5s poll. Two errors differing only in their
+    every 5s poll (review finding #4). Two errors differing only in their
     numbers are therefore treated as the same for alerting purposes, which
     suits a "something errored" nudge; non-numeric ids (e.g. hex request ids)
     are deliberately left un-normalized to avoid collapsing distinct errors.
@@ -99,7 +99,7 @@ def prune_seen_sources(seen: dict[str, set[str]], live_sources: Sequence[str]) -
     """Drop dedup state for sources that no longer exist, bounding `seen` growth.
 
     In a permanent process sources are created and destroyed over time; without
-    eviction their dedup sets would accumulate forever. Keys absent
+    eviction their dedup sets would accumulate forever (finding #5). Keys absent
     from `live_sources` are removed. The caller must skip this when source
     enumeration failed (an empty list there would wrongly wipe all state), since
     a real session always has at least the watcher's own window.
@@ -153,7 +153,7 @@ class ErrorRouter:
             return None
         source_names = [source.name for source in reading.sources]
         # Forget dedup state for sources that have since closed, so `seen` does
-        # not grow without bound in this permanent process. Skipped
+        # not grow without bound in this permanent process (finding #5). Skipped
         # when the read came back empty, which signals an input failure rather
         # than a genuinely source-less origin (the watcher's own window always
         # exists), and pruning against an empty list would wipe all state.

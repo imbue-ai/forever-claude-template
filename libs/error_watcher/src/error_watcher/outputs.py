@@ -188,7 +188,7 @@ class MngrAgentErrorOutput(ErrorOutput, ABC):
         # Parse the payload regardless of exit status: mngr can exit non-zero
         # (e.g. one provider failed) while still emitting a valid
         # {"agents": [...]} body, and dropping that would needlessly skip the
-        # alert. Only treat a non-zero exit as fatal when it left us
+        # alert (finding #6). Only treat a non-zero exit as fatal when it left us
         # with no usable agents.
         agents = parse_agent_summaries(list_result.stdout)
         if list_result.returncode != 0 and not agents:

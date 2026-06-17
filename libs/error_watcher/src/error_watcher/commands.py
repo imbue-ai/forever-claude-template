@@ -68,7 +68,7 @@ def default_command_runner(
         # Never raise: a hung tmux/mngr must surface as a runner failure the
         # caller logs and skips, not a crash of the poll loop. Preserve whatever
         # the command managed to emit before the timeout so a caller that can
-        # use a partial payload is not robbed of it. On the timeout
+        # use a partial payload is not robbed of it (finding #6). On the timeout
         # path subprocess hands back the buffered output as bytes even under
         # text=True (it skips the usual decode when the timeout kills the
         # process), so decode it ourselves rather than dropping a bytes payload.

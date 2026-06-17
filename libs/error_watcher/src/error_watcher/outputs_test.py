@@ -266,7 +266,7 @@ def test_deliver_tries_every_agent_before_giving_up() -> None:
 
 def test_deliver_uses_a_valid_payload_even_when_list_exits_nonzero() -> None:
     # mngr can exit non-zero (e.g. one provider failed) while still printing a
-    # valid {"agents": [...]} body; the alert must not be skipped.
+    # valid {"agents": [...]} body; the alert must not be skipped (finding #6).
     sends: list[list[str]] = []
     output = RandomMngrAgentErrorOutput(
         _delivery_runner(_TWO_MESSAGEABLE_AGENTS, sends, list_returncode=1),

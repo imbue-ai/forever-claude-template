@@ -30,7 +30,7 @@ def test_default_command_runner_times_out_with_the_failure_sentinel() -> None:
 
 def test_default_command_runner_preserves_partial_output_on_timeout() -> None:
     # A command that prints before it hangs must have that partial stdout
-    # preserved, not discarded -- subprocess hands back the buffered
+    # preserved (finding #6), not discarded -- subprocess hands back the buffered
     # output as bytes on the timeout path even under text=True, so the runner has
     # to decode it. `printf` writes immediately and the sleep far outlasts the
     # timeout, so the marker is buffered before the timeout fires.
