@@ -28,6 +28,7 @@ from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
@@ -249,6 +250,10 @@ class AgentManager:
     _broadcaster: WebSocketBroadcaster
     _lock: threading.Lock
     _agents: dict[str, AgentStateItem]
+    # agent id -> its discovery location (host/provider), kept in lockstep with
+    # _agents from the snapshot/destroy events, so messaging can resolve an
+    # agent's location without a fresh find_all_agents discovery.
+    _match_by_agent_id: dict[str, AgentMatch]
     _applications: list[ApplicationEntry]
     _app_observers: dict[str, Any]
     _proto_agents: dict[str, dict[str, Any]]
@@ -278,6 +283,7 @@ class AgentManager:
         manager._broadcaster = broadcaster
         manager._lock = threading.Lock()
         manager._agents = {}
+        manager._match_by_agent_id = {}
         manager._applications = []
         manager._app_observers = {}
         manager._proto_agents = {}
@@ -348,6 +354,16 @@ class AgentManager:
         with self._lock:
             return self._agents.get(agent_id)
 
+    def get_agent_matches_by_name(self, agent_name: str) -> list[AgentMatch]:
+        """Return the discovery locations of all agents with this name.
+
+        Sourced from the live observe stream, so a caller can message the agent
+        without running a fresh discovery. Empty when the name is not (yet) in
+        the latest snapshot -- the caller falls back to discovery in that case.
+        """
+        with self._lock:
+            return [match for match in self._match_by_agent_id.values() if str(match.agent_name) == agent_name]
+
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from the tracked state and broadcast the update.
 
@@ -356,6 +372,7 @@ class AgentManager:
         """
         with self._lock:
             self._agents.pop(agent_id, None)
+            self._match_by_agent_id.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
         self._stop_activity_tracking(agent_id)
@@ -820,9 +837,24 @@ class AgentManager:
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
             )
 
+        host_name_by_id = {host.host_id: host.host_name for host in event.hosts}
+        new_matches: dict[str, AgentMatch] = {}
+        for agent in event.agents:
+            host_name = host_name_by_id.get(agent.host_id)
+            if host_name is None:
+                continue
+            new_matches[str(agent.agent_id)] = AgentMatch(
+                agent_id=agent.agent_id,
+                agent_name=agent.agent_name,
+                host_id=agent.host_id,
+                host_name=host_name,
+                provider_name=agent.provider_name,
+            )
+
         with self._lock:
             old_ids = set(self._agents.keys())
             self._agents = new_agents
+            self._match_by_agent_id = new_matches
             new_ids = set(new_agents.keys())
 
         for agent_id in new_ids:
@@ -864,6 +896,7 @@ class AgentManager:
 
         with self._lock:
             self._agents.pop(agent_id, None)
+            self._match_by_agent_id.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
         self._stop_activity_tracking(agent_id)
@@ -875,6 +908,7 @@ class AgentManager:
             aid = str(agent_id)
             with self._lock:
                 self._agents.pop(aid, None)
+                self._match_by_agent_id.pop(aid, None)
             self._stop_app_watcher(aid)
             self._stop_activity_tracking(aid)
 

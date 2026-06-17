@@ -22,7 +22,9 @@ from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mngr.primitives import AgentId as MngrAgentId
 from imbue.mngr.primitives import AgentName as MngrAgentName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
 from imbue.system_interface.activity_state import ActivityState
@@ -336,6 +338,63 @@ def test_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster:
     msg = json.loads(raw)
     assert msg["type"] == "agents_updated"
     assert str_id not in [a["id"] for a in msg["agents"]]
+
+
+def _snapshot_with_located_agent(name: str) -> tuple[MngrAgentId, HostId, Any]:
+    host_id = HostId()
+    agent_id = MngrAgentId()
+    agent = DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=MngrAgentName(name),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    host = DiscoveredHost(host_id=host_id, host_name=HostName("myhost"), provider_name=ProviderInstanceName("local"))
+    return agent_id, host_id, make_full_discovery_snapshot_event([agent], [host])
+
+
+def test_full_snapshot_populates_agent_locations(agent_manager: AgentManager) -> None:
+    """A snapshot records each agent's location so messaging can skip discovery."""
+    agent_id, host_id, snapshot = _snapshot_with_located_agent("locatable")
+    agent_manager._handle_full_snapshot(snapshot)
+
+    matches = agent_manager.get_agent_matches_by_name("locatable")
+    assert len(matches) == 1
+    match = matches[0]
+    assert str(match.agent_id) == str(agent_id)
+    assert str(match.agent_name) == "locatable"
+    assert str(match.host_id) == str(host_id)
+    assert str(match.host_name) == "myhost"
+    assert str(match.provider_name) == "local"
+
+    assert agent_manager.get_agent_matches_by_name("nonexistent") == []
+
+
+def test_agent_location_dropped_when_absent_from_snapshot(agent_manager: AgentManager) -> None:
+    """An agent missing from a later snapshot loses its cached location."""
+    _agent_id, _host_id, snapshot = _snapshot_with_located_agent("ephemeral")
+    agent_manager._handle_full_snapshot(snapshot)
+    assert len(agent_manager.get_agent_matches_by_name("ephemeral")) == 1
+
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([], []))
+    assert agent_manager.get_agent_matches_by_name("ephemeral") == []
+
+
+def test_agent_without_host_in_snapshot_is_not_located(agent_manager: AgentManager) -> None:
+    """Without the agent's host in the snapshot, no location is recorded (the
+    caller then falls back to discovery)."""
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("hostless"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    assert agent_manager.get_agent_matches_by_name("hostless") == []
+    assert len(agent_manager.get_agents()) == 1
 
 
 def test_on_applications_changed(

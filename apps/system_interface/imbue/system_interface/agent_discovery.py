@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger as _loguru_logger
@@ -10,11 +12,13 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.api.list import ErrorBehavior
 from imbue.mngr.api.list import list_agents
+from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.loader import load_config
@@ -167,30 +171,72 @@ def discover_agents(
     return agents
 
 
-def send_message(agent_name: str, message: str) -> bool:
+LocationLookupFn = Callable[[str], Sequence[AgentMatch]]
+DiscoverFn = Callable[[str, MngrContext], Sequence[AgentMatch]]
+SendFn = Callable[[Sequence[AgentMatch], str, MngrContext], MessageResult]
+
+
+def _no_known_locations(agent_name: str) -> Sequence[AgentMatch]:
+    """Default location lookup: nothing known, so the caller discovers."""
+    return ()
+
+
+def _discover_locations(agent_name: str, mngr_ctx: MngrContext) -> Sequence[AgentMatch]:
+    """Resolve an agent name to its locations via a full mngr discovery."""
+    return find_all_agents(
+        addresses=(AgentAddress(agent=AgentName(agent_name)),),
+        filter_all=False,
+        target_state=None,
+        mngr_ctx=mngr_ctx,
+    )
+
+
+def _send_to(matches: Sequence[AgentMatch], message: str, mngr_ctx: MngrContext) -> MessageResult:
+    """Send a message to a pre-resolved set of agents, auto-starting STOPPED ones."""
+    return send_message_to_agents(
+        mngr_ctx=mngr_ctx,
+        message_content=message,
+        agents_to_message=matches,
+        error_behavior=ErrorBehavior.CONTINUE,
+        is_start_desired=True,
+    )
+
+
+def _send_message_to_agent(
+    agent_name: str,
+    message: str,
+    mngr_ctx: MngrContext,
+    *,
+    lookup_locations: LocationLookupFn = _no_known_locations,
+    discover: DiscoverFn = _discover_locations,
+    send: SendFn = _send_to,
+) -> bool:
+    """Send to ``agent_name`` using a known location if there is one, else discovery.
+
+    A known location (from the live observe stream) is messaged directly -- no
+    discovery. On a miss, or if that send reaches no agent (the location just went
+    stale: destroyed, recreated, or moved hosts), it falls back to a full mngr
+    discovery and sends to whatever that resolves.
+    """
+    known = lookup_locations(agent_name)
+    if known and send(known, message, mngr_ctx).successful_agents:
+        return True
+    matches = discover(agent_name, mngr_ctx)
+    return bool(send(matches, message, mngr_ctx).successful_agents)
+
+
+def send_message(agent_name: str, message: str, *, lookup_locations: LocationLookupFn = _no_known_locations) -> bool:
     """Send a message to an agent. Returns True on success.
 
-    STOPPED agents are automatically started before the message is sent
-    (`is_start_desired=True`), so messaging is possible regardless of agent state.
+    ``lookup_locations`` is consulted first for the agent's already-known
+    location(s); the server backs it with the live observe stream so a message
+    skips discovery. STOPPED agents are auto-started (`is_start_desired=True`).
     """
     mngr_ctx, cg = _get_mngr_context()
     try:
-        matches = find_all_agents(
-            addresses=(AgentAddress(agent=AgentName(agent_name)),),
-            filter_all=False,
-            target_state=None,
-            mngr_ctx=mngr_ctx,
-        )
-        result = send_message_to_agents(
-            mngr_ctx=mngr_ctx,
-            message_content=message,
-            agents_to_message=matches,
-            error_behavior=ErrorBehavior.CONTINUE,
-            is_start_desired=True,
-        )
+        return _send_message_to_agent(agent_name, message, mngr_ctx, lookup_locations=lookup_locations)
     finally:
         cg.__exit__(None, None, None)
-    return len(result.successful_agents) > 0
 
 
 def start_agent(agent_name: str) -> None:

@@ -416,7 +416,12 @@ def _send_message_endpoint(agent_id: str, send_message_request: SendMessageReque
     if agent_info is None:
         return _agent_not_found_response(agent_id)
 
-    success = send_message(agent_info.name, send_message_request.message)
+    agent_manager: AgentManager = request.app.state.agent_manager
+    success = send_message(
+        agent_info.name,
+        send_message_request.message,
+        lookup_locations=agent_manager.get_agent_matches_by_name,
+    )
     if not success:
         error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}' (0 successful agents)")
         return JSONResponse(content=error.model_dump(), status_code=500)
