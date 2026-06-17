@@ -368,7 +368,7 @@ class AgentManager:
             return self._agents.get(agent_id)
 
     def get_agent_matches_by_id(self, agent_id: str) -> list[AgentMatch]:
-        """Return the discovery location of the agent with this id (0- or 1-element).
+        """Return the discovered location of the agent with this id (0- or 1-element).
 
         Sourced from the live observe stream, so a caller can message the agent
         without running a fresh discovery. Empty when the id is not (yet) in the
