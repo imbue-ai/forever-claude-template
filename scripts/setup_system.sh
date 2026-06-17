@@ -29,6 +29,18 @@ apt-get install -y --no-install-recommends \
     xxd xmlstarlet
 rm -rf /var/lib/apt/lists/*
 
+# The Debian `supervisor` package enables a systemd unit that immediately starts
+# a supervisord against the default /etc/supervisor/supervisord.conf. On
+# systemd-based providers (lima/VPS) that daemon grabs /var/run/supervisor.sock
+# and makes `uv run bootstrap`'s `supervisord -c /mngr/code/supervisord.conf`
+# fail with "Another program is already listening". We always launch our own
+# supervisord from bootstrap, so disable + mask the packaged unit. Guarded so
+# it is a no-op on docker (no systemd / no systemctl on the slim image).
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now supervisor 2>/dev/null || true
+    systemctl mask supervisor 2>/dev/null || true
+fi
+
 # ttyd (terminal-over-web) binary from GitHub releases (not in apt).
 ttyd_arch="$(uname -m)"
 curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${ttyd_arch}" -o /usr/local/bin/ttyd
