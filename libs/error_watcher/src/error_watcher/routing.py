@@ -104,7 +104,8 @@ def prune_seen_sources(seen: dict[str, set[str]], live_sources: Sequence[str]) -
     enumeration failed (an empty list there would wrongly wipe all state), since
     a real session always has at least the watcher's own window.
     """
-    for gone in [source for source in seen if source not in set(live_sources)]:
+    live = set(live_sources)
+    for gone in [source for source in seen if source not in live]:
         del seen[gone]
 
 
