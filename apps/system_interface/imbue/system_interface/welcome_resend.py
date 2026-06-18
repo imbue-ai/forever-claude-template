@@ -5,13 +5,12 @@ mind whose initial `/welcome` failed for lack of credentials gets the
 greeting once auth recovers.
 
 `/welcome` is delivered exactly once, by the bootstrap, to a single agent:
-at mind creation `bootstrap/manager.py` runs
-`mngr create <host_name> --template chat --message /welcome`, so the
-initial chat agent's name is the mind's `host_name`. Later agents ("New
-Chat", worktree agents) never receive `/welcome`. The resend therefore
-has one well-defined target -- the initial chat agent -- which this
-module resolves from `host_name` in `$MNGR_HOST_DIR/data.json` rather
-than relying on a caller-supplied agent name.
+at mind creation `bootstrap/manager.py` runs `mngr create <host_name>
+--template chat --message /welcome` and persists the created agent's id at
+`$MNGR_HOST_DIR/initial_chat_agent_id`. Later agents ("New Chat", worktree
+agents) never receive `/welcome`. The resend therefore has one well-defined
+target -- the initial chat agent -- which this module reads by id from that
+file and addresses by id (never by name).
 
 The welcome skill's opening message text is read at runtime from
 `.agents/skills/welcome/SKILL.md`, so this helper and the skill stay in
@@ -33,7 +32,6 @@ module-level monkeypatching.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from collections.abc import Callable
@@ -51,6 +49,9 @@ logger = _loguru_logger
 _WELCOME_SKILL_RELATIVE_PATH = Path(".agents/skills/welcome/SKILL.md")
 _WORK_DIR_ENV_VAR = "MNGR_AGENT_WORK_DIR"
 _HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
+# Basename (under $MNGR_HOST_DIR) the bootstrap writes the initial chat agent's id to
+# (bootstrap/manager.py INITIAL_CHAT_AGENT_ID_FILENAME).
+_INITIAL_CHAT_AGENT_ID_FILENAME = "initial_chat_agent_id"
 _FRONTMATTER_DELIMITER = "---"
 _HEADER_LINE_REGEX = re.compile(r"^#{1,6}\s+.+$", re.MULTILINE)
 _WELCOME_COMMAND = "/welcome"
@@ -133,34 +134,23 @@ def read_welcome_opening_line(skill_path: Path | None = None) -> str:
     raise WelcomeResendError(f"Could not find a verbatim opening line in welcome skill at {path}")
 
 
-def _resolve_initial_chat_agent_name() -> str | None:
-    """Resolve the name of the agent that originally received `/welcome`.
+def _resolve_initial_chat_agent_id() -> str | None:
+    """Read the initial chat agent's id from `$MNGR_HOST_DIR/initial_chat_agent_id`.
 
-    The bootstrap creates exactly one chat agent at mind creation, via
-    `mngr create <host_name> --template chat --message /welcome`, so that
-    agent's name is the mind's `host_name`. `host_name` is persisted at
-    `$MNGR_HOST_DIR/data.json` -- the same source `bootstrap/manager.py`
-    and `system_interface/server.py` read it from. Returns None when the
-    file is missing or malformed so the caller skips the resend rather
-    than dispatching `/welcome` to a wrong (or nonexistent) agent.
+    The bootstrap (`bootstrap/manager.py`) persists the created chat agent's id
+    there, so the resend addresses it by its stable id rather than re-resolving
+    by name. Returns None when the file is absent (e.g. a workspace created
+    before this was added, which has already been welcomed) so the caller skips.
     """
     host_dir = os.environ.get(_HOST_DIR_ENV_VAR, "")
     if not host_dir:
         return None
-    data_path = Path(host_dir) / "data.json"
-    if not data_path.exists():
-        return None
+    id_path = Path(host_dir) / _INITIAL_CHAT_AGENT_ID_FILENAME
     try:
-        data = json.loads(data_path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Failed to read {}: {}", data_path, e)
+        agent_id = id_path.read_text().strip()
+    except OSError:
         return None
-    if not isinstance(data, dict):
-        return None
-    name = data.get("host_name")
-    if not isinstance(name, str) or not name:
-        return None
-    return name
+    return agent_id or None
 
 
 def _default_read_assistant_transcript(agent: AgentInfo) -> str | None:
@@ -208,7 +198,7 @@ class WelcomeResender(FrozenModel):
     deterministic fakes.
     """
 
-    # resolve_agent (name -> AgentInfo) and send_message_fn both go through the
+    # resolve_agent (id -> AgentInfo) and send_message_fn both go through the
     # AgentManager cache, so they have no standalone default -- the server wires
     # them from the live manager (and tests inject fakes).
     resolve_agent: ResolveAgentFn
@@ -219,19 +209,19 @@ class WelcomeResender(FrozenModel):
     def check_and_resend_welcome(self) -> bool:
         """If the initial chat agent's transcript lacks the welcome, dispatch `/welcome`.
 
-        Resolves the target agent itself (name from `_resolve_initial_chat_agent_name`,
-        then id via `resolve_agent`) rather than trusting a caller-supplied id. Returns
-        True when a resend was issued, False when it was skipped (target unresolved,
-        skill unreadable, or transcript already shows the welcome).
+        Resolves the target agent itself (id from `_resolve_initial_chat_agent_id`,
+        then `AgentInfo` via `resolve_agent`) rather than trusting a caller-supplied
+        id. Returns True when a resend was issued, False when it was skipped (target
+        unresolved, skill unreadable, or transcript already shows the welcome).
         """
-        agent_name = _resolve_initial_chat_agent_name()
-        if agent_name is None:
-            logger.warning("Could not resolve the initial chat agent name; skipping welcome resend")
+        agent_id = _resolve_initial_chat_agent_id()
+        if agent_id is None:
+            logger.warning("Could not resolve the initial chat agent id; skipping welcome resend")
             return False
 
-        agent = self.resolve_agent(agent_name)
+        agent = self.resolve_agent(agent_id)
         if agent is None:
-            logger.warning("Initial chat agent {} not found; skipping welcome resend", agent_name)
+            logger.warning("Initial chat agent {} not found; skipping welcome resend", agent_id)
             return False
 
         try:
@@ -242,12 +232,12 @@ class WelcomeResender(FrozenModel):
 
         transcript = self.read_assistant_transcript(agent)
         if _transcript_shows_welcome(transcript, opening_line):
-            logger.debug("Agent {} transcript already shows welcome; skipping resend", agent_name)
+            logger.debug("Agent {} transcript already shows welcome; skipping resend", agent_id)
             return False
 
-        logger.info("Resending /welcome to agent {} (transcript missing opening line)", agent_name)
+        logger.info("Resending /welcome to agent {} (transcript missing opening line)", agent_id)
         sent = self.send_message_fn(AgentId(agent.id), _WELCOME_COMMAND)
         if not sent:
-            logger.warning("Failed to dispatch /welcome to agent {}", agent_name)
+            logger.warning("Failed to dispatch /welcome to agent {}", agent_id)
             return False
         return True

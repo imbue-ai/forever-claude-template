@@ -105,7 +105,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.agent_manager = agent_manager
     preconfigured_welcome_resender: WelcomeResender | None = application.state.preconfigured_welcome_resender
     application.state.welcome_resender = preconfigured_welcome_resender or WelcomeResender(
-        resolve_agent=agent_manager.get_agent_info_by_name,
+        resolve_agent=agent_manager.get_agent_info_by_id,
         send_message_fn=agent_manager.send_message_to_agent,
     )
     # Advisory in-process mutex serializing layout-mutating ops. The agent

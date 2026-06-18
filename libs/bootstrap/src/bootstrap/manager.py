@@ -67,6 +67,9 @@ RUNTIME_BACKUP_USER_EMAIL = "runtime-backup@mindsbackup.local"
 # under runtime/ so the runtime-backup service replicates it to the
 # mindsbackup/$MNGR_AGENT_ID branch (survives container loss).
 INITIAL_CHAT_SIGNAL = RUNTIME_DIR / "initial_chat_created"
+# Basename (under $MNGR_HOST_DIR) of the file holding the initial chat agent's id,
+# read by system_interface's welcome_resend to address the resend by id.
+INITIAL_CHAT_AGENT_ID_FILENAME = "initial_chat_agent_id"
 
 # Env var names used by the bootstrap's new responsibilities.
 _AGENT_ID_ENV_VAR = "MNGR_AGENT_ID"
@@ -258,6 +261,10 @@ def _build_create_chat_command(host_name: str, labels: dict[str, str]) -> list[s
         "--message",
         "/welcome",
         "--no-connect",
+        # JSON output so we can read back the created agent's id and persist it
+        # for the welcome-resend target (see _persist_initial_chat_agent_id).
+        "--format",
+        "json",
     ]
     workspace = _resolve_initial_chat_workspace_label(labels)
     if workspace:
@@ -268,8 +275,38 @@ def _build_create_chat_command(host_name: str, labels: dict[str, str]) -> list[s
     return cmd
 
 
+def _parse_created_agent_id(stdout: str) -> str | None:
+    """Pull ``agent_id`` from `mngr create --format json` output, or None if absent."""
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            data = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("agent_id"), str):
+            return data["agent_id"]
+    return None
+
+
+def _persist_initial_chat_agent_id(agent_id: str) -> None:
+    """Record the initial chat agent's id at `$MNGR_HOST_DIR/initial_chat_agent_id`.
+
+    The welcome-resend target is read from here (system_interface's
+    `welcome_resend`), so the resend addresses the agent by its stable id rather
+    than re-resolving it by name.
+    """
+    host_dir = os.environ.get(_HOST_DIR_ENV_VAR, "")
+    if not host_dir:
+        logger.warning("{} unset; cannot persist initial chat agent id", _HOST_DIR_ENV_VAR)
+        return
+    (Path(host_dir) / INITIAL_CHAT_AGENT_ID_FILENAME).write_text(agent_id)
+    logger.info("Persisted initial chat agent id {} for welcome resend", agent_id)
+
+
 def _create_initial_chat_agent(host_name: str, labels: dict[str, str]) -> bool:
-    """Invoke `mngr create` for the initial chat agent. Returns success."""
+    """Invoke `mngr create` for the initial chat agent; persist its id. Returns success."""
     cmd = _build_create_chat_command(host_name, labels)
     logger.info("Creating initial chat agent: {}", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -281,6 +318,11 @@ def _create_initial_chat_agent(host_name: str, labels: dict[str, str]) -> bool:
             result.stderr.strip(),
         )
         return False
+    agent_id = _parse_created_agent_id(result.stdout)
+    if agent_id is not None:
+        _persist_initial_chat_agent_id(agent_id)
+    else:
+        logger.error("Initial chat agent created but could not parse agent_id from output: {!r}", result.stdout.strip())
     logger.info("Initial chat agent created")
     return True
 

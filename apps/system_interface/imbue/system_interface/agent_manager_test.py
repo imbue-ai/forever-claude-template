@@ -439,26 +439,6 @@ def test_get_agent_info_by_id_resolves_from_state(agent_manager: AgentManager, t
     assert agent_manager.get_agent_info_by_id("missing") is None
 
 
-def test_get_agent_info_by_name_resolves_unique(agent_manager: AgentManager) -> None:
-    with agent_manager._lock:
-        agent_manager._agents["agent-1"] = AgentStateItem(
-            id="agent-1", name="solo", state="RUNNING", labels={}, work_dir=None
-        )
-
-    info = agent_manager.get_agent_info_by_name("solo")
-    assert info is not None and info.id == "agent-1" and info.name == "solo"
-    assert agent_manager.get_agent_info_by_name("nobody") is None
-
-
-def test_get_agent_info_by_name_skips_when_ambiguous(agent_manager: AgentManager) -> None:
-    """A name on two agents (single-host assumption violated) resolves to None, not a guess."""
-    with agent_manager._lock:
-        for aid in ("agent-1", "agent-2"):
-            agent_manager._agents[aid] = AgentStateItem(id=aid, name="twin", state="RUNNING", labels={}, work_dir=None)
-
-    assert agent_manager.get_agent_info_by_name("twin") is None
-
-
 def test_discovered_agent_is_located_immediately(agent_manager: AgentManager) -> None:
     """A discovered-agent delta records the routing location (id/host/provider) at once,
     so the first message to a just-created agent skips discovery instead of waiting for

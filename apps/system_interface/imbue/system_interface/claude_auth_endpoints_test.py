@@ -10,7 +10,6 @@ without `unittest.mock` or runtime attribute patching.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +17,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from imbue.system_interface import welcome_resend
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.claude_auth import ProcessSetupError
@@ -26,16 +26,24 @@ from imbue.system_interface.testing import FakeFinishedProcess
 from imbue.system_interface.testing import FakePexpectProcess
 from imbue.system_interface.welcome_resend import WelcomeResender
 
+# The initial chat agent's id, as the bootstrap would persist it.
+_CHAT_AGENT_ID = "agent-00000000000000000000000000000001"
 
-def _fake_chat_agent(name: str) -> AgentInfo:
+
+def _fake_chat_agent() -> AgentInfo:
     """A resolved initial-chat-agent AgentInfo (valid id) for welcome-resend tests."""
     return AgentInfo(
-        id="agent-00000000000000000000000000000001",
-        name=name,
+        id=_CHAT_AGENT_ID,
+        name="chat",
         state="RUNNING",
         agent_state_dir=Path("/tmp/agent"),
         claude_config_dir=Path("/tmp/.claude"),
     )
+
+
+def _persist_chat_agent_id(host_dir: Path) -> None:
+    """Write the initial chat agent's id where welcome_resend reads it back."""
+    (host_dir / welcome_resend._INITIAL_CHAT_AGENT_ID_FILENAME).write_text(_CHAT_AGENT_ID)
 
 
 @contextmanager
@@ -96,7 +104,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
     the next API call, so restart would be disruptive churn for no auth
     benefit. (The console provider differs -- see the console restart
     test in claude_auth_test.py.) The welcome-resend target is the
-    initial chat agent, resolved from `host_name` in data.json.
+    initial chat agent, resolved from the id the bootstrap persisted.
     """
     fake_url = "https://claude.ai/oauth/authorize?abc=1"
     fake_process = FakePexpectProcess(url_match=fake_url)
@@ -104,7 +112,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
     command_log: list[tuple[str, ...]] = []
 
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
-    (tmp_path / "data.json").write_text(json.dumps({"host_name": "chat-1"}))
+    _persist_chat_agent_id(tmp_path)
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n")
 
@@ -118,7 +126,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
 
     service = ClaudeAuthService(command_runner=_recording_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
     resender = WelcomeResender(
-        resolve_agent=lambda _name: _fake_chat_agent("chat-1"),
+        resolve_agent=lambda _id: _fake_chat_agent(),
         read_assistant_transcript=lambda _agent: "",
         send_message_fn=_record_welcome_send,
         skill_path=skill_path,
@@ -140,7 +148,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
     assert body["logged_in"] is True
     assert body["email"] == "u@example.com"
     assert fake_process.sendline_calls == ["FAKE#CODE"]
-    assert welcome_resend_calls == ["agent-00000000000000000000000000000001"]
+    assert welcome_resend_calls == [_CHAT_AGENT_ID]
     assert all(cmd[:2] != ("mngr", "stop") for cmd in command_log)
     assert all(cmd[:2] != ("mngr", "start") for cmd in command_log)
 
@@ -161,11 +169,11 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
     `type: main`. We assert the main-type agent is skipped (matches
     system-services' shape in a real mind) and both claude agents are
     stopped before either is restarted. The welcome-resend target is the
-    initial chat agent (`host_name` = "ababa" in data.json).
+    initial chat agent, resolved from the id the bootstrap persisted.
     """
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
-    (tmp_path / "data.json").write_text(json.dumps({"host_name": "ababa"}))
+    _persist_chat_agent_id(tmp_path)
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n")
 
@@ -193,7 +201,7 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
 
     service = ClaudeAuthService(command_runner=_runner)
     resender = WelcomeResender(
-        resolve_agent=lambda _name: _fake_chat_agent("ababa"),
+        resolve_agent=lambda _id: _fake_chat_agent(),
         read_assistant_transcript=lambda _agent: "",
         send_message_fn=_record_welcome_send,
         skill_path=skill_path,
@@ -216,7 +224,7 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
         "start worktree-1",
     ]
     assert all("--no-resume" in cmd for cmd in restart_calls if cmd[1] == "start")
-    assert welcome_calls == ["agent-00000000000000000000000000000001"]
+    assert welcome_calls == [_CHAT_AGENT_ID]
 
 
 def test_submit_api_key_rejects_empty_key() -> None:

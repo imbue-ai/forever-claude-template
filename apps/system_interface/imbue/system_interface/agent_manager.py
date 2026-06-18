@@ -384,8 +384,11 @@ class AgentManager:
         with self._lock:
             return self._agents.get(agent_id)
 
-    def _agent_info_from_state(self, agent_state: AgentStateItem) -> AgentInfo:
-        """Build the web-UI :class:`AgentInfo` (with resolved state/config dirs)."""
+    def get_agent_info_by_id(self, agent_id: str) -> AgentInfo | None:
+        """Resolve an agent id to its web-UI :class:`AgentInfo` (with resolved dirs), or None."""
+        agent_state = self.get_agent_by_id(agent_id)
+        if agent_state is None:
+            return None
         agent_state_dir = self._get_agent_state_dir(agent_state.id)
         return AgentInfo(
             id=agent_state.id,
@@ -396,27 +399,6 @@ class AgentManager:
             labels=agent_state.labels,
             work_dir=agent_state.work_dir,
         )
-
-    def get_agent_info_by_id(self, agent_id: str) -> AgentInfo | None:
-        """Resolve an agent id to its :class:`AgentInfo` from the live state, or None."""
-        agent_state = self.get_agent_by_id(agent_id)
-        return self._agent_info_from_state(agent_state) if agent_state is not None else None
-
-    def get_agent_info_by_name(self, name: str) -> AgentInfo | None:
-        """Resolve a unique agent name to its :class:`AgentInfo` from the live state.
-
-        Returns None unless exactly one agent matches: zero (no such agent) or more
-        than one (a name spanning hosts -- the single-host assumption was violated)
-        both skip, so a caller never dispatches to an arbitrary, possibly wrong agent.
-        """
-        with self._lock:
-            matching = [agent for agent in self._agents.values() if agent.name == name]
-        if len(matching) != 1:
-            _loguru_logger.warning(
-                "Agent name {} resolved to {} agents (expected exactly 1); not resolving", name, len(matching)
-            )
-            return None
-        return self._agent_info_from_state(matching[0])
 
     def get_agent_matches_by_id(self, agent_id: str) -> list[AgentMatch]:
         """Return the discovered location of the agent with this id (0- or 1-element).
