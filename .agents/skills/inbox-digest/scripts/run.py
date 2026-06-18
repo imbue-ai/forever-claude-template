@@ -39,7 +39,7 @@ from urllib.parse import quote
 import anyio
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from claude_p import claude_p_completion  # noqa: E402  (copied helper, same dir)
+from claude_p import ClaudeCLIError, claude_p_completion  # noqa: E402  (copied helper, same dir)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -423,15 +423,25 @@ async def _classify_one(
     costs: list[float],
     limiter: anyio.Semaphore,
 ) -> None:
-    async with limiter:
-        result = await claude_p_completion(
-            _build_user_prompt(record),
-            system=_SYSTEM_PROMPT,
-            model=AI_MODEL,
+    # One email's failure (an AI error, or output we can't parse / classify)
+    # must not abort the whole batch: leave this slot None so the digest is
+    # built from the emails that did succeed, and report what was skipped.
+    try:
+        async with limiter:
+            result = await claude_p_completion(
+                _build_user_prompt(record),
+                system=_SYSTEM_PROMPT,
+                model=AI_MODEL,
+            )
+        extracted = _parse_ai_json(result.text)
+        results[index] = _merge_record(record, extracted)
+        costs[index] = result.cost_usd
+    except (ClaudeCLIError, InboxDigestError) as exc:
+        print(
+            f"skipped email {record.get('id')!r} "
+            f"({record.get('subject', '')!r}): {exc}",
+            file=sys.stderr,
         )
-    extracted = _parse_ai_json(result.text)
-    results[index] = _merge_record(record, extracted)
-    costs[index] = result.cost_usd
 
 
 async def _digest_async(records: list[dict[str, object]]) -> _DigestOutcome:
