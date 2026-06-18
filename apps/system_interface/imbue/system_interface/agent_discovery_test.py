@@ -140,9 +140,6 @@ def test_known_location_is_messaged_without_discovery(mngr_ctx: MngrContext) -> 
     discover_calls: list[AgentId] = []
     send_calls: list[tuple[AgentMatch, ...]] = []
 
-    def _lookup(agent_id: AgentId) -> Sequence[AgentMatch]:
-        return (match,)
-
     def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
         discover_calls.append(agent_id)
         return ()
@@ -151,18 +148,15 @@ def test_known_location_is_messaged_without_discovery(mngr_ctx: MngrContext) -> 
         send_calls.append(tuple(matches))
         return MessageResult(successful_agents=[str(m.agent_id) for m in matches])
 
-    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
+    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (match,), discover=_discover, send=_send)
     assert discover_calls == []
     assert send_calls == [(match,)]
 
 
-def test_empty_lookup_falls_back_to_discovery(mngr_ctx: MngrContext) -> None:
+def test_empty_known_locations_falls_back_to_discovery(mngr_ctx: MngrContext) -> None:
     discovered = _make_match()
     discover_calls: list[AgentId] = []
     send_calls: list[tuple[AgentMatch, ...]] = []
-
-    def _lookup(agent_id: AgentId) -> Sequence[AgentMatch]:
-        return ()
 
     def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
         discover_calls.append(agent_id)
@@ -172,7 +166,7 @@ def test_empty_lookup_falls_back_to_discovery(mngr_ctx: MngrContext) -> None:
         send_calls.append(tuple(matches))
         return MessageResult(successful_agents=[str(m.agent_id) for m in matches])
 
-    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
+    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (), discover=_discover, send=_send)
     assert discover_calls == [_AGENT_ID]
     assert send_calls == [(discovered,)]
 
@@ -182,9 +176,6 @@ def test_stale_known_location_falls_back_to_discovery(mngr_ctx: MngrContext) -> 
     fresh = _make_match(host="host-b")
     discover_calls: list[AgentId] = []
     send_calls: list[tuple[AgentMatch, ...]] = []
-
-    def _lookup(agent_id: AgentId) -> Sequence[AgentMatch]:
-        return (stale,)
 
     def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
         discover_calls.append(agent_id)
@@ -196,22 +187,16 @@ def test_stale_known_location_falls_back_to_discovery(mngr_ctx: MngrContext) -> 
         reached = [str(m.agent_id) for m in matches if str(m.host_name) == "host-b"]
         return MessageResult(successful_agents=reached)
 
-    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
+    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (stale,), discover=_discover, send=_send)
     assert discover_calls == [_AGENT_ID]
     assert send_calls == [(stale,), (fresh,)]
 
 
 def test_returns_false_when_nothing_reachable(mngr_ctx: MngrContext) -> None:
-    def _lookup(agent_id: AgentId) -> Sequence[AgentMatch]:
-        return ()
-
     def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
         return ()
 
     def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
         return MessageResult(successful_agents=[])
 
-    assert (
-        _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, lookup_locations=_lookup, discover=_discover, send=_send)
-        is False
-    )
+    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (), discover=_discover, send=_send) is False

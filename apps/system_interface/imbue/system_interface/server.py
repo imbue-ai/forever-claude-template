@@ -33,7 +33,6 @@ from imbue.system_interface import claude_auth_endpoints
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
-from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.system_interface.agent_discovery import start_agent
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.claude_auth import ClaudeAuthService
@@ -106,7 +105,8 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.agent_manager = agent_manager
     preconfigured_welcome_resender: WelcomeResender | None = application.state.preconfigured_welcome_resender
     application.state.welcome_resender = preconfigured_welcome_resender or WelcomeResender(
-        send_message_fn=agent_manager.send_message_to_agent
+        resolve_agent=agent_manager.get_agent_info_by_name,
+        send_message_fn=agent_manager.send_message_to_agent,
     )
     # Advisory in-process mutex serializing layout-mutating ops. The agent
     # script never auto-retries on contention -- it surfaces the 409 to the
@@ -274,30 +274,9 @@ def _list_agents_endpoint(request: Request) -> JSONResponse:
 
 
 def _find_agent(agent_id: str, request: Request) -> AgentInfo | None:
-    """Find a specific agent by ID.
-
-    Uses the AgentManager's already-loaded state instead of running a full
-    mngr discovery on every request.  Falls back to the agent state directory
-    for claude_config_dir resolution.
-    """
+    """Find a specific agent by ID, from the AgentManager's already-loaded state."""
     agent_manager: AgentManager = request.app.state.agent_manager
-    agent_state = agent_manager.get_agent_by_id(agent_id)
-    if agent_state is None:
-        return None
-
-    host_dir = get_host_dir()
-    agent_state_dir = host_dir / "agents" / agent_id
-    claude_config_dir = read_claude_config_dir_from_env_file(agent_state_dir)
-
-    return AgentInfo(
-        id=agent_state.id,
-        name=agent_state.name,
-        state=agent_state.state,
-        agent_state_dir=agent_state_dir,
-        claude_config_dir=claude_config_dir,
-        labels=agent_state.labels,
-        work_dir=agent_state.work_dir,
-    )
+    return agent_manager.get_agent_info_by_id(agent_id)
 
 
 def _agent_not_found_response(agent_id: str) -> JSONResponse:

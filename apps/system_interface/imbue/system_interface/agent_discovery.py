@@ -172,14 +172,8 @@ def discover_agents(
     return agents
 
 
-LocationLookupFn = Callable[[AgentId], Sequence[AgentMatch]]
 DiscoverFn = Callable[[AgentId, MngrContext], Sequence[AgentMatch]]
 SendFn = Callable[[Sequence[AgentMatch], str, MngrContext], MessageResult]
-
-
-def _no_known_locations(agent_id: AgentId) -> Sequence[AgentMatch]:
-    """Default location lookup: nothing known, so the caller discovers."""
-    return ()
 
 
 def _discover_locations(agent_id: AgentId, mngr_ctx: MngrContext) -> Sequence[AgentMatch]:
@@ -211,36 +205,37 @@ def _send_message_to_agent(
     agent_id: AgentId,
     message: str,
     mngr_ctx: MngrContext,
+    known_locations: Sequence[AgentMatch],
     *,
-    lookup_locations: LocationLookupFn = _no_known_locations,
     discover: DiscoverFn = _discover_locations,
     send: SendFn = _send_to,
 ) -> bool:
-    """Send to the agent with ``agent_id`` using its known location, else discovery.
+    """Send to the agent with ``agent_id`` at ``known_locations``, else discovery.
 
-    A known location (from the live observe stream) is messaged directly -- no
-    discovery. On a miss, or if that send reaches no agent (the location just went
-    stale: destroyed, recreated, or moved hosts), it falls back to a full mngr
-    discovery. The id is globally unique, so it resolves to exactly the intended
-    agent rather than fanning out across same-named agents on other hosts.
+    ``known_locations`` (the caller's already-resolved location, from the live
+    observe cache) is messaged directly -- no discovery. On a miss, or if that send
+    reaches no agent (the location just went stale: destroyed, recreated, or moved
+    hosts), it falls back to a full mngr discovery. The id is globally unique, so it
+    resolves to exactly the intended agent, never fanning out across same-named
+    agents on other hosts.
     """
-    known = lookup_locations(agent_id)
-    if known and send(known, message, mngr_ctx).successful_agents:
+    if known_locations and send(known_locations, message, mngr_ctx).successful_agents:
         return True
     matches = discover(agent_id, mngr_ctx)
     return bool(send(matches, message, mngr_ctx).successful_agents)
 
 
-def send_message(agent_id: AgentId, message: str, *, lookup_locations: LocationLookupFn = _no_known_locations) -> bool:
+def send_message(agent_id: AgentId, message: str, known_locations: Sequence[AgentMatch]) -> bool:
     """Send a message to the agent with ``agent_id``. Returns True on success.
 
-    ``lookup_locations`` is consulted first for the agent's already-known
-    location; the server backs it with the live observe stream so a message
-    skips discovery. STOPPED agents are auto-started (`is_start_desired=True`).
+    ``known_locations`` is the agent's already-resolved location (the caller passes
+    its live observe cache) so a message skips discovery; an empty/stale value falls
+    back to discovery. STOPPED agents are auto-started (`is_start_desired=True`).
+    Callers go through ``AgentManager.send_message_to_agent``, which supplies the cache.
     """
     mngr_ctx, cg = _get_mngr_context()
     try:
-        return _send_message_to_agent(agent_id, message, mngr_ctx, lookup_locations=lookup_locations)
+        return _send_message_to_agent(agent_id, message, mngr_ctx, known_locations)
     finally:
         cg.__exit__(None, None, None)
 

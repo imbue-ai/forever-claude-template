@@ -424,6 +424,41 @@ def test_remove_agent_drops_location(agent_manager: AgentManager) -> None:
     assert agent_manager.get_agent_matches_by_id(str(agent_id)) == []
 
 
+def test_get_agent_info_by_id_resolves_from_state(agent_manager: AgentManager, tmp_path: Path) -> None:
+    """get_agent_info_by_id builds an AgentInfo from the live state (with resolved dirs)."""
+    with agent_manager._lock:
+        agent_manager._agents["agent-1"] = AgentStateItem(
+            id="agent-1", name="alpha", state="RUNNING", labels={"k": "v"}, work_dir="/w"
+        )
+
+    info = agent_manager.get_agent_info_by_id("agent-1")
+    assert info is not None
+    assert info.id == "agent-1"
+    assert info.name == "alpha"
+    assert info.labels == {"k": "v"}
+    assert agent_manager.get_agent_info_by_id("missing") is None
+
+
+def test_get_agent_info_by_name_resolves_unique(agent_manager: AgentManager) -> None:
+    with agent_manager._lock:
+        agent_manager._agents["agent-1"] = AgentStateItem(
+            id="agent-1", name="solo", state="RUNNING", labels={}, work_dir=None
+        )
+
+    info = agent_manager.get_agent_info_by_name("solo")
+    assert info is not None and info.id == "agent-1" and info.name == "solo"
+    assert agent_manager.get_agent_info_by_name("nobody") is None
+
+
+def test_get_agent_info_by_name_skips_when_ambiguous(agent_manager: AgentManager) -> None:
+    """A name on two agents (single-host assumption violated) resolves to None, not a guess."""
+    with agent_manager._lock:
+        for aid in ("agent-1", "agent-2"):
+            agent_manager._agents[aid] = AgentStateItem(id=aid, name="twin", state="RUNNING", labels={}, work_dir=None)
+
+    assert agent_manager.get_agent_info_by_name("twin") is None
+
+
 def test_discovered_agent_is_located_immediately(agent_manager: AgentManager) -> None:
     """A discovered-agent delta records the routing location (id/host/provider) at once,
     so the first message to a just-created agent skips discovery instead of waiting for

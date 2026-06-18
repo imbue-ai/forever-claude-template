@@ -107,23 +107,6 @@ def test_resolve_initial_chat_agent_name_none_when_data_json_missing(
     assert welcome_resend._resolve_initial_chat_agent_name() is None
 
 
-def test_unique_agent_by_name_returns_the_single_match() -> None:
-    target = _agent_info("my-agent")
-    other = _agent_info("other", agent_id="agent-00000000000000000000000000000002")
-    assert welcome_resend._unique_agent_by_name("my-agent", [other, target]) is target
-
-
-def test_unique_agent_by_name_none_when_absent() -> None:
-    assert welcome_resend._unique_agent_by_name("my-agent", [_agent_info("other")]) is None
-
-
-def test_unique_agent_by_name_none_when_ambiguous() -> None:
-    """Two agents sharing the name (single-host assumption violated) -> skip, not guess."""
-    first = _agent_info("my-agent", agent_id="agent-00000000000000000000000000000001")
-    second = _agent_info("my-agent", agent_id="agent-00000000000000000000000000000002")
-    assert welcome_resend._unique_agent_by_name("my-agent", [first, second]) is None
-
-
 def test_check_and_resend_welcome_resends_when_transcript_missing_welcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

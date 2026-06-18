@@ -37,7 +37,6 @@ import json
 import os
 import re
 from collections.abc import Callable
-from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger as _loguru_logger
@@ -45,8 +44,6 @@ from loguru import logger as _loguru_logger
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import AgentId
 from imbue.system_interface.agent_discovery import AgentInfo
-from imbue.system_interface.agent_discovery import discover_agents
-from imbue.system_interface.agent_discovery import send_message
 from imbue.system_interface.session_watcher import AgentSessionWatcher
 
 logger = _loguru_logger
@@ -166,31 +163,6 @@ def _resolve_initial_chat_agent_name() -> str | None:
     return name
 
 
-def _unique_agent_by_name(agent_name: str, agents: Sequence[AgentInfo]) -> AgentInfo | None:
-    """Return the single agent named ``agent_name``, or None if not exactly one.
-
-    The workspace is single-host, where mngr guarantees the name is unique, so a
-    correct resolution yields exactly one agent. Anything else -- zero matches (no
-    such agent) or more than one (the single-host assumption was violated and the
-    name spans hosts) -- returns None so the caller skips the resend rather than
-    dispatching `/welcome` to an arbitrary, possibly wrong, agent.
-    """
-    matching = [agent for agent in agents if agent.name == agent_name]
-    if len(matching) != 1:
-        logger.warning(
-            "Welcome target {} resolved to {} agents (expected exactly 1); skipping resend",
-            agent_name,
-            len(matching),
-        )
-        return None
-    return matching[0]
-
-
-def _default_resolve_agent(agent_name: str) -> AgentInfo | None:
-    """Resolve the initial chat agent's name to its full :class:`AgentInfo` (with id)."""
-    return _unique_agent_by_name(agent_name, discover_agents())
-
-
 def _default_read_assistant_transcript(agent: AgentInfo) -> str | None:
     """Return the concatenated text of every assistant turn in the agent's transcript.
 
@@ -236,9 +208,12 @@ class WelcomeResender(FrozenModel):
     deterministic fakes.
     """
 
-    resolve_agent: ResolveAgentFn = _default_resolve_agent
+    # resolve_agent (name -> AgentInfo) and send_message_fn both go through the
+    # AgentManager cache, so they have no standalone default -- the server wires
+    # them from the live manager (and tests inject fakes).
+    resolve_agent: ResolveAgentFn
+    send_message_fn: MessageSendFn
     read_assistant_transcript: TranscriptReadFn = _default_read_assistant_transcript
-    send_message_fn: MessageSendFn = send_message
     skill_path: Path | None = None
 
     def check_and_resend_welcome(self) -> bool:

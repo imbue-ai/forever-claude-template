@@ -280,9 +280,9 @@ def test_send_message_success(client: TestClient) -> None:
     assert response.json()["status"] == "ok"
     assert mock_send.call_count == 1
     # The endpoint routes through AgentManager.send_message_to_agent, which addresses
-    # the agent by id and backs the lookup with the live location cache.
-    assert mock_send.call_args.args == (agent_id, "hello")
-    assert "lookup_locations" in mock_send.call_args.kwargs
+    # the agent by id and supplies the live cache's known location as the 3rd arg.
+    assert mock_send.call_args.args[0] == agent_id
+    assert mock_send.call_args.args[1] == "hello"
 
 
 def test_interrupt_agent_returns_404_for_unknown_agent(client: TestClient) -> None:

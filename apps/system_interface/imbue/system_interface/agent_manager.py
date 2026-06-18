@@ -43,8 +43,10 @@ from imbue.system_interface.activity_state import has_unmatched_tool_use
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
+from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
+from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.system_interface.agent_discovery import send_message
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
@@ -382,6 +384,40 @@ class AgentManager:
         with self._lock:
             return self._agents.get(agent_id)
 
+    def _agent_info_from_state(self, agent_state: AgentStateItem) -> AgentInfo:
+        """Build the web-UI :class:`AgentInfo` (with resolved state/config dirs)."""
+        agent_state_dir = self._get_agent_state_dir(agent_state.id)
+        return AgentInfo(
+            id=agent_state.id,
+            name=agent_state.name,
+            state=agent_state.state,
+            agent_state_dir=agent_state_dir,
+            claude_config_dir=read_claude_config_dir_from_env_file(agent_state_dir),
+            labels=agent_state.labels,
+            work_dir=agent_state.work_dir,
+        )
+
+    def get_agent_info_by_id(self, agent_id: str) -> AgentInfo | None:
+        """Resolve an agent id to its :class:`AgentInfo` from the live state, or None."""
+        agent_state = self.get_agent_by_id(agent_id)
+        return self._agent_info_from_state(agent_state) if agent_state is not None else None
+
+    def get_agent_info_by_name(self, name: str) -> AgentInfo | None:
+        """Resolve a unique agent name to its :class:`AgentInfo` from the live state.
+
+        Returns None unless exactly one agent matches: zero (no such agent) or more
+        than one (a name spanning hosts -- the single-host assumption was violated)
+        both skip, so a caller never dispatches to an arbitrary, possibly wrong agent.
+        """
+        with self._lock:
+            matching = [agent for agent in self._agents.values() if agent.name == name]
+        if len(matching) != 1:
+            _loguru_logger.warning(
+                "Agent name {} resolved to {} agents (expected exactly 1); not resolving", name, len(matching)
+            )
+            return None
+        return self._agent_info_from_state(matching[0])
+
     def get_agent_matches_by_id(self, agent_id: str) -> list[AgentMatch]:
         """Return the discovered location of the agent with this id (0- or 1-element).
 
@@ -396,12 +432,12 @@ class AgentManager:
     def send_message_to_agent(self, agent_id: AgentId, message: str) -> bool:
         """Send a message to the agent with ``agent_id``, using the live location cache.
 
-        The single entry point for messaging an agent: it backs `send_message`'s
-        location lookup with this manager's event-fed `get_agent_matches_by_id`, so
-        the message skips a fresh mngr discovery whenever the agent's location is
-        already known. Returns True on success.
+        The single entry point for messaging an agent: it reads this manager's
+        event-fed location for the id and hands it to `send_message`, so the message
+        skips a fresh mngr discovery whenever the location is already known. Returns
+        True on success.
         """
-        return send_message(agent_id, message, lookup_locations=self.get_agent_matches_by_id)
+        return send_message(agent_id, message, self.get_agent_matches_by_id(str(agent_id)))
 
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from the tracked state and broadcast the update.
