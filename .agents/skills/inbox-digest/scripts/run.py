@@ -268,11 +268,13 @@ def fetch(query: str, max_results: int, out_dir: Path) -> list[dict[str, object]
         message = fetch_message(message_id)
         # Preserve the raw payload (source of truth) before any derivation.
         (messages_dir / f"{message_id}.json").write_text(
-            json.dumps(message, indent=1, ensure_ascii=False)
+            json.dumps(message, indent=1, ensure_ascii=False), encoding="utf-8"
         )
         records.append(to_raw_record(message))
 
-    (out_dir / "raw.json").write_text(json.dumps(records, indent=1, ensure_ascii=False))
+    (out_dir / "raw.json").write_text(
+        json.dumps(records, indent=1, ensure_ascii=False), encoding="utf-8"
+    )
     return records
 
 
@@ -463,7 +465,7 @@ def digest(records: list[dict[str, object]], out_dir: Path) -> list[dict[str, ob
     else:
         outcome = anyio.run(_digest_async, records)
     (out_dir / "digest.json").write_text(
-        json.dumps(outcome.records, indent=1, ensure_ascii=False)
+        json.dumps(outcome.records, indent=1, ensure_ascii=False), encoding="utf-8"
     )
     print(
         f"Digested {len(outcome.records)}/{len(records)} emails "
@@ -486,7 +488,9 @@ def _default_out_dir() -> Path:
 def _write_stable_copy(records: list[dict[str, object]], stable_path: Path) -> None:
     """Refresh the fixed-path digest the web surface reads (same schema)."""
     stable_path.parent.mkdir(parents=True, exist_ok=True)
-    stable_path.write_text(json.dumps(records, indent=1, ensure_ascii=False))
+    stable_path.write_text(
+        json.dumps(records, indent=1, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def run_all(query: str, max_results: int, out_dir: Path, stable_path: Path) -> None:
@@ -504,7 +508,7 @@ def run_all(query: str, max_results: int, out_dir: Path, stable_path: Path) -> N
 
 def _load_records(path: Path) -> list[dict[str, object]]:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise InboxDigestError(f"could not read raw records at {path}: {exc}") from exc
     except ValueError as exc:
