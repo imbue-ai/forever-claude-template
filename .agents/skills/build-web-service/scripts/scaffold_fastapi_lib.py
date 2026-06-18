@@ -162,16 +162,12 @@ services.toml command sets ``ROOT_PATH=/service/{name}`` on this
 process for that case. Standalone ``uv run {name}`` leaves it empty so
 the app serves at ``/``.
 
-``root_path`` only fixes URLs that FastAPI generates server-side
-(OpenAPI, ``RedirectResponse`` to absolute paths, ``request.url_for``).
-It does NOT touch URLs in the HTML/JS you emit. For those -- every
-``fetch``/iframe ``src``/form ``action``/link/WebSocket URL in your
-markup -- use a RELATIVE path (``api/items``, not ``/api/items``): the
-proxy injects ``<base href="/service/{name}/">``, so relative URLs
-resolve under the prefix behind the proxy and under ``/`` standalone,
-with no hardcoded prefix. An absolute path (``/api/items``) ignores the
-base and escapes to the workspace root; a hardcoded prefix breaks
-standalone and on rename.
+``root_path`` only fixes server-side URLs (OpenAPI, redirects,
+``request.url_for``), NOT URLs in the HTML/JS you emit. For those, use
+RELATIVE paths (``api/items``, not ``/api/items``): the proxy injects
+``<base href="/service/{name}/">``, so they resolve under the prefix
+behind the proxy and under ``/`` standalone. An absolute path escapes to
+the workspace root; a hardcoded prefix breaks standalone and on rename.
 """
 
 import os

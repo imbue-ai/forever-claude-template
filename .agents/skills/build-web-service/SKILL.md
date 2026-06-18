@@ -143,32 +143,16 @@ sync and most pages don't need otherwise.
 
 ### The URL rule: emit relative URLs, never reconstruct the prefix
 
-Your app is served at `/service/<name>/` behind the proxy but at `/`
-when run standalone. **Every URL your client-side markup builds -- `fetch`
-paths, iframe `src`, form `action`, `<a href>`, WebSocket URLs -- must
-be a RELATIVE path** (`raw/123`, `api/items`, `socket`), never an
-absolute path and never a hardcoded prefix.
-
-Why relative wins on every axis:
-
-- The proxy injects `<base href="/service/<name>/">`, so a relative URL
-  resolves to `/service/<name>/raw/123` behind the proxy and to
-  `/raw/123` standalone -- correct in both, with zero knowledge of the
-  prefix.
-- An **absolute path** (`/raw/123`) ignores the `<base>` and resolves
-  against the origin root, so it escapes your service and hits the
-  workspace shell -- e.g. an iframe pointed at `/raw/123` loads the
-  workspace UI (blank inside a sandbox), not your route.
-- A **hardcoded prefix** (`/service/<name>/raw/123`) works behind the
-  proxy but breaks standalone and silently rots if the service is renamed.
-
-Do not try to read the prefix at runtime and prepend it yourself
-(`ROOT_PATH` is not reliably available to your client code, and threading
-it through is the bug this rule exists to avoid). Just emit the relative
-path. This is the same constraint the gotchas doc already states for
-WebSockets and redirects -- it applies to *all* client URLs. `root_path`
-(Step 1) is the server-side half; this is the client-side half. You need
-both.
+Your app is at `/service/<name>/` behind the proxy and at `/` standalone.
+**Every URL your client-side markup builds -- `fetch`, iframe `src`, form
+`action`, `<a href>`, WebSocket URLs -- must be RELATIVE** (`raw/123`,
+not `/raw/123`). The proxy injects `<base href="/service/<name>/">`, so a
+relative URL resolves correctly in both cases. An absolute path ignores
+the `<base>` and escapes to the workspace shell (an iframe `src` of
+`/raw/123` loads the workspace UI, blank under a sandbox); a hardcoded
+prefix breaks standalone and rots on rename. Don't read the prefix at
+runtime to prepend it (`ROOT_PATH` isn't reliable in client code). This
+is the client-side half; `root_path` (Step 1) is the server-side half.
 
 ### Rendering HTML for a human
 
