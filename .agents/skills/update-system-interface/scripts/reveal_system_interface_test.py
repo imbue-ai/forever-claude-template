@@ -13,6 +13,7 @@ never regress, because a broken backend takes down the user's whole UI.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -102,12 +103,22 @@ class _FakeSpawned:
 @dataclass
 class _FakeSpawner(reveal_mod.Spawner):
     spawns: list[list[str]] = field(default_factory=list)
+    detached_spawns: list[list[str]] = field(default_factory=list)
+    detached_envs: list[dict] = field(default_factory=list)
+    detached_pid: int = 4242
     last: _FakeSpawned | None = None
 
     def spawn(self, argv: Sequence[str], cwd: str, env: dict) -> _FakeSpawned:
         self.spawns.append(list(argv))
         self.last = _FakeSpawned()
         return self.last
+
+    def spawn_detached(
+        self, argv: Sequence[str], cwd: str, env: dict, log_path: str | None = None
+    ) -> int:
+        self.detached_spawns.append(list(argv))
+        self.detached_envs.append(dict(env))
+        return self.detached_pid
 
 
 def _runner_with_diff(name_status: str, *, dirty: bool = False) -> _RecordingRunner:
@@ -380,7 +391,9 @@ def test_main_maps_precondition_to_exit_1(tmp_path: Path) -> None:
     # main() wires real deps; point it at an empty dir so the first git call
     # (status) fails as a CalledProcessError -> exit 1, proving the mapping
     # without needing a real repo.
-    code = reveal_mod.main(["--rollback-to", _ROLLBACK, "--repo-root", str(tmp_path)])
+    code = reveal_mod.main(
+        ["reveal", "--rollback-to", _ROLLBACK, "--repo-root", str(tmp_path)]
+    )
     assert code == 1
 
 
@@ -413,3 +426,180 @@ def test_restore_tree_removes_adds_and_checks_out_the_rest() -> None:
         "apps/system_interface/imbue/system_interface/server.py",
         "apps/system_interface/frontend/src/old.ts",
     ]
+
+
+# --- preview setup ----------------------------------------------------------
+
+
+_SLUG = "demo-change"
+_BRANCH = "mngr/demo-change"
+
+
+def _preview(
+    runner: _RecordingRunner,
+    http: _FakeHttp,
+    spawner: _FakeSpawner,
+    repo_root: Path,
+) -> int:
+    return reveal_mod.preview(
+        _SLUG,
+        _BRANCH,
+        repo_root,
+        runner=runner,
+        http=http,
+        spawner=spawner,
+        sleeper=lambda _seconds: None,
+    )
+
+
+def _state_path(repo_root: Path) -> Path:
+    return reveal_mod._preview_state_path(repo_root, _SLUG)
+
+
+def test_preview_builds_boots_registers_and_records_state(tmp_path: Path) -> None:
+    runner = _RecordingRunner()
+    http = _FakeHttp(_all_healthy)
+    spawner = _FakeSpawner()
+
+    code = _preview(runner, http, spawner, tmp_path)
+
+    assert code == 0
+    # Built the worker branch in an isolated worktree.
+    assert runner.ran("git", "fetch", "origin", _BRANCH)
+    assert runner.ran("git", "worktree", "add", "--force")
+    assert runner.ran("uv", "sync", "--all-packages")
+    assert runner.ran("npm", "ci")
+    assert runner.ran("npm", "run", "build")
+    # Booted the built instance detached (from the worktree, via uv run).
+    assert spawner.detached_spawns == [["uv", "run", reveal_mod.TOOL_NAME]]
+    # Layout persistence is neutered (no MNGR_AGENT_ID) but discovery is kept.
+    env = spawner.detached_envs[0]
+    assert "MNGR_AGENT_ID" not in env
+    assert env["SYSTEM_INTERFACE_HOST"] == "127.0.0.1"
+    assert env["SYSTEM_INTERFACE_PORT"]
+    # Registered the preview as a proxied service.
+    register = runner.argvs_starting(
+        "python3", reveal_mod.FORWARD_PORT_SCRIPT, "--name"
+    )
+    assert register and register[0][3] == reveal_mod.PREVIEW_SERVICE_NAME
+    # Recorded enough state for unpreview to find everything later.
+    state = json.loads(_state_path(tmp_path).read_text())
+    assert state["pid"] == spawner.detached_pid
+    assert state["service"] == reveal_mod.PREVIEW_SERVICE_NAME
+    assert state["branch"] == _BRANCH
+    assert isinstance(state["port"], int)
+    assert state["worktree"].endswith(reveal_mod.PREVIEW_WORKTREE_DIRNAME)
+
+
+def test_preview_clears_a_stale_preview_before_building(tmp_path: Path) -> None:
+    # A leftover preview from a prior run must be torn down first so the fixed
+    # service name and worktree path can be reused cleanly.
+    state_dir = reveal_mod._preview_state_dir(tmp_path, _SLUG)
+    state_dir.mkdir(parents=True)
+    _state_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "pid": 999,
+                "service": reveal_mod.PREVIEW_SERVICE_NAME,
+                "worktree": "/old/tree",
+            }
+        )
+    )
+    runner = _RecordingRunner()
+
+    code = _preview(runner, _FakeHttp(_all_healthy), _FakeSpawner(), tmp_path)
+
+    assert code == 0
+    assert runner.ran("kill", "-TERM", "-999")  # old server killed
+    assert runner.ran(
+        "python3", reveal_mod.FORWARD_PORT_SCRIPT, "--remove", "--name"
+    )  # old service deregistered
+    # A fresh state file replaced the stale one.
+    assert json.loads(_state_path(tmp_path).read_text())["pid"] == 4242
+
+
+def test_preview_tears_down_and_reports_failure_when_build_fails(
+    tmp_path: Path,
+) -> None:
+    runner = _RecordingRunner()
+    runner.respond(("npm", "run", "build"), _Result(returncode=1, stderr="tsc error"))
+    spawner = _FakeSpawner()
+
+    code = _preview(runner, _FakeHttp(_all_healthy), spawner, tmp_path)
+
+    assert code == 1
+    assert not spawner.detached_spawns  # never got to boot
+    assert not runner.ran(
+        "python3", reveal_mod.FORWARD_PORT_SCRIPT, "--name"
+    )  # never registered
+    assert runner.ran("git", "worktree", "remove", "--force")  # worktree cleaned up
+    assert not _state_path(tmp_path).exists()  # no state left behind
+
+
+def test_preview_tears_down_booted_server_when_it_never_gets_healthy(
+    tmp_path: Path,
+) -> None:
+    runner = _RecordingRunner()
+    spawner = _FakeSpawner()
+    # The preview port never returns 200.
+    http = _FakeHttp(lambda _url: None)
+
+    code = _preview(runner, http, spawner, tmp_path)
+
+    assert code == 1
+    assert spawner.detached_spawns  # it was booted
+    assert runner.ran("kill", "-TERM", f"-{spawner.detached_pid}")  # then killed
+    assert not runner.ran(
+        "python3", reveal_mod.FORWARD_PORT_SCRIPT, "--name"
+    )  # never registered (health failed first)
+    assert runner.ran("git", "worktree", "remove", "--force")
+    assert not _state_path(tmp_path).exists()
+
+
+# --- preview teardown -------------------------------------------------------
+
+
+def test_unpreview_tears_down_everything_in_the_state_file(tmp_path: Path) -> None:
+    state_dir = reveal_mod._preview_state_dir(tmp_path, _SLUG)
+    state_dir.mkdir(parents=True)
+    worktree = str(state_dir / reveal_mod.PREVIEW_WORKTREE_DIRNAME)
+    _state_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "pid": 4242,
+                "service": reveal_mod.PREVIEW_SERVICE_NAME,
+                "worktree": worktree,
+            }
+        )
+    )
+    runner = _RecordingRunner()
+
+    code = reveal_mod.unpreview(_SLUG, tmp_path, runner=runner)
+
+    assert code == 0
+    assert runner.ran("kill", "-TERM", "-4242")
+    remove = runner.argvs_starting(
+        "python3", reveal_mod.FORWARD_PORT_SCRIPT, "--remove", "--name"
+    )
+    assert remove and remove[0][-1] == reveal_mod.PREVIEW_SERVICE_NAME
+    assert [c[-1] for c in runner.argvs_starting("git", "worktree", "remove")] == [
+        worktree
+    ]
+    assert not state_dir.exists()  # state directory deleted
+
+
+def test_unpreview_without_state_is_a_noop_success(tmp_path: Path) -> None:
+    runner = _RecordingRunner()
+
+    code = reveal_mod.unpreview(_SLUG, tmp_path, runner=runner)
+
+    assert code == 0
+    assert not runner.ran("kill")
+    assert not runner.ran("git", "worktree", "remove")
+
+
+def test_main_routes_unpreview(tmp_path: Path) -> None:
+    # No state present -> idempotent no-op success, proving the subcommand wires
+    # through main() and reaches unpreview.
+    code = reveal_mod.main(["unpreview", "--slug", _SLUG, "--repo-root", str(tmp_path)])
+    assert code == 0

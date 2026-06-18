@@ -32,14 +32,25 @@ The deployed system interface is the live web UI the user is looking at, so
 changes are not applied in place. The canonical flow is the
 `update-system-interface` agent skill: a change is delegated to a worker, tested
 in isolation (including Playwright against an isolated instance) and run through
-the review gates, merged, and only then revealed. See
+the review gates; then **previewed** to the user as a tab before merging; and,
+once approved, merged and revealed. See
 `.agents/skills/update-system-interface/SKILL.md`.
+
+The same `reveal_system_interface.py` script owns the deterministic setup/teardown
+on both sides of that user gate, as sub-commands:
+
+- `preview --slug <name> --branch mngr/<name>` builds the worker's branch in an
+  isolated worktree, boots it on a free port, and registers it as the
+  `si-preview` service so the live UI can proxy it as a tab -- all without
+  merging or touching the served tree.
+- `unpreview --slug <name>` tears that down (idempotent).
+- `reveal --rollback-to <sha>` reveals the merged change (below).
 
 The reveal, after merge, is a single self-healing command. With the known-good
 revision captured before the merge (`ROLLBACK_TO=$(git rev-parse HEAD)`):
 
 ```bash
-python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py --rollback-to "$ROLLBACK_TO"
+python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py reveal --rollback-to "$ROLLBACK_TO"
 ```
 
 It classifies what changed and does only what is needed: refreshes dependencies

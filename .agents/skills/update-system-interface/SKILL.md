@@ -19,8 +19,10 @@ not run `Edit`/`Write` on files under `apps/system_interface/` in this (the
 served) checkout, and do not rebuild or restart the live UI from uncommitted
 edits here. Every change is made in a separate, isolated clone of the source,
 built and tested there, and merged back only after it passes. The only things
-you do to the served tree are committing the merge and running the reveal
-command at the end of this skill.
+you do to the served tree are committing the merge and running this skill's
+`preview` / `reveal` / `unpreview` commands -- and `preview`/`unpreview` never
+modify the served tree at all (they build the change in a separate worktree, so
+even the pre-merge preview can't reach what the user is looking at).
 
 That isolated clone is a `launch-task` worker: it runs in its own git worktree
 with its own copy of the source, so a half-broken build can never reach what the
@@ -34,11 +36,15 @@ separate place to work.
    the detail of how to build, test, and verify the change in isolation.
 2. The **worker** implements + builds + tests it on its own branch (`mngr/<name>`),
    then reports `done`.
-3. You **record the known-good revision, then merge** the worker's branch on a
-   clean `done`.
-4. You **reveal** the change with one command, which refreshes dependencies,
-   rebuilds/restarts as needed, verifies the live UI is healthy, and
-   automatically rolls back if anything breaks.
+3. You **preview** the worker's branch *before merging*: one command builds it in
+   an isolated worktree and serves it as a tab the user can click around. The
+   user approves or rejects.
+4. **On approval**, you **record the known-good revision, then merge** the
+   worker's branch.
+5. You **reveal** the merged change with one command (refresh dependencies,
+   rebuild/restart as needed, verify the live UI is healthy, auto-rollback on
+   failure), then **tear down the preview**. On rejection, you just tear down the
+   preview and hand back -- nothing is merged.
 
 ## 1-2. Delegate to a worker
 
@@ -60,10 +66,43 @@ specifics for this flow:
     how to run, test, verify, and what not to touch; report `done` only when its
     testing contract and the review gates all pass.*
 
-## 3. Record known-good, then merge on a clean `done`
+## 3. Preview the change before merging
 
 Handle the worker's report per `launch-task` (its `## 4` and the referenced
-`lead-proxy.md`). On terminal `done`:
+`lead-proxy.md`). On a terminal `done`, show the user the change *before* merging
+anything. One command builds the worker's branch and serves it as a tab:
+
+```bash
+python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py preview \
+    --slug <name> --branch mngr/<name>
+```
+
+This builds the branch in a throwaway worktree (its own `static/` bundle, so the
+served UI is never touched), boots it on a free port with layout persistence
+neutered (it reads the same agents, so the user's real conversations render, but
+it cannot clobber the live `layout.json`), and registers it under the
+`si-preview` service. It does **not** merge or modify the served tree -- the
+whole point is to look before committing to the change. Exit `0` means the
+preview is up; a non-zero exit means it failed to build or boot and tore itself
+down (diagnose before retrying).
+
+Open it as a tab and ask the user to explore:
+
+```bash
+python3 scripts/layout.py open si-preview
+```
+
+Then confirm with the user via `send-user-message`: a binary keep/discard *and*
+room for free-form notes (what looks off, what they'd change). Wait for their
+answer before doing anything else.
+
+On `stuck` or a timeout with a dead worker, surface to the user per
+`launch-task`'s failure flow -- **do not** preview, merge, or reveal, and do not
+retry silently.
+
+## 4. On approval: record known-good, then merge
+
+If the user **approves** the preview:
 
 1. **Capture the known-good revision first** -- the served branch's current
    `HEAD`, *before* you merge. This is what the reveal rolls back to if the
@@ -75,20 +114,22 @@ Handle the worker's report per `launch-task` (its `## 4` and the referenced
    UI is served from. Commit the merge so the tree is clean (the reveal refuses
    to run on a dirty tree, so a rollback can never clobber unrelated work).
 
-On `stuck` or a timeout with a dead worker, surface to the user per
-`launch-task`'s failure flow -- **do not** reveal anything and do not retry
-silently.
+If the user **rejects**, do not merge. Tear down the preview (see the end of the
+next section) and hand back with their feedback -- decide *with them* whether to
+re-brief the worker for another pass. Re-briefing is your judgment, not an
+automatic loop.
 
 Note: the built `static/` bundle is gitignored, so the merge brings only source
 and dependency-manifest (`pyproject.toml` / `package.json` / lockfile) changes,
 not the worker's build output. The reveal step rebuilds it.
 
-## 4. Reveal the change (after merge)
+## 5. Reveal the change (after merge), then tear down the preview
 
-Run the reveal script with the known-good revision you captured:
+Run the reveal sub-command with the known-good revision you captured:
 
 ```bash
-python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py --rollback-to "$ROLLBACK_TO"
+python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py reveal \
+    --rollback-to "$ROLLBACK_TO"
 ```
 
 That single command owns the whole reveal as one deterministic, self-healing
@@ -124,6 +165,17 @@ Interpret the exit code and report it to the user:
   interface may be down; escalate immediately.
 - `1` -- precondition error (e.g. a dirty tree); nothing was changed.
 
+Once you no longer need the preview (after a successful reveal, *or* after a
+rejection where nothing was merged), tear it down:
+
+```bash
+python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py unpreview --slug <name>
+```
+
+`unpreview` kills the preview server, deregisters the `si-preview` service, and
+removes the worktree. It is idempotent, so it is also the safe way to clean up
+after a `preview` that failed partway.
+
 Why this exists as a script and not a checklist: if the backend fails to start,
 the user loses their entire chat UI -- there is nowhere left to surface an error
 message. The recover-or-revert logic must therefore run identically every time
@@ -139,5 +191,10 @@ top-level page, so it does **not** reveal a system-interface code change.
 The UI is what the user is actively looking at, so the design goal is "never
 serve a half-broken UI," not "iterate in place fast." The worker's isolated
 worktree clone + in-process testing + Playwright verification + review gates make
-it safe to merge; the reveal script's pre-flight, health probe, and autonomous
-rollback make it safe to reveal in one motion.
+it safe to merge; the pre-merge preview lets the user actually click around the
+change (served from its own worktree, so it can't touch the live UI) and approve
+it before anything lands; and the reveal script's pre-flight, health probe, and
+autonomous rollback make it safe to reveal in one motion. Preview setup and
+teardown are deterministic, so they live as `preview`/`unpreview` sub-commands of
+the same script rather than as agent prose -- the only non-deterministic part,
+gating on the user's judgment, stays with you.
