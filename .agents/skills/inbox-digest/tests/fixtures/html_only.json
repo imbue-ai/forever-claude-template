@@ -1,0 +1,30 @@
+{
+ "id": "fixturehtmlonly02",
+ "threadId": "fixturehtmlonly02",
+ "labelIds": [
+  "UNREAD",
+  "INBOX"
+ ],
+ "snippet": "Headline ...",
+ "payload": {
+  "mimeType": "text/html",
+  "headers": [
+   {
+    "name": "From",
+    "value": "Newsletter <news@example.com>"
+   },
+   {
+    "name": "Subject",
+    "value": "HTML only"
+   },
+   {
+    "name": "Date",
+    "value": "Thu, 18 Jun 2026 09:00:00 +0000"
+   }
+  ],
+  "body": {
+   "size": 204,
+   "data": "PGh0bWw-PGhlYWQ-PHN0eWxlPi5he2NvbG9yOmJsdWV9PC9zdHlsZT48c2NyaXB0PnZhciB4PTE7PC9zY3JpcHQ-PC9oZWFkPjxib2R5PjxoMT5IZWFkbGluZTwvaDE-PHA-Rmlyc3QgcGFyYWdyYXBoIHdpdGggYSA8YSBocmVmPSdodHRwczovL2V4YW1wbGUuY29tL2EnPmxpbms8L2E-LjwvcD48ZGl2PlNlY29uZCBibG9jazwvZGl2PjwvYm9keT48L2h0bWw-"
+  }
+ }
+}

@@ -1,0 +1,35 @@
+{
+ "id": "fixtureempty03",
+ "threadId": "fixtureempty03",
+ "labelIds": [
+  "UNREAD",
+  "INBOX"
+ ],
+ "snippet": "",
+ "payload": {
+  "mimeType": "multipart/mixed",
+  "headers": [
+   {
+    "name": "From",
+    "value": "Someone <x@example.com>"
+   },
+   {
+    "name": "Subject",
+    "value": "No body"
+   },
+   {
+    "name": "Date",
+    "value": "Thu, 18 Jun 2026 08:00:00 +0000"
+   }
+  ],
+  "parts": [
+   {
+    "mimeType": "image/png",
+    "body": {
+     "attachmentId": "abc",
+     "size": 1000
+    }
+   }
+  ]
+ }
+}

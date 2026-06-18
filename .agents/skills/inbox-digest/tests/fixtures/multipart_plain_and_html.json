@@ -1,0 +1,50 @@
+{
+ "id": "fixturemultipart01",
+ "threadId": "fixturemultipart01",
+ "labelIds": [
+  "UNREAD",
+  "INBOX",
+  "CATEGORY_UPDATES"
+ ],
+ "snippet": "Top story ...",
+ "payload": {
+  "mimeType": "multipart/alternative",
+  "headers": [
+   {
+    "name": "From",
+    "value": "TLDR AI <dan@tldrnewsletter.com>"
+   },
+   {
+    "name": "To",
+    "value": "user@example.com"
+   },
+   {
+    "name": "Subject",
+    "value": "Daily roundup"
+   },
+   {
+    "name": "Date",
+    "value": "Thu, 18 Jun 2026 13:48:46 +0000"
+   }
+  ],
+  "body": {
+   "size": 0
+  },
+  "parts": [
+   {
+    "mimeType": "text/plain",
+    "body": {
+     "size": 101,
+     "data": "VG9wIHN0b3J5ICg0IE1JTlVURSBSRUFEKSBbNl0KQSBjb25jaXNlIHBsYWluLXRleHQgc3VtbWFyeS4KCkxpbmtzOgpbNl0gaHR0cHM6Ly9leGFtcGxlLmNvbS90b3Atc3Rvcnk"
+    }
+   },
+   {
+    "mimeType": "text/html",
+    "body": {
+     "size": 90,
+     "data": "PGh0bWw-PGhlYWQ-PHN0eWxlPi54e2NvbG9yOnJlZH08L3N0eWxlPjwvaGVhZD48Ym9keT48cD5Ub3AgPGI-c3Rvcnk8L2I-PC9wPjwvYm9keT48L2h0bWw-"
+    }
+   }
+  ]
+ }
+}
