@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from imbue.mngr.cli.output_helpers import write_json_line
 from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from bootstrap.manager import (
@@ -412,6 +415,22 @@ def test_parse_created_agent_id_returns_none_when_absent() -> None:
     assert _parse_created_agent_id('{"host_id": "host-1"}\n') is None
     assert _parse_created_agent_id("not json at all") is None
     assert _parse_created_agent_id("") is None
+
+
+def test_parse_created_agent_id_reads_live_mngr_json_output() -> None:
+    """Confront the parser with mngr's real `--format json` serializer, so a
+    vendor/mngr switch to pretty-printed or JSONL create output fails here at
+    merge time rather than only at host boot. `write_json_line` is exactly what
+    `mngr create`'s JSON branch calls (one compact object on stdout)."""
+    result_data = {
+        "agent_id": "agent-0123456789abcdef0123456789abcdef",
+        "host_id": "host-1",
+        "host_name": "my-workspace",
+    }
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        write_json_line(result_data)
+    assert _parse_created_agent_id(buffer.getvalue()) == result_data["agent_id"]
 
 
 # --- _persist_initial_chat_agent_id ---
