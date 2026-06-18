@@ -18,12 +18,24 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.claude_auth import ProcessSetupError
 from imbue.system_interface.server import create_application
 from imbue.system_interface.testing import FakeFinishedProcess
 from imbue.system_interface.testing import FakePexpectProcess
 from imbue.system_interface.welcome_resend import WelcomeResender
+
+
+def _fake_chat_agent(name: str) -> AgentInfo:
+    """A resolved initial-chat-agent AgentInfo (valid id) for welcome-resend tests."""
+    return AgentInfo(
+        id="agent-00000000000000000000000000000001",
+        name=name,
+        state="RUNNING",
+        agent_state_dir=Path("/tmp/agent"),
+        claude_config_dir=Path("/tmp/.claude"),
+    )
 
 
 @contextmanager
@@ -37,17 +49,13 @@ def _client(
     instance -- fine for tests that never reach that dependency (e.g.
     request-validation rejections).
     """
-    app = create_application(
-        claude_auth_service=claude_auth_service, welcome_resender=welcome_resender
-    )
+    app = create_application(claude_auth_service=claude_auth_service, welcome_resender=welcome_resender)
     with TestClient(app) as test_client:
         yield test_client
 
 
 def _logged_in_runner(_cmd: list[str], _timeout: float) -> FakeFinishedProcess:
-    return FakeFinishedProcess(
-        stdout='{"loggedIn": true, "email": "u@example.com", "subscriptionType": "Max"}'
-    )
+    return FakeFinishedProcess(stdout='{"loggedIn": true, "email": "u@example.com", "subscriptionType": "Max"}')
 
 
 def test_status_endpoint_returns_parsed_payload() -> None:
@@ -63,9 +71,7 @@ def test_status_endpoint_returns_parsed_payload() -> None:
 
 def test_status_endpoint_logged_out_when_claude_missing() -> None:
     def _missing_runner(_cmd: list[str], _timeout: float) -> FakeFinishedProcess:
-        raise ProcessSetupError(
-            command=("claude",), stdout="", stderr="not found", is_output_already_logged=False
-        )
+        raise ProcessSetupError(command=("claude",), stdout="", stderr="not found", is_output_already_logged=False)
 
     service = ClaudeAuthService(command_runner=_missing_runner)
     with _client(claude_auth_service=service) as client:
@@ -100,23 +106,20 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     (tmp_path / "data.json").write_text(json.dumps({"host_name": "chat-1"}))
     skill_path = tmp_path / "SKILL.md"
-    skill_path.write_text(
-        "---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n"
-    )
+    skill_path.write_text("---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n")
 
     def _recording_runner(cmd: list[str], timeout: float) -> FakeFinishedProcess:
         command_log.append(tuple(cmd))
         return _logged_in_runner(cmd, timeout)
 
-    def _record_welcome_send(name: str, _message: str) -> bool:
-        welcome_resend_calls.append(name)
+    def _record_welcome_send(agent_id: str, _message: str) -> bool:
+        welcome_resend_calls.append(agent_id)
         return True
 
-    service = ClaudeAuthService(
-        command_runner=_recording_runner, pexpect_spawner=lambda *_a, **_k: fake_process
-    )
+    service = ClaudeAuthService(command_runner=_recording_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
     resender = WelcomeResender(
-        read_assistant_transcript=lambda _name: "",
+        resolve_agent=lambda _name: _fake_chat_agent("chat-1"),
+        read_assistant_transcript=lambda _agent: "",
         send_message_fn=_record_welcome_send,
         skill_path=skill_path,
     )
@@ -137,16 +140,14 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
     assert body["logged_in"] is True
     assert body["email"] == "u@example.com"
     assert fake_process.sendline_calls == ["FAKE#CODE"]
-    assert welcome_resend_calls == ["chat-1"]
+    assert welcome_resend_calls == ["agent-00000000000000000000000000000001"]
     assert all(cmd[:2] != ("mngr", "stop") for cmd in command_log)
     assert all(cmd[:2] != ("mngr", "start") for cmd in command_log)
 
 
 def test_submit_code_rejects_unknown_session() -> None:
     with _client() as client:
-        response = client.post(
-            "/api/claude-auth/submit-code", json={"session_id": "nope", "code": "x"}
-        )
+        response = client.post("/api/claude-auth/submit-code", json={"session_id": "nope", "code": "x"})
     assert response.status_code == 400
 
 
@@ -166,9 +167,7 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     (tmp_path / "data.json").write_text(json.dumps({"host_name": "ababa"}))
     skill_path = tmp_path / "SKILL.md"
-    skill_path.write_text(
-        "---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n"
-    )
+    skill_path.write_text("---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n")
 
     welcome_calls: list[str] = []
     restart_calls: list[list[str]] = []
@@ -188,13 +187,14 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
             return FakeFinishedProcess(returncode=0)
         return _logged_in_runner(cmd, _timeout)
 
-    def _record_welcome_send(name: str, _message: str) -> bool:
-        welcome_calls.append(name)
+    def _record_welcome_send(agent_id: str, _message: str) -> bool:
+        welcome_calls.append(agent_id)
         return True
 
     service = ClaudeAuthService(command_runner=_runner)
     resender = WelcomeResender(
-        read_assistant_transcript=lambda _name: "",
+        resolve_agent=lambda _name: _fake_chat_agent("ababa"),
+        read_assistant_transcript=lambda _agent: "",
         send_message_fn=_record_welcome_send,
         skill_path=skill_path,
     )
@@ -216,7 +216,7 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
         "start worktree-1",
     ]
     assert all("--no-resume" in cmd for cmd in restart_calls if cmd[1] == "start")
-    assert welcome_calls == ["ababa"]
+    assert welcome_calls == ["agent-00000000000000000000000000000001"]
 
 
 def test_submit_api_key_rejects_empty_key() -> None:
