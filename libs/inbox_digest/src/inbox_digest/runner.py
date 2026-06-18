@@ -484,7 +484,7 @@ def _fetch_raw_html(msg_id: str) -> str | None:
     if "payload" not in msg:
         return None
 
-    found = {"html": None, "plain": None}
+    found: dict[str, str | None] = {"html": None, "plain": None}
 
     def walk(part: dict) -> None:
         mime = part.get("mimeType", "")
