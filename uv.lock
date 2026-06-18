@@ -13,6 +13,7 @@ members = [
     "cloudflare-tunnel",
     "forever-claude-template",
     "host-backup",
+    "inbox-digest",
     "mngr-cli-contract",
     "runtime-backup",
     "system-interface",
@@ -793,6 +794,7 @@ dependencies = [
     { name = "cloudflare-tunnel" },
     { name = "host-backup" },
     { name = "imbue-common" },
+    { name = "inbox-digest" },
     { name = "litellm" },
     { name = "playwright" },
     { name = "runtime-backup" },
@@ -823,6 +825,7 @@ requires-dist = [
     { name = "cloudflare-tunnel", editable = "libs/cloudflare_tunnel" },
     { name = "host-backup", editable = "libs/host_backup" },
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
+    { name = "inbox-digest", editable = "libs/inbox_digest" },
     { name = "litellm", specifier = ">=1.88.1" },
     { name = "playwright", specifier = "==1.58.0" },
     { name = "runtime-backup", editable = "libs/runtime_backup" },
@@ -1385,6 +1388,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e7/72/c600ae4f68c28fc19f9c31b9403053e5dbb8cace2e6842c7b7c3e4d42fe9/importlib_metadata-8.9.0.tar.gz", hash = "sha256:58850626cef4bd2df100378b0f2aea9724a7b92f10770d547725b047078f99ee", size = 56140, upload-time = "2026-03-20T16:56:26.362Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7d/f9/97f2ca8bb3ec6e4b1d64f983ebe98b9a192faddff67fac3d6303a537e670/importlib_metadata-8.9.0-py3-none-any.whl", hash = "sha256:e0f761b6ea91ced3b0844c14c9d955224d538105921f8e6754c00f6ca79fba7f", size = 27220, upload-time = "2026-03-20T16:56:25.07Z" },
+]
+
+[[package]]
+name = "inbox-digest"
+version = "0.1.0"
+source = { editable = "libs/inbox_digest" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "jinja2" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.110" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "uvicorn", specifier = ">=0.29" },
 ]
 
 [[package]]

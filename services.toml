@@ -43,3 +43,7 @@ restart = "on-failure"
 # scripts/deferred_install.sh and libs/bootstrap/README.md.
 [services.deferred-install]
 command = "bash scripts/deferred_install.sh"
+
+[services.inbox-digest]
+command = "python3 scripts/forward_port.py --url http://localhost:8081 --name inbox-digest && ROOT_PATH=/service/inbox-digest uv run inbox-digest"
+restart = "on-failure"

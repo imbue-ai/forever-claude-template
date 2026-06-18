@@ -7,8 +7,9 @@
 
 Creates `libs/<package>/` with a sync-FastAPI starter, updates the root
 pyproject.toml workspace/sources/dependencies, adds a `[services.<name>]`
-entry that sets `ROOT_PATH=/service/<name>` for prefix-aware URL emission,
-and runs `uv sync --all-packages` to materialize the workspace.
+entry that sets `ROOT_PATH=/service/<name>` on the app process for
+prefix-aware server-side URL emission, and runs `uv sync --all-packages` to
+materialize the workspace.
 
 Usage:
     uv run .agents/skills/build-web-service/scripts/scaffold_fastapi_lib.py \\
@@ -157,9 +158,16 @@ Services run from /mngr/code (the repo root). Conventions:
 The ``ROOT_PATH`` env var is read so FastAPI emits prefix-aware
 absolute URLs (OpenAPI links, redirects) when this app is reached
 through the system_interface proxy at ``/service/{name}/``. The
-services.toml command sets ``ROOT_PATH=/service/{name}`` for that
-case. Standalone ``uv run {name}`` leaves it empty so the app serves
-at ``/``.
+services.toml command sets ``ROOT_PATH=/service/{name}`` on this
+process for that case. Standalone ``uv run {name}`` leaves it empty so
+the app serves at ``/``.
+
+``root_path`` only fixes server-side URLs (OpenAPI, redirects,
+``request.url_for``), NOT URLs in the HTML/JS you emit. For those, use
+RELATIVE paths (``api/items``, not ``/api/items``): the proxy injects
+``<base href="/service/{name}/">``, so they resolve under the prefix
+behind the proxy and under ``/`` standalone. An absolute path escapes to
+the workspace root; a hardcoded prefix breaks standalone and on rename.
 """
 
 import os
@@ -364,9 +372,14 @@ def _update_services_toml(repo_root: Path, name: str, port: int) -> None:
         sys.exit(f"error: services.toml already has a [services.{name}] entry")
 
     entry = tomlkit.table()
+    # ROOT_PATH must be set on `uv run {name}` (the app), NOT on the whole
+    # line: a `VAR=val cmd1 && cmd2` prefix binds VAR to cmd1 only, so putting
+    # it before forward_port.py would leave the app's env unset and
+    # FastAPI(root_path=...) empty. forward_port.py does not read ROOT_PATH.
     entry["command"] = (
-        f"ROOT_PATH=/service/{name} python3 scripts/forward_port.py "
-        f"--url http://localhost:{port} --name {name} && uv run {name}"
+        f"python3 scripts/forward_port.py "
+        f"--url http://localhost:{port} --name {name} && "
+        f"ROOT_PATH=/service/{name} uv run {name}"
     )
     entry["restart"] = "on-failure"
     services[name] = entry

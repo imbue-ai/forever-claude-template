@@ -44,20 +44,42 @@ What this means for you: if your app emits relative `Location`s or
 absolute paths under its own root, redirects work. If it hardcodes
 public URLs at non-prefixed paths, those will land at the wrong place.
 
-## FastAPI absolute URLs (OpenAPI, redirects)
+## Client-side URLs: emit relative paths, never the prefix
+
+Your app is at `/service/<name>/` behind the proxy and at `/` standalone,
+so **every URL your HTML/JS builds -- `fetch`, iframe `src`, form
+`action`, `<a href>`, WebSocket URLs -- must be RELATIVE** (`raw/123`),
+never absolute and never a hardcoded prefix. The proxy injects
+`<base href="/service/<name>/">`, so a relative URL resolves under the
+prefix behind the proxy and under `/` standalone.
+
+- **Absolute path** (`/raw/123`): ignores `<base>`, resolves against the
+  origin root, and hits the workspace shell. Classic symptom: an iframe
+  whose `src` is `/raw/123` renders blank -- it loaded the workspace UI
+  (scripts killed by the sandbox), not your route.
+- **Hardcoded prefix** (`/service/<name>/raw/123`): works behind the
+  proxy, breaks standalone, rots on rename.
+
+Don't read the prefix at runtime to prepend it -- `ROOT_PATH` is
+server-only, not reliable in client code. (The WebSocket section below is
+one instance of this rule.)
+
+## FastAPI absolute URLs (OpenAPI, redirects) -- the server-side half
 
 FastAPI emits absolute URLs in OpenAPI metadata (`/docs`,
-`/openapi.json`) based on `app.root_path`. The scaffolder reads
-`ROOT_PATH` from env and passes it to `FastAPI(root_path=ROOT_PATH)`,
-and the generated services.toml command sets
-`ROOT_PATH=/service/<name>`. So the scaffolded happy path emits
-prefix-correct URLs without further work.
+`/openapi.json`) and from `RedirectResponse`/`request.url_for` based on
+`app.root_path`. The scaffolder passes `FastAPI(root_path=ROOT_PATH)` and
+the generated services.toml command sets `ROOT_PATH=/service/<name>` **on
+the app process** (`... && ROOT_PATH=/service/<name> uv run <name>`).
 
-If you wrote your own FastAPI runner without using the scaffolder,
-or you want to expose an existing FastAPI app via the wrap-existing
-escape hatch, set `root_path=/service/<name>` either at construction
-time or via the same `ROOT_PATH` env-var pattern. Without it,
-`/openapi.json` will list endpoints at `/`, breaking the API explorer.
+Watch the placement: a `VAR=val cmd1 && cmd2` prefix binds `VAR` to
+`cmd1` only, so a leading `ROOT_PATH=` reaches `forward_port.py` (which
+ignores it) and leaves the app's env empty -- `root_path` is `""` and
+every server-generated URL is mis-prefixed, though the line *looks*
+correct. Keep the assignment on the app if you hand-edit the command or
+use the wrap-existing escape hatch. `root_path` only fixes server-side
+URLs; markup URLs follow the relative-URL rule above. Without it,
+`/openapi.json` lists endpoints at `/`, breaking the API explorer.
 
 ## Static-file servers and trailing slashes
 
@@ -72,11 +94,23 @@ default.
 ## WebSockets
 
 The system_interface proxies WebSocket upgrades under
-`/service/<name>/<ws-path>`. Your client code should connect to a
-relative URL and derive the scheme from `location.protocol` so that
-HTTPS-served pages (e.g. via the Cloudflare tunnel) use `wss:` --
-hardcoding `ws:` will be blocked by browsers as mixed content on
-HTTPS:
+`/service/<name>/<ws-path>`. This is an instance of the relative-URL
+rule above: pass a **relative** path to the `WebSocket` constructor.
+Modern browsers resolve it against the document base URL -- which
+includes the proxy's injected `<base href="/service/<name>/">` -- and
+the URL parser upgrades the scheme automatically (`http:` -> `ws:`,
+`https:` -> `wss:`), so the same code is correct behind the proxy and
+standalone, and HTTPS-served pages (e.g. via the Cloudflare tunnel)
+get `wss:` without a mixed-content error:
+
+```js
+new WebSocket("socket");
+```
+
+Older browsers (predating relative-URL support in the `WebSocket`
+constructor) need an absolute URL. Build it from `location` so you
+still avoid a hardcoded host, and derive the scheme from
+`location.protocol` so HTTPS pages use `wss:`:
 
 ```js
 const scheme = location.protocol === "https:" ? "wss:" : "ws:";
