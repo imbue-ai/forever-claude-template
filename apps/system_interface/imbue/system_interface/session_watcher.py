@@ -276,11 +276,14 @@ class AgentSessionWatcher:
         # a cycle before the subagent's meta.json is discovered, and evicting on bare
         # linkage would drop the parent before the card was ever upgraded.
         self._unlinked_agent_parent_events: dict[str, dict[str, Any]] = {}
-        # event_ids of assistant messages that carry an Agent tool_call, recorded as
-        # the transcript is parsed. After priming marks the backlog emitted, this lets
-        # _seed_running_agent_parents find parents whose subagent was already in flight
-        # when the watcher started (conversation opened mid-run) and make their card
-        # upgradeable live -- the poll loop never re-surfaces a primed-emitted event.
+        # event_ids of assistant messages that carry an Agent tool_call, recorded only
+        # while the priming pass parses the backlog (mark_all_emitted). After priming
+        # marks the backlog emitted, this lets _seed_running_agent_parents find parents
+        # whose subagent was already in flight when the watcher started (conversation
+        # opened mid-run) and make their card upgradeable live -- the poll loop never
+        # re-surfaces a primed-emitted event. The seed is the only consumer, so events
+        # parsed after priming are not recorded (they reach SSE clients live via the
+        # poll loop and would only grow this set without ever being read).
         self._agent_parent_event_ids: set[str] = set()
 
         # Bounded LRU of parsed event bodies, keyed by event_id, plus a bodyless
@@ -741,8 +744,10 @@ class AgentSessionWatcher:
                     self._cache_put_locked(event)
                     if event.get("type") == "tool_result" and "subagent_id" in event:
                         self._subagent_id_by_tool_call.setdefault(event["tool_call_id"], event["subagent_id"])
-                    if event.get("type") == "assistant_message" and any(
-                        tc.get("tool_name") == "Agent" for tc in event.get("tool_calls", [])
+                    if (
+                        mark_all_emitted
+                        and event.get("type") == "assistant_message"
+                        and any(tc.get("tool_name") == "Agent" for tc in event.get("tool_calls", []))
                     ):
                         self._agent_parent_event_ids.add(event["event_id"])
 
