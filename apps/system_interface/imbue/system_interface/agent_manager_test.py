@@ -28,6 +28,7 @@ from imbue.mngr.utils.polling import poll_until
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.agent_manager import _LogQueueCallback
+from imbue.system_interface.agent_manager import _build_agent_match
 from imbue.system_interface.agent_manager import _build_chat_create_command
 from imbue.system_interface.agent_manager import _build_observe_command_argv
 from imbue.system_interface.agent_manager import _build_worktree_create_command
@@ -777,11 +778,15 @@ def test_handle_agent_destroyed_removes_agent(agent_manager: AgentManager, broad
             labels={},
             work_dir=None,
         )
+        agent_manager._match_by_agent_id[str(test_agent_id)] = _build_agent_match(
+            _discovered_agent("to-destroy", agent_id=test_agent_id, host_id=host_id)
+        )
 
     event = _make_agent_destroyed_event(test_agent_id, host_id)
     agent_manager._handle_agent_destroyed(event)
 
     assert len(agent_manager.get_agents()) == 0
+    assert agent_manager.get_agent_matches_by_id(str(test_agent_id)) == []
     raw = q.get_nowait()
     assert raw is not None
     msg = json.loads(raw)
@@ -826,11 +831,16 @@ def test_handle_host_destroyed_removes_all_agents(
                 labels={},
                 work_dir=None,
             )
+            agent_manager._match_by_agent_id[str(aid)] = _build_agent_match(
+                _discovered_agent(f"agent-{str(aid)[:8]}", agent_id=aid, host_id=host_id)
+            )
 
     event = _make_host_destroyed_event(host_id, [agent_id_1, agent_id_2])
     agent_manager._handle_host_destroyed(event)
 
     assert len(agent_manager.get_agents()) == 0
+    assert agent_manager.get_agent_matches_by_id(str(agent_id_1)) == []
+    assert agent_manager.get_agent_matches_by_id(str(agent_id_2)) == []
     raw = q.get_nowait()
     assert raw is not None
     msg = json.loads(raw)

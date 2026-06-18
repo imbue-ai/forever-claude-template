@@ -275,9 +275,11 @@ class AgentManager:
     _broadcaster: WebSocketBroadcaster
     _lock: threading.Lock
     _agents: dict[str, AgentStateItem]
-    # agent id -> its discovered location (host/provider), kept in lockstep with
-    # _agents from the snapshot/destroy events, so messaging can resolve an
-    # agent's location without a fresh find_all_agents discovery.
+    # agent id -> its discovered location (host/provider), maintained from the
+    # observe snapshot/discovered/destroy events so messaging can resolve an
+    # agent's location without a fresh find_all_agents discovery. Best-effort:
+    # paths that mutate _agents without a discovery event (creation/refresh) skip
+    # it, and a miss in get_agent_matches_by_id just falls back to discovery.
     _match_by_agent_id: dict[str, AgentMatch]
     _applications: list[ApplicationEntry]
     _app_observers: dict[str, Any]

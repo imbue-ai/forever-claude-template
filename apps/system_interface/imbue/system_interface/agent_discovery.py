@@ -183,7 +183,11 @@ def _no_known_locations(agent_id: AgentId) -> Sequence[AgentMatch]:
 
 
 def _discover_locations(agent_id: AgentId, mngr_ctx: MngrContext) -> Sequence[AgentMatch]:
-    """Resolve an agent id to its location via a full mngr discovery."""
+    """Resolve an agent id to its location via a full mngr discovery.
+
+    Raises ``AgentNotFoundError`` when the id matches no agent -- ``find_all_agents``
+    does not return empty for an unmatched identifier.
+    """
     return find_all_agents(
         addresses=(AgentAddress(agent=agent_id),),
         filter_all=False,
