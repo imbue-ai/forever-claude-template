@@ -190,12 +190,13 @@ describe("renderSubagentCard", () => {
     };
     const vnode = renderSubagentCard(toolCall, "agent-1", true);
     const text = allText(vnode);
+    const classes = collectClasses(vnode).join(" ");
 
     expect(text).toContain("explore foo");
     expect(text).toContain("Explore");
-    // Not yet linked: shows the running placeholder, not a clickable conversation link.
-    expect(text).toContain("Running");
-    expect(text).not.toContain("View conversation");
+    // Not yet linked: the label is the muted, non-clickable "View conversation" placeholder.
+    expect(text).toContain("View conversation");
+    expect(classes).toContain("subagent-card-link--pending");
   });
 
   it("shows a pulsing running dot on a green card while the sub-agent is working", () => {
@@ -239,9 +240,11 @@ describe("renderSubagentCard", () => {
     };
     const vnode = renderSubagentCard(toolCall, "agent-1", false);
     const text = allText(vnode);
+    const classes = collectClasses(vnode).join(" ");
 
     expect(text).toContain("View conversation");
-    expect(text).not.toContain("Running");
+    // Linked: the active link, not the muted pending placeholder.
+    expect(classes).not.toContain("subagent-card-link--pending");
   });
 
   it("falls back to subagent_metadata fields when the tool call lacks description", () => {

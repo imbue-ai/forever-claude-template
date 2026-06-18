@@ -1074,6 +1074,58 @@ def test_tool_result_before_meta_discovery_does_not_strand_card(tmp_path: Path) 
     assert upgraded["subagent_metadata"]["session_id"] == "agent-racesubid"
 
 
+def test_subagent_discovered_after_history_file_disappears(tmp_path: Path) -> None:
+    """A rotated/replaced agent can lose its claude_session_id_history while its main session
+    stays watched (already in _session_states). Subagent discovery must still run for known
+    sessions, so a subagent that appears AFTER the history file is gone is linked -- not
+    stranded on the pending state. (Subagent discovery used to sit behind the history reader's
+    early return, so a missing history file silently disabled all further linkage.)"""
+    parent_assistant_uuid = "assistant-uuid-rot"
+    tool_use_id = "toolu_rot"
+    parent_event = _make_agent_tool_use_assistant(
+        uuid=parent_assistant_uuid,
+        timestamp="2026-01-01T00:00:01Z",
+        tool_use_id=tool_use_id,
+        description="explore rot",
+    )
+
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [parent_event])
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+
+    # The main session is discovered and primed while the history file still exists.
+    watcher._discover_sessions()
+    watcher._prime_caches()
+
+    # The agent is rotated/replaced: its history file disappears, but the main session file
+    # stays on disk and watched.
+    (agent_state_dir / "claude_session_id_history").unlink()
+
+    # A subagent appears only now, after the history file is gone.
+    _write_subagent_session(
+        parent_session_file,
+        agent_id="rotsubid",
+        tool_use_id=tool_use_id,
+        first_timestamp="2026-01-01T00:00:02Z",
+        agent_type="general-purpose",
+        description="explore rot",
+    )
+
+    # Discovery must still pick it up despite the missing history file, and the card links.
+    watcher._discover_sessions()
+    watcher._rebroadcast_relinked_parents()
+    upgraded = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert upgraded is not None
+    assert upgraded["subagent_metadata"]["session_id"] == "agent-rotsubid"
+
+
 def test_is_main_session_event_excludes_subagent_sessions(tmp_path: Path) -> None:
     """The predicate that keeps subagent-session events out of the main stream."""
     agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])

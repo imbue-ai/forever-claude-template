@@ -915,7 +915,28 @@ class AgentSessionWatcher:
                     self._unlinked_agent_parent_events[message_uuid] = event
 
     def _discover_sessions(self) -> None:
-        """Read claude_session_id_history to find all session IDs."""
+        """Discover this agent's main sessions and any subagent sessions under them."""
+        self._discover_main_sessions_from_history()
+
+        # Discover subagent sessions for ALL known main sessions (not just newly discovered
+        # ones), since subagent files may appear after the parent session is first discovered.
+        # This must run regardless of whether claude_session_id_history currently exists: a
+        # rotated/replaced agent can leave a main session watchable (already in _session_states)
+        # while its history file is gone, and subagents that appear after that point still need
+        # to be linked. Gating subagent discovery behind the history file -- as it was when this
+        # lived after an early return in the history reader -- stranded such subagents' cards on
+        # "Running..." forever, even after they finished.
+        with self._lock:
+            states = list(self._session_states.values())
+        for state in states:
+            self._discover_subagent_sessions(state.session_id, state.file_path)
+
+    def _discover_main_sessions_from_history(self) -> None:
+        """Register any not-yet-known main sessions listed in claude_session_id_history.
+
+        A missing or unreadable history file is a no-op (already-known sessions keep being
+        watched); subagent discovery in ``_discover_sessions`` runs either way.
+        """
         history_file = self._agent_state_dir / "claude_session_id_history"
         if not history_file.exists():
             return
@@ -959,13 +980,6 @@ class AgentSessionWatcher:
                     self._observer.schedule(WakeOnChangeHandler(self._wake_event), parent_dir, recursive=False)
                 except OSError as e:
                     logger.debug("Failed to schedule watchdog for {}: {}", parent_dir, e)
-
-        # Discover subagent sessions for ALL known sessions (not just newly discovered ones),
-        # since subagent files may appear after the parent session is first discovered.
-        with self._lock:
-            states = list(self._session_states.values())
-        for state in states:
-            self._discover_subagent_sessions(state.session_id, state.file_path)
 
     def _discover_subagent_sessions(self, parent_session_id: str, parent_file_path: Path) -> None:
         """Discover subagent session files under <session_id>/subagents/.

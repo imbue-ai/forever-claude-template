@@ -284,7 +284,9 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string, isRunnin
       agentType ? m("span", { class: "subagent-card-type-badge" }, agentType) : null,
     ]),
     // The click-through needs the subagent session_id, which only arrives once the call is
-    // linked. Until then show a non-clickable "running" state so the card is still rich.
+    // linked. The label stays "View conversation" throughout so it doesn't flip-flop; before
+    // the session is known it renders as a muted, non-clickable placeholder (there is no
+    // conversation to open yet), becoming an active link the moment linkage lands.
     sessionId
       ? m(
           "a",
@@ -299,7 +301,7 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string, isRunnin
           },
           "View conversation",
         )
-      : m("span", { class: "subagent-card-link subagent-card-link--pending" }, "Running…"),
+      : m("span", { class: "subagent-card-link subagent-card-link--pending" }, "View conversation"),
   ]);
 }
 
