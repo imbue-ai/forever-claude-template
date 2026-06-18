@@ -44,10 +44,14 @@ folder it has already built -- the preview serves it in place:
 
 - ``preview`` boots the worker's ``--work-dir`` on a free port (layout
   persistence neutered so it can't clobber the live ``layout.json``) and
-  registers it as the ``si-preview`` service so the live UI can proxy it as a
-  tab. No fetch, no second checkout, no rebuild; it never touches the served
-  tree or the worker's folder. The worker must still exist at preview time.
-- ``unpreview`` tears that down (kill the server, deregister the service).
+  registers it as the ``si-preview-app`` service, then boots a small wrapper page
+  (``preview_wrapper_server.py``) that embeds it in a labeled "preview" frame and
+  registers that as the user-facing ``si-preview`` service. The live UI proxies
+  ``si-preview`` as a tab that reads as a clearly-marked proposed change rather
+  than a nested clone of the live UI. No fetch, no second checkout, no rebuild;
+  it never touches the served tree or the worker's folder. The worker must still
+  exist at preview time.
+- ``unpreview`` tears that down (kill both servers, deregister both services).
   Idempotent.
 
 The non-deterministic part -- opening the tab and gating on the user's judgment
@@ -111,16 +115,30 @@ RELOAD_OP = "reload_system_interface"
 # so its work_dir is just a built folder on disk -- no fetch or rebuild needed.
 # See ``preview`` / ``unpreview``.
 #
-# The preview is registered under a single fixed service name -- the
+# The preview is registered under fixed service names -- the
 # update-system-interface flow runs one preview at a time, and ``preview``
-# tears down any stale preview for the slug first. State (the detached pid, the
-# port, the service name, the worker work_dir) lives under the lead's
+# tears down any stale preview for the slug first. State (the detached pids, the
+# ports, the service names, the worker work_dir) lives under the lead's
 # ``runtime/`` so it is gitignored and survives between the separate ``preview``
 # and ``unpreview`` invocations.
+#
+# Two services are registered, not one: the inner service points at the worker's
+# booted app, and the outer "wrapper" service the user actually opens points at a
+# tiny chrome page (``preview_wrapper_server.py``) that embeds the inner service
+# in a labeled "preview" frame. Wrapping it this way keeps the preview from
+# reading as a confusing nested clone of the live UI. The two live at disjoint
+# ``/service/<name>/`` scopes so the dispatcher's scoped service workers do not
+# interfere.
 PREVIEW_SERVICE_NAME = "si-preview"
+PREVIEW_INNER_SERVICE_NAME = "si-preview-app"
+PREVIEW_WRAPPER_SCRIPT = "preview_wrapper_server.py"
 PREVIEW_STATE_ROOT = "runtime/system-interface-preview"
 PREVIEW_STATE_FILENAME = "preview.json"
 PREVIEW_LOG_FILENAME = "preview.log"
+PREVIEW_WRAPPER_LOG_FILENAME = "preview-wrapper.log"
+# The wrapper server ships beside this script and is stdlib-only, so it runs
+# under the same bare ``python3`` that runs this script -- no venv resolution.
+_WRAPPER_SCRIPT_PATH = Path(__file__).resolve().parent / PREVIEW_WRAPPER_SCRIPT
 # forward_port.py imports tomlkit (a venv dependency), but this script is run via
 # bare python3 with no venv assumed, and the ambient ``python3`` need not have
 # tomlkit. Invoke it through ``uv run`` (like scripts/run_ttyd.sh) so the
@@ -713,17 +731,20 @@ def _teardown_preview(
     repo_root: Path,
     runner: Runner,
     *,
-    pid: int | None,
-    service: str | None,
+    pids: Sequence[int],
+    services: Sequence[str],
 ) -> None:
     """Best-effort teardown of whatever a preview set up. Every step is
     unchecked so partial state still fully unwinds and re-runs are no-ops.
 
-    Order: kill the detached server (by process group), then deregister the
-    proxied service so the live UI stops routing to a dead port. There is no
-    worktree to remove -- the preview serves the worker's own work_dir in place.
+    A preview stands up two detached servers (the worker's inner app and the
+    wrapper chrome page) and registers two proxied services, so both lists may
+    hold more than one entry. Order: kill every detached server (by process
+    group), then deregister every proxied service so the live UI stops routing to
+    a dead port. There is no worktree to remove -- the preview serves the
+    worker's own work_dir in place.
     """
-    if pid is not None:
+    for pid in pids:
         # Negative pid signals the whole process group (see ``spawn_detached``).
         runner.run(
             ["kill", "-TERM", f"-{pid}"],
@@ -732,7 +753,7 @@ def _teardown_preview(
             text=True,
             check=False,
         )
-    if service is not None:
+    for service in services:
         runner.run(
             [*FORWARD_PORT_CMD, "--remove", "--name", service],
             cwd=str(repo_root),
@@ -759,12 +780,15 @@ def unpreview(slug: str, repo_root: Path, *, runner: Runner) -> int:
     except (json.JSONDecodeError, OSError) as exc:
         sys.stderr.write(f"error: could not read preview state {state_path}: {exc}\n")
         return 1
-    _teardown_preview(
-        repo_root,
-        runner,
-        pid=state.get("pid"),
-        service=state.get("service"),
-    )
+    # Newer state records lists (inner app + wrapper); fall back to the legacy
+    # single-server keys so a preview created before the wrapper still tears down.
+    pids = state.get("pids")
+    if pids is None:
+        pids = [state["pid"]] if state.get("pid") is not None else []
+    services = state.get("services")
+    if services is None:
+        services = [state["service"]] if state.get("service") is not None else []
+    _teardown_preview(repo_root, runner, pids=pids, services=services)
     shutil.rmtree(_preview_state_dir(repo_root, slug), ignore_errors=True)
     sys.stderr.write(f"preview for '{slug}' torn down.\n")
     return 0
@@ -780,19 +804,22 @@ def preview(
     spawner: Spawner,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> int:
-    """Stand up a pre-merge preview of the worker's ``work_dir`` as a proxied service.
+    """Stand up a pre-merge preview of the worker's ``work_dir`` as two proxied services.
 
     The worker is a local git-worktree sub-agent in this same container, so
     ``work_dir`` is a folder on disk that the worker has already built (its
-    ``done`` contract runs ``uv sync`` + ``npm run build``). We just boot that
-    built instance detached on a free port -- with layout persistence neutered --
-    and register it so the live UI can proxy it as a tab. No fetch, no second
-    checkout, no rebuild; the worker's folder is never modified (the log and
-    state live under the lead's ``runtime/``).
+    ``done`` contract runs ``uv sync`` + ``npm run build``). We boot that built
+    instance detached on a free port -- with layout persistence neutered -- and
+    register it as the inner service. We then boot the small wrapper chrome page
+    (``preview_wrapper_server.py``) on a second port and register it as the
+    user-facing service, so the tab the user opens reads as a labeled "preview"
+    frame around the change rather than a confusing nested clone of the live UI.
+    No fetch, no second checkout, no rebuild; the worker's folder is never
+    modified (the logs and state live under the lead's ``runtime/``).
 
     On any failure the partial state is torn down and 1 is returned; on success
-    the state file lets ``unpreview`` find the server + service later. ``work_dir``
-    must still exist -- run this before the worker is destroyed.
+    the state file lets ``unpreview`` find both servers + services later.
+    ``work_dir`` must still exist -- run this before the worker is destroyed.
     """
     # Sanity-check the work_dir before disturbing anything: a wrong --work-dir
     # should fail fast, not tear down an existing good preview for this slug.
@@ -804,21 +831,25 @@ def preview(
         )
         return 1
 
-    # Clear any stale preview for this slug first so the fixed service name and
+    # Clear any stale preview for this slug first so the fixed service names and
     # state dir can be reused cleanly.
     unpreview(slug, repo_root, runner=runner)
 
     state_dir = _preview_state_dir(repo_root, slug)
-    log_path = state_dir / PREVIEW_LOG_FILENAME
+    inner_log_path = state_dir / PREVIEW_LOG_FILENAME
+    wrapper_log_path = state_dir / PREVIEW_WRAPPER_LOG_FILENAME
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    pid: int | None = None
-    service_registered = False
+    # Track what has been stood up so teardown unwinds exactly the partial state
+    # on any failure (each server is appended right after it is spawned/registered).
+    pids: list[int] = []
+    services: list[str] = []
     try:
-        port = find_free_port()
+        # 1. Boot the worker's already-built app (the inner service).
+        inner_port = find_free_port()
         env = dict(os.environ)
         env["SYSTEM_INTERFACE_HOST"] = "127.0.0.1"
-        env["SYSTEM_INTERFACE_PORT"] = str(port)
+        env["SYSTEM_INTERFACE_PORT"] = str(inner_port)
         # Drop MNGR_AGENT_ID so the preview cannot persist layout over the live
         # workspace's layout.json (the server treats a missing id as "no layout
         # dir"). MNGR_HOST_DIR is kept, so the preview still discovers and
@@ -826,22 +857,71 @@ def preview(
         env.pop("MNGR_AGENT_ID", None)
         # Boot from the worker's own work_dir; ``uv run`` resolves that worktree's
         # already-synced ``.venv`` and serves its already-built ``static/`` bundle.
-        pid = spawner.spawn_detached(
-            ["uv", "run", TOOL_NAME],
-            cwd=str(worker_app_dir),
-            env=env,
-            log_path=str(log_path),
+        pids.append(
+            spawner.spawn_detached(
+                ["uv", "run", TOOL_NAME],
+                cwd=str(worker_app_dir),
+                env=env,
+                log_path=str(inner_log_path),
+            )
         )
         if not wait_healthy(
             http,
-            f"http://127.0.0.1:{port}{HEALTH_PATH}",
+            f"http://127.0.0.1:{inner_port}{HEALTH_PATH}",
             _PREVIEW_ATTEMPTS,
             _PREVIEW_INTERVAL_SECONDS,
             sleeper,
         ):
             raise RevealFailed(
-                f"preview instance did not become healthy on port {port} "
-                f"(see {log_path})"
+                f"preview instance did not become healthy on port {inner_port} "
+                f"(see {inner_log_path})"
+            )
+        _run_checked(
+            runner,
+            [
+                *FORWARD_PORT_CMD,
+                "--name",
+                PREVIEW_INNER_SERVICE_NAME,
+                "--url",
+                f"http://localhost:{inner_port}",
+            ],
+            repo_root,
+            "forward_port register (inner)",
+        )
+        services.append(PREVIEW_INNER_SERVICE_NAME)
+
+        # 2. Boot the wrapper chrome page (the outer, user-facing service). It
+        # embeds the inner service by its ``/service/<name>/`` path -- it needs
+        # only the name, not the inner port. It is stdlib-only, so it runs under
+        # the same interpreter as this script (no venv resolution).
+        wrapper_port = find_free_port()
+        pids.append(
+            spawner.spawn_detached(
+                [
+                    sys.executable,
+                    str(_WRAPPER_SCRIPT_PATH),
+                    "--port",
+                    str(wrapper_port),
+                    "--inner-service",
+                    PREVIEW_INNER_SERVICE_NAME,
+                    "--title",
+                    slug,
+                ],
+                cwd=str(repo_root),
+                env=dict(os.environ),
+                log_path=str(wrapper_log_path),
+            )
+        )
+        if not wait_healthy(
+            http,
+            f"http://127.0.0.1:{wrapper_port}{SERVE_PATH}",
+            _PREVIEW_ATTEMPTS,
+            _PREVIEW_INTERVAL_SECONDS,
+            sleeper,
+        ):
+            raise RevealFailed(
+                f"preview wrapper did not become healthy on port {wrapper_port} "
+                f"(see {wrapper_log_path})"
             )
         _run_checked(
             runner,
@@ -850,20 +930,24 @@ def preview(
                 "--name",
                 PREVIEW_SERVICE_NAME,
                 "--url",
-                f"http://localhost:{port}",
+                f"http://localhost:{wrapper_port}",
             ],
             repo_root,
-            "forward_port register",
+            "forward_port register (wrapper)",
         )
-        service_registered = True
+        services.append(PREVIEW_SERVICE_NAME)
 
         state = {
             "slug": slug,
             "work_dir": str(work_dir),
-            "port": port,
-            "pid": pid,
+            "inner_port": inner_port,
+            "wrapper_port": wrapper_port,
+            "pids": pids,
+            "services": services,
+            # The user-facing tab to open (the wrapper).
             "service": PREVIEW_SERVICE_NAME,
-            "log": str(log_path),
+            "inner_log": str(inner_log_path),
+            "wrapper_log": str(wrapper_log_path),
         }
         _preview_state_path(repo_root, slug).write_text(json.dumps(state, indent=2))
     except (RevealError, OSError) as exc:
@@ -873,19 +957,14 @@ def preview(
         # already be running, so teardown must run to honor "on any failure the
         # partial state is torn down".
         sys.stderr.write(f"preview failed: {exc}\ntearing down partial preview...\n")
-        _teardown_preview(
-            repo_root,
-            runner,
-            pid=pid,
-            service=PREVIEW_SERVICE_NAME if service_registered else None,
-        )
+        _teardown_preview(repo_root, runner, pids=pids, services=services)
         shutil.rmtree(state_dir, ignore_errors=True)
         return 1
 
     sys.stderr.write(
         f"preview up: open the '{PREVIEW_SERVICE_NAME}' service tab to explore the "
-        f"change (serving {work_dir} on port {port}). Run 'unpreview --slug {slug}' "
-        "to tear it down.\n"
+        f"change (serving {work_dir} on port {inner_port}, wrapped on port "
+        f"{wrapper_port}). Run 'unpreview --slug {slug}' to tear it down.\n"
     )
     return 0
 

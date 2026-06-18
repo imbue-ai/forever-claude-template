@@ -21,9 +21,9 @@ edits here. Every change is made in a separate, isolated clone of the source,
 built and tested there, and merged back only after it passes. The only things
 you do to the served tree are committing the merge and running this skill's
 `preview` / `reveal` / `unpreview` commands -- and `preview`/`unpreview` never
-modify the served tree at all (they act only on the worker's separate,
-already-built work_dir, so even the pre-merge preview can't reach what the user
-is looking at).
+modify the served tree at all (they only boot throwaway servers against the
+worker's separate, already-built work_dir, so even the pre-merge preview can't
+reach what the user is looking at).
 
 That isolated clone is a `launch-task` worker: it runs in its own git worktree
 with its own copy of the source, so a half-broken build can never reach what the
@@ -39,8 +39,9 @@ separate place to work.
    then reports `done`.
 3. You **preview** the change *before merging*: the worker is a local
    worktree-agent in this container that already built its own work_dir, so one
-   command boots that folder and serves it as a tab the user can click around.
-   The user approves or rejects.
+   command boots that folder and serves it -- wrapped in a labeled "preview"
+   frame so the tab reads as a proposed change, not the live UI -- for the user
+   to click around. The user approves or rejects.
 4. **On approval**, you **record the known-good revision, then merge** the
    worker's branch.
 5. You **reveal** the merged change with one command (refresh dependencies,
@@ -91,11 +92,14 @@ python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.p
 
 This boots the worker's already-built instance on a free port with layout
 persistence neutered (it reads the same agents, so the user's real conversations
-render, but it cannot clobber the live `layout.json`) and registers it under the
-`si-preview` service. It does **not** merge, touch the served tree, or modify the
-worker's folder. Exit `0` means the preview is up; a non-zero exit means it
-failed to boot (or the work_dir was wrong / the worker was already destroyed) and
-tore itself down -- diagnose before retrying.
+render, but it cannot clobber the live `layout.json`), then boots a small wrapper
+page that embeds it in a labeled "preview" frame. The user-facing `si-preview`
+service points at that wrapper (the inner instance is registered separately as
+`si-preview-app`), so the tab reads as a clearly-marked proposed change rather
+than a confusing nested clone of the live UI. It does **not** merge, touch the
+served tree, or modify the worker's folder. Exit `0` means the preview is up; a
+non-zero exit means it failed to boot (or the work_dir was wrong / the worker was
+already destroyed) and tore itself down -- diagnose before retrying.
 
 Open it as a tab and ask the user to explore:
 
@@ -183,11 +187,11 @@ rejection where nothing was merged), tear it down:
 python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py unpreview --slug <name>
 ```
 
-`unpreview` kills the preview server and deregisters the `si-preview` service
-(there is no worktree to remove -- the preview served the worker's folder in
-place). It is idempotent, so it is also the safe way to clean up after a
-`preview` that failed partway. Once the preview is down, the worker can be
-destroyed per `launch-task`.
+`unpreview` kills both preview servers (the inner instance and the wrapper) and
+deregisters both their services (there is no worktree to remove -- the preview
+served the worker's folder in place). It is idempotent, so it is also the safe
+way to clean up after a `preview` that failed partway. Once the preview is down,
+the worker can be destroyed per `launch-task`.
 
 Why this exists as a script and not a checklist: if the backend fails to start,
 the user loses their entire chat UI -- there is nowhere left to surface an error

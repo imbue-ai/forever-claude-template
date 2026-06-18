@@ -41,12 +41,15 @@ on both sides of that user gate, as sub-commands:
 
 - `preview --slug <name> --work-dir <worker-work-dir>` boots the worker's
   already-built work_dir (a local worktree-agent folder in this same container)
-  on a free port and registers it as the `si-preview` service so the live UI can
-  proxy it as a tab -- no fetch, no re-checkout, no rebuild, and without merging
-  or touching the served tree. (Resolve the work_dir from
+  on a free port and registers it as the `si-preview-app` service, then boots a
+  small wrapper page that embeds it in a labeled "preview" frame and registers
+  that as the user-facing `si-preview` service -- so the proxied tab reads as a
+  clearly-marked proposed change rather than a nested clone of the live UI. No
+  fetch, no re-checkout, no rebuild, and without merging or touching the served
+  tree. (Resolve the work_dir from
   `mngr ls --include 'name=="<name>"' --format json` -> `agents[0].work_dir`.)
-- `unpreview --slug <name>` tears that down -- kill the server, deregister the
-  service (idempotent).
+- `unpreview --slug <name>` tears that down -- kill both servers, deregister both
+  services (idempotent).
 - `reveal --rollback-to <sha>` reveals the merged change (below).
 
 The reveal, after merge, is a single self-healing command. With the known-good

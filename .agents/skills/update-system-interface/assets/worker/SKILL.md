@@ -60,12 +60,28 @@ replies via `mngr message` and you resume. For terminal statuses, the run ends.
 
 ## Testing contract (verify it actually works, then crystallize)
 
+- **For any change that touches the frontend, you MUST look at the rendered page
+  -- not just assert on the DOM.** This is the single most important step and the
+  one most easily skipped. A clean build and passing Playwright assertions prove
+  the markup and wiring exist; they do NOT prove the page *looks* right -- layout,
+  spacing, alignment, overflow/truncation, color/contrast, z-order, and whether
+  your change broke something visually elsewhere. So before you report `done`:
+  capture screenshots of every page and state your change affects, driving the
+  same isolated Playwright instance (e.g. `page.screenshot(path=...)`, and
+  `page.set_viewport_size(...)` if layout is width-sensitive), then **actually
+  open and view those images and judge them with your own eyes.** Confirm the
+  change looks correct and nothing regressed; if anything looks off, fix it and
+  re-screenshot until it does. "The tests pass" is never a substitute for having
+  looked -- a UI can be visibly broken while every assertion is green. These
+  development screenshots are a manual check, not a committed test (do not try to
+  assert pixels in CI).
 - **Verify the change really works**, driving the UI with Playwright against an
   isolated instance. The existing harness in
   `apps/system_interface/imbue/system_interface/test_e2e.py` already spins up an
   isolated uvicorn instance on an alternate port (`Config(system_interface_port=...)`),
   builds fake agent/session fixtures via `_make_agent_fixture`, and drives it
-  with Playwright (auto-skips when browsers aren't installed). Extend it.
+  with Playwright (auto-skips when browsers aren't installed). Extend it -- and
+  use it as the same instance you screenshot for the visual check above.
 - For each kind of test, use **exactly one** of crystallized-vs-ad-hoc -- do not
   duplicate the same coverage in both a committed test and a throwaway manual
   check. Crystallize the behavior worth keeping (a Playwright assertion in
