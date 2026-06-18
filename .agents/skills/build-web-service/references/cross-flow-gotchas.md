@@ -107,11 +107,23 @@ default.
 ## WebSockets
 
 The system_interface proxies WebSocket upgrades under
-`/service/<name>/<ws-path>`. Your client code should connect to a
-relative URL and derive the scheme from `location.protocol` so that
-HTTPS-served pages (e.g. via the Cloudflare tunnel) use `wss:` --
-hardcoding `ws:` will be blocked by browsers as mixed content on
-HTTPS:
+`/service/<name>/<ws-path>`. This is an instance of the relative-URL
+rule above: pass a **relative** path to the `WebSocket` constructor.
+Modern browsers resolve it against the document base URL -- which
+includes the proxy's injected `<base href="/service/<name>/">` -- and
+the URL parser upgrades the scheme automatically (`http:` -> `ws:`,
+`https:` -> `wss:`), so the same code is correct behind the proxy and
+standalone, and HTTPS-served pages (e.g. via the Cloudflare tunnel)
+get `wss:` without a mixed-content error:
+
+```js
+new WebSocket("socket");
+```
+
+Older browsers (predating relative-URL support in the `WebSocket`
+constructor) need an absolute URL. Build it from `location` so you
+still avoid a hardcoded host, and derive the scheme from
+`location.protocol` so HTTPS pages use `wss:`:
 
 ```js
 const scheme = location.protocol === "https:" ? "wss:" : "ws:";
