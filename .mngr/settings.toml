@@ -9,8 +9,15 @@ pass_env__extend = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_
 host_env__extend = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
-    # might as well use the latest model if we actually do want to try fast mode, sure
+    # Fast mode is enabled for all agents (settings_overrides fastMode=true on
+    # agent_types.claude below); this gates the Opus fast-mode capability on.
     "CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE=1",
+    # Skip Claude Code's org-level fast-mode eligibility check. Agents sign in
+    # with a Claude Max subscription that supports fast mode, but the session
+    # resolves under an organization whose org check otherwise reports fast
+    # mode as "currently unavailable" -- so without this, /fast is refused in
+    # the container even though the same account gets fast mode on the laptop.
+    "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1",
     # Lock Claude Code to the version pinned in agent_types.claude.version and the
     # Dockerfile's CLAUDE_CODE_VERSION; disable the auto-updater + background
     # feedback pings so the installed binary cannot silently drift. Tracks the
@@ -67,7 +74,7 @@ include__extend = ["""has(labels.workspace)"""]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode,TodoWrite,TaskCreate,TaskList,TaskUpdate"""
-settings_overrides__extend = {model = "opus[1m]", fastMode = false}
+settings_overrides__extend = {model = "opus[1m]", fastMode = true}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
