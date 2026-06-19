@@ -17,6 +17,7 @@ members = [
     "runtime-backup",
     "system-interface",
     "telegram-bot",
+    "tk-command-parsing",
     "web-server",
 ]
 
@@ -797,6 +798,7 @@ dependencies = [
     { name = "playwright" },
     { name = "runtime-backup" },
     { name = "telegram-bot" },
+    { name = "tk-command-parsing" },
     { name = "tomlkit" },
     { name = "web-server" },
 ]
@@ -827,6 +829,7 @@ requires-dist = [
     { name = "playwright", specifier = "==1.58.0" },
     { name = "runtime-backup", editable = "libs/runtime_backup" },
     { name = "telegram-bot", editable = "libs/telegram_bot" },
+    { name = "tk-command-parsing", editable = "libs/tk_command_parsing" },
     { name = "tomlkit", specifier = ">=0.12" },
     { name = "web-server", editable = "libs/web_server" },
 ]
@@ -2838,6 +2841,7 @@ dependencies = [
     { name = "pluggy" },
     { name = "pydantic-settings" },
     { name = "starlette" },
+    { name = "tk-command-parsing" },
     { name = "uvicorn" },
     { name = "watchdog" },
     { name = "websockets" },
@@ -2870,6 +2874,7 @@ requires-dist = [
     { name = "pluggy", specifier = ">=1.5" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "starlette", specifier = ">=0.45" },
+    { name = "tk-command-parsing", editable = "libs/tk_command_parsing" },
     { name = "uvicorn", specifier = ">=0.34" },
     { name = "watchdog", specifier = ">=4.0" },
     { name = "websockets", specifier = ">=13.0" },
@@ -2975,6 +2980,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2f/68/a18b4f307086954fdae32714cb4f85562e34f9d34ab206e61f1816aa6018/tiktoken-0.13.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:5cb65b60b9408563676d874a3a4ee573370066f0dc4e29d84e82e989c6517424", size = 1239218, upload-time = "2026-05-15T04:51:16.103Z" },
     { url = "https://files.pythonhosted.org/packages/16/5b/f2aa703a4fc5d2dff73460a7d46cc2f3f44aa0f3dd8eeb20d2a0ecf68862/tiktoken-0.13.0-cp314-cp314t-win_amd64.whl", hash = "sha256:85b78cc3a2c3d48723ca751fa981f1fedccd54194ca0471b957364353a898b07", size = 918110, upload-time = "2026-05-15T04:51:17.237Z" },
 ]
+
+[[package]]
+name = "tk-command-parsing"
+version = "0.1.0"
+source = { editable = "libs/tk_command_parsing" }
 
 [[package]]
 name = "tokenizers"

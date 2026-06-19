@@ -238,9 +238,10 @@ class AgentSessionWatcher:
         # Guards _session_states, _main_session_ids, _tool_name_by_call_id,
         # _existing_event_ids, _subagent_metadata, _subagent_meta_read_failed,
         # _subagent_tool_use_id, _subagent_id_by_tool_call,
-        # _unlinked_agent_parent_events, _body_cache, _locator_ref_by_id, and
-        # every SessionFileState. Held across file I/O and parsing (cheap,
-        # incremental, per-agent) but never across the on_events fan-out callback.
+        # _unlinked_agent_parent_events, _agent_parent_event_ids, _body_cache,
+        # _locator_ref_by_id, and every SessionFileState. Held across file I/O and
+        # parsing (cheap, incremental, per-agent) but never across the on_events
+        # fan-out callback.
         self._lock = threading.Lock()
         self._session_states: dict[str, SessionFileState] = {}
         self._main_session_ids: list[str] = []
@@ -269,8 +270,21 @@ class AgentSessionWatcher:
         # tool_call still missing its subagent_metadata. A subagent's jsonl (and thus its
         # parent linkage) can appear after the parent was already broadcast, so we keep the
         # event around to re-enrich and re-broadcast it once linkage lands (see
-        # _rebroadcast_relinked_parents). Fully-linked parents are never cached.
+        # _rebroadcast_relinked_parents). A parent is dropped only once it is fully
+        # *enriched* (every Agent tool_call carries subagent_metadata), not merely
+        # once a linkage id exists -- an id can be known (e.g. from the tool_result)
+        # a cycle before the subagent's meta.json is discovered, and evicting on bare
+        # linkage would drop the parent before the card was ever upgraded.
         self._unlinked_agent_parent_events: dict[str, dict[str, Any]] = {}
+        # event_ids of assistant messages that carry an Agent tool_call, recorded only
+        # while the priming pass parses the backlog (mark_all_emitted). After priming
+        # marks the backlog emitted, this lets _seed_running_agent_parents find parents
+        # whose subagent was already in flight when the watcher started (conversation
+        # opened mid-run) and make their card upgradeable live -- the poll loop never
+        # re-surfaces a primed-emitted event. The seed is the only consumer, so events
+        # parsed after priming are not recorded (they reach SSE clients live via the
+        # poll loop and would only grow this set without ever being read).
+        self._agent_parent_event_ids: set[str] = set()
 
         # Bounded LRU of parsed event bodies, keyed by event_id, plus a bodyless
         # locator -> position index so any event can be located and re-resolved.
@@ -359,7 +373,9 @@ class AgentSessionWatcher:
         self._enrich_subagent_metadata(events)
         return events
 
-    def get_forward_events(self, after_event_id: str, limit: int = 50, session_id: str | None = None) -> list[dict[str, Any]]:
+    def get_forward_events(
+        self, after_event_id: str, limit: int = 50, session_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Return up to ``limit`` events immediately AFTER ``after_event_id``.
 
         The mirror of :meth:`get_backfill_events`, for paging newer when the loaded
@@ -728,6 +744,12 @@ class AgentSessionWatcher:
                     self._cache_put_locked(event)
                     if event.get("type") == "tool_result" and "subagent_id" in event:
                         self._subagent_id_by_tool_call.setdefault(event["tool_call_id"], event["subagent_id"])
+                    if (
+                        mark_all_emitted
+                        and event.get("type") == "assistant_message"
+                        and any(tc.get("tool_name") == "Agent" for tc in event.get("tool_calls", []))
+                    ):
+                        self._agent_parent_event_ids.add(event["event_id"])
 
             state.byte_offset_consumed += len(complete)
             state.last_mtime = current_mtime
@@ -841,9 +863,80 @@ class AgentSessionWatcher:
         for state in states:
             if state.file_path.exists():
                 self._ensure_cache_current(state, mark_all_emitted=True)
+        self._seed_running_agent_parents()
+
+    def _seed_running_agent_parents(self) -> None:
+        """Make backlog Agent parents with a still-running subagent upgradeable live.
+
+        Priming marks the whole backlog as already emitted, so ``_poll_for_changes``
+        never re-surfaces a parent that was already on disk when the watcher started --
+        the "conversation opened mid-run" case. Without this, a subagent whose linkage
+        lands *after* the watcher starts can never upgrade its parent's card live; only
+        a page refresh (which re-enriches over the REST path) would show it.
+
+        We seed only parents whose subagent is still running -- at least one Agent
+        tool_call has no tool_result yet. Such a subagent's transcript is on disk, so a
+        later discovery cycle will populate its metadata and
+        ``_rebroadcast_relinked_parents`` will upgrade the card, then drop the parent.
+        Finished subagents are skipped: the initial REST render already enriched them
+        best-effort, so they need no live upgrade, and seeding them could retain a
+        cleaned-up historical parent (no metadata ever coming) in the cache forever.
+        """
+        with self._lock:
+            pairs: list[tuple[SessionFileState, EventLocator]] = []
+            for event_id in self._agent_parent_event_ids:
+                ref = self._locator_ref_by_id.get(event_id)
+                if ref is None:
+                    continue
+                state, index = ref
+                if index < len(state.locators):
+                    pairs.append((state, state.locators[index]))
+            events = self._resolve_bodies_locked(pairs)
+        # Enrich first so parents whose subagent was already discovered at startup are
+        # recognized as fully enriched below and are not needlessly cached.
+        self._enrich_subagent_metadata(events)
+        with self._lock:
+            finished_tool_calls = set(self._subagent_id_by_tool_call.keys())
+            for event in events:
+                agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
+                if not agent_tool_calls:
+                    continue
+                if all("subagent_metadata" in tc for tc in agent_tool_calls):
+                    continue
+                running = any(
+                    tc.get("tool_call_id") not in finished_tool_calls
+                    for tc in agent_tool_calls
+                    if "subagent_metadata" not in tc
+                )
+                if not running:
+                    continue
+                message_uuid = event.get("message_uuid", "")
+                if message_uuid:
+                    self._unlinked_agent_parent_events[message_uuid] = event
 
     def _discover_sessions(self) -> None:
-        """Read claude_session_id_history to find all session IDs."""
+        """Discover this agent's main sessions and any subagent sessions under them."""
+        self._discover_main_sessions_from_history()
+
+        # Discover subagent sessions for ALL known main sessions (not just newly discovered
+        # ones), since subagent files may appear after the parent session is first discovered.
+        # This must run regardless of whether claude_session_id_history currently exists: a
+        # rotated/replaced agent can leave a main session watchable (already in _session_states)
+        # while its history file is gone, and subagents that appear after that point still need
+        # to be linked. Gating subagent discovery behind the history file -- as it was when this
+        # lived after an early return in the history reader -- stranded such subagents' cards on
+        # "Running..." forever, even after they finished.
+        with self._lock:
+            states = list(self._session_states.values())
+        for state in states:
+            self._discover_subagent_sessions(state.session_id, state.file_path)
+
+    def _discover_main_sessions_from_history(self) -> None:
+        """Register any not-yet-known main sessions listed in claude_session_id_history.
+
+        A missing or unreadable history file is a no-op (already-known sessions keep being
+        watched); subagent discovery in ``_discover_sessions`` runs either way.
+        """
         history_file = self._agent_state_dir / "claude_session_id_history"
         if not history_file.exists():
             return
@@ -887,13 +980,6 @@ class AgentSessionWatcher:
                     self._observer.schedule(WakeOnChangeHandler(self._wake_event), parent_dir, recursive=False)
                 except OSError as e:
                     logger.debug("Failed to schedule watchdog for {}: {}", parent_dir, e)
-
-        # Discover subagent sessions for ALL known sessions (not just newly discovered ones),
-        # since subagent files may appear after the parent session is first discovered.
-        with self._lock:
-            states = list(self._session_states.values())
-        for state in states:
-            self._discover_subagent_sessions(state.session_id, state.file_path)
 
     def _discover_subagent_sessions(self, parent_session_id: str, parent_file_path: Path) -> None:
         """Discover subagent session files under <session_id>/subagents/.
@@ -1026,12 +1112,15 @@ class AgentSessionWatcher:
                 self._on_events(self._agent_id, pending_events)
 
     def _cache_unlinked_agent_parents(self, events: list[dict[str, Any]]) -> None:
-        """Remember assistant messages whose Agent tool_calls aren't linked yet.
+        """Remember assistant messages whose Agent tool_calls aren't enriched yet.
 
-        When an Agent tool_call is broadcast before its subagent's linkage exists, it goes
-        out without subagent_metadata. We keep the event so a later cycle can re-enrich and
-        re-broadcast it once the linkage lands (see _rebroadcast_relinked_parents). Fully
-        linked parents are skipped -- there is nothing left to resolve.
+        When an Agent tool_call is broadcast before its subagent's metadata is attached, it
+        goes out without subagent_metadata. We keep the event so a later cycle can re-enrich
+        and re-broadcast it once the metadata lands (see _rebroadcast_relinked_parents).
+        Fully enriched parents are skipped -- there is nothing left to resolve. The check is
+        on enrichment, not bare linkage: a tool_call_id can appear in a linkage map (e.g.
+        from the tool_result) a cycle before the subagent's meta.json is discovered, and
+        skipping it then would lose the card upgrade.
         """
         for event in events:
             if event.get("type") != "assistant_message":
@@ -1039,7 +1128,7 @@ class AgentSessionWatcher:
             agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
             if not agent_tool_calls:
                 continue
-            if self._is_fully_linked(event):
+            if self._is_fully_enriched(event):
                 continue
             message_uuid = event.get("message_uuid", "")
             if message_uuid:
@@ -1049,33 +1138,37 @@ class AgentSessionWatcher:
     def _rebroadcast_relinked_parents(self) -> None:
         """Re-emit cached parent events that gained subagent links since broadcast.
 
-        A subagent's linkage can appear after the parent Agent tool_call was already
+        A subagent's metadata can appear after the parent Agent tool_call was already
         streamed: the subagent's meta.json (with toolUseId) shows up a cycle later, or its
         tool_result lands later still. Re-enriching the cached parent and re-broadcasting it
-        once it links lets the frontend upgrade the plain tool-call block into the rich card
-        without a page refresh. Parents whose Agent tool_calls are all linked are dropped
-        from the cache.
+        once metadata attaches lets the frontend upgrade the plain tool-call block into the
+        rich card without a page refresh. A parent is dropped from the cache only once it is
+        fully *enriched* -- every Agent tool_call carries subagent_metadata -- not merely
+        once a linkage id exists. The tool_result's agentId can register a tool_call as
+        "linked" a cycle before the subagent's meta.json (which holds the card metadata) is
+        discovered; dropping on bare linkage there would evict the parent before the card was
+        ever upgraded, stranding it on "Running..." until a page refresh.
 
         The cache snapshot and removals run under ``_lock`` (they mutate shared state), but
-        ``_enrich_subagent_metadata`` / ``_is_fully_linked`` take the lock themselves and the
-        ``on_events`` fan-out runs unlocked, so the lock is never held across either.
+        ``_enrich_subagent_metadata`` / ``_is_fully_enriched`` take the lock themselves and
+        the ``on_events`` fan-out runs unlocked, so the lock is never held across either.
         """
         with self._lock:
             cached = list(self._unlinked_agent_parent_events.items())
 
         relinked: list[dict[str, Any]] = []
-        fully_linked_uuids: list[str] = []
+        fully_enriched_uuids: list[str] = []
         for message_uuid, event in cached:
             before = self._linked_agent_tool_call_ids(event)
             self._enrich_subagent_metadata([event])
             if self._linked_agent_tool_call_ids(event) != before:
                 relinked.append(event)
-            if self._is_fully_linked(event):
-                fully_linked_uuids.append(message_uuid)
+            if self._is_fully_enriched(event):
+                fully_enriched_uuids.append(message_uuid)
 
-        if fully_linked_uuids:
+        if fully_enriched_uuids:
             with self._lock:
-                for message_uuid in fully_linked_uuids:
+                for message_uuid in fully_enriched_uuids:
                     self._unlinked_agent_parent_events.pop(message_uuid, None)
 
         if relinked:
@@ -1090,15 +1183,18 @@ class AgentSessionWatcher:
             if tc.get("tool_name") == "Agent" and "subagent_metadata" in tc
         )
 
-    def _is_fully_linked(self, event: dict[str, Any]) -> bool:
-        """True if every Agent tool_call in ``event`` is linked to a subagent.
+    @staticmethod
+    def _is_fully_enriched(event: dict[str, Any]) -> bool:
+        """True if every Agent tool_call in ``event`` already carries subagent_metadata.
 
-        Linkage is resolved by toolUseId (meta.json) or tool_result agentId; both are read
-        from disk. A tool_call counts as linked once it appears in either source's map, even
-        if no metadata could be attached (e.g. the subagent's files were cleaned up), so such
-        a parent is not retried forever.
+        This -- not bare linkage -- is the condition for retiring a cached parent: the card
+        upgrade the cache exists to deliver is exactly the attachment of subagent_metadata,
+        so a parent must stay cached until that has actually happened for all its Agent
+        tool_calls. A parent whose subagent transcript is genuinely gone (so metadata can
+        never attach) is never cached in the first place: the live path only caches a
+        just-spawned subagent's parent, and the priming seed (_seed_running_agent_parents)
+        only seeds parents whose subagent is still running -- in both cases the transcript is
+        on disk, so enrichment will succeed and the parent will be retired here.
         """
-        with self._lock:
-            linked = set(self._subagent_tool_use_id.values()) | set(self._subagent_id_by_tool_call.keys())
         agent_tool_calls = [tc for tc in event.get("tool_calls", []) if tc.get("tool_name") == "Agent"]
-        return bool(agent_tool_calls) and all(tc.get("tool_call_id") in linked for tc in agent_tool_calls)
+        return bool(agent_tool_calls) and all("subagent_metadata" in tc for tc in agent_tool_calls)

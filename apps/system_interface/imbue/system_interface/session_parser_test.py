@@ -714,3 +714,24 @@ def test_tk_lifecycle_input_preview_is_not_truncated() -> None:
     # Non-tk input still truncated at the 200-char limit.
     assert calls["toolu_echo"].endswith("...")
     assert len(calls["toolu_echo"]) <= 203
+
+
+def test_tk_mentioned_in_quoted_arg_is_still_truncated() -> None:
+    """A long non-tk command that merely *mentions* `tk close ...` inside a
+    quoted argument is NOT a tk lifecycle call, so its input_preview is still
+    truncated. The shared shlex parser distinguishes this from a real tk
+    invocation; the previous substring regex wrongly exempted it."""
+    mentions_tk = 'echo "remember to tk close cod-step-x once ' + ("the work is fully done " * 12).strip() + '"'
+    assert len(mentions_tk) > 200
+    lines = [
+        _make_assistant_line(
+            "uuid-mention",
+            "2026-01-01T00:00:00Z",
+            "working",
+            tool_calls=[{"id": "toolu_mention", "name": "Bash", "input": {"command": mentions_tk}}],
+        ),
+    ]
+    events = parse_session_lines(lines)
+    preview = events[0]["tool_calls"][0]["input_preview"]
+    assert preview.endswith("...")
+    assert len(preview) <= 203

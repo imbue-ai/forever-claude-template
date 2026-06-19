@@ -943,6 +943,189 @@ def test_tool_result_in_later_poll_relinks_cached_parent(tmp_path: Path) -> None
     assert relinked_tc["subagent_metadata"]["description"] == "explore tr"
 
 
+def test_parent_already_on_disk_at_start_upgrades_card_when_subagent_links(tmp_path: Path) -> None:
+    """Conversation opened mid-run: the parent Agent tool_call is already on disk when the
+    watcher starts, so priming marks it emitted and the poll loop never re-surfaces it. The
+    card must still upgrade live once the subagent links -- the prime-time seed keeps the
+    parent eligible for re-broadcast -- rather than staying on "Running..." until a refresh.
+
+    Reproduces the most common real-world trigger: a user clicks into a conversation to watch
+    a subagent that was already spawned before they opened it.
+    """
+    parent_assistant_uuid = "assistant-uuid-midrun"
+    tool_use_id = "toolu_midrun"
+    parent_event = _make_agent_tool_use_assistant(
+        uuid=parent_assistant_uuid,
+        timestamp="2026-01-01T00:00:01Z",
+        tool_use_id=tool_use_id,
+        description="explore midrun",
+    )
+
+    # The parent is already on disk before the watcher starts; the subagent does not exist yet.
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [parent_event])
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+
+    watcher._discover_sessions()
+    watcher._prime_caches()
+
+    # Priming does not broadcast the backlog, and a poll re-surfaces nothing (it was marked
+    # emitted), so without the prime-time seed there would be nothing left to upgrade.
+    watcher._poll_for_changes()
+    assert _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id) is None
+
+    # The subagent appears while still running (meta.json present, no tool_result yet).
+    _write_subagent_session(
+        parent_session_file,
+        agent_id="midrunsubid",
+        tool_use_id=tool_use_id,
+        first_timestamp="2026-01-01T00:00:02Z",
+        agent_type="general-purpose",
+        description="explore midrun",
+    )
+    watcher._discover_sessions()
+    watcher._rebroadcast_relinked_parents()
+
+    upgraded = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert upgraded is not None
+    assert upgraded["subagent_metadata"]["session_id"] == "agent-midrunsubid"
+
+
+def test_tool_result_before_meta_discovery_does_not_strand_card(tmp_path: Path) -> None:
+    """The subagent's tool_result is polled before its meta.json is discovered. The parent
+    must not be dropped from the re-broadcast cache on bare linkage: it has to stay cached
+    until the metadata is actually attached, then upgrade live. Evicting on bare linkage
+    (a tool_call_id appearing in a linkage map) stranded the card on "Running..." until a
+    page refresh, because the metadata it needed had not been discovered yet.
+    """
+    parent_assistant_uuid = "assistant-uuid-race"
+    tool_use_id = "toolu_race"
+    parent_event = _make_agent_tool_use_assistant(
+        uuid=parent_assistant_uuid,
+        timestamp="2026-01-01T00:00:01Z",
+        tool_use_id=tool_use_id,
+        description="explore race",
+    )
+    tool_result_line: dict[str, Any] = {
+        "type": "user",
+        "uuid": "user-uuid-race",
+        "timestamp": "2026-01-01T00:00:05Z",
+        "toolUseResult": {"status": "completed", "agentId": "racesubid"},
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": "done", "is_error": False}],
+        },
+    }
+
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+
+    watcher._discover_sessions()
+    watcher._prime_caches()
+
+    # Cycle A: the parent is broadcast before any linkage exists, and cached.
+    with open(parent_session_file, "a") as f:
+        f.write(json.dumps(parent_event) + "\n")
+    watcher._poll_for_changes()
+    watcher._rebroadcast_relinked_parents()
+    cycle_a_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert cycle_a_tc is not None
+    assert "subagent_metadata" not in cycle_a_tc
+
+    # Cycle B: the subagent finishes -- its tool_result lands -- but its meta.json has not
+    # been discovered yet. The parent must remain cached, NOT be evicted on bare linkage.
+    with open(parent_session_file, "a") as f:
+        f.write(json.dumps(tool_result_line) + "\n")
+    watcher._poll_for_changes()
+    watcher._rebroadcast_relinked_parents()
+    assert parent_assistant_uuid in watcher._unlinked_agent_parent_events
+    cycle_b_tc = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert cycle_b_tc is not None
+    assert "subagent_metadata" not in cycle_b_tc
+
+    # Cycle C: the subagent's files are finally discovered; the card upgrades live.
+    _write_subagent_session(
+        parent_session_file,
+        agent_id="racesubid",
+        tool_use_id=tool_use_id,
+        first_timestamp="2026-01-01T00:00:02Z",
+        agent_type="general-purpose",
+        description="explore race",
+    )
+    watcher._discover_sessions()
+    watcher._rebroadcast_relinked_parents()
+    upgraded = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert upgraded is not None
+    assert upgraded["subagent_metadata"]["session_id"] == "agent-racesubid"
+
+
+def test_subagent_discovered_after_history_file_disappears(tmp_path: Path) -> None:
+    """A rotated/replaced agent can lose its claude_session_id_history while its main session
+    stays watched (already in _session_states). Subagent discovery must still run for known
+    sessions, so a subagent that appears AFTER the history file is gone is linked -- not
+    stranded on the pending state. (Subagent discovery used to sit behind the history reader's
+    early return, so a missing history file silently disabled all further linkage.)"""
+    parent_assistant_uuid = "assistant-uuid-rot"
+    tool_use_id = "toolu_rot"
+    parent_event = _make_agent_tool_use_assistant(
+        uuid=parent_assistant_uuid,
+        timestamp="2026-01-01T00:00:01Z",
+        tool_use_id=tool_use_id,
+        description="explore rot",
+    )
+
+    agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [parent_event])
+    parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
+
+    collected: list[tuple[str, list[dict[str, Any]]]] = []
+    watcher = AgentSessionWatcher(
+        agent_id="test-agent",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda aid, evts: collected.append((aid, evts)),
+    )
+
+    # The main session is discovered and primed while the history file still exists.
+    watcher._discover_sessions()
+    watcher._prime_caches()
+
+    # The agent is rotated/replaced: its history file disappears, but the main session file
+    # stays on disk and watched.
+    (agent_state_dir / "claude_session_id_history").unlink()
+
+    # A subagent appears only now, after the history file is gone.
+    _write_subagent_session(
+        parent_session_file,
+        agent_id="rotsubid",
+        tool_use_id=tool_use_id,
+        first_timestamp="2026-01-01T00:00:02Z",
+        agent_type="general-purpose",
+        description="explore rot",
+    )
+
+    # Discovery must still pick it up despite the missing history file, and the card links.
+    watcher._discover_sessions()
+    watcher._rebroadcast_relinked_parents()
+    upgraded = _latest_agent_tool_call(collected, parent_assistant_uuid, tool_use_id)
+    assert upgraded is not None
+    assert upgraded["subagent_metadata"]["session_id"] == "agent-rotsubid"
+
+
 def test_is_main_session_event_excludes_subagent_sessions(tmp_path: Path) -> None:
     """The predicate that keeps subagent-session events out of the main stream."""
     agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
