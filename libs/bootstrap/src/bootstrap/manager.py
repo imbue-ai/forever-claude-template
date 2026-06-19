@@ -293,13 +293,19 @@ def _persist_initial_chat_agent_id(agent_id: str) -> None:
 
     The welcome-resend target is read from here (system_interface's
     `welcome_resend`), so the resend addresses the agent by its stable id rather
-    than re-resolving it by name.
+    than re-resolving it by name. Best-effort: a missing host dir or a failed
+    write is logged but not raised, so it never aborts the create/signal flow
+    (the welcome-resend simply skips when the file is absent).
     """
     host_dir = os.environ.get(_HOST_DIR_ENV_VAR, "")
     if not host_dir:
         logger.warning("{} unset; cannot persist initial chat agent id", _HOST_DIR_ENV_VAR)
         return
-    (Path(host_dir) / INITIAL_CHAT_AGENT_ID_FILENAME).write_text(agent_id)
+    try:
+        (Path(host_dir) / INITIAL_CHAT_AGENT_ID_FILENAME).write_text(agent_id)
+    except OSError as e:
+        logger.error("Failed to persist initial chat agent id {}: {}", agent_id, e)
+        return
     logger.info("Persisted initial chat agent id {} for welcome resend", agent_id)
 
 
