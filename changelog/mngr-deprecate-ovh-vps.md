@@ -1,0 +1,1 @@
+Marked the OVH VPS provider config in `.mngr/settings.toml` as deprecated. Imbue Cloud pool hosts are now baked as bare-metal slices; baking new OVH classic VPS pool hosts is no longer supported. The `[providers.ovh]` block and OVH references in the `pool_host` template comments are kept only so existing OVH VPS pool hosts stay manageable, and are now clearly labeled legacy.
