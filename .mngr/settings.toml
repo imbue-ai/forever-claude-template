@@ -224,7 +224,12 @@ build_arg__extend = ["--file=Dockerfile", "."]
 # tolerates a pre-existing cwd; runsc does not. Pointing the cwd at `/` (always
 # present) sidesteps it; nothing depends on the host container's default cwd
 # (the entrypoint just sleeps; agents set their own work_dir=/mngr/code).
-start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
+#
+# `--restart=unless-stopped` brings the container back after a docker daemon
+# restart or host reboot; the container entrypoint then self-heals sshd, so the
+# host is reachable again without a manual `mngr start`. The agent itself is
+# relaunched by the minds desktop client in this (debugging-oriented) mode.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
@@ -273,6 +278,12 @@ extra_provision_command__extend = [
     "bash /mngr/code/scripts/setup_system.sh",
     "bash /mngr/code/scripts/install_dependencies.sh",
     "bash /mngr/code/scripts/build_workspace.sh",
+    # Install a systemd unit that relaunches the system-services agent on VM
+    # boot, so the workspace recovers from a VM reboot even when the minds
+    # desktop app is not running. The agent runs directly in the VM here, so
+    # this runs `mngr start system-services` in the VM (mngr is installed by
+    # build_workspace.sh above).
+    "bash /mngr/code/scripts/minds_lima_autostart.sh",
 ]
 
 # template for vultr VPS provider (cloud mode)
@@ -323,11 +334,47 @@ idle_mode = "disabled"
 # gVisor runsc hardening for the agent container; see the vultr template comment.
 # runsc is installed+selected by the chosen provider (the OVH/vultr provider block,
 # or the slice VM's own provisioning).
-start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
+#
+# `--restart=unless-stopped` brings the agent container back after a pool-VM
+# reboot; the container entrypoint then self-heals sshd. The agent itself is
+# relaunched by the outer boot unit installed below.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
 post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# Install a systemd unit on the OUTER pool/slice VM that, on every VM boot,
+# starts the agent container and relaunches the system-services agent inside it
+# -- so the workspace recovers from a VM reboot even when the minds desktop app
+# is not running. Runs once at bake time on the VM (post_host_create_command /
+# fct-seed has already seeded /mngr/code in the container, so the ExecStart
+# script can be copied out of it). The unit persists across leases and
+# container rebuilds (it finds the container by mngr label, not by name).
+post_host_create_outer_command__extend = [
+    """
+set -eu
+container_id="$(docker ps -q --filter label=com.imbue.mngr.host-id | head -n1)"
+test -n "$container_id"
+docker cp "$container_id:/mngr/code/scripts/minds_outer_autostart.sh" /usr/local/sbin/minds-outer-autostart.sh
+chmod +x /usr/local/sbin/minds-outer-autostart.sh
+cat > /etc/systemd/system/minds-autostart.service <<'UNIT'
+[Unit]
+Description=Start the minds system-services agent on boot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/minds-outer-autostart.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable minds-autostart.service
+""",
+]
 
 # template for AWS EC2 VPS provider (aws mode)
 [create_templates.aws]
@@ -382,6 +429,11 @@ target_path = "/mngr/code/"
 # pre-baked image and ignores these (the imbue_cloud provider treats them as
 # pass-through and only the slow path consumes them). Mirrors the ovh template.
 build_arg__extend = ["--file=Dockerfile", "."]
+# `--restart=unless-stopped` on the inner agent container so a slow-path rebuild
+# (which recreates the container) comes back after a pool-VM reboot, matching the
+# baked container from the pool_host template. The fast (adopt) path reuses the
+# pre-baked container, which already carries this policy.
+start_arg__extend = ["--restart=unless-stopped"]
 # Forward the LiteLLM-minted ANTHROPIC creds + the minds-side MNGR_PREFIX
 # + an optional GH_TOKEN from minds' subprocess env onto the host's
 # ``/mngr/env``. minds writes these into the subprocess env it hands
