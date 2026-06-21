@@ -246,6 +246,41 @@ def test_websocket_echo_forwards_bidirectionally(workspace_served: ServedApp) ->
 
 
 @pytest.mark.timeout(15)
+def test_websocket_echoes_client_subprotocol(workspace_served: ServedApp) -> None:
+    """The proxy echoes the client's offered WS subprotocol back in the handshake.
+
+    ttyd's browser client opens its socket with the ``tty`` subprotocol, and
+    Chrome aborts the handshake (close 1006, "press enter to reconnect") if the
+    server's 101 response does not echo it. The proxy must reflect the offered
+    subprotocol so the negotiated value is ``tty``, not ``None``.
+    """
+    ws = open_ws(workspace_served, "/service/web/ws-echo", subprotocols=["tty"])
+    try:
+        assert ws.subprotocol == "tty"
+        ws.send("hello")
+        assert ws.receive(timeout=_WS_RECEIVE_TIMEOUT) == "echo:hello"
+    finally:
+        close_ws(ws)
+
+
+@pytest.mark.timeout(15)
+def test_broadcaster_websocket_connects_without_subprotocol(workspace_served: ServedApp) -> None:
+    """A client offering no subprotocol still connects and gets none echoed.
+
+    Guards against the subprotocol passthrough regressing the broadcaster
+    ``/api/ws`` and proto-agent-logs streams, which (unlike ttyd) never offer a
+    subprotocol and must keep negotiating ``None``.
+    """
+    ws = open_ws(workspace_served, "/api/ws")
+    try:
+        assert ws.subprotocol is None
+        # The broadcaster pushes an initial agents snapshot on connect.
+        assert ws.receive(timeout=_WS_RECEIVE_TIMEOUT) is not None
+    finally:
+        close_ws(ws)
+
+
+@pytest.mark.timeout(15)
 def test_websocket_backend_close_propagates_to_client(workspace_served: ServedApp) -> None:
     """When the backend WS closes first, the proxy must cancel the still-parked
     client->backend direction and close the client socket rather than hanging

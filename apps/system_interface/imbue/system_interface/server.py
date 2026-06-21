@@ -80,6 +80,35 @@ _DEFAULT_TAIL_COUNT = 50
 _WS_PING_INTERVAL_SECONDS = 25
 
 
+class _ReflectClientSubprotocols:
+    """A WebSocket subprotocols allow-list that accepts whatever the client offers.
+
+    ``flask_sock`` builds one ``simple_websocket.Server`` per connection from
+    ``SOCK_SERVER_OPTIONS`` and completes the WebSocket handshake (selecting and
+    echoing the subprotocol) *before* our route handler runs, so a handler cannot
+    choose the subprotocol per-connection. ``simple_websocket``'s default
+    ``choose_subprotocol`` echoes the first client-offered subprotocol that is
+    ``in`` this allow-list; making ``__contains__`` always true turns that into a
+    transparent passthrough -- the server echoes back whatever subprotocol the
+    client requested.
+
+    This is required for the ``/service/<name>/`` proxy: ttyd's browser client
+    opens its socket with the ``tty`` subprotocol, and Chrome aborts the
+    handshake (close 1006, "press enter to reconnect" in the terminal tab) if it
+    offered a subprotocol and the 101 response echoes none. Reflecting the
+    offered subprotocol keeps the proxy transparent for any service, not just
+    ttyd, so a new service that uses its own subprotocol works without touching
+    this list.
+
+    Clients that offer no subprotocol (the ``/api/ws`` broadcaster and the
+    proto-agent-logs stream) are unaffected: with nothing offered, the
+    negotiation loop never runs and no subprotocol is echoed.
+    """
+
+    def __contains__(self, _subprotocol: object) -> bool:
+        return True
+
+
 def _json_response(content: Any, status_code: int = 200) -> Response:
     """Build a compact JSON response, matching the wire format the frontend expects."""
     body = json.dumps(content, separators=(",", ":"), ensure_ascii=False)
@@ -894,7 +923,12 @@ def create_application(
     # static_folder=None disables Flask's default /static route; the system
     # interface serves its own static assets explicitly below.
     application = Flask(__name__, static_folder=None)
-    application.config["SOCK_SERVER_OPTIONS"] = {"ping_interval": _WS_PING_INTERVAL_SECONDS}
+    application.config["SOCK_SERVER_OPTIONS"] = {
+        "ping_interval": _WS_PING_INTERVAL_SECONDS,
+        # Echo back whatever subprotocol the client offered so the WS proxy is
+        # transparent (e.g. ttyd's ``tty``); see ``_ReflectClientSubprotocols``.
+        "subprotocols": _ReflectClientSubprotocols(),
+    }
 
     # Event queues back the SSE streams; the broadcaster backs the WebSockets.
     event_queues = AgentEventQueues()
