@@ -1309,7 +1309,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "imbue-mngr"
-version = "0.2.14"
+version = "0.2.17"
 source = { editable = "vendor/mngr/libs/mngr" }
 dependencies = [
     { name = "cel-python" },
@@ -1321,6 +1321,7 @@ dependencies = [
     { name = "docker" },
     { name = "imbue-common" },
     { name = "markdown-it-py" },
+    { name = "overlay" },
     { name = "packaging" },
     { name = "paramiko" },
     { name = "pluggy" },
@@ -1350,6 +1351,7 @@ requires-dist = [
     { name = "docker", specifier = "==7.1.0" },
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
     { name = "markdown-it-py", specifier = ">=2.2.0" },
+    { name = "overlay", editable = "vendor/mngr/libs/overlay" },
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy", specifier = ">=1.5.0" },
@@ -1370,17 +1372,19 @@ requires-dist = [
 
 [[package]]
 name = "imbue-mngr-claude"
-version = "0.2.14"
+version = "0.2.17"
 source = { editable = "vendor/mngr/libs/mngr_claude" }
 dependencies = [
     { name = "anthropic" },
     { name = "imbue-mngr" },
+    { name = "overlay" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "anthropic" },
     { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
+    { name = "overlay", editable = "vendor/mngr/libs/overlay" },
 ]
 
 [package.metadata.requires-dev]
@@ -1855,6 +1859,15 @@ sdist = { url = "https://files.pythonhosted.org/packages/40/36/4c926a91554483977
 wheels = [
     { url = "https://files.pythonhosted.org/packages/20/74/925d7b3892927e9804aaf58d374a45dc28e4420ff90e992272b77286343e/openai-2.41.1-py3-none-any.whl", hash = "sha256:a939565f350cb7443cb843b801b88c716ac8024b492fb94ca269d5f6b1bbefd6", size = 1353380, upload-time = "2026-06-10T16:10:35.756Z" },
 ]
+
+[[package]]
+name = "overlay"
+version = "0.1.0"
+source = { editable = "vendor/mngr/libs/overlay" }
+
+[package.metadata]
+requires-dist = [{ name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" }]
+provides-extras = ["dev"]
 
 [[package]]
 name = "packaging"

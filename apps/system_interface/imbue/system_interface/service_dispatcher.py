@@ -21,10 +21,13 @@ already owns its own thread under the threaded WSGI server), so there is no
 asyncio anywhere.
 """
 
+import socket
 import threading
 from collections.abc import Iterator
 from typing import Any
 from typing import Final
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 import httpx
 import simple_websocket
@@ -320,6 +323,40 @@ def _forward_backend_to_client(
             logger.trace("Client WebSocket already closed during backend->client cleanup")
 
 
+def _connect_backend_websocket(ws_url: str, subprotocols: list[str] | None) -> simple_websocket.Client:
+    """Open a WebSocket to the backend, trying every resolved address in turn.
+
+    ``simple_websocket.Client`` connects only to ``getaddrinfo(...)[0]`` and does
+    not fall back. In the container, ``localhost`` resolves to IPv6 ``::1``
+    first, but the backend services (ttyd, etc.) bind IPv4 ``127.0.0.1`` only, so
+    that single attempt is refused. We resolve the host ourselves and connect to
+    the first address that accepts, pinning each candidate URL to that concrete
+    IP -- the address fallback ``httpx`` and the old ``websockets`` client did
+    for free.
+    """
+    parsed = urlsplit(ws_url)
+    host = parsed.hostname
+    port = parsed.port
+    if host is None or port is None:
+        raise ValueError(f"backend WebSocket URL is missing host or port: {ws_url}")
+
+    last_error: Exception | None = None
+    for family, _socktype, _proto, _canonname, sockaddr in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        address = sockaddr[0]
+        host_for_url = f"[{address}]" if family == socket.AF_INET6 else address
+        candidate_url = urlunsplit(
+            (parsed.scheme, f"{host_for_url}:{port}", parsed.path, parsed.query, parsed.fragment)
+        )
+        try:
+            return simple_websocket.Client(candidate_url, subprotocols=subprotocols)
+        except (ConnectionRefusedError, ConnectionError, OSError, TimeoutError, ConnectionClosed) as error:
+            last_error = error
+            logger.trace("Backend WebSocket connect to {} failed, trying next address: {}", address, error)
+    if last_error is not None:
+        raise last_error
+    raise ConnectionError(f"no addresses resolved for backend WebSocket {host}:{port}")
+
+
 def _handle_service_websocket(
     client_websocket: Any,
     service_name: str,
@@ -344,7 +381,7 @@ def _handle_service_websocket(
         subprotocols = [s.strip() for s in client_subprotocol_header.split(",")]
 
     try:
-        backend_ws = simple_websocket.Client(ws_url, subprotocols=subprotocols or None)
+        backend_ws = _connect_backend_websocket(ws_url, subprotocols or None)
     except (ConnectionRefusedError, ConnectionError, OSError, TimeoutError, ConnectionClosed) as connection_error:
         logger.debug("Backend WebSocket connection failed for service {}: {}", service_name, connection_error)
         try:

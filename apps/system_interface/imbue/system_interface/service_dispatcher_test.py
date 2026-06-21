@@ -19,6 +19,7 @@ from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
 from imbue.system_interface.models import ApplicationEntry
 from imbue.system_interface.server import create_application
+from imbue.system_interface.service_dispatcher import _connect_backend_websocket
 from imbue.system_interface.testing import ServedApp
 from imbue.system_interface.testing import close_ws
 from imbue.system_interface.testing import open_ws
@@ -269,3 +270,21 @@ def test_websocket_unknown_service_closes_with_4004(workspace_served: ServedApp)
         assert excinfo.value.reason == 4004
     finally:
         close_ws(ws)
+
+
+@pytest.mark.timeout(15)
+def test_connect_backend_websocket_falls_back_across_addresses(stub_backend: ServedApp) -> None:
+    """The backend WS connect iterates resolved addresses instead of only trying the first.
+
+    The stub listener binds IPv4 ``127.0.0.1`` only (like ttyd). Connecting via a
+    ``localhost`` URL on a dual-stack host resolves ``::1`` first, which would be
+    refused; the helper must fall back to ``127.0.0.1`` and connect. (On a
+    single-stack host ``localhost`` resolves straight to ``127.0.0.1`` and the
+    first attempt already succeeds -- either way the connection works.)
+    """
+    backend_ws = _connect_backend_websocket(f"ws://localhost:{stub_backend.port}/ws-echo", None)
+    try:
+        backend_ws.send("ping")
+        assert backend_ws.receive(timeout=_WS_RECEIVE_TIMEOUT) == "echo:ping"
+    finally:
+        close_ws(backend_ws)

@@ -4,6 +4,31 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-17
+
+- Avoid `logger.warning()`.
+- Replace `logger.debug()` with `logger.info()` to prevent logs from growing needlessly.
+
+Fixed a bug where applying a latchkey permission grant could fail with a 500 (`ENOENT ... latchkey_permissions.json.tmp.<hex>`) when the per-host directory did not exist yet. The gateway's `permissions` extension (`POST /permissions/rules`) now creates the target file's parent directories (e.g. `hosts/<host_id>/`) before writing, matching its documented "creates the target file if it does not yet exist" behavior.
+
+Added `maybe_recover_host_permissions_for_agent` to `agent_setup`: a best-effort repair that, given an agent's opaque permissions handle, host id, and agent id, materializes the canonical per-host permissions file (and points the opaque handle's symlink at it, recreating the handle if it had gone missing) when that file is missing, and idempotently re-registers the agent in the host's `minds-api-proxy` allowlist (closing the gap where discovery-time auto-register skipped the agent because the host file did not exist yet). Cheap in the common case (the canonical file already exists). Used by minds to self-heal hosts whose agent-creation finalize/link step was skipped or failed.
+
+Added `point_opaque_handle_at_host` to `store`: (re)creates an opaque permissions handle as a symlink to the canonical host file without moving anything (the symlink-only tail of `link_opaque_permissions_to_host`, now shared between the two).
+
+## 2026-06-16
+
+Exposed the catch-all permission name as a public `WILDCARD_PERMISSION_NAME` constant (still `any`) so the minds permission dialog can present it to users as `all` while keeping the stored/granted value unchanged.
+
+## 2026-06-15
+
+`mngr latchkey forward` now has a structured, rotated, timestamped log, reusing the standard mngr/minds JSONL logging rather than the previous unrotated, untimestamped files.
+
+- The supervisor now writes its structured log to `<latchkey_directory>/mngr_latchkey/events.jsonl` (one flat JSON object per line with a nanosecond timestamp, size-rotated with rotated copies pruned). Read this when you need to observe timing.
+
+- The shared `latchkey gateway` subprocess's output is now routed through loguru (each line at DEBUG, prefixed with `[latchkey gateway]`) into that same structured log, so it is timestamped and rotated like the rest of the logs instead of accumulating in the separate, unrotated `latchkey_gateway.log`. That separate file is no longer written.
+
+- The detached supervisor is now spawned with `--quiet`, so its raw `latchkey_forward.log` capture file no longer accumulates console output in steady state (everything goes to the structured `events.jsonl`). The raw file stays effectively empty and only ever captures rare startup-failure output (Click errors or a pre-logging traceback), which is exactly when you want it. Its fd is handed straight to the detached process, so it cannot be rotated mid-write -- keeping it near-empty is what bounds it.
+
 ## 2026-06-12
 
 Fixed file-sharing permission grants for paths containing spaces or non-ASCII characters (e.g. an agent-requested or user-selected directory like `My Documents`). The per-file permission pattern is now built from the same WHATWG-URL-normalized (percent-encoded) form that the gateway matches incoming requests against, so a path with a space (`%20`) or accented letter now matches instead of silently never granting access.
