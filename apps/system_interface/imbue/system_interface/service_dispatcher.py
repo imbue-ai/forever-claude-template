@@ -56,6 +56,10 @@ _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
 )
 
 
+class BackendWebSocketUrlError(ValueError):
+    """Raised when a backend WebSocket URL cannot be parsed into a host and port."""
+
+
 def _sw_cookie_name(service_name: str) -> str:
     return f"sw_installed_{service_name}"
 
@@ -338,7 +342,7 @@ def _connect_backend_websocket(ws_url: str, subprotocols: list[str] | None) -> s
     host = parsed.hostname
     port = parsed.port
     if host is None or port is None:
-        raise ValueError(f"backend WebSocket URL is missing host or port: {ws_url}")
+        raise BackendWebSocketUrlError(f"backend WebSocket URL is missing host or port: {ws_url}")
 
     last_error: Exception | None = None
     for family, _socktype, _proto, _canonname, sockaddr in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
