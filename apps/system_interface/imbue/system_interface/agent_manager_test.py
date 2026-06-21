@@ -758,6 +758,41 @@ def test_handle_discovery_event_dispatches_host_destroyed(
     assert len(agent_manager.get_agents()) == 0
 
 
+def test_remove_agent_notifies_removed_listener(agent_manager: AgentManager) -> None:
+    """remove_agent() (the REST-destroy path) fires registered removal listeners."""
+    removed: list[str] = []
+    agent_manager.add_agent_removed_listener(removed.append)
+
+    agent_manager.remove_agent("agent-xyz")
+
+    assert removed == ["agent-xyz"]
+
+
+def test_handle_agent_destroyed_notifies_removed_listener(agent_manager: AgentManager) -> None:
+    """Observe-driven agent destruction also fires removal listeners."""
+    removed: list[str] = []
+    agent_manager.add_agent_removed_listener(removed.append)
+
+    test_agent_id = MngrAgentId()
+    host_id = HostId()
+    agent_manager._handle_agent_destroyed(_make_agent_destroyed_event(test_agent_id, host_id))
+
+    assert removed == [str(test_agent_id)]
+
+
+def test_handle_host_destroyed_notifies_removed_listener_per_agent(agent_manager: AgentManager) -> None:
+    """Host destruction fires a removal listener for every agent on the host."""
+    removed: list[str] = []
+    agent_manager.add_agent_removed_listener(removed.append)
+
+    agent_id_1 = MngrAgentId()
+    agent_id_2 = MngrAgentId()
+    host_id = HostId()
+    agent_manager._handle_host_destroyed(_make_host_destroyed_event(host_id, [agent_id_1, agent_id_2]))
+
+    assert removed == [str(agent_id_1), str(agent_id_2)]
+
+
 def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroadcaster) -> None:
     """The ``mngr_binary`` argument to ``build()`` overrides the default binary path."""
     manager = AgentManager.build(broadcaster, mngr_binary="/path/to/custom-mngr")

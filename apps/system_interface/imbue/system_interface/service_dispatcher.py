@@ -51,6 +51,224 @@ _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Request headers that describe the *original* framing of the client request.
+# We re-stream the body to the backend as a chunked async iterator, so httpx
+# sets its own Transfer-Encoding and a stale Content-Length/Transfer-Encoding
+# from the client would conflict. ``host`` is dropped so the backend sees its
+# own host.
+_EXCLUDED_REQUEST_HEADERS: Final[frozenset[str]] = frozenset(
+    {
+        "host",
+        "content-length",
+        "transfer-encoding",
+    }
+)
+
+# Hard cap on a forwarded *request* body. The body is streamed to the backend
+# (never buffered in the proxy), so this is an abuse bound rather than an
+# OOM guard: a client that streams more than this many bytes gets a 413 and
+# the upstream send is aborted. Generous enough for ordinary file uploads to
+# a workspace service.
+_MAX_REQUEST_BODY_BYTES: Final[int] = 2 * 1024 * 1024 * 1024
+
+# Hard cap on a *response* body that we must buffer in order to rewrite it
+# (i.e. HTML, which needs the <base> tag / WS shim / absolute-path rewriting).
+# Non-HTML responses are streamed through without buffering and are not capped,
+# so large downloads still work; only the rewrite path holds bytes in memory.
+_MAX_REWRITABLE_HTML_BYTES: Final[int] = 25 * 1024 * 1024
+
+# Chunk size for streaming bodies in either direction.
+_STREAM_CHUNK_SIZE: Final[int] = 64 * 1024
+
+
+class _RequestBodyTooLargeError(Exception):
+    """Raised by the request-body stream wrapper when the cap is exceeded."""
+
+
+def _parse_content_length(request: Request) -> int | None:
+    """Return the declared Content-Length, or None if absent/unparseable."""
+    raw = request.headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _request_has_body(request: Request) -> bool:
+    """Whether the incoming request carries a body worth forwarding.
+
+    Browsers set Content-Length on bodied requests and use chunked
+    Transfer-Encoding for streamed uploads. Bodyless requests (the common
+    GET/HEAD case) are forwarded without a content stream so httpx does not
+    add a spurious chunked body.
+    """
+    if request.headers.get("transfer-encoding"):
+        return True
+    content_length = _parse_content_length(request)
+    return content_length is not None and content_length > 0
+
+
+async def _capped_request_stream(request: Request, max_bytes: int) -> AsyncGenerator[bytes, None]:
+    """Yield the request body in chunks, aborting if it exceeds ``max_bytes``."""
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            raise _RequestBodyTooLargeError()
+        yield chunk
+
+
+def _forwarded_request_headers(request: Request) -> dict[str, str]:
+    return {key: value for key, value in request.headers.items() if key.lower() not in _EXCLUDED_REQUEST_HEADERS}
+
+
+def _body_too_large_response() -> Response:
+    return Response(status_code=413, content="Request body too large")
+
+
+def _apply_backend_headers(
+    response: Response,
+    backend_response: httpx.Response,
+    service_name: ServiceName,
+    skip_header_keys: frozenset[str],
+) -> None:
+    """Copy backend response headers onto ``response`` with scoping/exclusions.
+
+    Excludes hop-by-hop/framing headers (``_EXCLUDED_RESPONSE_HEADERS``) and
+    any keys in ``skip_header_keys`` (e.g. ``content-type`` when it is already
+    carried by a StreamingResponse's ``media_type``). ``Set-Cookie`` is
+    rewritten to scope under the service prefix.
+    """
+    for header_key, header_value in backend_response.headers.multi_items():
+        lowered = header_key.lower()
+        if lowered in _EXCLUDED_RESPONSE_HEADERS or lowered in skip_header_keys:
+            continue
+        if lowered == "set-cookie":
+            header_value = rewrite_cookie_path(set_cookie_header=header_value, service_name=service_name)
+        response.headers.append(header_key, header_value)
+
+
+async def _build_rewritten_html_response(
+    backend_response: httpx.Response,
+    service_name: ServiceName,
+    max_bytes: int,
+) -> Response:
+    """Buffer an HTML response (up to ``max_bytes``), rewrite it, and return it."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in backend_response.aiter_bytes(chunk_size=_STREAM_CHUNK_SIZE):
+        total += len(chunk)
+        if total > max_bytes:
+            logger.warning(
+                "HTML response from service {} exceeds {} bytes; refusing to buffer for rewrite",
+                service_name,
+                max_bytes,
+            )
+            return Response(status_code=502, content="HTML response too large to proxy")
+        chunks.append(chunk)
+    html_text = b"".join(chunks).decode(backend_response.encoding or "utf-8", errors="replace")
+    rewritten_html = rewrite_proxied_html(html_content=html_text, service_name=service_name)
+
+    response = Response(content=rewritten_html.encode(), status_code=backend_response.status_code)
+    _apply_backend_headers(
+        response=response,
+        backend_response=backend_response,
+        service_name=service_name,
+        skip_header_keys=frozenset({"content-type"}),
+    )
+    response.headers["content-type"] = backend_response.headers.get("content-type", "text/html")
+    return response
+
+
+def _build_streaming_proxy_response(
+    backend_response: httpx.Response,
+    service_name: ServiceName,
+) -> StreamingResponse:
+    """Stream a non-HTML response body through without buffering it."""
+
+    async def _stream_generator() -> AsyncGenerator[bytes, None]:
+        try:
+            async for chunk in backend_response.aiter_bytes(chunk_size=_STREAM_CHUNK_SIZE):
+                yield chunk
+        except httpx.ReadError as e:
+            logger.warning("Backend read error during streaming for service {}: {}", service_name, e)
+        except httpx.RemoteProtocolError as e:
+            logger.warning(
+                "Backend disconnected without response during streaming for service {}: {}", service_name, e
+            )
+        except httpx.TimeoutException as e:
+            logger.warning("Backend stream timed out for service {}: {}", service_name, e)
+        finally:
+            await backend_response.aclose()
+
+    media_type = backend_response.headers.get("content-type", "application/octet-stream")
+    response = StreamingResponse(
+        _stream_generator(),
+        status_code=backend_response.status_code,
+        media_type=media_type,
+    )
+    _apply_backend_headers(
+        response=response,
+        backend_response=backend_response,
+        service_name=service_name,
+        skip_header_keys=frozenset({"content-type"}),
+    )
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+async def _forward_http_request(
+    request: Request,
+    backend_url: str,
+    path: str,
+    service_name: str,
+    http_client: httpx.AsyncClient,
+) -> Response:
+    """Forward an HTTP request to the backend, streaming both bodies.
+
+    The request body is streamed upstream (never buffered) with a hard cap.
+    The response is streamed back unless it is HTML, which must be buffered
+    (up to a smaller cap) so the proxy can rewrite absolute paths and inject
+    the ``<base>`` tag and WebSocket shim. Raises the httpx connection errors
+    to the caller, which maps them to a loading page or 5xx.
+    """
+    proxy_url = f"{backend_url.rstrip('/')}/{path}"
+    if request.url.query:
+        proxy_url = f"{proxy_url}?{request.url.query}"
+
+    declared_length = _parse_content_length(request)
+    if declared_length is not None and declared_length > _MAX_REQUEST_BODY_BYTES:
+        return _body_too_large_response()
+
+    headers = _forwarded_request_headers(request)
+    content = _capped_request_stream(request, _MAX_REQUEST_BODY_BYTES) if _request_has_body(request) else None
+
+    backend_request = http_client.build_request(
+        method=request.method,
+        url=proxy_url,
+        headers=headers,
+        content=content,
+    )
+    try:
+        backend_response = await http_client.send(backend_request, stream=True)
+    except _RequestBodyTooLargeError:
+        logger.warning("Request body to service {} exceeded {} bytes", service_name, _MAX_REQUEST_BODY_BYTES)
+        return _body_too_large_response()
+
+    parsed_service_name = ServiceName(service_name)
+    content_type = backend_response.headers.get("content-type", "")
+    if "text/html" in content_type:
+        try:
+            return await _build_rewritten_html_response(
+                backend_response, parsed_service_name, _MAX_REWRITABLE_HTML_BYTES
+            )
+        finally:
+            await backend_response.aclose()
+
+    return _build_streaming_proxy_response(backend_response, parsed_service_name)
+
 
 def _sw_cookie_name(service_name: str) -> str:
     return f"sw_installed_{service_name}"
@@ -64,146 +282,6 @@ def _make_loading_html(current_service: ServiceName, agent_manager: AgentManager
         current_service=current_service,
         other_services=other_services,
     )
-
-
-async def _forward_http_request(
-    request: Request,
-    backend_url: str,
-    path: str,
-    service_name: str,
-    http_client: httpx.AsyncClient,
-) -> httpx.Response | Response:
-    """Forward an HTTP request to the backend, returning the backend response or an error Response."""
-    proxy_url = f"{backend_url.rstrip('/')}/{path}"
-    if request.url.query:
-        proxy_url = f"{proxy_url}?{request.url.query}"
-
-    headers = dict(request.headers)
-    headers.pop("host", None)
-
-    body = await request.body()
-
-    try:
-        return await http_client.request(
-            method=request.method,
-            url=proxy_url,
-            headers=headers,
-            content=body,
-        )
-    except httpx.ConnectError:
-        logger.warning("Backend connection refused for service {}", service_name)
-        return Response(status_code=502, content="Backend connection refused")
-    except httpx.ReadError:
-        logger.warning("Backend connection lost for service {}", service_name)
-        return Response(status_code=502, content="Backend connection lost")
-    except httpx.RemoteProtocolError:
-        logger.warning("Backend disconnected without response for service {} (likely still starting)", service_name)
-        return Response(status_code=502, content="Backend disconnected without response")
-    except httpx.TimeoutException:
-        logger.warning("Backend request timed out for service {}", service_name)
-        return Response(status_code=504, content="Backend request timed out")
-
-
-async def _forward_http_request_streaming(
-    request: Request,
-    backend_url: str,
-    path: str,
-    service_name: str,
-    http_client: httpx.AsyncClient,
-) -> Response:
-    """Forward an HTTP request and stream the response back without buffering.
-
-    Used for SSE (Server-Sent Events) endpoints where the backend sends data
-    incrementally and the client needs to receive it as it arrives. The
-    backend's status code and Content-Type are propagated so that a backend
-    responding with something other than ``text/event-stream`` (e.g. chunked
-    ``application/x-ndjson``) still renders correctly client-side.
-    """
-    proxy_url = f"{backend_url.rstrip('/')}/{path}"
-    if request.url.query:
-        proxy_url = f"{proxy_url}?{request.url.query}"
-
-    headers = dict(request.headers)
-    headers.pop("host", None)
-
-    body = await request.body()
-
-    backend_request = http_client.build_request(
-        method=request.method,
-        url=proxy_url,
-        headers=headers,
-        content=body,
-    )
-    try:
-        backend_response = await http_client.send(backend_request, stream=True)
-    except httpx.ConnectError as e:
-        logger.warning("Backend connection refused for service {} (streaming): {}", service_name, e)
-        return Response(status_code=502, content="Backend connection refused")
-    except httpx.TimeoutException as e:
-        logger.warning("Backend stream timed out for service {}: {}", service_name, e)
-        return Response(status_code=504, content="Backend stream timed out")
-
-    async def _stream_generator() -> AsyncGenerator[bytes, None]:
-        try:
-            async for chunk in backend_response.aiter_bytes():
-                yield chunk
-        except httpx.ReadError as e:
-            logger.warning("Backend read error during streaming for service {}: {}", service_name, e)
-        except httpx.RemoteProtocolError as e:
-            logger.warning(
-                "Backend disconnected without response during streaming for service {}: {}", service_name, e
-            )
-        except httpx.TimeoutException as e:
-            logger.warning("Backend stream timed out for service {}: {}", service_name, e)
-        finally:
-            await backend_response.aclose()
-
-    media_type = backend_response.headers.get("content-type", "text/event-stream")
-    return StreamingResponse(
-        _stream_generator(),
-        status_code=backend_response.status_code,
-        media_type=media_type,
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-def _build_proxy_response(
-    backend_response: httpx.Response,
-    service_name: ServiceName,
-) -> Response:
-    """Transform a backend httpx response into a FastAPI Response with header/content rewriting."""
-    resp_headers: dict[str, list[str]] = {}
-    for header_key, header_value in backend_response.headers.multi_items():
-        if header_key.lower() in _EXCLUDED_RESPONSE_HEADERS:
-            continue
-        if header_key.lower() == "set-cookie":
-            header_value = rewrite_cookie_path(
-                set_cookie_header=header_value,
-                service_name=service_name,
-            )
-        resp_headers.setdefault(header_key, [])
-        resp_headers[header_key].append(header_value)
-
-    content: str | bytes = backend_response.content
-
-    content_type = backend_response.headers.get("content-type", "")
-    if "text/html" in content_type:
-        html_text = backend_response.text
-        rewritten_html = rewrite_proxied_html(
-            html_content=html_text,
-            service_name=service_name,
-        )
-        content = rewritten_html.encode()
-
-    response = Response(content=content, status_code=backend_response.status_code)
-    for header_key, header_values in resp_headers.items():
-        for header_value in header_values:
-            response.headers.append(header_key, header_value)
-    return response
 
 
 async def _handle_service_sw_js(service_name: str) -> Response:
@@ -242,35 +320,38 @@ async def _handle_service_http(
 
     http_client: httpx.AsyncClient = request.app.state.http_client
 
-    accept = request.headers.get("accept", "")
-    is_likely_sse = "text/event-stream" in accept
-
-    if is_likely_sse:
-        return await _forward_http_request_streaming(
+    try:
+        return await _forward_http_request(
             request=request,
             backend_url=backend_url,
             path=path,
             service_name=service_name,
             http_client=http_client,
         )
+    except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
+        logger.warning("Backend connection error for service {}: {}", service_name, e)
+        return _connection_error_response(502, "Backend connection failed", request, parsed_service, agent_manager)
+    except httpx.TimeoutException as e:
+        logger.warning("Backend request timed out for service {}: {}", service_name, e)
+        return _connection_error_response(504, "Backend request timed out", request, parsed_service, agent_manager)
 
-    result = await _forward_http_request(
-        request=request,
-        backend_url=backend_url,
-        path=path,
-        service_name=service_name,
-        http_client=http_client,
-    )
 
-    if isinstance(result, Response):
-        if result.status_code >= 500 and "text/html" in request.headers.get("accept", ""):
-            return HTMLResponse(content=_make_loading_html(parsed_service, agent_manager))
-        return result
+def _connection_error_response(
+    status_code: int,
+    detail: str,
+    request: Request,
+    parsed_service: ServiceName,
+    agent_manager: AgentManager,
+) -> Response:
+    """Return the auto-retrying loading page for HTML navigations, else a 5xx.
 
-    return _build_proxy_response(
-        backend_response=result,
-        service_name=parsed_service,
-    )
+    Connection failures usually mean the backend service is still starting; an
+    HTML navigation gets the loading page (which retries), while non-HTML
+    callers get the raw error status.
+    """
+    if "text/html" in request.headers.get("accept", ""):
+        return HTMLResponse(content=_make_loading_html(parsed_service, agent_manager))
+    return Response(status_code=status_code, content=detail)
 
 
 async def _forward_client_to_backend(

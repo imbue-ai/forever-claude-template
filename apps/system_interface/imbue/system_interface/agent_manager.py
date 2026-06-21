@@ -4,6 +4,7 @@ import queue
 import shlex
 import threading
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -253,6 +254,7 @@ class AgentManager:
     _app_observers: dict[str, Any]
     _proto_agents: dict[str, dict[str, Any]]
     _log_queues: dict[str, queue.Queue[str | None]]
+    _agent_removed_listeners: list[Callable[[str], None]]
     _own_agent_id: str
     _own_work_dir: str
     _shutdown_event: ShutdownEvent
@@ -282,6 +284,7 @@ class AgentManager:
         manager._app_observers = {}
         manager._proto_agents = {}
         manager._log_queues = {}
+        manager._agent_removed_listeners = []
         manager._own_agent_id = os.environ.get("MNGR_AGENT_ID", "")
         manager._own_work_dir = os.environ.get("MNGR_AGENT_WORK_DIR", "")
         manager._shutdown_event = ShutdownEvent.build_root()
@@ -348,6 +351,40 @@ class AgentManager:
         with self._lock:
             return self._agents.get(agent_id)
 
+    def add_agent_removed_listener(self, listener: Callable[[str], None]) -> None:
+        """Register a callback invoked with the agent_id whenever an agent is removed.
+
+        Fires for every removal path -- explicit destroy via the REST endpoint
+        (:meth:`remove_agent`) and observe-driven removals
+        (:meth:`_handle_agent_destroyed`, :meth:`_handle_host_destroyed`). Used
+        by the server to release per-agent resources that live outside this
+        manager (the session-watcher thread and the SSE event queues).
+
+        Listeners run on whatever thread performed the removal (a background
+        observe-reader thread, or a threadpool worker for the REST path) and
+        may block briefly, so callers that trigger removal from the asyncio
+        event loop must do so off the loop.
+        """
+        self._agent_removed_listeners.append(listener)
+
+    def _notify_agent_removed(self, agent_id: str) -> None:
+        """Invoke all registered agent-removed listeners for ``agent_id``.
+
+        Several removal paths (``_handle_agent_destroyed`` /
+        ``_handle_host_destroyed``) run on the observe-reader background thread,
+        where an exception escaping this fan-out would skip later listeners,
+        abort the host-destroyed loop, prevent the trailing
+        ``broadcast_agents_updated``, and tear down observe event processing.
+        Listeners are therefore required to be self-contained: each must handle
+        its own expected operational failures (the server's resource-eviction
+        listener, for example, catches the errors its watchdog teardown can
+        raise). This method deliberately does not wrap listeners in a blanket
+        ``except`` -- doing so would silently swallow genuine programming errors
+        in a listener; those should surface.
+        """
+        for listener in list(self._agent_removed_listeners):
+            listener(agent_id)
+
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from the tracked state and broadcast the update.
 
@@ -359,6 +396,7 @@ class AgentManager:
 
         self._stop_app_watcher(agent_id)
         self._stop_activity_tracking(agent_id)
+        self._notify_agent_removed(agent_id)
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def get_applications(self) -> list[ApplicationEntry]:
@@ -867,6 +905,7 @@ class AgentManager:
 
         self._stop_app_watcher(agent_id)
         self._stop_activity_tracking(agent_id)
+        self._notify_agent_removed(agent_id)
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
@@ -877,6 +916,7 @@ class AgentManager:
                 self._agents.pop(aid, None)
             self._stop_app_watcher(aid)
             self._stop_activity_tracking(aid)
+            self._notify_agent_removed(aid)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Generator
 from unittest.mock import patch
 
+import anyio
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -30,6 +31,22 @@ from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 # host portion of the TestClient ``client`` tuple is inspected by the
 # endpoint (it enforces loopback), so any fixed value works here.
 _TEST_CLIENT_PORT = 12345
+
+
+class _StoppableWatcher:
+    """Minimal stand-in for a session watcher that records stop() calls."""
+
+    was_stopped = False
+
+    def stop(self) -> None:
+        self.was_stopped = True
+
+
+class _RaisingWatcher:
+    """Stand-in whose stop() raises the kind of error a watchdog teardown can."""
+
+    def stop(self) -> None:
+        raise OSError("inotify teardown failed")
 
 
 @pytest.fixture
@@ -883,11 +900,63 @@ def test_stream_filtered_events_forwards_only_matching_events() -> None:
         session_id = event.get("session_id")
         return session_id is None or session_id == "main-1"
 
-    frames = list(_stream_filtered_events("agent-1", event_queues, event_queue, is_main_session_event))
+    async def _drive() -> list[str]:
+        return [
+            frame
+            async for frame in _stream_filtered_events("agent-1", event_queues, event_queue, is_main_session_event)
+        ]
+
+    frames = anyio.run(_drive)
     forwarded_ids = [json.loads(frame[len("data: ") :])["event_id"] for frame in frames if frame.startswith("data: ")]
 
     assert forwarded_ids == ["main-evt", "no-session"]
     assert "sub-evt" not in forwarded_ids
+
+
+def test_agent_removal_stops_watcher_and_evicts_queue(app: FastAPI) -> None:
+    """Removing an agent stops its session-watcher thread and terminates its SSE subscribers.
+
+    The lifespan registers an agent-removed listener that frees the per-agent
+    resources living on application.state (the session-watcher thread and the
+    event queues), which the AgentManager itself has no reference to.
+    """
+    with TestClient(app):
+        agent_manager: AgentManager = app.state.agent_manager
+        event_queues: AgentEventQueues = app.state.event_queues
+
+        agent_id = "agent-to-remove"
+        session_watcher = _StoppableWatcher()
+        app.state.watchers[agent_id] = session_watcher
+        subscriber = event_queues.register(agent_id)
+
+        agent_manager.remove_agent(agent_id)
+
+        assert session_watcher.was_stopped is True
+        assert agent_id not in app.state.watchers
+        assert subscriber.get_nowait() is None
+
+
+def test_agent_removal_tolerates_watcher_stop_failure(app: FastAPI) -> None:
+    """A watcher.stop() failure is contained: the queue is still evicted.
+
+    Stopping a watchdog-backed watcher can raise OSError/RuntimeError during
+    teardown. The eviction listener must catch that, log it, and still evict the
+    event queues -- and must not let the error escape onto the observe thread
+    that drives observe-driven removals.
+    """
+    with TestClient(app):
+        agent_manager: AgentManager = app.state.agent_manager
+        event_queues: AgentEventQueues = app.state.event_queues
+
+        agent_id = "agent-bad-watcher"
+        app.state.watchers[agent_id] = _RaisingWatcher()
+        subscriber = event_queues.register(agent_id)
+
+        # Must not raise even though watcher.stop() does.
+        agent_manager.remove_agent(agent_id)
+
+        assert agent_id not in app.state.watchers
+        assert subscriber.get_nowait() is None
 
 
 def test_destroy_rejects_is_primary_agent(client: TestClient, app: FastAPI) -> None:
