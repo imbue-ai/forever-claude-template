@@ -51,9 +51,9 @@ temperature, etc. with no wrapper of ours in the way. `litellm` is in the root
 `pyproject.toml`; read its docs for the call surface. Sketch:
 
 ```python
-from litellm import acompletion, completion_cost
+from litellm import completion, completion_cost
 
-resp = await acompletion(
+resp = completion(
     model="claude-haiku-4-5",
     messages=[
         {"role": "system", "content": "You are an email triage classifier."},
@@ -71,7 +71,7 @@ It disables tools and runs from an isolated working directory so the repo's
 ```python
 from claude_p import claude_p_completion  # the file you copied in
 
-result = await claude_p_completion(
+result = claude_p_completion(
     "Classify this email's intent:\n\n" + email_body,
     system="You are an email triage classifier.",   # required
     model="claude-haiku-4-5",
@@ -79,10 +79,11 @@ result = await claude_p_completion(
 print(result.text, result.cost_usd, result.usage)
 ```
 
-Both `acompletion` and `claude_p_completion` are async. Once you have confirmed
-the prompt + model combination works and produces good results on a few items,
-run a batch of items concurrently (an `anyio` task group) rather than awaiting
-them one at a time -- the throughput difference is large.
+Both `completion` and `claude_p_completion` are synchronous (no asyncio). Once
+you have confirmed the prompt + model combination works and produces good
+results on a few items, run a batch concurrently with a thread pool
+(`concurrent.futures.ThreadPoolExecutor`) rather than one at a time -- the
+throughput difference is large.
 
 ## Scenario 2 -- one-shot agentic task
 
@@ -95,7 +96,7 @@ run has no human to approve tool use).
 ```python
 from claude_p import claude_p_task
 
-result = await claude_p_task(
+result = claude_p_task(
     "Read runtime/email-triage/latest.json and draft a reply using templates/.",
     append_system="Only touch files under runtime/email-triage/.",
 )

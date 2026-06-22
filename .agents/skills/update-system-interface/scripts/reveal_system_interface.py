@@ -148,7 +148,7 @@ FORWARD_PORT_CMD = ("uv", "run", "python3", "scripts/forward_port.py")
 # Endpoints used to probe liveness. ``/api/agents`` exercises the mngr plugin
 # discovery path -- exactly what a missing backend dependency or a broken
 # plugin-config parse would take down -- so a 200 there is a strong "the backend
-# actually works" signal, not just "uvicorn is listening".
+# actually works" signal, not just "the server is listening".
 HEALTH_PATH = "/api/agents"
 SERVE_PATH = "/"
 

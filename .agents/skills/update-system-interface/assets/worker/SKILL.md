@@ -8,7 +8,7 @@ metadata:
 # Implementing a system-interface change
 
 Your task file describes a change to `apps/system_interface` -- the web workspace
-UI (dockview shell, chat panels, progress view) and/or its FastAPI backend. You
+UI (dockview shell, chat panels, progress view) and/or its Flask backend. You
 are running in your **own git worktree** with your own copy of the source, so you
 can edit, build, and test in isolation. Nothing you do reaches the user until the
 lead merges and reveals your branch, so the bar is: **prove the change actually
@@ -31,7 +31,7 @@ replies via `mngr message` and you resume. For terminal statuses, the run ends.
 
 ## Where the source lives
 
-- Backend: `apps/system_interface/imbue/system_interface/` (FastAPI + uvicorn).
+- Backend: `apps/system_interface/imbue/system_interface/` (Flask + flask-sock, served by the threaded Werkzeug server).
 - Frontend: `apps/system_interface/frontend/src/` (TypeScript + Vite + Tailwind
   + mithril/dockview). Build output goes to the gitignored
   `apps/system_interface/imbue/system_interface/static/`.
@@ -49,8 +49,9 @@ replies via `mngr message` and you resume. For terminal statuses, the run ends.
 - Backend: exercise the edited Python **in-process** -- never install the global
   `system-interface` tool and never touch the running `svc-system_interface`
   service. `cd apps/system_interface && uv run pytest` imports
-  `create_application` and runs uvicorn in-process, so your edits are picked up
-  with no reinstall and no restart.
+  `create_application` and exercises it via Flask's test client (and a threaded
+  Werkzeug server in-process for the WebSocket/SSE tests), so your edits are
+  picked up with no reinstall and no restart.
 - Frontend: `cd apps/system_interface/frontend && npm run build` (you must be
   able to produce a clean build) plus `npm run lint` and `npm run test`.
 - If you want to drive the UI manually during development, launch a **throwaway**
@@ -94,7 +95,7 @@ replies via `mngr message` and you resume. For terminal statuses, the run ends.
 - **Verify the change really works**, driving the UI with Playwright against an
   isolated instance. The existing harness in
   `apps/system_interface/imbue/system_interface/test_e2e.py` already spins up an
-  isolated uvicorn instance on an alternate port (`Config(system_interface_port=...)`),
+  isolated threaded Werkzeug server on an alternate port (`Config(system_interface_port=...)`),
   builds fake agent/session fixtures via `_make_agent_fixture`, and drives it
   with Playwright (auto-skips when browsers aren't installed). Extend it -- and
   use it as the same instance you screenshot for the visual check above.

@@ -22,15 +22,16 @@ rather than being swallowed.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
 import httpx
-from fastapi import FastAPI
+from flask import Flask
+from flask import Response
 from loguru import logger as _loguru_logger
-from starlette.requests import Request
-from starlette.responses import JSONResponse
 
+from imbue.system_interface.app_context import get_state
 from imbue.system_interface.models import LatchkeyPermissionInfo
 from imbue.system_interface.models import LatchkeyScopeInfo
 
@@ -45,11 +46,16 @@ _ENV_GATEWAY_PERMISSIONS_OVERRIDE = "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE"
 _HEADER_PASSWORD = "X-Latchkey-Gateway-Password"
 _HEADER_PERMISSIONS_OVERRIDE = "X-Latchkey-Gateway-Permissions-Override"
 
-# Per-service catalog responses are cached (on ``app.state.latchkey_catalog_cache``,
-# set up by ``create_application``) keyed by service name; ``None`` records a 404
-# so a non-service scope-prefix isn't re-requested.
+# Per-service catalog responses are cached (on the app's ``SystemInterfaceState``)
+# keyed by service name; ``None`` records a 404 so a non-service scope-prefix
+# isn't re-requested.
 ServiceCatalog = tuple[dict[str, Any], ...]
 CatalogCache = dict[str, ServiceCatalog | None]
+
+
+def _json_response(content: object, status_code: int = 200) -> Response:
+    body = json.dumps(content, separators=(",", ":"), ensure_ascii=False)
+    return Response(body, status=status_code, mimetype="application/json")
 
 
 def candidate_services(scope: str) -> list[str]:
@@ -148,31 +154,34 @@ def resolve_scope_info(
     return None
 
 
-def get_scope_info(request: Request) -> JSONResponse:
+def get_scope_info(scope: str) -> Response:
     """GET /api/latchkey/scopes/{scope} -- catalog info for a permission scope.
 
     503 when the gateway env isn't configured (e.g. running outside an agent
     container); 502 when the gateway can't be reached or errors; 404 when the
     scope isn't in the gateway catalog.
     """
-    scope = request.path_params["scope"]
     base_url = os.environ.get(_ENV_GATEWAY)
     password = os.environ.get(_ENV_GATEWAY_PASSWORD)
     permissions_override = os.environ.get(_ENV_GATEWAY_PERMISSIONS_OVERRIDE)
     if not base_url or not password or not permissions_override:
-        return JSONResponse({"detail": "latchkey gateway is not configured"}, status_code=503)
-    client: httpx.Client = request.app.state.latchkey_http_client
-    cache: CatalogCache = request.app.state.latchkey_catalog_cache
+        return _json_response({"detail": "latchkey gateway is not configured"}, status_code=503)
+    state = get_state()
+    client: httpx.Client = state.latchkey_http_client
+    cache: CatalogCache = state.latchkey_catalog_cache
     try:
-        info = resolve_scope_info(client, base_url, password, permissions_override, scope, cache)
+        # Serialize concurrent resolves so two request threads don't both fetch
+        # the same uncached service catalog.
+        with state.latchkey_lock:
+            info = resolve_scope_info(client, base_url, password, permissions_override, scope, cache)
     except httpx.HTTPError as error:
         logger.warning("latchkey gateway request for scope {!r} failed: {}", scope, error)
-        return JSONResponse({"detail": "latchkey gateway request failed"}, status_code=502)
+        return _json_response({"detail": "latchkey gateway request failed"}, status_code=502)
     if info is None:
-        return JSONResponse({"detail": f"no catalog entry for scope {scope!r}"}, status_code=404)
-    return JSONResponse(content=info.model_dump())
+        return _json_response({"detail": f"no catalog entry for scope {scope!r}"}, status_code=404)
+    return _json_response(info.model_dump())
 
 
-def register_routes(application: FastAPI) -> None:
-    """Wire `/api/latchkey/*` endpoints onto the FastAPI application."""
-    application.add_api_route("/api/latchkey/scopes/{scope}", get_scope_info, methods=["GET"])
+def register_routes(application: Flask) -> None:
+    """Wire `/api/latchkey/*` endpoints onto the Flask application."""
+    application.add_url_rule("/api/latchkey/scopes/<scope>", view_func=get_scope_info, methods=["GET"])

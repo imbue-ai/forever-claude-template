@@ -55,7 +55,7 @@ tool-call block into the rich card without a page refresh.
 
 All access to the shared session collections, per-file locator lists, the body
 cache and the subagent linkage maps is guarded by ``_lock`` because the watcher
-thread and FastAPI handler threads touch them concurrently. File I/O and parsing
+thread and the Flask request/WebSocket handler threads touch them concurrently. File I/O and parsing
 run while the lock is held, but the ``on_events`` callback (which fans out to SSE
 queues) is always invoked outside the lock to avoid serializing fan-out and to
 avoid re-entrancy / deadlock.

@@ -2,7 +2,7 @@
 
 Exercises the full backend path the agent-facing helper depends on:
 ``scripts/layout.py`` (subprocess) -> ``POST /api/layout/broadcast``
-(loopback FastAPI route) -> ``WebSocketBroadcaster.broadcast_layout_op``.
+(loopback Flask route) -> ``WebSocketBroadcaster.broadcast_layout_op``.
 The WS-to-DOM step is left to manual verification (no headless browser
 harness exists for the dockview layout).
 
@@ -29,7 +29,6 @@ from typing import Any
 from typing import Generator
 
 import pytest
-import uvicorn
 
 from imbue.mngr.utils.polling import wait_for
 from imbue.system_interface.agent_manager import AgentManager
@@ -37,6 +36,7 @@ from imbue.system_interface.config import Config
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
+from imbue.system_interface.wsgi import make_threaded_server
 
 pytestmark = pytest.mark.acceptance
 
@@ -97,8 +97,8 @@ def layout_server(
     config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
     app = create_application(config=config, agent_manager=manager)
 
-    server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT, log_level="error"))
-    thread = threading.Thread(target=server.run, daemon=True)
+    server = make_threaded_server("127.0.0.1", _PORT, app)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         wait_for(
@@ -109,7 +109,7 @@ def layout_server(
         )
         yield _BASE_URL, broadcaster
     finally:
-        server.should_exit = True
+        server.shutdown()
         thread.join(timeout=5.0)
 
 
@@ -258,9 +258,7 @@ def test_open_close_chat_ref_broadcasts_layout_ops(
 
     client_queue = broadcaster.register()
     try:
-        open_result = _run_layout_script(
-            ["open", f"chat:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox
-        )
+        open_result = _run_layout_script(["open", f"chat:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox)
         assert open_result.returncode == 0, f"stderr={open_result.stderr!r}"
         open_msg = _await_layout_op(client_queue, timeout=2.0)
         assert open_msg["op"] == "open"
@@ -268,9 +266,7 @@ def test_open_close_chat_ref_broadcasts_layout_ops(
         # the args dict through unchanged.
         assert open_msg["args"] == {"ref": f"chat:{_AGENT_NAME}", "new_group": False}
 
-        close_result = _run_layout_script(
-            ["close", f"chat:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox
-        )
+        close_result = _run_layout_script(["close", f"chat:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox)
         assert close_result.returncode == 0, f"stderr={close_result.stderr!r}"
         close_msg = _await_layout_op(client_queue, timeout=2.0)
         assert close_msg["op"] == "close"
@@ -297,9 +293,7 @@ def test_open_chat_terminal_ref_broadcasts_through_pipeline(
 
     client_queue = broadcaster.register()
     try:
-        result = _run_layout_script(
-            ["open", f"chat-terminal:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox
-        )
+        result = _run_layout_script(["open", f"chat-terminal:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox)
         assert result.returncode == 0, f"stderr={result.stderr!r}"
         msg = _await_layout_op(client_queue, timeout=2.0)
         assert msg["op"] == "open"
