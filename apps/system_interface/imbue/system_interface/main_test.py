@@ -1,65 +1,37 @@
 """Tests for the main entry point."""
 
-from unittest.mock import patch
-
+from imbue.system_interface.app_context import get_state
 from imbue.system_interface.config import Config
-from imbue.system_interface.main import main
+from imbue.system_interface.main import _parse_args
+from imbue.system_interface.main import build_application
 
 
-def test_main_starts_server() -> None:
-    """main() creates an app and starts uvicorn."""
-    with (
-        patch("imbue.system_interface.main.load_config") as mock_load_config,
-        patch("imbue.system_interface.main.create_application") as mock_create_app,
-        patch("imbue.system_interface.main.uvicorn") as mock_uvicorn,
-        patch("sys.argv", ["system-interface"]),
-    ):
-        mock_config = Config()
-        mock_load_config.return_value = mock_config
-        mock_create_app.return_value = "fake_app"
-
-        main()
-
-        mock_load_config.assert_called_once()
-        mock_create_app.assert_called_once_with(
-            mock_config,
-            provider_names=None,
-            include_filters=(),
-            exclude_filters=(),
-        )
-        mock_uvicorn.run.assert_called_once_with(
-            "fake_app",
-            host="127.0.0.1",
-            port=8000,
-        )
+def test_build_application_defaults_have_no_filters() -> None:
+    """With no CLI filter args, the app carries no provider/include/exclude filters."""
+    args = _parse_args([])
+    app = build_application(Config(), args)
+    with app.app_context():
+        state = get_state()
+    assert state.provider_names is None
+    assert state.include_filters == ()
+    assert state.exclude_filters == ()
 
 
-def test_main_passes_filters() -> None:
-    """main() passes CLI filter args to create_application."""
-    with (
-        patch("imbue.system_interface.main.load_config") as mock_load_config,
-        patch("imbue.system_interface.main.create_application") as mock_create_app,
-        patch("imbue.system_interface.main.uvicorn"),
-        patch(
-            "sys.argv",
-            [
-                "system-interface",
-                "--provider",
-                "local",
-                "--include",
-                'state == "RUNNING"',
-                "--exclude",
-                'name == "test"',
-            ],
-        ),
-    ):
-        mock_load_config.return_value = Config()
-        mock_create_app.return_value = "fake_app"
-
-        main()
-
-        mock_create_app.assert_called_once()
-        call_kwargs = mock_create_app.call_args
-        assert call_kwargs.kwargs["provider_names"] == ("local",)
-        assert call_kwargs.kwargs["include_filters"] == ('state == "RUNNING"',)
-        assert call_kwargs.kwargs["exclude_filters"] == ('name == "test"',)
+def test_build_application_threads_filters_through() -> None:
+    """CLI filter args reach the app's state as provider/include/exclude filters."""
+    args = _parse_args(
+        [
+            "--provider",
+            "local",
+            "--include",
+            'state == "RUNNING"',
+            "--exclude",
+            'name == "test"',
+        ]
+    )
+    app = build_application(Config(), args)
+    with app.app_context():
+        state = get_state()
+    assert state.provider_names == ("local",)
+    assert state.include_filters == ('state == "RUNNING"',)
+    assert state.exclude_filters == ('name == "test"',)

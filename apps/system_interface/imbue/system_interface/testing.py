@@ -10,6 +10,17 @@ rather than being copy-pasted into each test module.
 from __future__ import annotations
 
 import re
+import socket
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import closing
+from contextlib import contextmanager
+
+import simple_websocket
+from flask import Flask
+
+from imbue.system_interface.wsgi import make_threaded_server
 
 
 class FakeFinishedProcess:
@@ -90,3 +101,76 @@ class FakePexpectProcess:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+def _find_free_port() -> int:
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _wait_until_serving(host: str, port: int, timeout: float = 10.0) -> None:
+    """Poll a TCP connect until the server accepts, or raise on timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with closing(socket.create_connection((host, port), timeout=0.5)):
+                return
+        except OSError:
+            time.sleep(0.02)
+    raise TimeoutError(f"server at {host}:{port} did not start within {timeout}s")
+
+
+class ServedApp:
+    """Handle to a Flask app served by a real Werkzeug listener in a background thread."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+
+    @property
+    def http_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    @property
+    def ws_url(self) -> str:
+        return f"ws://{self.host}:{self.port}"
+
+
+@contextmanager
+def serve_app(app: Flask) -> Iterator[ServedApp]:
+    """Serve ``app`` on an ephemeral loopback port via a real threaded Werkzeug server.
+
+    Used by the WebSocket/SSE tests, which the Flask test client cannot drive
+    (flask-sock needs a real listener). The server runs in a daemon thread and
+    is shut down on exit.
+    """
+    host = "127.0.0.1"
+    port = _find_free_port()
+    server = make_threaded_server(host, port, app)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _wait_until_serving(host, port)
+        yield ServedApp(host, port)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5.0)
+
+
+def open_ws(served: ServedApp, path: str, subprotocols: list[str] | None = None) -> simple_websocket.Client:
+    """Open a WebSocket client against a ``ServedApp`` at ``path``."""
+    return simple_websocket.Client(f"{served.ws_url}{path}", subprotocols=subprotocols)
+
+
+def close_ws(ws: simple_websocket.Client) -> None:
+    """Close a WebSocket client, tolerating an already-closed connection.
+
+    A handler that finishes (e.g. the proto-agent-logs not-found path) closes
+    the socket server-side first, so the client-side close would otherwise raise
+    ``ConnectionClosed``.
+    """
+    try:
+        ws.close()
+    except simple_websocket.ConnectionClosed:
+        pass

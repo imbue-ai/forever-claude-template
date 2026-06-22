@@ -1,6 +1,6 @@
 ---
 name: build-web-service
-description: Use when you want to create a new web view for the user. Covers scaffolding a new FastAPI service (canonical path) and the escape hatch for wrapping a pre-existing third-party server, plus diagnostic references when things misbehave.
+description: Use when you want to create a new web view for the user. Covers scaffolding a new Flask service (canonical path) and the escape hatch for wrapping a pre-existing third-party server, plus diagnostic references when things misbehave.
 metadata:
   crystallized: true
 ---
@@ -11,13 +11,13 @@ A "web service" here is something the user can click on as a tab in
 the desktop client and see render at `/service/<name>/`, proxied
 through the system_interface.
 
-There is one canonical path (scaffold a new FastAPI lib) and one
+There is one canonical path (scaffold a new Flask lib) and one
 escape hatch (wrap a pre-existing third-party server). Modify/remove
 flows go through the `edit-services` skill.
 
 ## Decide which path applies
 
-- **Authoring routes yourself** (the common case): use the FastAPI
+- **Authoring routes yourself** (the common case): use the Flask
   scaffolder in Step 1. The scaffolder picks correct defaults so most
   framework gotchas don't fire.
 - **Wrapping a pre-existing third-party server** (Jupyter, Grafana,
@@ -25,7 +25,7 @@ flows go through the `edit-services` skill.
   skip the scaffolder, jump to "Escape hatch: wrap an existing server"
   below.
 
-If you would otherwise scaffold a FastAPI lib whose only job is to
+If you would otherwise scaffold a Flask lib whose only job is to
 shell out to a third-party tool, do not do that -- the system_interface
 already proxies `/service/<name>/...` to whatever URL you register.
 Adding a Python proxy in front of the third-party server adds a hop,
@@ -58,7 +58,7 @@ under `libs/<your-package>/` so they get an isolated tab and prefix.
 ## Step 1: Run the scaffolder (canonical path)
 
 ```bash
-uv run .agents/skills/build-web-service/scripts/scaffold_fastapi_lib.py \
+uv run .agents/skills/build-web-service/scripts/scaffold_flask_lib.py \
     --name <service-name> \
     --description "<one-liner>" \
     [--port <int>] \
@@ -71,7 +71,7 @@ Required:
 
 Optional:
 - `--port`: explicit port; auto-picked if omitted.
-- `--extra-dep`: repeatable. Add libraries beyond `fastapi`/`uvicorn`
+- `--extra-dep`: repeatable. Add libraries beyond `flask`/`flask-sock`
   (e.g. `--extra-dep "jinja2>=3.1" --extra-dep "anthropic>=0.40"`).
 - `--skip-uv-sync`: skip the final `uv sync --all-packages` (for fast
   iteration / dry runs).
@@ -85,10 +85,11 @@ What gets generated:
 - `libs/<package>/pyproject.toml` -- declares
   `[project.scripts] <name> = "<package>.runner:main"`.
 - `libs/<package>/src/<package>/__init__.py` -- empty.
-- `libs/<package>/src/<package>/runner.py` -- sync FastAPI starter.
-  Reads `ROOT_PATH` from env (default empty) and passes it to
-  `FastAPI(...)` so the app emits prefix-aware URLs when reached
-  through the proxy.
+- `libs/<package>/src/<package>/runner.py` -- sync Flask starter.
+  Builds a `Flask` app and serves it with
+  `werkzeug.serving.run_simple(..., threaded=True)`. It serves at `/`;
+  the system_interface proxy handles the `/service/<name>/` prefixing,
+  so no `root_path`/`ROOT_PATH` is needed.
 - `libs/<package>/test_<package>_ratchets.py` -- standard ratchets at
   zero.
 - `libs/<package>/README.md` -- one-line description.
@@ -103,19 +104,19 @@ What gets updated:
 
   ```ini
   [program:<name>]
-  command=bash -c "ROOT_PATH=/service/<name> python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && uv run <name>"
+  command=bash -c "python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && uv run <name>"
   directory=/mngr/code
   autostart=true
   autorestart=true
   # plus rotated stdout/stderr logfiles under /var/log/supervisor/<name>-*.log
   ```
 
-  The `ROOT_PATH=/service/<name>` prefix is what makes FastAPI emit
-  prefix-correct OpenAPI links and absolute redirects when reached
-  through the system_interface. Standalone `uv run <name>` keeps
-  working at `/` because the env var is unset there. The `bash -c "..."`
-  wrapper is required because supervisord runs commands directly (no
-  shell) and this one chains `forward_port.py` with `&&`.
+  The Flask app serves at `/` and needs no prefix env var: the
+  system_interface proxy handles `/service/<name>/` prefixing (it
+  rewrites absolute paths in served HTML and installs a scoped service
+  worker that prepends the prefix to the page's own fetches). The
+  `bash -c "..."` wrapper is required because supervisord runs commands
+  directly (no shell) and this one chains `forward_port.py` with `&&`.
 
 supervisord does not watch the config, so tell it to pick up the new
 program, then confirm it is running:
@@ -135,8 +136,10 @@ The starter `runner.py` has just `GET /` (a placeholder HTML page)
 and `GET /health` (returns `{"status": "ok"}`). Replace the
 placeholder with your real routes.
 
-Use **sync handlers** (`def`, not `async def`). The starter is fully
-sync and most pages don't need otherwise.
+Use **sync handlers** (`def`, not `async def`). Flask handlers are
+sync `def`, and the starter runs on the threaded Werkzeug server
+(`run_simple(..., threaded=True)`), so concurrent requests are handled
+by separate threads -- no asyncio needed.
 
 ### Rendering HTML for a human
 

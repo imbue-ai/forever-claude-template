@@ -28,14 +28,14 @@ def _isolate_system_interface_tests(
     """Isolate server_test.py-style tests from the developer's live mngr state.
 
     Two pieces of isolation, both needed for the common-case test that
-    spins up a real FastAPI app via ``TestClient(create_application())``:
+    spins up a real Flask app via ``create_application().test_client()``:
 
     1. Override MNGR_HOST_DIR / MNGR_AGENT_ID / MNGR_AGENT_WORK_DIR /
        MNGR_AGENT_STATE_DIR to point at a fresh tmp dir. Anything that
        reads these (e.g. system_interface endpoints) gets an empty world.
 
-    2. Replace ``AgentManager.start`` with a no-op. The FastAPI lifespan
-       in ``server._lifespan`` calls ``AgentManager.build(...).start()``,
+    2. Replace ``AgentManager.start`` with a no-op. ``create_application``
+       calls ``AgentManager.build(...).start()`` for an owned manager,
        which spawns ``mngr observe`` as a subprocess. The docker provider
        inside observe reads ``docker ps`` directly (NOT honoring
        MNGR_HOST_DIR), so if the developer has any running mngr-prefixed

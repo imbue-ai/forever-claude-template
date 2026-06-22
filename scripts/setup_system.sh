@@ -25,7 +25,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
     bash build-essential ca-certificates curl fd-find git git-lfs jq less nano \
-    openssh-server procps restic ripgrep rsync sqlite3 supervisor tini tmux unison wget \
+    openssh-server procps restic ripgrep rsync sqlite3 supervisor tini tmux unison util-linux wget \
     xxd xmlstarlet
 rm -rf /var/lib/apt/lists/*
 

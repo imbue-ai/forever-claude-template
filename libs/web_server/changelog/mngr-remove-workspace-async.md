@@ -1,0 +1,1 @@
+Rewrote the example `web_server` placeholder from FastAPI/uvicorn to Flask served by the threaded Werkzeug server. It still serves the same placeholder page at `/` and a `/health` JSON endpoint, on the same `WEB_SERVER_PORT`, with the same `web-server` console-script entrypoint. This removes the last FastAPI/asyncio usage from the default web service shipped with the template.

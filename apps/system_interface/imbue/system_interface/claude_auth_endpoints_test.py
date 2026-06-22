@@ -2,9 +2,9 @@
 
 Each test builds a `ClaudeAuthService` and/or `WelcomeResender` with
 deterministic fakes and passes them to `create_application`, which stores
-them on `app.state` for the handlers to read. This exercises the
-auth-success chokepoint end-to-end through the FastAPI test client
-without touching real Claude binaries or session transcripts -- and
+them on the app's `SystemInterfaceState` for the handlers to read. This
+exercises the auth-success chokepoint end-to-end through the Flask test
+client without touching real Claude binaries or session transcripts -- and
 without `unittest.mock` or runtime attribute patching.
 """
 
@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from flask.testing import FlaskClient
 
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.claude_auth import ProcessSetupError
@@ -30,24 +30,19 @@ from imbue.system_interface.welcome_resend import WelcomeResender
 def _client(
     claude_auth_service: ClaudeAuthService | None = None,
     welcome_resender: WelcomeResender | None = None,
-) -> Iterator[TestClient]:
-    """Build a TestClient over an app wired with the given service instances.
+) -> Iterator[FlaskClient]:
+    """Build a Flask test client over an app wired with the given service instances.
 
     Either argument left as None falls back to a default production
     instance -- fine for tests that never reach that dependency (e.g.
     request-validation rejections).
     """
-    app = create_application(
-        claude_auth_service=claude_auth_service, welcome_resender=welcome_resender
-    )
-    with TestClient(app) as test_client:
-        yield test_client
+    app = create_application(claude_auth_service=claude_auth_service, welcome_resender=welcome_resender)
+    yield app.test_client()
 
 
 def _logged_in_runner(_cmd: list[str], _timeout: float) -> FakeFinishedProcess:
-    return FakeFinishedProcess(
-        stdout='{"loggedIn": true, "email": "u@example.com", "subscriptionType": "Max"}'
-    )
+    return FakeFinishedProcess(stdout='{"loggedIn": true, "email": "u@example.com", "subscriptionType": "Max"}')
 
 
 def test_status_endpoint_returns_parsed_payload() -> None:
@@ -55,7 +50,7 @@ def test_status_endpoint_returns_parsed_payload() -> None:
     with _client(claude_auth_service=service) as client:
         response = client.get("/api/claude-auth/status")
     assert response.status_code == 200
-    payload = response.json()
+    payload = response.get_json()
     assert payload["logged_in"] is True
     assert payload["email"] == "u@example.com"
     assert payload["subscription_type"] == "Max"
@@ -63,15 +58,13 @@ def test_status_endpoint_returns_parsed_payload() -> None:
 
 def test_status_endpoint_logged_out_when_claude_missing() -> None:
     def _missing_runner(_cmd: list[str], _timeout: float) -> FakeFinishedProcess:
-        raise ProcessSetupError(
-            command=("claude",), stdout="", stderr="not found", is_output_already_logged=False
-        )
+        raise ProcessSetupError(command=("claude",), stdout="", stderr="not found", is_output_already_logged=False)
 
     service = ClaudeAuthService(command_runner=_missing_runner)
     with _client(claude_auth_service=service) as client:
         response = client.get("/api/claude-auth/status")
     assert response.status_code == 200
-    assert response.json()["logged_in"] is False
+    assert response.get_json()["logged_in"] is False
 
 
 def test_start_oauth_rejects_unknown_provider() -> None:
@@ -100,9 +93,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     (tmp_path / "data.json").write_text(json.dumps({"host_name": "chat-1"}))
     skill_path = tmp_path / "SKILL.md"
-    skill_path.write_text(
-        "---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n"
-    )
+    skill_path.write_text("---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n")
 
     def _recording_runner(cmd: list[str], timeout: float) -> FakeFinishedProcess:
         command_log.append(tuple(cmd))
@@ -112,9 +103,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
         welcome_resend_calls.append(name)
         return True
 
-    service = ClaudeAuthService(
-        command_runner=_recording_runner, pexpect_spawner=lambda *_a, **_k: fake_process
-    )
+    service = ClaudeAuthService(command_runner=_recording_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
     resender = WelcomeResender(
         read_assistant_transcript=lambda _name: "",
         send_message_fn=_record_welcome_send,
@@ -124,7 +113,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
     with _client(claude_auth_service=service, welcome_resender=resender) as client:
         start = client.post("/api/claude-auth/start", json={"provider": "claudeai"})
         assert start.status_code == 200
-        start_payload = start.json()
+        start_payload = start.get_json()
         assert start_payload["oauth_url"] == fake_url
         session_id = start_payload["session_id"]
 
@@ -133,7 +122,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
             json={"session_id": session_id, "code": "FAKE#CODE"},
         )
     assert submit.status_code == 200
-    body = submit.json()
+    body = submit.get_json()
     assert body["logged_in"] is True
     assert body["email"] == "u@example.com"
     assert fake_process.sendline_calls == ["FAKE#CODE"]
@@ -144,9 +133,7 @@ def test_full_oauth_flow_drives_subprocess_runs_welcome_resend_and_skips_restart
 
 def test_submit_code_rejects_unknown_session() -> None:
     with _client() as client:
-        response = client.post(
-            "/api/claude-auth/submit-code", json={"session_id": "nope", "code": "x"}
-        )
+        response = client.post("/api/claude-auth/submit-code", json={"session_id": "nope", "code": "x"})
     assert response.status_code == 400
 
 
@@ -166,9 +153,7 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     (tmp_path / "data.json").write_text(json.dumps({"host_name": "ababa"}))
     skill_path = tmp_path / "SKILL.md"
-    skill_path.write_text(
-        "---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n"
-    )
+    skill_path.write_text("---\nname: w\n---\n\nIntro\n\n---\n\n### Welcome to Minds\n\nbody\n\n---\n")
 
     welcome_calls: list[str] = []
     restart_calls: list[list[str]] = []
@@ -206,7 +191,7 @@ def test_submit_api_key_restarts_all_claude_agents_and_runs_welcome_resend(
         )
 
     assert response.status_code == 200
-    assert response.json()["logged_in"] is True
+    assert response.get_json()["logged_in"] is True
     env_text = (tmp_path / "env").read_text()
     assert "ANTHROPIC_API_KEY=sk-ant-test-key" in env_text
     assert [f"{cmd[1]} {cmd[-1]}" for cmd in restart_calls] == [
@@ -240,6 +225,6 @@ def test_abort_endpoint_clears_in_flight_session() -> None:
         assert abort.status_code == 200
         followup = client.post(
             "/api/claude-auth/submit-code",
-            json={"session_id": start.json()["session_id"], "code": "x"},
+            json={"session_id": start.get_json()["session_id"], "code": "x"},
         )
     assert followup.status_code == 400
