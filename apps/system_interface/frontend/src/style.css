@@ -2173,34 +2173,23 @@ body {
   background: var(--color-bg);
 }
 
-/* A turn that ends on a permission request flows straight into the section the
-   user's grant/deny reply opens: that reply's bubble is hidden and its verdict
-   is folded into the card above (see turn-grouping's permission-resolution
-   branch), so the two progress blocks are really one continuous turn. Left
-   alone, the seam shows the full turn-separation gap (this block's bottom margin
-   + the next block's top margin) -- far larger than the normal node-to-node
-   spacing.
+/* The block immediately before a permission-resolution boundary drops its
+   turn-bottom margin. When the user grants/denies, the app injects a hidden
+   notification: its bubble is suppressed and its verdict folds into the card
+   above, but it still opens a fresh turn section (see turn-grouping's
+   permission-resolution branch). With no user bubble between them, this
+   (card-ending) block's bottom margin and the resumption block's top margin
+   would stack into an empty void -- far larger than the normal node-to-node
+   spacing. Dropping the bottom margin leaves the seam as just the resumption
+   block's standard top margin.
 
-   So whenever a block's timeline ends on a permission card, drop the block's
-   bottom margin; the next block keeps its standard top margin, which alone
-   equals the normal node-to-node gap. This applies even when the agent's
-   "I've sent a permission request..." prose follows as a separate message and
-   renders as this block's trailing reply (`.pv-final`) -- the common real
-   case. The guard is deliberately only on the inner-margin rule below, not
-   here. */
-.progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child) {
-  margin-bottom: 0;
-}
-
-/* When there is no trailing reply, the permission card itself is the block's
-   last visible element, so its own trailing margins would still pad the seam --
-   zero them too. With a trailing reply present, leave these alone: that margin
-   sits between the card and its own "I've sent..." reply, which is fine. */
-.progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child):not(:has(> .pv-final))
-  .pv-permission,
-.progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child):not(:has(> .pv-final))
-  .pv-permission
-  .message-assistant {
+   This is keyed structurally: the renderer adds this class only when the NEXT
+   section carries SectionView.opened_by_permission_resolution (see
+   conversation-rows / ProgressBlock), NOT on the permission card's DOM position.
+   So a permission card that is the genuine last thing in an unresolved turn
+   keeps its normal end-of-turn margin, and a resolution boundary is handled even
+   when other work follows the card before the grant. */
+.progress-block--flush-bottom {
   margin-bottom: 0;
 }
 

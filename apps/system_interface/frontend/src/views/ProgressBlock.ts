@@ -35,6 +35,13 @@ interface ProgressBlockAttrs {
   /** Optional DOM id for the root, so a virtualized list can measure this
    *  block's height by querying ``.message-list > [id]``. */
   id?: string;
+  /** Drop this block's turn-bottom margin. Set when the NEXT section opens at a
+   *  hidden permission grant/deny (no user bubble), so the resolved card + its
+   *  trailing prose are the seam: without the bottom margin, the gap to the
+   *  resumption block is just that block's normal top margin rather than the two
+   *  turn-margins stacked into an empty void. See conversation-rows /
+   *  SectionView.opened_by_permission_resolution. */
+  flushBottomMargin?: boolean;
 }
 
 function statusIcon(status: StepStatus, is_frontier: boolean): m.Vnode {
@@ -146,7 +153,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
   return {
     view(vnode) {
-      const { items, trailing_reply, toolResults, agentId, id } = vnode.attrs;
+      const { items, trailing_reply, toolResults, agentId, id, flushBottomMargin } = vnode.attrs;
 
       // Index of the last step item, so only it gets the `--last` thread cap.
       let lastStepIdx = -1;
@@ -181,7 +188,8 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
         return m("div.pv-stophook", { key: `chip-${item.event.event_id}` }, renderUserMessage(item.event));
       });
 
-      return m("div.progress-block", { id }, [
+      const rootClass = flushBottomMargin ? "progress-block progress-block--flush-bottom" : "progress-block";
+      return m("div", { class: rootClass, id }, [
         m("div.pv.pv--timeline", [
           m("div.pv-timeline-thread", { "aria-hidden": "true" }),
           m("div.pv-timeline-nodes", timelineNodes),

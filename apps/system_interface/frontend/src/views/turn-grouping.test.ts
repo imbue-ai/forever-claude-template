@@ -919,6 +919,25 @@ describe("permission resolutions", () => {
     expect(sections).toHaveLength(2);
     expect(sections[1].user_event).toBeNull();
     expect(sections.every((s) => !(s.user_event?.content ?? "").includes("was granted"))).toBe(true);
+    // The resumption section is marked as a no-bubble resolution boundary; the
+    // turn that issued the request is not. The renderer uses this marker (not the
+    // card's DOM position) to collapse the would-be empty seam.
+    expect(sections[0].opened_by_permission_resolution).toBe(false);
+    expect(sections[1].opened_by_permission_resolution).toBe(true);
+  });
+
+  it("does not mark a normal user-bubble turn boundary as a resolution boundary", () => {
+    // A genuine user turn (with a bubble) must keep full turn separation -- its
+    // section is never flagged, even though it too opens a fresh section.
+    const events = [
+      userMsg("2026-05-01T01:00:00Z", "first"),
+      workMsg("2026-05-01T01:00:01Z", "Bash", "w1"),
+      result("2026-05-01T01:00:01Z", "w1", "ok"),
+      userMsg("2026-05-01T01:00:02Z", "second"),
+    ];
+    const sections = run(events);
+    expect(sections).toHaveLength(2);
+    expect(sections.every((s) => s.opened_by_permission_resolution === false)).toBe(true);
   });
 
   it("carries an open step over the approval so it continues in the new turn", () => {
