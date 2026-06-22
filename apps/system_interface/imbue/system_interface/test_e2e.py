@@ -12,6 +12,7 @@ import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from unittest.mock import patch
 import pytest
 import uvicorn
 
+from imbue.mngr.utils.polling import wait_for
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
@@ -542,6 +544,185 @@ def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
             empty_msg = page.locator(".conversation-selector-empty")
             expect(empty_msg).to_be_visible(timeout=5000)
             expect(empty_msg).to_contain_text("No agents found")
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5.0)
+
+
+# A permission request POST to the reserved latchkey host, recognised by the
+# frontend (see message-classification.isPermissionRequestCall) and lifted out of
+# its step into an always-visible card.
+_PERMISSION_POST_CMD = "latchkey curl -XPOST http://latchkey-self.invalid/permission-requests -d '{}'"
+_PERMISSION_RESULT_JSON = json.dumps(
+    {
+        "request_id": "req-e2e-1",
+        "request_type": "predefined",
+        "rationale": "Read your unread Gmail messages so I can summarize them.",
+        "payload": {"scope": "gmail-api", "permissions": ["gmail-read"]},
+    }
+)
+
+
+def _bash_tool_call(uuid: str, ts: str, command: str) -> dict[str, Any]:
+    """An assistant message issuing a single Bash tool call."""
+    return {
+        "type": "assistant",
+        "uuid": uuid,
+        "timestamp": ts,
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [{"type": "tool_use", "id": f"tc-{uuid}", "name": "Bash", "input": {"command": command}}],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    }
+
+
+def _tool_result(uuid: str, ts: str, output: str) -> dict[str, Any]:
+    """The user-role tool_result matching the ``_bash_tool_call`` with this uuid."""
+    return {
+        "type": "user",
+        "uuid": f"r-{uuid}",
+        "timestamp": ts,
+        "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"tc-{uuid}", "content": output}]},
+    }
+
+
+# A steps turn in which the agent declares two steps, opens the first, issues a
+# permission request (with trailing prose), the user grants it (which folds the
+# verdict into the card and opens a fresh section), then the agent continues.
+_PERMISSION_TURN_EVENTS: list[dict[str, Any]] = [
+    {
+        "type": "user",
+        "uuid": "u1",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "message": {"role": "user", "content": "Check my unread email"},
+    },
+    _bash_tool_call("a1", "2026-01-01T00:00:01Z", "tk create --step 'Set up access'\ntk create --step 'Fetch emails'"),
+    _tool_result("a1", "2026-01-01T00:00:02Z", "Created cod-step-aaaa: Set up access\nCreated cod-step-bbbb: Fetch emails"),
+    _bash_tool_call("a2", "2026-01-01T00:00:03Z", "tk start cod-step-aaaa"),
+    _tool_result("a2", "2026-01-01T00:00:04Z", "Updated cod-step-aaaa -> in_progress\ntk-step cod-step-aaaa title: Set up access"),
+    {
+        "type": "assistant",
+        "uuid": "a3",
+        "timestamp": "2026-01-01T00:00:05Z",
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {"type": "tool_use", "id": "tc-a3", "name": "Bash", "input": {"command": _PERMISSION_POST_CMD}},
+                {"type": "text", "text": "I've sent a permission request. Waiting for you to approve it in the Minds app."},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+    },
+    _tool_result("a3", "2026-01-01T00:00:06Z", _PERMISSION_RESULT_JSON),
+    {
+        "type": "user",
+        "uuid": "u2",
+        "timestamp": "2026-01-01T00:00:07Z",
+        "message": {
+            "role": "user",
+            "content": (
+                "Your permission request for Gmail was granted with the following permissions: "
+                "gmail-read. Please retry the call that was blocked."
+            ),
+        },
+    },
+    _bash_tool_call("a4", "2026-01-01T00:00:08Z", "tk close cod-step-aaaa 'Got access.'"),
+    _tool_result(
+        "a4",
+        "2026-01-01T00:00:09Z",
+        "Updated cod-step-aaaa -> closed\ntk-step cod-step-aaaa title: Set up access\ntk-step cod-step-aaaa summary: Got access.",
+    ),
+    _bash_tool_call("a5", "2026-01-01T00:00:10Z", "tk start cod-step-bbbb"),
+    _tool_result("a5", "2026-01-01T00:00:11Z", "Updated cod-step-bbbb -> in_progress\ntk-step cod-step-bbbb title: Fetch emails"),
+]
+
+
+def test_resolved_permission_card_spacing_matches_node_gap(tmp_path: Path, page: Page) -> None:
+    """A resolved permission card flows into the next step with normal node spacing.
+
+    When the user grants a permission request, the approval message is hidden and
+    its verdict is folded into the permission card, but the grant still opens a
+    fresh turn section -- so the card ends one progress block and the continuing
+    steps render in the next. Without the spacing fix the seam carried the full
+    turn-separation gap (each block's margins) plus the permission message's own
+    trailing margin, leaving a gap far larger than the normal step-to-step gap.
+    This asserts the gap below the card is now ~ the normal node-to-node gap.
+    """
+    port = _PORT + 3
+    agent_info, _ = _make_agent_fixture(tmp_path, session_events=_PERMISSION_TURN_EVENTS)
+
+    broadcaster = WebSocketBroadcaster()
+    manager = AgentManager.build(broadcaster)
+    with manager._lock:
+        manager._agents[agent_info.id] = AgentStateItem(
+            id=agent_info.id,
+            name=agent_info.name,
+            state="RUNNING",
+            labels={},
+            work_dir=str(tmp_path / "work"),
+        )
+    manager._ensure_activity_tracking(agent_info.id)
+
+    config = Config(system_interface_host="127.0.0.1", system_interface_port=port)
+    app = create_application(config, agent_manager=manager)
+
+    with (
+        patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""}),
+        patch("imbue.system_interface.server.send_message", return_value=True),
+        patch("imbue.system_interface.server.discover_agents", return_value=[agent_info]),
+    ):
+        server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="error"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+
+        def _server_ready() -> bool:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/agents", timeout=0.5)
+                return True
+            except (OSError, urllib.error.URLError):
+                return False
+
+        wait_for(_server_ready, timeout=10.0, error_message="server did not start")
+
+        try:
+            page.goto(f"http://127.0.0.1:{port}")
+            expect(page.locator(".permission-request").first).to_be_visible(timeout=15000)
+            # The grant verdict is folded into the card (not shown as a user bubble).
+            expect(page.locator(".permission-request-verdict--granted")).to_be_visible(timeout=5000)
+            # The continuation renders in a second progress block.
+            expect(page.locator(".progress-block")).to_have_count(2, timeout=5000)
+
+            metrics = page.evaluate(
+                """
+                () => {
+                  const perm = document.querySelector('.pv-permission');
+                  const permRect = perm.getBoundingClientRect();
+                  // First timeline node below the permission card (in the next block).
+                  const nodes = Array.from(document.querySelectorAll('.pv-tl-node'));
+                  let next = null;
+                  for (const n of nodes) {
+                    if (n.getBoundingClientRect().top >= permRect.bottom - 1) { next = n; break; }
+                  }
+                  const nextRect = next.getBoundingClientRect();
+                  // The normal node-to-node gap is a node's own bottom padding.
+                  const nodePadBottom = parseFloat(getComputedStyle(next).paddingBottom);
+                  return {
+                    gapBelowCard: nextRect.top - permRect.bottom,
+                    normalNodeGap: nodePadBottom,
+                  };
+                }
+                """
+            )
+            gap = metrics["gapBelowCard"]
+            normal = metrics["normalNodeGap"]
+            # The gap below a resolved card must match the normal node gap, not the
+            # old ~66px turn-separation seam. Allow a few px of sub-pixel slack.
+            assert abs(gap - normal) <= 4, f"gap below resolved permission card {gap}px != normal node gap {normal}px"
         finally:
             server.should_exit = True
             thread.join(timeout=5.0)

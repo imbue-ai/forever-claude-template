@@ -2173,6 +2173,27 @@ body {
   background: var(--color-bg);
 }
 
+/* A turn that ends on a permission request flows straight into the section the
+   user's grant/deny reply opens: that reply's bubble is hidden and its verdict
+   is folded into the card above (see turn-grouping's permission-resolution
+   branch), so the two progress blocks are really one continuous turn. Left
+   alone, the seam shows the full turn-separation gap (this block's bottom margin
+   + the next block's top margin) plus the permission message's own contained
+   bottom margin -- far larger than the normal node-to-node spacing. So when a
+   block ends on a permission card (and nothing follows it in the timeline), drop
+   the card's trailing margins and this block's bottom margin; the next block
+   keeps its standard top margin, which equals the normal node-to-node gap. */
+.progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child):not(:has(> .pv-final)) {
+  margin-bottom: 0;
+}
+.progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child):not(:has(> .pv-final))
+  .pv-permission,
+.progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child):not(:has(> .pv-final))
+  .pv-permission
+  .message-assistant {
+  margin-bottom: 0;
+}
+
 /* ─────────────────────────────────────────────────────────────────────
    ACTIVITY INDICATOR (replaces the generic "Running tool..." strip)
    ─────────────────────────────────────────────────────────────────── */
