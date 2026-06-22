@@ -59,7 +59,15 @@ function buildRows(
   toolResults: Map<string, ToolResultEvent>,
 ): RowDescriptor[] {
   const rows: RowDescriptor[] = [];
-  for (const section of sections) {
+  for (let s = 0; s < sections.length; s++) {
+    const section = sections[s];
+    // The next section opens at a hidden permission grant/deny (no user bubble),
+    // so the resolved card + its trailing prose are the visual break. This
+    // (card-ending) block must drop its turn-bottom margin so the seam is just
+    // the next block's normal top margin, not the two turn-margins stacked into
+    // an empty void. Keyed on the structural resolution marker, not on the
+    // permission card's position in the DOM.
+    const nextOpensAtPermissionResolution = sections[s + 1]?.opened_by_permission_resolution === true;
     const userEvent = section.user_event;
     if (userEvent !== null && !isHiddenUserMessage(userEvent.content || "")) {
       rows.push({
@@ -83,6 +91,7 @@ function buildRows(
             trailing_reply: section.trailing_reply,
             toolResults,
             agentId,
+            flushBottomMargin: nextOpensAtPermissionResolution,
           }),
       });
       continue;
