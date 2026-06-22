@@ -2,7 +2,7 @@
 
 The system_interface proxies HTTP and WebSocket traffic from
 `/service/<name>/...` to the backend URL you registered. Most apps
-"just work" -- the FastAPI scaffolder picks defaults that sidestep
+"just work" -- the Flask scaffolder picks defaults that sidestep
 the common traps. This file is loaded on demand when verification
 surfaces something odd; skim for the symptom that matches.
 
@@ -45,20 +45,20 @@ What this means for you: if your app emits relative `Location`s or
 absolute paths under its own root, redirects work. If it hardcodes
 public URLs at non-prefixed paths, those will land at the wrong place.
 
-## FastAPI absolute URLs (OpenAPI, redirects)
+## Prefix-aware links (Flask serves at `/`)
 
-FastAPI emits absolute URLs in OpenAPI metadata (`/docs`,
-`/openapi.json`) based on `app.root_path`. The scaffolder reads
-`ROOT_PATH` from env and passes it to `FastAPI(root_path=ROOT_PATH)`,
-and the generated supervisord program command sets
-`ROOT_PATH=/service/<name>`. So the scaffolded happy path emits
-prefix-correct URLs without further work.
+The Flask starter serves at `/` and needs no prefix configuration.
+The system_interface proxy handles the `/service/<name>/` prefix for
+you: it rewrites absolute paths in the served HTML, and installs a
+scoped service worker that prepends the prefix to the page's own
+fetches. So a Flask app written against `/` works behind the proxy
+unchanged.
 
-If you wrote your own FastAPI runner without using the scaffolder,
-or you want to expose an existing FastAPI app via the wrap-existing
-escape hatch, set `root_path=/service/<name>` either at construction
-time or via the same `ROOT_PATH` env-var pattern. Without it,
-`/openapi.json` will list endpoints at `/`, breaking the API explorer.
+The one thing to watch: if you generate prefix-aware links yourself
+in application code (e.g. building an absolute URL to share or embed),
+account for the `/service/<name>/` prefix in that code. There is no
+`root_path`/`ROOT_PATH` mechanism in the generated runner -- don't
+add one.
 
 ## Static-file servers and trailing slashes
 
@@ -110,7 +110,8 @@ manually before choosing a port.
 
 ## Bind host (wrap-existing path mostly)
 
-The scaffolder generates `uvicorn.run(app, host="127.0.0.1", port=...)`
+The scaffolder generates
+`run_simple("127.0.0.1", port, app, threaded=True, ...)` (werkzeug)
 which is correct. For the wrap-existing escape hatch, many Node
 frameworks default to `0.0.0.0` (Node's
 `http.createServer().listen(port)` binds to `::`/`0.0.0.0` when no

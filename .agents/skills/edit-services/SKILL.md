@@ -103,6 +103,6 @@ Or read the log files directly under `/var/log/supervisor/`.
   the main agent window or other tmux windows.
 - If you need a one-off command, just run it directly rather than adding a
   program.
-- For standing up a new web service (FastAPI lib or wrapping a third-party
+- For standing up a new web service (Flask lib or wrapping a third-party
   server), use the `build-web-service` skill -- it generates the `[program:*]`
   block and `forward_port.py` wiring for you.
