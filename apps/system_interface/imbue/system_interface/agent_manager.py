@@ -44,10 +44,10 @@ from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
 from imbue.system_interface.agent_discovery import AgentInfo
+from imbue.system_interface.agent_discovery import MngrMessenger
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
-from imbue.system_interface.agent_discovery import send_message
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
@@ -276,6 +276,7 @@ class AgentManager:
     """
 
     _broadcaster: WebSocketBroadcaster
+    _messenger: MngrMessenger
     _lock: threading.Lock
     _agents: dict[str, AgentStateItem]
     # agent id -> its discovered location (host/provider), maintained from the
@@ -311,6 +312,7 @@ class AgentManager:
         """
         manager = cls.__new__(cls)
         manager._broadcaster = broadcaster
+        manager._messenger = MngrMessenger()
         manager._lock = threading.Lock()
         manager._agents = {}
         manager._match_by_agent_id = {}
@@ -415,11 +417,11 @@ class AgentManager:
         """Send a message to the agent with ``agent_id``, using the live location cache.
 
         The single entry point for messaging an agent: it reads this manager's
-        event-fed location for the id and hands it to `send_message`, so the message
-        skips a fresh mngr discovery whenever the location is already known. Returns
-        True on success.
+        event-fed location for the id and hands it to the `MngrMessenger`, so the
+        message skips a fresh mngr discovery whenever the location is already known.
+        Returns True on success.
         """
-        return send_message(agent_id, message, self.get_agent_matches_by_id(str(agent_id)))
+        return self._messenger.send_to_agent(agent_id, message, self.get_agent_matches_by_id(str(agent_id)))
 
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from the tracked state and broadcast the update.

@@ -893,9 +893,6 @@ def create_application(
     provider_names: tuple[str, ...] | None = None,
     include_filters: tuple[str, ...] = (),
     exclude_filters: tuple[str, ...] = (),
-    agent_manager: AgentManager | None = None,
-    claude_auth_service: ClaudeAuthService | None = None,
-    welcome_resender: WelcomeResender | None = None,
     http_client: httpx.Client | None = None,
     latchkey_http_client: httpx.Client | None = None,
 ) -> Flask:
@@ -912,18 +909,14 @@ def create_application(
     # Event queues back the SSE streams; the broadcaster backs the WebSockets.
     event_queues = AgentEventQueues()
 
-    # When a preconfigured agent manager is injected (tests), reuse it and its
-    # broadcaster, and do not own its lifecycle. Otherwise build a fresh manager
-    # and start the ``mngr observe`` pipeline.
-    if agent_manager is None:
-        broadcaster = WebSocketBroadcaster()
-        resolved_agent_manager = AgentManager.build(broadcaster)
-        resolved_agent_manager.start()
-        is_agent_manager_owned = True
-    else:
-        resolved_agent_manager = agent_manager
-        broadcaster = agent_manager.broadcaster
-        is_agent_manager_owned = False
+    # Build the live agent manager and start the ``mngr observe`` pipeline. Tests
+    # that need a seeded manager build the app, then overwrite
+    # ``state_of(app).agent_manager`` (the broadcaster follows, since it is
+    # derived from the manager); ``conftest`` no-ops ``AgentManager.start`` so
+    # this build stays cheap and never spawns observe under test.
+    broadcaster = WebSocketBroadcaster()
+    agent_manager = AgentManager.build(broadcaster)
+    agent_manager.start()
 
     # Single shared synchronous httpx client for the /service/<name>/ forwarding
     # layer; a separate one for the latchkey catalog proxy. Tests can inject
@@ -936,8 +929,7 @@ def create_application(
         provider_names=provider_names,
         include_filters=include_filters,
         exclude_filters=exclude_filters,
-        agent_manager=resolved_agent_manager,
-        broadcaster=broadcaster,
+        agent_manager=agent_manager,
         event_queues=event_queues,
         # Advisory in-process mutex serializing layout-mutating ops. The agent
         # script never auto-retries on contention -- it surfaces the 409 to the
@@ -945,15 +937,13 @@ def create_application(
         layout_mutex=LayoutMutex(),
         # One long-lived ClaudeAuthService per app so the in-flight OAuth
         # subprocess survives between the /start and /submit-code requests.
-        claude_auth_service=claude_auth_service or ClaudeAuthService(),
-        welcome_resender=welcome_resender
-        or WelcomeResender(
-            resolve_agent=resolved_agent_manager.get_agent_info_by_id,
-            send_message_fn=resolved_agent_manager.send_message_to_agent,
+        claude_auth_service=ClaudeAuthService(),
+        welcome_resender=WelcomeResender(
+            resolve_agent=agent_manager.get_agent_info_by_id,
+            send_message_fn=agent_manager.send_message_to_agent,
         ),
         http_client=resolved_http_client,
         latchkey_http_client=resolved_latchkey_http_client,
-        is_agent_manager_owned=is_agent_manager_owned,
     )
     attach_state(application, state)
 

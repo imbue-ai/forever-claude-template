@@ -16,6 +16,7 @@ from flask.testing import FlaskClient
 from flask_sock import Sock
 
 from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.app_context import state_of
 from imbue.system_interface.config import Config
 from imbue.system_interface.models import ApplicationEntry
 from imbue.system_interface.server import create_application
@@ -114,7 +115,9 @@ def workspace_app_with_stub(stub_backend: ServedApp, monkeypatch: pytest.MonkeyP
     agent_manager = AgentManager.build(broadcaster)
     agent_manager._applications = [ApplicationEntry(name="web", url=stub_backend.http_url)]
 
-    return create_application(Config(), agent_manager=agent_manager)
+    app = create_application(Config())
+    state_of(app).agent_manager = agent_manager
+    return app
 
 
 @pytest.fixture

@@ -19,6 +19,7 @@ from flask.testing import FlaskClient
 
 from imbue.system_interface import welcome_resend
 from imbue.system_interface.agent_discovery import AgentInfo
+from imbue.system_interface.app_context import state_of
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.claude_auth import ProcessSetupError
 from imbue.system_interface.server import create_application
@@ -51,13 +52,18 @@ def _client(
     claude_auth_service: ClaudeAuthService | None = None,
     welcome_resender: WelcomeResender | None = None,
 ) -> Iterator[FlaskClient]:
-    """Build a Flask test client over an app wired with the given service instances.
+    """Build a Flask test client, seeding the auth services onto the app state.
 
-    Either argument left as None falls back to a default production
-    instance -- fine for tests that never reach that dependency (e.g.
-    request-validation rejections).
+    Each argument left as None keeps the default production instance the app
+    factory already built -- fine for tests that never reach that dependency
+    (e.g. request-validation rejections).
     """
-    app = create_application(claude_auth_service=claude_auth_service, welcome_resender=welcome_resender)
+    app = create_application()
+    state = state_of(app)
+    if claude_auth_service is not None:
+        state.claude_auth_service = claude_auth_service
+    if welcome_resender is not None:
+        state.welcome_resender = welcome_resender
     yield app.test_client()
 
 

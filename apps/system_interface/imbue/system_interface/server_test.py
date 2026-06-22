@@ -269,7 +269,7 @@ def test_send_message_success(client: FlaskClient) -> None:
     )
     with (
         patch("imbue.system_interface.server._find_agent", return_value=agent_info),
-        patch("imbue.system_interface.agent_manager.send_message", return_value=True) as mock_send,
+        patch("imbue.system_interface.agent_discovery.MngrMessenger.send_to_agent", return_value=True) as mock_send,
     ):
         response = client.post(f"/api/agents/{agent_id}/message", json={"message": "hello"})
 
@@ -697,7 +697,8 @@ def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest
         )
     manager._ensure_activity_tracking(agent_id)
 
-    app = create_application(agent_manager=manager)
+    app = create_application()
+    state_of(app).agent_manager = manager
     agent_info = AgentInfo(
         id=agent_id,
         name="seed-agent",

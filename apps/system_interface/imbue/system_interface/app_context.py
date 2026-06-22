@@ -45,22 +45,28 @@ class SystemInterfaceState(MutableModel):
     include_filters: tuple[str, ...]
     exclude_filters: tuple[str, ...]
     agent_manager: AgentManager
-    broadcaster: WebSocketBroadcaster
     event_queues: AgentEventQueues
     layout_mutex: LayoutMutex
     claude_auth_service: ClaudeAuthService
     welcome_resender: WelcomeResender
     http_client: httpx.Client
     latchkey_http_client: httpx.Client
-    # Whether this app built (and therefore must start/stop) the agent manager.
-    # False when a preconfigured manager was injected (tests).
-    is_agent_manager_owned: bool
     watchers: dict[str, AgentSessionWatcher] = {}
     latchkey_catalog_cache: dict[str, Any] = {}
 
     _watchers_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _latchkey_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _is_shut_down: bool = PrivateAttr(default=False)
+
+    @property
+    def broadcaster(self) -> WebSocketBroadcaster:
+        """The agent manager's broadcaster, kept paired with the manager itself.
+
+        Derived from ``agent_manager`` (rather than stored separately) so that
+        seeding a test manager via ``state.agent_manager = ...`` transparently
+        repoints the broadcaster too -- the two must never diverge.
+        """
+        return self.agent_manager.broadcaster
 
     @property
     def latchkey_lock(self) -> threading.Lock:
@@ -128,8 +134,7 @@ class SystemInterfaceState(MutableModel):
         self._is_shut_down = True
         self.event_queues.shutdown()
         self.broadcaster.shutdown()
-        if self.is_agent_manager_owned:
-            self.agent_manager.stop()
+        self.agent_manager.stop()
         self.stop_all_watchers()
         try:
             self.http_client.close()
