@@ -35,13 +35,14 @@ interface ProgressBlockAttrs {
   /** Optional DOM id for the root, so a virtualized list can measure this
    *  block's height by querying ``.message-list > [id]``. */
   id?: string;
-  /** Drop this block's turn-bottom margin. Set by conversation-rows when the
-   *  NEXT section renders no user bubble (in practice a permission grant/deny
-   *  boundary), so the resolved card + its trailing prose are the seam: without
-   *  the bottom margin, the gap to the resumption block is just that block's
-   *  normal top margin rather than the two turn-margins stacked into an empty
-   *  void. See sectionRendersUserBubble in conversation-rows. */
-  flushBottomMargin?: boolean;
+  /** Whether THIS block is a resumption: a turn that opened after a hidden,
+   *  bubble-less boundary (in practice a permission grant/deny, whose verdict
+   *  folds onto the card above and which carries the open step over). When true
+   *  the root gets `progress-block--resumption`; CSS then collapses the gap to
+   *  whatever precedes it via `:has(+ .progress-block--resumption)`. This
+   *  describes the block itself, not its neighbor. See sectionRendersUserBubble
+   *  in conversation-rows. */
+  isResumption?: boolean;
 }
 
 function statusIcon(status: StepStatus, is_frontier: boolean): m.Vnode {
@@ -153,7 +154,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
 
   return {
     view(vnode) {
-      const { items, trailing_reply, toolResults, agentId, id, flushBottomMargin } = vnode.attrs;
+      const { items, trailing_reply, toolResults, agentId, id, isResumption } = vnode.attrs;
 
       // Index of the last step item, so only it gets the `--last` thread cap.
       let lastStepIdx = -1;
@@ -188,7 +189,7 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
         return m("div.pv-stophook", { key: `chip-${item.event.event_id}` }, renderUserMessage(item.event));
       });
 
-      const rootClass = flushBottomMargin ? "progress-block progress-block--flush-bottom" : "progress-block";
+      const rootClass = isResumption ? "progress-block progress-block--resumption" : "progress-block";
       return m("div", { class: rootClass, id }, [
         m("div.pv.pv--timeline", [
           m("div.pv-timeline-thread", { "aria-hidden": "true" }),

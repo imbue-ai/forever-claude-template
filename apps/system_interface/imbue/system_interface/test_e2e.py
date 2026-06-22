@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from typing import Generator
@@ -142,67 +143,79 @@ def _make_agent_fixture(
     return agent_info, session_file
 
 
+@contextmanager
+def _serve_agent_chat(
+    tmp_path: Path,
+    port: int,
+    session_events: list[dict[str, Any]] | None = None,
+) -> Generator[tuple[str, list[AgentInfo], Path], None, None]:
+    """Serve a single mock agent's chat on ``port``, with the dockview UI
+    auto-opening that chat. Shared by the ``e2e_server`` fixture and tests that
+    need their own custom session transcript on a separate port.
+
+    Isolate the workspace environment: point MNGR_HOST_DIR at the fixture's tmp
+    tree so the session endpoint (_find_agent) resolves the fixture agent's state
+    dir + env file, and clear MNGR_AGENT_ID so the layout endpoint has no
+    primary-agent dir to read from (returns 404 -> the UI auto-opens the fixture
+    chat) and never reads or writes the real workspace's layout.json. This
+    overrides the autouse _isolate_system_interface_tests fixture's env for the
+    duration of the context. Discovery + send_message are mocked, and the agent is
+    seeded into a directly-built AgentManager (the autouse conftest fixture no-ops
+    AgentManager.start, so background discovery never runs).
+    """
+    agent_info, session_file = _make_agent_fixture(tmp_path, session_events=session_events)
+    agents = [agent_info]
+    base_url = f"http://127.0.0.1:{port}"
+
+    with (
+        patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""}),
+        patch("imbue.system_interface.server.send_message", return_value=True),
+        patch("imbue.system_interface.server.discover_agents", return_value=agents),
+    ):
+        # The autouse conftest fixture no-ops AgentManager.start (so background
+        # mngr discovery never runs in tests), so seed the agent into the manager
+        # directly and inject it. The UI renders its agent list from the WebSocket
+        # agents_updated snapshot, which the server sends from this manager on
+        # connect.
+        broadcaster = WebSocketBroadcaster()
+        manager = AgentManager.build(broadcaster)
+        with manager._lock:
+            manager._agents[agent_info.id] = AgentStateItem(
+                id=agent_info.id,
+                name=agent_info.name,
+                state="RUNNING",
+                labels={},
+                work_dir=str(tmp_path / "work"),
+            )
+        manager._ensure_activity_tracking(agent_info.id)
+
+        config = Config(system_interface_host="127.0.0.1", system_interface_port=port)
+        app = create_application(config, agent_manager=manager)
+
+        server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="error"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+
+        # Wait for server to start
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"{base_url}/api/agents", timeout=0.5)
+                break
+            except Exception:
+                time.sleep(0.1)
+
+        try:
+            yield base_url, agents, session_file
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5.0)
+
+
 @pytest.fixture
 def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], None, None]:
-    """Start the web server with mock agents for e2e testing."""
-    agent_info, session_file = _make_agent_fixture(tmp_path)
-    agents = [agent_info]
-
-    # Isolate the workspace environment: point MNGR_HOST_DIR at the fixture's
-    # tmp tree so the session endpoint (_find_agent) resolves the fixture agent's
-    # state dir + env file, and clear MNGR_AGENT_ID so the layout endpoint has no
-    # primary-agent dir to read from (returns 404 -> the UI auto-opens the fixture
-    # chat) and never reads or writes the real workspace's layout.json. This
-    # overrides the autouse _isolate_system_interface_tests fixture's env for the
-    # duration of the test.
-    env_patcher = patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""})
-    env_patcher.start()
-
-    send_patcher = patch("imbue.system_interface.server.send_message", return_value=True)
-    send_patcher.start()
-    discover_patcher = patch("imbue.system_interface.server.discover_agents", return_value=agents)
-    discover_patcher.start()
-
-    # The autouse conftest fixture no-ops AgentManager.start (so background mngr
-    # discovery never runs in tests), so seed the agent into the manager directly
-    # and inject it. The UI renders its agent list from the WebSocket
-    # agents_updated snapshot, which the server sends from this manager on connect.
-    broadcaster = WebSocketBroadcaster()
-    manager = AgentManager.build(broadcaster)
-    with manager._lock:
-        manager._agents[agent_info.id] = AgentStateItem(
-            id=agent_info.id,
-            name=agent_info.name,
-            state="RUNNING",
-            labels={},
-            work_dir=str(tmp_path / "work"),
-        )
-    manager._ensure_activity_tracking(agent_info.id)
-
-    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
-    app = create_application(config, agent_manager=manager)
-
-    server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT, log_level="error"))
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-
-    # Wait for server to start
-    for _ in range(50):
-        try:
-            import urllib.request
-
-            urllib.request.urlopen(f"{_BASE_URL}/api/agents", timeout=0.5)
-            break
-        except Exception:
-            time.sleep(0.1)
-
-    yield _BASE_URL, agents, session_file
-
-    discover_patcher.stop()
-    send_patcher.stop()
-    env_patcher.stop()
-    server.should_exit = True
-    thread.join(timeout=5.0)
+    """Start the web server with the default mock agent for e2e testing."""
+    with _serve_agent_chat(tmp_path, _PORT) as served:
+        yield served
 
 
 def test_page_loads_and_shows_title(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
@@ -545,3 +558,189 @@ def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
         finally:
             server.should_exit = True
             thread.join(timeout=5.0)
+
+
+# Decoration lines tk prints on stdout for the step used below. The frontend's
+# turn-grouping walk reads the title/summary from these (see CREATED_RE /
+# TK_STEP_TITLE_RE in turn-grouping.ts), so the carried-over step renders with a
+# real title rather than its raw id.
+_STEP_ID = "e2e-step-mail1"
+_STEP_TITLE = "Fetch your unread emails"
+
+
+def _permission_resolution_session_events() -> list[dict[str, Any]]:
+    """The real chat shape that motivated the boundary spacing fix.
+
+    Reproduces, in order:
+      1. a user turn that opens a step (``tk start``),
+      2. an assistant message that issues a permission request (a latchkey POST
+         tool call) -> rendered as the ``.pv-permission`` card, the last timeline
+         node of the first progress block,
+      3. a SEPARATE following assistant message that speaks prose ("I've sent a
+         permission request...") -> the first block's trailing reply (``.pv-final``),
+      4. a hidden user message granting the request -> a turn boundary with NO
+         user bubble (its verdict folds onto the card; ``parsePermissionResolution``
+         matches it), opening a fresh progress block that carries the still-open
+         step over,
+      5. the resumed work + the step closing in that second block.
+
+    The two progress blocks abut with no user bubble between them -- the exact
+    structure where the old ~46px void appeared.
+    """
+
+    def assistant(uuid: str, content: list[dict[str, Any]], stop_reason: str) -> dict[str, Any]:
+        return {
+            "type": "assistant",
+            "uuid": uuid,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-6",
+                "content": content,
+                "stop_reason": stop_reason,
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        }
+
+    def tool_result(uuid: str, tool_use_id: str, output: str) -> dict[str, Any]:
+        return {
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": output}],
+            },
+        }
+
+    def user(uuid: str, text: str) -> dict[str, Any]:
+        return {
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": text},
+        }
+
+    return [
+        user("u-1", "show me my unread emails"),
+        # Open the step.
+        assistant(
+            "a-start",
+            [{"type": "tool_use", "id": "tu-start", "name": "Bash", "input": {"command": f"tk start {_STEP_ID}"}}],
+            "tool_use",
+        ),
+        tool_result("tr-start", "tu-start", f"Updated {_STEP_ID} -> in_progress\ntk-step {_STEP_ID} title: {_STEP_TITLE}"),
+        # Issue the permission request (latchkey POST) -> the .pv-permission card.
+        assistant(
+            "a-perm",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "tu-perm",
+                    "name": "Bash",
+                    "input": {
+                        "command": (
+                            "latchkey curl -XPOST "
+                            "http://latchkey-self.invalid/permission-requests -d '{\"service\":\"gmail\"}'"
+                        )
+                    },
+                }
+            ],
+            "tool_use",
+        ),
+        tool_result("tr-perm", "tu-perm", '{"request_id":"r1"}'),
+        # SEPARATE trailing prose -> the first block's .pv-final reply.
+        assistant(
+            "a-prose",
+            [{"type": "text", "text": "I've sent a permission request to access your email. I'll continue once you approve."}],
+            "end_turn",
+        ),
+        # Hidden grant notification -> a no-bubble turn boundary.
+        user("u-grant", "Your permission request for Gmail was granted. Please retry the call that was blocked."),
+        # Resumed work in the second (carryover) block, then close the step.
+        assistant(
+            "a-work",
+            [{"type": "tool_use", "id": "tu-work", "name": "Bash", "input": {"command": "fetch-unread-emails"}}],
+            "tool_use",
+        ),
+        tool_result("tr-work", "tu-work", "Fetched 3 unread emails."),
+        assistant(
+            "a-close",
+            [{"type": "tool_use", "id": "tu-close", "name": "Bash", "input": {"command": f"tk close {_STEP_ID}"}}],
+            "tool_use",
+        ),
+        tool_result(
+            "tr-close",
+            "tu-close",
+            f"Updated {_STEP_ID} -> closed\ntk-step {_STEP_ID} title: {_STEP_TITLE}\n"
+            f"tk-step {_STEP_ID} summary: Pulled your unread emails.",
+        ),
+    ]
+
+
+@pytest.mark.timeout(120)
+def test_permission_resolution_boundary_has_no_empty_void(tmp_path: Path, page: Page) -> None:
+    """A permission grant/deny boundary renders as a single clean turn break.
+
+    The hidden grant notification opens a fresh progress block carrying the open
+    step over (this turn-boundary carryover is the intended behavior). Because
+    that boundary has no user bubble, the two progress blocks' turn-margins would
+    otherwise stack into a ~46px empty void. The resumption block is marked
+    ``progress-block--resumption``; a CSS ``:has(+ .progress-block--resumption)``
+    rule zeroes the preceding element's turn-bottom margin so the seam is just the
+    resumption block's normal ~18px top margin.
+
+    This asserts the REAL DOM shape (a ``.pv-final`` trailing reply is present and
+    the resumption block carries the intrinsic marker), so it cannot pass against
+    a different tree, then measures the boundary gap. It fails against the ~46px
+    void (pre-fix) and passes at the ~18px clean break (post-fix).
+    """
+    with _serve_agent_chat(tmp_path, _PORT + 3, _permission_resolution_session_events()) as served:
+        base_url, _, _ = served
+        page.set_viewport_size({"width": 1300, "height": 1600})
+        page.goto(base_url)
+
+        # Both progress blocks (block A: card + prose; block B: carryover) render.
+        blocks = page.locator(".progress-block")
+        expect(blocks).to_have_count(2, timeout=_TRIGGER_TIMEOUT_MS)
+
+        # The real shape: block A ends on the permission card AND a separate
+        # trailing prose reply (.pv-final). Asserting both guards against the test
+        # silently passing against a simpler tree.
+        expect(page.locator(".pv-permission").first).to_be_visible()
+        expect(page.locator(".pv-final").first).to_be_visible()
+        expect(page.locator(".pv-final").first).to_contain_text("I've sent a permission request")
+
+        # The carried-over step appears in BOTH blocks (the intended carryover).
+        expect(page.locator(".pv-tl-title", has_text=_STEP_TITLE)).to_have_count(2)
+
+        # The intrinsic marker is on the resumption (second) block -- NOT on the
+        # card-ending block, and NOT a :has() selector keyed on the card's
+        # position.
+        first_block_class = blocks.nth(0).get_attribute("class") or ""
+        assert "progress-block--resumption" not in first_block_class, (
+            f"the card-ending block must not carry the resumption marker; got class={first_block_class!r}"
+        )
+        second_block_class = blocks.nth(1).get_attribute("class") or ""
+        assert "progress-block--resumption" in second_block_class, (
+            f"the resumption block should carry the intrinsic marker; got class={second_block_class!r}"
+        )
+
+        # Measure the boundary gap: the vertical distance between the two blocks'
+        # border boxes (boundingClientRect excludes margins, so this gap IS the
+        # sum of block A's bottom margin + block B's top margin -- they do not
+        # collapse in the flex-column message list).
+        gap = page.evaluate(
+            """
+            () => {
+              const blocks = Array.from(document.querySelectorAll('.progress-block'));
+              const a = blocks[0].getBoundingClientRect();
+              const b = blocks[1].getBoundingClientRect();
+              return b.top - a.bottom;
+            }
+            """
+        )
+        # Post-fix target ~18px (block B's top margin alone). Pre-fix this is
+        # ~46px (28 + 18). Use a window that excludes the pre-fix void but allows
+        # sub-pixel rounding around the 18px target.
+        assert 10 <= gap <= 28, f"permission-resolution boundary gap should be a single ~18px turn break, got {gap}px"
