@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Install bundled worker sub-skills from each parent skill's assets/worker/
 # directory into the worker's .agents/skills/ tree. Called at worker provision
-# time by the crystallize-worker create template (see .mngr/settings.toml).
+# time by the subskill-worker create template (see .mngr/settings.toml).
 #
 # Each parent skill under .agents/skills/ that has an assets/worker/ directory
 # is installed at <destination>/<parent>-worker/ so it becomes loadable as a

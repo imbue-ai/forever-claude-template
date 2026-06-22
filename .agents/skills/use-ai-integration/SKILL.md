@@ -1,30 +1,35 @@
 ---
 name: use-ai-integration
-description: Use when building a service that calls Claude -- an AI-driven service or AI integration. Covers the three scenarios (one-shot completion, one-shot agentic task, full agent), choosing between a keyed litellm call and the keyless claude -p helper, and the cost / credentialing model.
+description: Use when code needs to call Claude -- an AI-driven service, an AI integration, or a skill's scripted model step. Covers the three scenarios (one-shot completion, one-shot agentic task, full agent), choosing between a keyed litellm call and the keyless claude -p helper, and the cost / credentialing model.
 ---
 
-# Calling Claude from a service
+# Calling Claude from code
 
-A service reaches Claude in one of two ways, depending on whether
-`ANTHROPIC_API_KEY` is set in the service's environment: with a key, call
-`litellm` directly; without one, use the `claude -p` helper in
-`scripts/claude_p.py`.
+This is the shared reference for the mechanics of calling Claude from code:
+which path to use, the call surface, and the cost model. Whatever sent you here
+-- building an AI-driven service, scripting a skill's `[ai-script]` step, or
+adding an AI integration elsewhere -- supplies the framing; this skill is the
+how.
+
+Code reaches Claude in one of two ways, depending on whether `ANTHROPIC_API_KEY`
+is set in the environment: with a key, call `litellm` directly; without one, use
+the `claude -p` helper in `scripts/claude_p.py`.
 
 Which path applies is fixed for a deployment -- it does not change at runtime, so
-**do not write a service that handles both.** Check once, up front, with a shell
-command, and implement only the path that applies:
+**do not handle both.** Check once, up front, with a shell command, and
+implement only the path that applies:
 
 ```bash
 [ -n "$ANTHROPIC_API_KEY" ] && echo keyed || echo keyless
 ```
 
 If keyed, write only the litellm path; if keyless, write only the `claude -p`
-path. Branching on the key from inside the service is dead weight. If the user
-decides to add an API key, you can do a simple migration.
+path. Branching on the key at call time is dead weight. If the user decides to
+add an API key, you can do a simple migration.
 
 ## Pick the scenario (weakest that does the job)
 
-A service's need falls into one of three scenarios, by how much agency Claude
+The call falls into one of three scenarios, by how much agency Claude
 needs. Pick the weakest -- it is cheaper, faster, and simpler.
 
 1. **One-shot completion** -- no agency: classify, summarize, extract, rewrite,
@@ -46,9 +51,9 @@ temperature, etc. with no wrapper of ours in the way. `litellm` is in the root
 `pyproject.toml`; read its docs for the call surface. Sketch:
 
 ```python
-from litellm import acompletion, completion_cost
+from litellm import completion, completion_cost
 
-resp = await acompletion(
+resp = completion(
     model="claude-haiku-4-5",
     messages=[
         {"role": "system", "content": "You are an email triage classifier."},
@@ -66,7 +71,7 @@ It disables tools and runs from an isolated working directory so the repo's
 ```python
 from claude_p import claude_p_completion  # the file you copied in
 
-result = await claude_p_completion(
+result = claude_p_completion(
     "Classify this email's intent:\n\n" + email_body,
     system="You are an email triage classifier.",   # required
     model="claude-haiku-4-5",
@@ -74,10 +79,11 @@ result = await claude_p_completion(
 print(result.text, result.cost_usd, result.usage)
 ```
 
-Both `acompletion` and `claude_p_completion` are async. Once you have confirmed
-the prompt + model combination works and produces good results on a few items,
-run a batch of items concurrently (an `anyio` task group) rather than awaiting
-them one at a time -- the throughput difference is large.
+Both `completion` and `claude_p_completion` are synchronous (no asyncio). Once
+you have confirmed the prompt + model combination works and produces good
+results on a few items, run a batch concurrently with a thread pool
+(`concurrent.futures.ThreadPoolExecutor`) rather than one at a time -- the
+throughput difference is large.
 
 ## Scenario 2 -- one-shot agentic task
 
@@ -90,7 +96,7 @@ run has no human to approve tool use).
 ```python
 from claude_p import claude_p_task
 
-result = await claude_p_task(
+result = claude_p_task(
     "Read runtime/email-triage/latest.json and draft a reply using templates/.",
     append_system="Only touch files under runtime/email-triage/.",
 )
@@ -108,7 +114,7 @@ Reach for this over scenario 2 when the work needs its **own git worktree**:
 Claude is editing code that has to be tested and validated, or other agents are
 working in the same repo and the changes must not collide. A `launch-task` worker
 gives the run an isolated branch and worktree; scenario 2 instead runs in the
-service's own working directory.
+caller's own working directory.
 
 Launch the worker synchronously and collect its structured result -- do not wrap
 it; call the script directly:
@@ -131,7 +137,7 @@ returned branch (merge, review) is your concern.
 
 ## Cost and the keyed onramp
 
-A keyless service can tell the user what each call costs and what a key would save,
+A keyless caller can tell the user what each call costs and what a key would save,
 so they can decide when volume justifies setting `ANTHROPIC_API_KEY`:
 
 - `claude_p_completion` / `claude_p_task` return the **actual** `cost_usd` that

@@ -70,11 +70,13 @@ from imbue.concurrency_group.subprocess_utils import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr_claude.claude_config import acknowledge_cost_threshold
 from imbue.mngr_claude.claude_config import complete_onboarding
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import read_claude_config
+from imbue.mngr_claude.resources.stream_snapshot import strip_ansi
 
 logger = _loguru_logger
 
@@ -100,12 +102,8 @@ CommandRunner = Callable[..., Any]
 PexpectSpawner = Callable[..., Any]
 
 
-def _default_command_runner(
-    command: list[str], timeout: float, env: Mapping[str, str] | None = None
-) -> Any:
-    return run_local_command_modern_version(
-        command=command, is_checked=False, timeout=timeout, cwd=None, env=env
-    )
+def _default_command_runner(command: list[str], timeout: float, env: Mapping[str, str] | None = None) -> Any:
+    return run_local_command_modern_version(command=command, is_checked=False, timeout=timeout, cwd=None, env=env)
 
 
 def _default_pexpect_spawner(executable: str, args: list[str], timeout: float) -> Any:
@@ -125,9 +123,7 @@ class AuthStatus(FrozenModel):
     email: str | None = Field(default=None)
     org_id: str | None = Field(default=None)
     org_name: str | None = Field(default=None)
-    subscription_type: str | None = Field(
-        default=None, description="e.g. 'Max'; absent for Console accounts"
-    )
+    subscription_type: str | None = Field(default=None, description="e.g. 'Max'; absent for Console accounts")
 
 
 class OAuthProvider(str, Enum):
@@ -211,9 +207,7 @@ def _resolve_claude_config_path() -> Path:
     """Locate the shared `$CLAUDE_CONFIG_DIR/.claude.json` for the mind."""
     config_dir = os.environ.get(_CLAUDE_CONFIG_DIR_ENV_VAR, "")
     if not config_dir:
-        raise ClaudeAuthError(
-            f"{_CLAUDE_CONFIG_DIR_ENV_VAR} is unset; cannot locate the Claude config"
-        )
+        raise ClaudeAuthError(f"{_CLAUDE_CONFIG_DIR_ENV_VAR} is unset; cannot locate the Claude config")
     return Path(config_dir) / ".claude.json"
 
 
@@ -302,11 +296,25 @@ def _drive_oauth_code(process: Any, code: str) -> None:
     try:
         result = process.expect([pexpect.EOF, pexpect.TIMEOUT])
     except pexpect.ExceptionPexpect as e:
-        raise ClaudeAuthError(
-            f"claude auth login subprocess failed waiting for completion: {e}"
-        ) from e
+        raise ClaudeAuthError(f"claude auth login subprocess failed waiting for completion: {e}") from e
     if result != 0:
         raise ClaudeAuthError("Timed out waiting for claude auth login to complete after code submit")
+
+
+def _extract_oauth_url(raw_output: str) -> str | None:
+    """Pull the single OAuth URL out of `claude auth login`'s PTY output.
+
+    The CLI renders the URL as an OSC 8 terminal hyperlink styled with ANSI
+    color, so the raw stream carries the URL *twice* -- once as the
+    hyperlink target and once as the styled visible label -- interleaved
+    with escape sequences (`ESC]8;;<url>ST <colored url> ESC]8;;ST`).
+    Matching the URL straight off that stream captures both copies plus the
+    escapes. Stripping the escapes first collapses the hyperlink back to its
+    bare visible label, leaving exactly one clean URL for the regex.
+    """
+    cleaned = strip_ansi(raw_output)
+    match = _OAUTH_URL_REGEX.search(cleaned)
+    return match.group(0) if match is not None else None
 
 
 def _build_list_command() -> list[str]:
@@ -314,8 +322,32 @@ def _build_list_command() -> list[str]:
 
     Pure: argv assembly only, so the repo<->mngr CLI contract is testable
     against the live CLI without a subprocess (see ``claude_auth_test.py``).
+
+    ``--on-error continue`` makes this blanket listing tolerate an
+    unauthenticated/unreachable provider: ``mngr list`` still emits the
+    healthy providers' agents and exits ``EXIT_CODE_PROVIDER_INACCESSIBLE``,
+    which the caller treats as success.
     """
-    return ["mngr", "list", "--format", "json"]
+    return ["mngr", "list", "--format", "json", "--on-error", "continue"]
+
+
+def _log_inaccessible_providers(payload: dict[str, Any]) -> None:
+    """Debug-log each provider `mngr list` skipped due to an auth/access error.
+
+    The structured `errors` array is present when `mngr list` exits
+    EXIT_CODE_PROVIDER_INACCESSIBLE. Skipped providers are expected (e.g. a
+    provider enabled in config but never authenticated), so this is debug
+    only -- the enumeration still succeeds on the healthy providers.
+    """
+    errors = payload.get("errors", [])
+    if not isinstance(errors, list):
+        return
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        provider_name = error.get("provider_name", "?")
+        message = error.get("message", "")
+        logger.debug("Skipped inaccessible provider {} while listing agents: {}", provider_name, message)
 
 
 def _build_stop_command(name: str) -> list[str]:
@@ -373,9 +405,7 @@ class ClaudeAuthService(MutableModel):
                     runner_env,
                 )
                 if runner_env is not None
-                else self.command_runner(
-                    ["claude", "auth", "status", "--json"], _CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS
-                )
+                else self.command_runner(["claude", "auth", "status", "--json"], _CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS)
             )
         except ProcessSetupError as e:
             logger.warning("claude auth status failed to launch: {}", e)
@@ -387,9 +417,7 @@ class ClaudeAuthService(MutableModel):
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError as e:
-            raise ClaudeAuthError(
-                f"claude auth status returned non-JSON output: {stdout!r}"
-            ) from e
+            raise ClaudeAuthError(f"claude auth status returned non-JSON output: {stdout!r}") from e
         if not isinstance(payload, dict):
             raise ClaudeAuthError(f"claude auth status returned non-object JSON: {payload!r}")
         return _parse_status_payload(payload)
@@ -401,13 +429,14 @@ class ClaudeAuthService(MutableModel):
         This excludes the `main`-type system-services agent, which has no
         interactive claude process to restart.
         """
-        result = self.command_runner(
-            _build_list_command(), _MNGR_COMMAND_TIMEOUT_SECONDS
-        )
-        if result.returncode != 0:
-            raise ClaudeAuthError(
-                f"mngr list failed (exit {result.returncode}): {result.stderr.strip()}"
-            )
+        result = self.command_runner(_build_list_command(), _MNGR_COMMAND_TIMEOUT_SECONDS)
+        # Exit EXIT_CODE_PROVIDER_INACCESSIBLE means some enabled provider was
+        # unauthenticated/unreachable, but the healthy providers' agents were
+        # still listed (we pass --on-error continue). This is a blanket listing,
+        # so that is an acceptable partial success: enumerate what we got. Any
+        # other nonzero exit is a real failure.
+        if result.returncode not in (0, EXIT_CODE_PROVIDER_INACCESSIBLE):
+            raise ClaudeAuthError(f"mngr list failed (exit {result.returncode}): {result.stderr.strip()}")
         stdout = result.stdout if isinstance(result.stdout, str) else ""
         try:
             payload = json.loads(stdout)
@@ -415,6 +444,8 @@ class ClaudeAuthService(MutableModel):
             raise ClaudeAuthError(f"mngr list returned non-JSON output: {stdout!r}") from e
         if not isinstance(payload, dict):
             raise ClaudeAuthError(f"mngr list returned non-object JSON: {payload!r}")
+        if result.returncode == EXIT_CODE_PROVIDER_INACCESSIBLE:
+            _log_inaccessible_providers(payload)
         agents = payload.get("agents", [])
         if not isinstance(agents, list):
             raise ClaudeAuthError(f"mngr list 'agents' field is not a list: {agents!r}")
@@ -453,24 +484,18 @@ class ClaudeAuthService(MutableModel):
         names = self.list_claude_agent_names()
         for name in names:
             logger.info("Stopping type:claude agent {} via mngr stop", name)
-            stop_result = self.command_runner(
-                _build_stop_command(name), _MNGR_COMMAND_TIMEOUT_SECONDS
-            )
+            stop_result = self.command_runner(_build_stop_command(name), _MNGR_COMMAND_TIMEOUT_SECONDS)
             if stop_result.returncode != 0:
                 raise ClaudeAuthError(
-                    f"mngr stop {name} failed (exit {stop_result.returncode}): "
-                    f"{stop_result.stderr.strip()}"
+                    f"mngr stop {name} failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
                 )
         _prepare_claude_config_for_restart(api_key)
         for name in names:
             logger.info("Starting type:claude agent {} via mngr start --no-resume", name)
-            start_result = self.command_runner(
-                _build_start_command(name), _MNGR_COMMAND_TIMEOUT_SECONDS
-            )
+            start_result = self.command_runner(_build_start_command(name), _MNGR_COMMAND_TIMEOUT_SECONDS)
             if start_result.returncode != 0:
                 raise ClaudeAuthError(
-                    f"mngr start {name} failed (exit {start_result.returncode}): "
-                    f"{start_result.stderr.strip()}"
+                    f"mngr start {name} failed (exit {start_result.returncode}): {start_result.stderr.strip()}"
                 )
         return names
 
@@ -492,9 +517,7 @@ class ClaudeAuthService(MutableModel):
         """
         write_api_key_to_host_env(api_key)
         self.restart_all_claude_agents(api_key=api_key)
-        return self.get_auth_status(
-            extra_env={_ANTHROPIC_API_KEY_ENV_VAR: api_key.get_secret_value()}
-        )
+        return self.get_auth_status(extra_env={_ANTHROPIC_API_KEY_ENV_VAR: api_key.get_secret_value()})
 
     def _spawn_oauth_and_parse_url(self, provider: OAuthProvider) -> tuple[Any, str]:
         process = self.pexpect_spawner(
@@ -509,14 +532,20 @@ class ClaudeAuthService(MutableModel):
             if match_index == 1:
                 raise ClaudeAuthError("claude auth login exited before printing OAuth URL")
             raise ClaudeAuthError("Timed out waiting for OAuth URL from claude auth login")
-        match = process.match
-        if match is None:
+        # `process.match` spans the raw stream, where the CLI's OSC 8
+        # hyperlink renders the URL twice and wraps it in escape sequences.
+        # Re-extract from the full consumed buffer (`before` + `after`, which
+        # together hold the hyperlink's opening `ESC]8;;` and both URL copies)
+        # with the escapes stripped, so we hand back one clean URL.
+        consumed = (process.before or "") + (process.after or "")
+        oauth_url = _extract_oauth_url(consumed)
+        if oauth_url is None:
             _safe_terminate(process)
             _safe_close(process)
             raise ClaudeAuthError(
-                "OAuth URL regex matched but pexpect.match is None (unexpected)"
+                "OAuth URL matched in the stream but could not be extracted after stripping terminal escape sequences"
             )
-        return process, match.group(0)
+        return process, oauth_url
 
     def start_oauth_login(self, provider: OAuthProvider) -> OAuthStartResult:
         """Spawn `claude auth login --<provider>` and return the parsed OAuth URL.
@@ -532,9 +561,7 @@ class ClaudeAuthService(MutableModel):
                 self._current_oauth_record = None
                 self._current_oauth_process = None
             process, oauth_url = self._spawn_oauth_and_parse_url(provider)
-            record = _OAuthSessionRecord(
-                session_id=uuid.uuid4().hex, provider=provider, oauth_url=oauth_url
-            )
+            record = _OAuthSessionRecord(session_id=uuid.uuid4().hex, provider=provider, oauth_url=oauth_url)
             self._current_oauth_record = record
             self._current_oauth_process = process
         return OAuthStartResult(session_id=record.session_id, oauth_url=record.oauth_url)

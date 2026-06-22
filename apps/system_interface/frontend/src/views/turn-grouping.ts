@@ -33,6 +33,19 @@
  * re-renders at the top of the new turn, while the prior turn's node freezes at
  * its last-known state.
  *
+ * One message is never grouped under a step: an agent permission request. It
+ * is lifted out into a dedicated inline break (the `permission` timeline item)
+ * so the user always sees it and can respond without expanding a step. The step
+ * it interrupted stays open, so work resumed afterwards keeps grouping under it.
+ * When the user later grants or denies the request, the app injects a plain
+ * notification user message. The walk reads its verdict onto the request's card
+ * and treats the notification as a turn boundary (the agent blocked on the
+ * request and is now resuming), so any open step carries over and continues in
+ * the new turn rather than the same node resuming beneath the card. The raw text
+ * isn't shown (its verdict is on the card). The notification carries no request
+ * id, so it resolves the oldest still-open request (the agent blocks on a
+ * request until answered, so in practice only one is open at a time).
+ *
  * This module reads no timestamps. Pending placeholders are ordered by
  * transcript position; grouping and the positioning of any transitioned step
  * read transcript order alone.
@@ -45,7 +58,13 @@ import type {
   ToolResultEvent,
   ToolCall,
 } from "../models/Response";
-import { isNonBoundaryUserMessage, isStopHookFeedback } from "./user-message-classification";
+import type { PermissionResolution } from "./message-classification";
+import {
+  isNonBoundaryUserMessage,
+  isPermissionRequestCall,
+  isStopHookFeedback,
+  parsePermissionResolution,
+} from "./message-classification";
 
 export type StepStatus = "pending" | "active" | "done";
 
@@ -82,6 +101,12 @@ export type TimelineItem =
   /** Real work and/or prose with no step open: pre-step work, or a step's
    *  ejected closing prose. Rendered inline, exactly like a no-steps turn. */
   | { kind: "ungrouped"; key: string; events: AssistantMessageEvent[] }
+  /** An agent permission request, lifted out of any open step so it always
+   *  renders inline as a thread-breaking block. The user must be able to see and
+   *  act on it without expanding a step. `resolution` is set once a later
+   *  granted/denied notification is correlated to this request (see
+   *  buildSections); null while still awaiting a decision. */
+  | { kind: "permission"; event: AssistantMessageEvent; resolution: PermissionResolution | null }
   /** A non-boundary user message shown inline (e.g. a stop-hook chip). */
   | { kind: "chip"; event: UserMessageEvent };
 
@@ -148,6 +173,11 @@ function isStepId(id: string): boolean {
  *  begins with the tk verb (see TK_LIFECYCLE_RE). */
 function isTkLifecycleCall(tc: ToolCall): boolean {
   return tc.tool_name === "Bash" && TK_LIFECYCLE_RE.test(tc.input_preview);
+}
+
+/** True when an assistant message issues a permission request. */
+function hasPermissionRequest(e: AssistantMessageEvent): boolean {
+  return e.tool_calls.some(isPermissionRequestCall);
 }
 
 /** The Bash command string for a tool call, or null if not a Bash call (or its
@@ -323,6 +353,9 @@ function isProse(e: AssistantMessageEvent): boolean {
  *  order. */
 type SectionEntry =
   | { kind: "step"; id: string }
+  /** A permission request, lifted out of any open step to render inline as a
+   *  visible break (see hasPermissionRequest / the `permission` TimelineItem). */
+  | { kind: "permission"; event: AssistantMessageEvent }
   | { kind: "event"; event: AssistantMessageEvent; step_id: string | null };
 
 interface SectionBuilder {
@@ -367,6 +400,13 @@ export function buildSections(
   let current: SectionBuilder | null = null;
   // Steps open at the end of the prior section, to re-open as carryover.
   let carryover: string[] = [];
+  // Permission requests awaiting a decision, in transcript (creation) order, by
+  // the event id of the message that issued each. A granted/denied notification
+  // carries no request id, so it resolves the oldest still-open request -- the
+  // agent blocks on a request until it is answered, so in practice only one is
+  // open at a time. Resolutions are keyed by the resolved request's event id.
+  const unresolvedPermissions: string[] = [];
+  const resolutions = new Map<string, PermissionResolution>();
 
   const ensureSection = (user_event: UserMessageEvent | null, key: string): SectionBuilder => {
     const section = newSection(user_event, key);
@@ -381,6 +421,25 @@ export function buildSections(
 
   for (const e of events) {
     if (e.type === "user_message") {
+      // A granted/denied notification for an earlier permission request. Record
+      // the verdict against the oldest open request (it reflects on that
+      // request's card, not as a user prompt), then treat the notification as
+      // the turn boundary it naturally is: the agent blocked on the request and
+      // is now resuming, so close the current section -- carrying any open step
+      // over -- and open a fresh one. The step then continues in the normal
+      // carryover way rather than the same node resuming inline beneath the
+      // card. The raw text is not shown (its verdict is on the card), so the new
+      // section has no user bubble. If no request is open to claim it (e.g. the
+      // request scrolled out of the visible transcript), fall through and let it
+      // render as an ordinary user message.
+      const resolution = parsePermissionResolution(e.content ?? "");
+      if (resolution !== null && unresolvedPermissions.length > 0) {
+        const resolvedEventId = unresolvedPermissions.shift() as string;
+        resolutions.set(resolvedEventId, resolution);
+        carryover = current === null ? [] : openStepsAtEnd(current);
+        current = ensureSection(null, `section-after-${e.event_id}`);
+        continue;
+      }
       if (isNonBoundaryUserMessage(e.content ?? "")) {
         // Stop-hook feedback and the like: a chip inside the current section.
         if (current !== null && isStopHookFeedback(e.content ?? "")) {
@@ -418,7 +477,18 @@ export function buildSections(
         if (t.status === "in_progress") lastOpened = t.id;
       }
       if (parsed.render !== null && (parsed.render.text || parsed.render.tool_calls.length > 0)) {
-        routeMessage(current, parsed.render, lastOpened ?? stepBefore);
+        if (hasPermissionRequest(parsed.render)) {
+          // A permission request breaks out of any open step: it must always be
+          // directly visible, never collapsed inside a step node. The step stays
+          // open (current_step_id is untouched), so work resumed after the user
+          // responds keeps grouping under it.
+          current.entries.push({ kind: "permission", event: parsed.render });
+          // Track it as awaiting a decision so a later granted/denied
+          // notification can be correlated back to this card by order.
+          unresolvedPermissions.push(parsed.render.event_id);
+        } else {
+          routeMessage(current, parsed.render, lastOpened ?? stepBefore);
+        }
       }
       continue;
     }
@@ -435,7 +505,7 @@ export function buildSections(
 
   const lastBuilder = builders[builders.length - 1];
   return builders.map((b) =>
-    finalizeSection(b, deco, b === lastBuilder ? pending : [], agentIsIdle, b === lastBuilder),
+    finalizeSection(b, deco, resolutions, b === lastBuilder ? pending : [], agentIsIdle, b === lastBuilder),
   );
 }
 
@@ -511,6 +581,7 @@ function openStepsAtEnd(section: SectionBuilder): string[] {
 function finalizeSection(
   section: SectionBuilder,
   deco: Map<string, Decoration>,
+  resolutions: Map<string, PermissionResolution>,
   pending: { id: string; title: string }[],
   agentIsIdle: boolean,
   is_tail: boolean,
@@ -550,7 +621,12 @@ function finalizeSection(
   let lastStepEntryIdx = -1;
   for (let i = 0; i < section.entries.length; i++) {
     const en = section.entries[i];
-    if (en.kind === "event" && isWork(en.event)) lastWorkEntryIdx = i;
+    // A permission request is real (non-tk) activity, so it acts as a reply
+    // boundary just like a work event -- prose before a trailing permission
+    // request stays inline at its spot, not hoisted below the timeline as a
+    // reply.
+    if (en.kind === "permission") lastWorkEntryIdx = i;
+    else if (en.kind === "event" && isWork(en.event)) lastWorkEntryIdx = i;
     if (en.kind === "step") lastStepEntryIdx = i;
   }
   const replyBoundary = Math.max(lastWorkEntryIdx, lastStepEntryIdx);
@@ -635,6 +711,16 @@ function finalizeSection(
         items.push({ kind: "step", step: section.steps.get(entry.id)! });
         emittedSteps.add(entry.id);
       }
+    } else if (entry.kind === "permission") {
+      // A permission break ends any in-flight ungrouped run and stands as its
+      // own always-visible item at its transcript position. Attach the verdict
+      // if a later notification resolved this request.
+      flushUngrouped();
+      items.push({
+        kind: "permission",
+        event: entry.event,
+        resolution: resolutions.get(entry.event.event_id) ?? null,
+      });
     } else if (trailingIds.has(entry.event.event_id)) {
       // Trailing reply: rendered below the timeline (see trailing_reply).
     } else if (entry.step_id === null || ejectedIds.has(entry.event.event_id)) {

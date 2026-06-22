@@ -5,7 +5,7 @@
 # ///
 """Validate a skill directory against the agentskills.io spec.
 
-Checks (in order, short-circuit on first failure per check):
+Static structural checks (in order, short-circuit on first failure per check):
 
 - Directory exists.
 - `SKILL.md` exists.
@@ -17,6 +17,16 @@ Checks (in order, short-circuit on first failure per check):
   (`run.py` is optional even for crystallized skills -- a skill may be pure
   SKILL.md prose if every step is judgement or uses existing tools.)
 
+Runnability check (only when the static checks pass and `scripts/run.py`
+exists):
+
+- `uv run scripts/run.py --help` exits 0. This forces `uv` to resolve the
+  script's PEP 723 dependencies and import the module, so a broken import or
+  an unresolvable dependency is caught here rather than only at scenario time.
+  `--help` is a shallow import check: it exercises the top-level imports and
+  argparse wiring, not imports done lazily inside subcommand bodies -- those
+  are left to scenario testing.
+
 Exits 0 and prints `ok` when valid; exits 1 with a human-readable error to
 stderr otherwise.
 """
@@ -25,12 +35,13 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 _MAX_BODY_LINES = 500
 _MIN_DESC_LEN = 1
@@ -38,6 +49,14 @@ _MAX_DESC_LEN = 1024
 _MIN_NAME_LEN = 1
 _MAX_NAME_LEN = 64
 _NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+# Generous enough to cover a cold `uv` dependency resolution (first-time
+# download + install); warm-cache runs are near-instant.
+_RUN_HELP_TIMEOUT_SECONDS = 180
+
+# A callable that invokes `run.py --help` and reports the completed process.
+# Injectable so tests can exercise the result-handling without a real `uv` run.
+RunHelpRunner = Callable[[Path], "subprocess.CompletedProcess[str]"]
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], list[str]]:
@@ -75,6 +94,48 @@ def _validate_run_py(skill_dir: Path) -> str | None:
     return None
 
 
+def _run_help_via_uv(run_py: Path) -> subprocess.CompletedProcess[str]:
+    """Invoke ``uv run <run_py> --help`` so uv resolves the script's deps."""
+    return subprocess.run(
+        ["uv", "run", str(run_py), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=_RUN_HELP_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+
+def check_runnable(
+    skill_dir: Path, runner: RunHelpRunner = _run_help_via_uv
+) -> str | None:
+    """Confirm ``scripts/run.py`` runs far enough to import and build its CLI.
+
+    Runs ``uv run scripts/run.py --help`` via ``runner`` (injectable for
+    testing). Returns an error message on failure, otherwise ``None``. A skill
+    with no ``run.py`` is trivially runnable, so this returns ``None``.
+    """
+    run_py = skill_dir / "scripts" / "run.py"
+    if not run_py.is_file():
+        return None
+    try:
+        result = runner(run_py)
+    except subprocess.TimeoutExpired:
+        return (
+            f"{run_py} did not respond to `--help` within "
+            f"{_RUN_HELP_TIMEOUT_SECONDS}s (dependency resolution may be stuck "
+            "or the script blocks before argparse)"
+        )
+    except FileNotFoundError:
+        return "`uv` was not found on PATH; cannot run the run.py runnability check"
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        return (
+            f"{run_py} failed `uv run ... --help` (exit {result.returncode}); "
+            f"its imports or PEP 723 dependencies may be broken:\n{detail}"
+        )
+    return None
+
+
 def validate(skill_dir: Path) -> str | None:
     """Return an error message if the skill is invalid; otherwise ``None``."""
     if not skill_dir.is_dir():
@@ -84,7 +145,9 @@ def validate(skill_dir: Path) -> str | None:
         return f"SKILL.md not found at {skill_md}"
 
     try:
-        frontmatter, body_lines = _split_frontmatter(skill_md.read_text(encoding="utf-8"))
+        frontmatter, body_lines = _split_frontmatter(
+            skill_md.read_text(encoding="utf-8")
+        )
     except ValueError as exc:
         return str(exc)
 
@@ -140,6 +203,8 @@ def main() -> int:
     args = parser.parse_args()
 
     error = validate(args.skill_dir)
+    if error is None:
+        error = check_runnable(args.skill_dir)
     if error is None:
         print("ok")
         return 0

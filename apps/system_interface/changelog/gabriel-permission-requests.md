@@ -1,0 +1,3 @@
+- Latchkey permission requests are now lifted out of the chat progress-view steps into a dedicated inline timeline break that always renders directly instead of being collapsed inside an open step. A still-pending request the agent is blocked on is now immediately visible and actionable without expanding the step. The interrupted step stays open, so work resumed after approval keeps grouping under it.
+
+- Added a backend `latchkey_endpoints` module (with the reserved `latchkey-self.invalid/permission-requests` detection) and extracted the permission card into its own `permission-card.ts` frontend module.

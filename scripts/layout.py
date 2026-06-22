@@ -79,7 +79,7 @@ MNGR_AGENT_ID_HEADER = "X-Mngr-Agent-Id"
 ENV_NO_WAIT_STABLE = "MINDS_LAYOUT_NO_WAIT_STABLE"
 
 # How long ``open`` / ``split`` wait for a freshly-registered service to
-# appear before giving up. The bootstrap-managed forward_port.py call races
+# appear before giving up. The supervisord-managed forward_port.py call races
 # with the agent invoking this script right after build-web-service, so we
 # tolerate a brief window where the entry is not yet visible.
 _REGISTRATION_TIMEOUT_SECONDS = 5.0
@@ -93,7 +93,14 @@ _REGISTRATION_POLL_INTERVAL_SECONDS = 0.25
 # ``_normalize_ref`` prefix scan returns on the first match -- if ``chat:``
 # came first the longer prefix would never be recognized and
 # ``chat-terminal:foo`` would degrade to a bare service-name fallback.
-_REF_PREFIXES = ("service:", "chat-terminal:", "chat:", "terminal:", "url:", "subagent:")
+_REF_PREFIXES = (
+    "service:",
+    "chat-terminal:",
+    "chat:",
+    "terminal:",
+    "url:",
+    "subagent:",
+)
 # Set of accepted directions for split/move. ``within`` is the synthetic
 # direction that means "tab into the anchor's own group" -- the four
 # cardinal values all describe *adjacent* groups.
@@ -217,7 +224,9 @@ def _validate_ref(ref: str) -> None:
         raise SystemExit(EXIT_ERROR)
     prefix, _, name = ref.partition(":")
     if not name:
-        sys.stderr.write(f"error: ref {ref!r} is missing a name after {prefix + ':'!r}\n")
+        sys.stderr.write(
+            f"error: ref {ref!r} is missing a name after {prefix + ':'!r}\n"
+        )
         raise SystemExit(EXIT_ERROR)
 
 
@@ -257,8 +266,13 @@ def _resolve_replace_url(url: str) -> str:
 def _post_layout(op: str, args: dict[str, Any]) -> tuple[int, dict[str, Any] | str]:
     """POST {op, args, agent_id} to /api/layout/broadcast and return (status, parsed_or_raw)."""
     url = f"{_workspace_base_url()}/api/layout/broadcast"
-    body = json.dumps({"op": op, "args": args, "agent_id": _mngr_agent_id()}).encode("utf-8")
-    headers = {"Content-Type": "application/json", MNGR_AGENT_ID_HEADER: _mngr_agent_id()}
+    body = json.dumps({"op": op, "args": args, "agent_id": _mngr_agent_id()}).encode(
+        "utf-8"
+    )
+    headers = {
+        "Content-Type": "application/json",
+        MNGR_AGENT_ID_HEADER: _mngr_agent_id(),
+    }
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=10.0) as response:
@@ -306,7 +320,9 @@ def _report_failure(op: str, status: int, body: dict[str, Any] | str) -> int:
             )
             return EXIT_CONFLICT
         if status == 404:
-            sys.stderr.write(f"error: layout op {op!r} target not found (HTTP 404): {detail}\n")
+            sys.stderr.write(
+                f"error: layout op {op!r} target not found (HTTP 404): {detail}\n"
+            )
             return EXIT_ERROR
         if status == 400:
             sys.stderr.write(f"error: layout op {op!r} rejected (HTTP 400): {detail}\n")
@@ -502,7 +518,9 @@ def _predicate_url(ref: str, url: str) -> _Predicate:
     return check
 
 
-def _find_iframe_panel_by_url(layout: dict[str, Any], url: str) -> dict[str, Any] | None:
+def _find_iframe_panel_by_url(
+    layout: dict[str, Any], url: str
+) -> dict[str, Any] | None:
     """Return the first iframe panel whose ``url`` matches, or None.
 
     Used by ``open`` / ``split`` against an external ``https://`` target:
@@ -607,7 +625,9 @@ def _wait_stable(
     while True:
         layout = _fetch_layout()
         if layout is None:
-            sys.stderr.write(f"warning: inspect failed while waiting for {op!r} to settle\n")
+            sys.stderr.write(
+                f"warning: inspect failed while waiting for {op!r} to settle\n"
+            )
             return "unknown", last
         last = layout
         if predicate(layout):
@@ -657,7 +677,9 @@ def _run_mutating_op(
         if status != 200:
             return _report_failure(op, status, body)
         _emit_allocated_ref(body)
-        sys.stderr.write("(broadcast sent; no observable layout-state change to confirm)\n")
+        sys.stderr.write(
+            "(broadcast sent; no observable layout-state change to confirm)\n"
+        )
         return EXIT_OK
 
     if os.environ.get(ENV_NO_WAIT_STABLE):
@@ -795,7 +817,9 @@ def _emit_layout_view(layout: dict[str, Any], *, as_json: bool, verbose: bool) -
 # ---------- where: neighbor lookup by tree structure ----------
 
 
-def _build_leaf_parents(node: Any, parent_chain: tuple[dict[str, Any], ...]) -> dict[int, tuple[dict[str, Any], ...]]:
+def _build_leaf_parents(
+    node: Any, parent_chain: tuple[dict[str, Any], ...]
+) -> dict[int, tuple[dict[str, Any], ...]]:
     """Map ``id(leaf)`` -> the chain of ancestor branches (root first).
 
     Used by ``_neighbors_in_direction`` to walk *up* from a leaf to the
@@ -917,7 +941,11 @@ def _cmd_where(args: argparse.Namespace) -> int:
             "tabs": _refs_in_group(leaf),
         },
         "neighbors": {
-            direction: [r for n in _neighbors_in_direction(layout, leaf, direction) for r in _refs_in_group(n)]
+            direction: [
+                r
+                for n in _neighbors_in_direction(layout, leaf, direction)
+                for r in _refs_in_group(n)
+            ]
             for direction in _CARDINAL_DIRECTIONS
         },
     }
@@ -993,8 +1021,12 @@ def _cmd_open(args: argparse.Namespace) -> int:
         "open",
         payload,
         _predicate_ref_present(ref),
-        on_success=lambda b, a: f"opened {ref} in {_describe_group(_find_leaf_for_ref(a, ref))}\n",
-        on_noop=lambda b: f"no change: {ref} is already open in {_describe_group(_find_leaf_for_ref(b, ref))}\n",
+        on_success=lambda b, a: (
+            f"opened {ref} in {_describe_group(_find_leaf_for_ref(a, ref))}\n"
+        ),
+        on_noop=lambda b: (
+            f"no change: {ref} is already open in {_describe_group(_find_leaf_for_ref(b, ref))}\n"
+        ),
     )
 
 
@@ -1080,8 +1112,12 @@ def _cmd_split(args: argparse.Namespace) -> int:
         "split",
         payload,
         _predicate_ref_present(ref),
-        on_success=lambda b, a: f"split: {ref} now in {_describe_group(_find_leaf_for_ref(a, ref))}\n",
-        on_noop=lambda b: f"no change: {ref} is already open in {_describe_group(_find_leaf_for_ref(b, ref))}\n",
+        on_success=lambda b, a: (
+            f"split: {ref} now in {_describe_group(_find_leaf_for_ref(a, ref))}\n"
+        ),
+        on_noop=lambda b: (
+            f"no change: {ref} is already open in {_describe_group(_find_leaf_for_ref(b, ref))}\n"
+        ),
     )
 
 
@@ -1140,7 +1176,9 @@ def _cmd_move(args: argparse.Namespace) -> int:
     skip_pre_op_noop = False
     if args.direction == _WITHIN_DIRECTION and relative_to != _SELF_REF:
         predicate: _Predicate = _predicate_share_group(ref, relative_to)
-        on_noop: _NoopMessage = lambda b: f"no change: {ref} is already in the same group as {relative_to}\n"
+        on_noop: _NoopMessage = lambda b: (
+            f"no change: {ref} is already in the same group as {relative_to}\n"
+        )
     elif os.environ.get(ENV_NO_WAIT_STABLE):
         # Predicate is unused; pick anything that won't fire the
         # ``_UNOBSERVABLE`` short-circuit (which prints the "no
@@ -1150,7 +1188,9 @@ def _cmd_move(args: argparse.Namespace) -> int:
     else:
         before_snapshot = _fetch_layout()
         if before_snapshot is None:
-            sys.stderr.write("warning: inspect failed before move; will not detect a no-op\n")
+            sys.stderr.write(
+                "warning: inspect failed before move; will not detect a no-op\n"
+            )
             before_snapshot = {}
         predicate = _predicate_any_change(before_snapshot)
         # Snapshot-relative predicate -- not usable for pre-op no-op detection.
@@ -1161,7 +1201,9 @@ def _cmd_move(args: argparse.Namespace) -> int:
         "move",
         payload,
         predicate,
-        on_success=lambda b, a: f"moved {ref} into {_describe_group(_find_leaf_for_ref(a, ref))}\n",
+        on_success=lambda b, a: (
+            f"moved {ref} into {_describe_group(_find_leaf_for_ref(a, ref))}\n"
+        ),
         on_noop=on_noop,
         skip_pre_op_noop=skip_pre_op_noop,
     )
@@ -1250,7 +1292,9 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     p_list = subparsers.add_parser("list", help="List addressable services + agents")
@@ -1260,7 +1304,9 @@ def main(argv: list[str] | None = None) -> int:
     p_inspect = subparsers.add_parser(
         "inspect", help="Describe the live dockview state (compact text by default)"
     )
-    p_inspect.add_argument("--json", action="store_true", help="Emit JSON (full detail)")
+    p_inspect.add_argument(
+        "--json", action="store_true", help="Emit JSON (full detail)"
+    )
     p_inspect.add_argument(
         "--verbose",
         action="store_true",
@@ -1269,10 +1315,15 @@ def main(argv: list[str] | None = None) -> int:
     p_inspect.set_defaults(func=_cmd_inspect)
 
     p_where = subparsers.add_parser(
-        "where", help="Show one panel's group tab-mates and the refs in each cardinal direction"
+        "where",
+        help="Show one panel's group tab-mates and the refs in each cardinal direction",
     )
-    p_where.add_argument("ref", help="Panel ref to locate (service name shorthand accepted)")
-    p_where.add_argument("--json", action="store_true", help="Emit JSON instead of text")
+    p_where.add_argument(
+        "ref", help="Panel ref to locate (service name shorthand accepted)"
+    )
+    p_where.add_argument(
+        "--json", action="store_true", help="Emit JSON instead of text"
+    )
     p_where.add_argument(
         "--verbose",
         action="store_true",
@@ -1295,7 +1346,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_open.set_defaults(func=_cmd_open)
 
-    p_focus = subparsers.add_parser("focus", help="Activate the named panel within its group")
+    p_focus = subparsers.add_parser(
+        "focus", help="Activate the named panel within its group"
+    )
     p_focus.add_argument("ref", help="Panel ref")
     p_focus.set_defaults(func=_cmd_focus)
 
@@ -1346,7 +1399,9 @@ def main(argv: list[str] | None = None) -> int:
     p_close.add_argument("ref", help="Panel ref")
     p_close.set_defaults(func=_cmd_close)
 
-    p_move = subparsers.add_parser("move", help="Relocate an existing panel (state-preserving)")
+    p_move = subparsers.add_parser(
+        "move", help="Relocate an existing panel (state-preserving)"
+    )
     p_move.add_argument("ref", help="Panel ref to move")
     p_move.add_argument("--relative-to", required=True, help="Ref to move relative to")
     p_move.add_argument(
@@ -1390,8 +1445,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_replace.set_defaults(func=_cmd_replace_url)
 
-    p_refresh = subparsers.add_parser("refresh", help="Reload an iframe (or all iframes for a service)")
-    p_refresh.add_argument("target", help="Panel ref. ``service:<name>`` reloads every iframe for that service.")
+    p_refresh = subparsers.add_parser(
+        "refresh", help="Reload an iframe (or all iframes for a service)"
+    )
+    p_refresh.add_argument(
+        "target",
+        help="Panel ref. ``service:<name>`` reloads every iframe for that service.",
+    )
     p_refresh.set_defaults(func=_cmd_refresh)
 
     args = parser.parse_args(argv)

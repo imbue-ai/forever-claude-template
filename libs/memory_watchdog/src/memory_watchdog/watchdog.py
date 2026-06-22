@@ -5,16 +5,18 @@ into an OOM-priority tier, and keeps each process's oom_score_adj in line with
 its tier. Under sustained memory pressure it sheds whole tiers from the most
 expendable up (agent build/test/browser subprocesses first, the user's own
 agents only as a last resort), recording every kill to a ledger and publishing a
-status file the UI banner reads. It also supervises the service manager and the
-telegram / terminal windows, restarting them if their process dies -- the
-reverse of bootstrap restarting this watchdog, closing the recovery loop.
+status file the UI banner reads.
+
+Liveness of the watchdog itself, and of every other background service, is owned
+by supervisord (see supervisord.conf): supervisord restarts this process if it
+dies, and restarts any service it sheds. The watchdog does not supervise other
+processes -- it only decides which to shed under pressure.
 """
 
 import os
 import signal
 import subprocess
 import threading
-from collections import defaultdict
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Final
@@ -23,16 +25,14 @@ from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.pure import pure
 from loguru import logger
 
-from memory_watchdog.classifier import classify_processes
+from memory_watchdog.classifier import classify_processes, find_services_session_name
 from memory_watchdog.data_types import (
     ISO_TIMESTAMP_FORMAT,
     SHEDDABLE_TIERS_IN_SHED_ORDER,
     MemoryPressure,
     MemoryStatus,
     ProcessClassification,
-    ProcessInfo,
     ShedRecord,
-    TmuxPane,
 )
 from memory_watchdog.ledger import (
     append_shed_records,
@@ -60,19 +60,6 @@ SHED_RELIEF_THRESHOLD: Final[float] = 0.80
 # the recent window.
 BANNER_PRESSURE_THRESHOLD: Final[float] = 0.80
 RECENT_SHED_WINDOW_SECONDS: Final[float] = 120.0
-# Supervised non-service windows and the command to relaunch each if its process
-# dies. bootstrap is the critical one (nothing else restarts it); terminal and
-# telegram are included so a memory kill does not leave them dead.
-SUPERVISED_WINDOW_COMMANDS: Final[dict[str, str]] = {
-    "bootstrap": "uv run bootstrap",
-    "telegram": "uv run telegram-bot",
-    "terminal": "bash scripts/run_ttyd.sh",
-}
-# A supervised window must look dead for this many consecutive polls before we
-# relaunch it, and we will not relaunch the same window more often than the
-# cooldown, so a service that exits cleanly is not thrashed.
-SUPERVISION_DEAD_POLLS_BEFORE_RESTART: Final[int] = 2
-SUPERVISION_RESTART_COOLDOWN_SECONDS: Final[float] = 30.0
 
 _MNGR_PREFIX_DEFAULT: Final[str] = "mngr-"
 
@@ -85,7 +72,13 @@ def _iso(moment: datetime) -> str:
     return format_nanosecond_iso_timestamp(moment)
 
 
-def _get_services_session_name() -> str:
+def _tmux_current_session_name() -> str:
+    """Best-effort tmux "current session" fallback used until supervisord is up.
+
+    Only consulted on the first polls before supervisord exists in the process
+    snapshot; once it does, the services session is derived from supervisord's
+    pane ancestor (see find_services_session_name), which is unambiguous.
+    """
     result = subprocess.run(
         ["tmux", "display-message", "-p", "#S"],
         capture_output=True,
@@ -93,55 +86,6 @@ def _get_services_session_name() -> str:
         check=False,
     )
     return result.stdout.strip()
-
-
-def _looks_like_idle_shell(command_line: str) -> bool:
-    """Whether a process command looks like a bare interactive shell.
-
-    Used to tell a window whose service has exited (leaving an idle shell at the
-    pane) from one whose service `exec`'d into the pane itself (e.g. ttyd), which
-    legitimately has no child process.
-    """
-    if not command_line:
-        return True
-    first_token = command_line.split(" ", 1)[0]
-    basename = first_token.rsplit("/", 1)[-1].lstrip("-")
-    return basename in {"bash", "sh", "zsh", "dash"}
-
-
-@pure
-def _windows_with_no_live_process(
-    panes: Sequence[TmuxPane],
-    processes: Sequence[ProcessInfo],
-    services_session_name: str,
-    supervised_window_names: frozenset[str],
-) -> set[str]:
-    """Return supervised windows that have died down to an idle shell.
-
-    A running service is a direct child of its window's pane shell, so a window
-    is considered dead only when its pane process is itself a bare shell with no
-    children. Requiring the shell check avoids falsely flagging a window whose
-    service `exec`'d into the pane (e.g. ttyd with no client attached has no
-    child but is very much alive). Only windows in the services session are
-    considered.
-    """
-    process_by_pid: dict[int, ProcessInfo] = {p.pid: p for p in processes}
-    pids_with_parent: dict[int, list[int]] = defaultdict(list)
-    for process in processes:
-        pids_with_parent[process.parent_pid].append(process.pid)
-    dead_windows: set[str] = set()
-    for pane in panes:
-        if pane.session_name != services_session_name:
-            continue
-        if pane.window_name not in supervised_window_names:
-            continue
-        pane_process = process_by_pid.get(pane.pane_pid)
-        if pane_process is None:
-            continue
-        has_no_children = not pids_with_parent.get(pane.pane_pid)
-        if has_no_children and _looks_like_idle_shell(pane_process.command_line):
-            dead_windows.add(pane.window_name)
-    return dead_windows
 
 
 @pure
@@ -192,30 +136,6 @@ def _shed_until_relieved(
     return all_records
 
 
-def _restart_window(session_name: str, window_name: str, command: str) -> None:
-    """Relaunch a supervised window's command via tmux, creating it if missing."""
-    window_target = f"{session_name}:{window_name}"
-    logger.warning("Restarting supervised window {} ({})", window_name, command)
-    list_result = subprocess.run(
-        ["tmux", "list-windows", "-t", session_name, "-F", "#{window_name}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    existing_windows = (
-        list_result.stdout.split("\n") if list_result.returncode == 0 else []
-    )
-    if window_name not in existing_windows:
-        subprocess.run(
-            ["tmux", "new-window", "-t", session_name, "-n", window_name, "-d"],
-            check=False,
-        )
-    subprocess.run(
-        ["tmux", "send-keys", "-t", window_target, command, "Enter"],
-        check=False,
-    )
-
-
 def _prune_recent_records(
     recent_records: Sequence[ShedRecord], now: datetime
 ) -> list[ShedRecord]:
@@ -235,14 +155,8 @@ def _prune_recent_records(
 
 
 def main() -> None:
-    services_session_name = _get_services_session_name()
     mngr_prefix = os.environ.get("MNGR_PREFIX", _MNGR_PREFIX_DEFAULT)
-    supervised_window_names = frozenset(SUPERVISED_WINDOW_COMMANDS)
-    logger.info(
-        "Started memory watchdog (services session: {}, agent prefix: {})",
-        services_session_name,
-        mngr_prefix,
-    )
+    logger.info("Started memory watchdog (agent prefix: {})", mngr_prefix)
 
     stop_event = threading.Event()
 
@@ -255,8 +169,6 @@ def main() -> None:
     # Loop state.
     pressure_over_threshold_since: float | None = None
     recent_records: list[ShedRecord] = []
-    dead_poll_count_by_window: dict[str, int] = defaultdict(int)
-    last_restart_time_by_window: dict[str, float] = {}
 
     while not stop_event.is_set():
         now = _now()
@@ -265,6 +177,13 @@ def main() -> None:
         processes = read_all_processes()
         panes = read_tmux_panes()
         user_created_names, agent_created_names = read_agent_label_sets()
+        # The watchdog has no tmux pane of its own (it is a supervisord child),
+        # so derive the services session from supervisord's pane ancestor. Fall
+        # back to tmux's notion of the current session only on the first polls,
+        # before supervisord appears in the snapshot.
+        services_session_name = (
+            find_services_session_name(processes, panes) or _tmux_current_session_name()
+        )
         classifications = classify_processes(
             processes=processes,
             panes=panes,
@@ -289,34 +208,6 @@ def main() -> None:
                 pressure_over_threshold_since = None
         else:
             pressure_over_threshold_since = None
-
-        # Supervise the recovery / interface windows; restart any that died.
-        dead_windows = _windows_with_no_live_process(
-            panes, processes, services_session_name, supervised_window_names
-        )
-        for window_name in supervised_window_names:
-            if window_name in dead_windows:
-                dead_poll_count_by_window[window_name] = (
-                    dead_poll_count_by_window[window_name] + 1
-                )
-            else:
-                dead_poll_count_by_window[window_name] = 0
-            is_dead_enough = (
-                dead_poll_count_by_window[window_name]
-                >= SUPERVISION_DEAD_POLLS_BEFORE_RESTART
-            )
-            last_restart = last_restart_time_by_window.get(window_name, 0.0)
-            is_off_cooldown = (
-                now.timestamp() - last_restart >= SUPERVISION_RESTART_COOLDOWN_SECONDS
-            )
-            if is_dead_enough and is_off_cooldown:
-                _restart_window(
-                    services_session_name,
-                    window_name,
-                    SUPERVISED_WINDOW_COMMANDS[window_name],
-                )
-                last_restart_time_by_window[window_name] = now.timestamp()
-                dead_poll_count_by_window[window_name] = 0
 
         # Publish the status the UI banner reads.
         recent_records = _prune_recent_records(recent_records, now)

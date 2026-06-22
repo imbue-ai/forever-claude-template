@@ -23,32 +23,18 @@ import {
   hasMoreAfter,
   isConversationNotFound,
   MAX_HELD_EVENTS,
-  type ToolResultEvent,
 } from "../models/Response";
 import { computeVisibleWindow } from "../models/virtualWindow";
 import { nextUserScrolledUp } from "../models/scrollFollow";
-import {
-  createRowMeasurer,
-  OVERSCAN_PX,
-  ESTIMATED_USER_HEIGHT_PX,
-  ESTIMATED_ASSISTANT_HEIGHT_PX,
-} from "./row-measurement";
+import { createRowMeasurer, OVERSCAN_PX } from "./row-measurement";
 import { connectToStream, disconnectFromStream, loadSnapshotWithStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { openLoginModal } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
-import {
-  renderUserMessage,
-  renderAssistantMessage,
-  buildToolResultsWithSkillExpansions,
-  computeAuthErrorHiddenEventIds,
-} from "./message-renderers";
-import { isHiddenUserMessage } from "./user-message-classification";
 import { buildAgentTerminalUrl, getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import { buildSections, type SectionView } from "./turn-grouping";
-import { ProgressBlock } from "./ProgressBlock";
+import { buildConversationRows, type RowDescriptor } from "./conversation-rows";
 import { ActivityIndicator } from "./ActivityIndicator";
 import { renderPendingMessages } from "./PendingMessageView";
 
@@ -88,9 +74,6 @@ const BACKFILL_TRIGGER_PX = 600;
 // there incrementally. Small enough that ordinary scrolling keeps paging; large
 // enough that a couple of pages' overshoot doesn't trigger a disruptive reload.
 const JUMP_GAP_EVENTS = 120;
-// Fallback height for a progress block until it has been measured. The user and
-// assistant estimates are shared with the subagent view (see row-measurement).
-const ESTIMATED_PROGRESS_HEIGHT_PX = 360;
 // Stable per-event height used to size the reserved (phantom) regions for history
 // that exists on the server but isn't loaded yet. It is deliberately a constant
 // rather than the measured average of the loaded window: the loaded window is a
@@ -104,14 +87,6 @@ const ESTIMATED_PROGRESS_HEIGHT_PX = 360;
 // residual (measured height vs count * this) is affected.
 const ESTIMATED_EVENT_HEIGHT_PX = 160;
 
-interface RowDescriptor {
-  key: string;
-  estimate: number;
-  // m.Children (not m.Vnode) because a row can be a component vnode
-  // (ProgressBlock), whose typed attrs do not fit the bare Vnode<{}, {}>.
-  render: () => m.Children;
-}
-
 function isNearBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
 }
@@ -122,87 +97,6 @@ function scrollToBottom(element: HTMLElement): void {
 
 function isProtoAgent(agentId: string): boolean {
   return getProtoAgents().some((p) => p.agent_id === agentId);
-}
-
-/**
- * Flatten the turn-grouped sections into the virtualized list's top-level rows.
- *
- * Each row is one mounted node in the message list: a user message, a whole
- * ProgressBlock for a turn that has tk steps, an ungrouped assistant message, a
- * stop-hook chip, or a trailing wrap-up reply. Keeping the grouping here (rather
- * than virtualizing raw events) preserves turn structure, the progress timeline,
- * skill expansions and auth-error hiding while still mounting only the windowed
- * rows. Render closures are invoked lazily so off-window rows never build their
- * vnodes (so MarkdownContent is only parsed for on-screen rows). Every row's
- * rendered root carries a DOM ``id`` equal to its ``key`` so measureRows can read
- * its height.
- */
-function buildRows(
-  agentId: string,
-  sections: SectionView[],
-  toolResults: Map<string, ToolResultEvent>,
-): RowDescriptor[] {
-  const rows: RowDescriptor[] = [];
-  for (const section of sections) {
-    const userEvent = section.user_event;
-    if (userEvent !== null && !isHiddenUserMessage(userEvent.content || "")) {
-      rows.push({
-        key: userEvent.event_id,
-        estimate: ESTIMATED_USER_HEIGHT_PX,
-        render: () => renderUserMessage(userEvent) as m.Vnode,
-      });
-    }
-
-    const hasSteps = section.items.some((i) => i.kind === "step");
-    if (hasSteps) {
-      const key = `progress-${section.key}`;
-      rows.push({
-        key,
-        estimate: ESTIMATED_PROGRESS_HEIGHT_PX,
-        render: () =>
-          m(ProgressBlock, {
-            id: key,
-            key,
-            items: section.items,
-            trailing_reply: section.trailing_reply,
-            toolResults,
-            agentId,
-          }),
-      });
-      continue;
-    }
-
-    // No steps this turn: render the body as plain chat -- prose and tool-call
-    // blocks inline, the same as assistant messages outside a progress section.
-    for (const item of section.items) {
-      if (item.kind === "ungrouped") {
-        for (const event of item.events) {
-          rows.push({
-            key: event.event_id,
-            estimate: ESTIMATED_ASSISTANT_HEIGHT_PX,
-            render: () => renderAssistantMessage(event, toolResults, agentId),
-          });
-        }
-      } else if (item.kind === "chip") {
-        const chipEvent = item.event;
-        if (!isHiddenUserMessage(chipEvent.content || "")) {
-          rows.push({
-            key: chipEvent.event_id,
-            estimate: ESTIMATED_USER_HEIGHT_PX,
-            render: () => renderUserMessage(chipEvent) as m.Vnode,
-          });
-        }
-      }
-    }
-    for (const event of section.trailing_reply) {
-      rows.push({
-        key: event.event_id,
-        estimate: ESTIMATED_ASSISTANT_HEIGHT_PX,
-        render: () => renderAssistantMessage(event, toolResults, agentId),
-      });
-    }
-  }
-  return rows;
 }
 
 export function ChatPanel(): m.Component<{ agentId: string }> {
@@ -687,13 +581,10 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     // rendered structure is identical to recomputing.
     const renderKey = `${agentId}|${getRenderVersion(agentId)}|${agentIsIdle ? 1 : 0}`;
     if (renderKey !== rowsCacheKey) {
-      const toolResults = buildToolResultsWithSkillExpansions(events);
-      const hiddenEventIds = computeAuthErrorHiddenEventIds(events);
-      const visibleEvents = hiddenEventIds.size > 0 ? events.filter((e) => !hiddenEventIds.has(e.event_id)) : events;
       // Both structure and decoration come from the transcript walk; there is no
-      // side-channel enrichment.
-      const sections = buildSections(visibleEvents, toolResults, agentIsIdle);
-      cachedRows = buildRows(agentId, sections, toolResults);
+      // side-channel enrichment. The same pipeline feeds the subagent view, so a
+      // subagent's "View conversation" renders an identical progress timeline.
+      cachedRows = buildConversationRows(agentId, events, agentIsIdle);
       rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
       rowsCacheKey = renderKey;
     }

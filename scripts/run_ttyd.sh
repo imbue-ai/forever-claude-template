@@ -4,8 +4,9 @@
 # 2. Registers the port via forward_port.py before starting ttyd
 # 3. Writes server events for discovery
 #
-# Started as an extra_window (not via bootstrap/services.toml) so that
-# terminal access is always available even if bootstrap fails.
+# Runs as the supervisord `terminal` program (started by supervisord, which
+# bootstrap launches), so terminal access is supervised and restarted alongside
+# the other services.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -19,7 +19,8 @@ delivered the correct result but did not. Typical triggers:
   prevented it from handling a realistic input shape.
 
 **Principle.** Reliability is the floor; simplicity is the target. Default to
-a single entry point and one flow. Add surface only when a specific invariant
+a subcommand per cleanly-separable step plus a `run all` that chains them (see
+`spec-summary.md`); add surface beyond that only when a specific invariant
 demands it.
 
 Do NOT use heal for a drift between what the skill *does* and what the user
@@ -126,12 +127,12 @@ content drawn from your conversation -- do not leave the placeholders.
 ```bash
 uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name heal-$TARGET \
-    --template crystallize-worker \
+    --template subskill-worker \
     --runtime-dir runtime/heal/$TARGET/ \
     --task-file runtime/heal/$TARGET/task.md
 ```
 
-The `crystallize-worker` template pre-installs `heal-skill-worker`.
+The `subskill-worker` template pre-installs `heal-skill-worker`.
 
 ## Step 4: Proxy the final-artifact gate, then merge
 

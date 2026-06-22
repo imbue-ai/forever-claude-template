@@ -1,149 +1,107 @@
 """Integration tests for /service/<name>/ forwarding inside the system_interface.
 
-Spins up a small stub FastAPI app on an ephemeral port as the "backend"
+Spins up a small stub Flask app on an ephemeral port as the "backend"
 service, registers it with the system_interface's AgentManager via a
 controlled applications.toml, and exercises the proxy end-to-end.
 """
 
-import socket
-import threading
-import time
-from collections.abc import AsyncGenerator
-from collections.abc import Generator
+from collections.abc import Iterator
 
 import pytest
-import uvicorn
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi.responses import HTMLResponse
-from fastapi.responses import JSONResponse
-from fastapi.responses import PlainTextResponse
-from fastapi.responses import StreamingResponse
-from fastapi.testclient import TestClient
-from starlette.websockets import WebSocket
-from starlette.websockets import WebSocketDisconnect
+import simple_websocket
+from flask import Flask
+from flask import Response
+from flask import request
+from flask.testing import FlaskClient
+from flask_sock import Sock
 
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
 from imbue.system_interface.models import ApplicationEntry
 from imbue.system_interface.server import create_application
+from imbue.system_interface.service_dispatcher import _connect_backend_websocket
+from imbue.system_interface.testing import ServedApp
+from imbue.system_interface.testing import close_ws
+from imbue.system_interface.testing import open_ws
+from imbue.system_interface.testing import serve_app
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
-
-def _find_free_port() -> int:
-    """Return an ephemeral TCP port that is currently free."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+_WS_RECEIVE_TIMEOUT = 10.0
 
 
-class _UvicornThread(threading.Thread):
-    """Run a uvicorn server in a background thread for test scoping."""
+def _build_stub_backend() -> Flask:
+    """Build a tiny Flask app that exercises the proxy's HTML/cookie/SSE/WS paths."""
+    stub = Flask(__name__, static_folder=None)
+    sock = Sock(stub)
 
-    def __init__(self, app: FastAPI, port: int) -> None:
-        super().__init__(daemon=True)
-        self._config = uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="error")
-        self.server = uvicorn.Server(self._config)
-
-    def run(self) -> None:
-        self.server.run()
-
-    def stop(self) -> None:
-        self.server.should_exit = True
-
-
-def _wait_for_port(port: int, timeout_seconds: float = 3.0) -> None:
-    """Poll until a TCP port is accepting connections."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                return
-        except OSError:
-            time.sleep(0.05)
-    raise TimeoutError(f"Backend port {port} did not come up within {timeout_seconds}s")
-
-
-def _build_stub_backend() -> FastAPI:
-    """Build a tiny FastAPI app that exercises the proxy's HTML/cookie/SSE paths."""
-    stub = FastAPI()
-
-    @stub.get("/", response_class=HTMLResponse)
-    def index() -> HTMLResponse:
-        return HTMLResponse(
-            '<html><head><title>stub</title></head><body><a href="/relative-link">rel</a></body></html>'
+    @stub.route("/")
+    def index() -> Response:
+        return Response(
+            '<html><head><title>stub</title></head><body><a href="/relative-link">rel</a></body></html>',
+            mimetype="text/html",
         )
 
-    @stub.get("/plain")
-    def plain() -> PlainTextResponse:
-        return PlainTextResponse("hello")
+    @stub.route("/plain")
+    def plain() -> Response:
+        return Response("hello", mimetype="text/plain")
 
-    @stub.get("/setcookie")
-    def setcookie() -> PlainTextResponse:
-        response = PlainTextResponse("ok")
+    @stub.route("/setcookie")
+    def setcookie() -> Response:
+        response = Response("ok", mimetype="text/plain")
         response.headers["Set-Cookie"] = "sid=abc; Path=/"
         return response
 
-    @stub.get("/json")
-    def json_endpoint() -> JSONResponse:
-        return JSONResponse({"ok": True})
+    @stub.route("/json")
+    def json_endpoint() -> Response:
+        return Response('{"ok": true}', mimetype="application/json")
 
-    @stub.get("/echo-query")
-    def echo_query(request: Request) -> JSONResponse:
-        return JSONResponse({"query": request.url.query})
+    @stub.route("/echo-query")
+    def echo_query() -> Response:
+        return Response(
+            '{"query": "' + request.query_string.decode() + '"}',
+            mimetype="application/json",
+        )
 
-    @stub.get("/events")
-    def sse_endpoint() -> StreamingResponse:
-        async def gen() -> AsyncGenerator[bytes, None]:
+    @stub.route("/events")
+    def sse_endpoint() -> Response:
+        def gen() -> Iterator[bytes]:
             yield b"data: chunk-1\n\n"
             yield b"data: chunk-2\n\n"
 
-        return StreamingResponse(
-            gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache"},
-        )
+        return Response(gen(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache"})
 
-    @stub.websocket("/ws-echo")
-    async def ws_echo(websocket: WebSocket) -> None:
-        await websocket.accept()
-        connected = True
-        try:
-            while connected:
-                msg = await websocket.receive_text()
-                await websocket.send_text(f"echo:{msg}")
-        except WebSocketDisconnect:
-            connected = False
+    @sock.route("/ws-echo")
+    def ws_echo(ws: simple_websocket.Server) -> None:
+        is_connected = True
+        while is_connected:
+            try:
+                msg = ws.receive()
+            except simple_websocket.ConnectionClosed:
+                is_connected = False
+            else:
+                ws.send(f"echo:{msg}")
 
-    @stub.websocket("/ws-server-close")
-    async def ws_server_close(websocket: WebSocket) -> None:
+    @sock.route("/ws-server-close")
+    def ws_server_close(ws: simple_websocket.Server) -> None:
         # Accept then immediately close from the backend side, without the
         # client ever sending anything. Exercises the proxy path where the
         # backend->client direction finishes first while client->backend is
         # still parked on receive().
-        await websocket.accept()
-        await websocket.close()
+        ws.close()
 
     return stub
 
 
 @pytest.fixture
-def stub_backend() -> Generator[tuple[str, int], None, None]:
-    """Start the stub backend and yield (base_url, port)."""
-    port = _find_free_port()
-    thread = _UvicornThread(_build_stub_backend(), port)
-    thread.start()
-    try:
-        _wait_for_port(port)
-        yield f"http://127.0.0.1:{port}", port
-    finally:
-        thread.stop()
-        thread.join(timeout=2)
+def stub_backend() -> Iterator[ServedApp]:
+    """Start the stub backend on an ephemeral port and yield its ServedApp handle."""
+    with serve_app(_build_stub_backend()) as served:
+        yield served
 
 
 @pytest.fixture
-def workspace_app_with_stub(stub_backend: tuple[str, int], monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    """Build a system_interface FastAPI app wired to a stub backend under service 'web'.
+def workspace_app_with_stub(stub_backend: ServedApp, monkeypatch: pytest.MonkeyPatch) -> Flask:
+    """Build a system_interface Flask app wired to a stub backend under service 'web'.
 
     Injects a pre-built ``AgentManager`` seeded with the stub's URL as the
     'web' service. The real ``mngr observe`` pipeline is not started, so the
@@ -154,18 +112,23 @@ def workspace_app_with_stub(stub_backend: tuple[str, int], monkeypatch: pytest.M
 
     broadcaster = WebSocketBroadcaster()
     agent_manager = AgentManager.build(broadcaster)
-    agent_manager._applications = [ApplicationEntry(name="web", url=stub_backend[0])]
+    agent_manager._applications = [ApplicationEntry(name="web", url=stub_backend.http_url)]
 
     return create_application(Config(), agent_manager=agent_manager)
 
 
 @pytest.fixture
-def workspace_client(workspace_app_with_stub: FastAPI) -> Generator[TestClient, None, None]:
-    with TestClient(workspace_app_with_stub) as client:
-        yield client
+def workspace_client(workspace_app_with_stub: Flask) -> FlaskClient:
+    return workspace_app_with_stub.test_client()
 
 
-def test_service_sw_js_is_served_without_stub(workspace_client: TestClient) -> None:
+@pytest.fixture
+def workspace_served(workspace_app_with_stub: Flask) -> Iterator[ServedApp]:
+    with serve_app(workspace_app_with_stub) as served:
+        yield served
+
+
+def test_service_sw_js_is_served_without_stub(workspace_client: FlaskClient) -> None:
     """The scoped service worker is served statically from the system_interface."""
     response = workspace_client.get("/service/web/__sw.js")
     assert response.status_code == 200
@@ -173,7 +136,7 @@ def test_service_sw_js_is_served_without_stub(workspace_client: TestClient) -> N
     assert "const PREFIX = '/service/web'" in response.text
 
 
-def test_first_navigation_returns_bootstrap_when_sw_cookie_missing(workspace_client: TestClient) -> None:
+def test_first_navigation_returns_bootstrap_when_sw_cookie_missing(workspace_client: FlaskClient) -> None:
     """First HTML navigation without the sw_installed cookie gets the bootstrap page."""
     response = workspace_client.get(
         "/service/web/",
@@ -183,59 +146,51 @@ def test_first_navigation_returns_bootstrap_when_sw_cookie_missing(workspace_cli
     assert "serviceWorker.register" in response.text
 
 
-def test_forwarded_html_has_base_tag_and_ws_shim(workspace_client: TestClient) -> None:
+def test_forwarded_html_has_base_tag_and_ws_shim(workspace_client: FlaskClient) -> None:
     """Once the SW cookie is present, HTML responses from the backend get rewritten."""
+    workspace_client.set_cookie("sw_installed_web", "1")
     response = workspace_client.get(
         "/service/web/",
         headers={"sec-fetch-mode": "navigate"},
-        cookies={"sw_installed_web": "1"},
     )
     assert response.status_code == 200
     assert '<base href="/service/web/">' in response.text
     assert "OrigWebSocket" in response.text
 
 
-def test_forwarded_absolute_href_is_rewritten(workspace_client: TestClient) -> None:
+def test_forwarded_absolute_href_is_rewritten(workspace_client: FlaskClient) -> None:
     """Absolute-path attributes in HTML are rewritten to the service prefix."""
-    response = workspace_client.get(
-        "/service/web/",
-        cookies={"sw_installed_web": "1"},
-    )
+    workspace_client.set_cookie("sw_installed_web", "1")
+    response = workspace_client.get("/service/web/")
     assert 'href="/service/web/relative-link"' in response.text
 
 
-def test_forwarded_plain_text_is_unchanged(workspace_client: TestClient) -> None:
+def test_forwarded_plain_text_is_unchanged(workspace_client: FlaskClient) -> None:
     """Non-HTML responses pass through as-is."""
-    response = workspace_client.get(
-        "/service/web/plain",
-        cookies={"sw_installed_web": "1"},
-    )
+    workspace_client.set_cookie("sw_installed_web", "1")
+    response = workspace_client.get("/service/web/plain")
     assert response.status_code == 200
     assert response.text == "hello"
 
 
-def test_forwarded_json_is_unchanged(workspace_client: TestClient) -> None:
+def test_forwarded_json_is_unchanged(workspace_client: FlaskClient) -> None:
     """JSON responses pass through as-is."""
-    response = workspace_client.get(
-        "/service/web/json",
-        cookies={"sw_installed_web": "1"},
-    )
+    workspace_client.set_cookie("sw_installed_web", "1")
+    response = workspace_client.get("/service/web/json")
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    assert response.get_json() == {"ok": True}
 
 
-def test_set_cookie_is_rewritten_to_service_path(workspace_client: TestClient) -> None:
+def test_set_cookie_is_rewritten_to_service_path(workspace_client: FlaskClient) -> None:
     """Set-Cookie headers are scoped under /service/<name>/ so services don't pollute the origin."""
-    response = workspace_client.get(
-        "/service/web/setcookie",
-        cookies={"sw_installed_web": "1"},
-    )
+    workspace_client.set_cookie("sw_installed_web", "1")
+    response = workspace_client.get("/service/web/setcookie")
     assert response.status_code == 200
     set_cookie = response.headers.get("set-cookie", "")
     assert "Path=/service/web/" in set_cookie
 
 
-def test_unknown_service_returns_loading_page_for_html(workspace_client: TestClient) -> None:
+def test_unknown_service_returns_loading_page_for_html(workspace_client: FlaskClient) -> None:
     """Unknown service with HTML accept gets the auto-retrying loading page."""
     response = workspace_client.get(
         "/service/nonexistent/",
@@ -246,7 +201,7 @@ def test_unknown_service_returns_loading_page_for_html(workspace_client: TestCli
     assert "location.reload" in response.text
 
 
-def test_unknown_service_returns_502_for_non_html(workspace_client: TestClient) -> None:
+def test_unknown_service_returns_502_for_non_html(workspace_client: FlaskClient) -> None:
     """Unknown service for a non-HTML request returns 502 immediately."""
     response = workspace_client.get(
         "/service/nonexistent/api",
@@ -255,22 +210,20 @@ def test_unknown_service_returns_502_for_non_html(workspace_client: TestClient) 
     assert response.status_code == 502
 
 
-def test_forwarded_query_string_reaches_backend(workspace_client: TestClient) -> None:
+def test_forwarded_query_string_reaches_backend(workspace_client: FlaskClient) -> None:
     """Query string on the incoming request is preserved in the backend URL."""
-    response = workspace_client.get(
-        "/service/web/echo-query?foo=bar&baz=qux",
-        cookies={"sw_installed_web": "1"},
-    )
+    workspace_client.set_cookie("sw_installed_web", "1")
+    response = workspace_client.get("/service/web/echo-query?foo=bar&baz=qux")
     assert response.status_code == 200
-    assert response.json()["query"] == "foo=bar&baz=qux"
+    assert response.get_json()["query"] == "foo=bar&baz=qux"
 
 
-def test_forwarded_sse_is_streamed(workspace_client: TestClient) -> None:
+def test_forwarded_sse_is_streamed(workspace_client: FlaskClient) -> None:
     """An SSE request (accept: text/event-stream) streams chunks back to the client."""
+    workspace_client.set_cookie("sw_installed_web", "1")
     response = workspace_client.get(
         "/service/web/events",
         headers={"accept": "text/event-stream"},
-        cookies={"sw_installed_web": "1"},
     )
     assert response.status_code == 200
     assert "text/event-stream" in response.headers.get("content-type", "")
@@ -279,31 +232,94 @@ def test_forwarded_sse_is_streamed(workspace_client: TestClient) -> None:
     assert "chunk-2" in body
 
 
-def test_websocket_echo_forwards_bidirectionally(workspace_client: TestClient) -> None:
+@pytest.mark.timeout(15)
+def test_websocket_echo_forwards_bidirectionally(workspace_served: ServedApp) -> None:
     """The WS dispatcher byte-forwards messages between client and backend service."""
-    with workspace_client.websocket_connect("/service/web/ws-echo") as ws:
-        ws.send_text("hello")
-        assert ws.receive_text() == "echo:hello"
-        ws.send_text("world")
-        assert ws.receive_text() == "echo:world"
+    ws = open_ws(workspace_served, "/service/web/ws-echo")
+    try:
+        ws.send("hello")
+        assert ws.receive(timeout=_WS_RECEIVE_TIMEOUT) == "echo:hello"
+        ws.send("world")
+        assert ws.receive(timeout=_WS_RECEIVE_TIMEOUT) == "echo:world"
+    finally:
+        close_ws(ws)
 
 
 @pytest.mark.timeout(15)
-def test_websocket_backend_close_propagates_to_client(workspace_client: TestClient) -> None:
+def test_websocket_echoes_client_subprotocol(workspace_served: ServedApp) -> None:
+    """The proxy echoes the client's offered WS subprotocol back in the handshake.
+
+    ttyd's browser client opens its socket with the ``tty`` subprotocol, and
+    Chrome aborts the handshake (close 1006, "press enter to reconnect") if the
+    server's 101 response does not echo it. The proxy must reflect the offered
+    subprotocol so the negotiated value is ``tty``, not ``None``.
+    """
+    ws = open_ws(workspace_served, "/service/web/ws-echo", subprotocols=["tty"])
+    try:
+        assert ws.subprotocol == "tty"
+        ws.send("hello")
+        assert ws.receive(timeout=_WS_RECEIVE_TIMEOUT) == "echo:hello"
+    finally:
+        close_ws(ws)
+
+
+@pytest.mark.timeout(15)
+def test_broadcaster_websocket_connects_without_subprotocol(workspace_served: ServedApp) -> None:
+    """A client offering no subprotocol still connects and gets none echoed.
+
+    Guards against the subprotocol passthrough regressing the broadcaster
+    ``/api/ws`` and proto-agent-logs streams, which (unlike ttyd) never offer a
+    subprotocol and must keep negotiating ``None``.
+    """
+    ws = open_ws(workspace_served, "/api/ws")
+    try:
+        assert ws.subprotocol is None
+        # The broadcaster pushes an initial agents snapshot on connect.
+        assert ws.receive(timeout=_WS_RECEIVE_TIMEOUT) is not None
+    finally:
+        close_ws(ws)
+
+
+@pytest.mark.timeout(15)
+def test_websocket_backend_close_propagates_to_client(workspace_served: ServedApp) -> None:
     """When the backend WS closes first, the proxy must cancel the still-parked
     client->backend direction and close the client socket rather than hanging
     forever (issue E)."""
-    with pytest.raises(WebSocketDisconnect):
-        with workspace_client.websocket_connect("/service/web/ws-server-close") as ws:
-            # The client never sends; without the survivor-cancel fix the proxy
-            # would stay blocked on the client->backend receive() and this
-            # receive would hang until the test timeout instead of disconnecting.
-            ws.receive_text()
+    ws = open_ws(workspace_served, "/service/web/ws-server-close")
+    try:
+        # The client never sends; the proxy must propagate the backend-initiated
+        # close to the client instead of hanging on the client->backend receive.
+        with pytest.raises(simple_websocket.ConnectionClosed):
+            ws.receive(timeout=_WS_RECEIVE_TIMEOUT)
+    finally:
+        close_ws(ws)
 
 
-def test_websocket_unknown_service_closes_with_4004(workspace_client: TestClient) -> None:
+@pytest.mark.timeout(15)
+def test_websocket_unknown_service_closes_with_4004(workspace_served: ServedApp) -> None:
     """A WS upgrade against an unregistered service gets closed with 4004."""
-    with pytest.raises(WebSocketDisconnect) as excinfo:
-        with workspace_client.websocket_connect("/service/nonexistent/anything") as ws:
-            ws.receive_text()
-    assert excinfo.value.code == 4004
+    ws = open_ws(workspace_served, "/service/nonexistent/anything")
+    try:
+        with pytest.raises(simple_websocket.ConnectionClosed) as excinfo:
+            ws.receive(timeout=_WS_RECEIVE_TIMEOUT)
+        assert excinfo.value.reason == 4004
+    finally:
+        close_ws(ws)
+
+
+@pytest.mark.timeout(15)
+def test_connect_backend_websocket_falls_back_across_addresses(stub_backend: ServedApp) -> None:
+    """The backend WS connect iterates resolved addresses instead of only trying the first.
+
+    The stub listener binds IPv4 ``127.0.0.1`` only (like ttyd). Connecting via a
+    ``localhost`` URL on a dual-stack host resolves ``::1`` first, which would be
+    refused; the helper must fall back to ``127.0.0.1`` and connect. (On a
+    single-stack host ``localhost`` resolves straight to ``127.0.0.1`` and the
+    first attempt already succeeds -- either way the connection works.)
+    """
+    backend_ws = _connect_backend_websocket(f"ws://localhost:{stub_backend.port}/ws-echo", None)
+    try:
+        backend_ws.send("ping")
+        assert backend_ws.receive(timeout=_WS_RECEIVE_TIMEOUT) == "echo:ping"
+    finally:
+        close_ws(backend_ws)

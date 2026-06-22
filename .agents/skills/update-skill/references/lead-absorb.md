@@ -85,7 +85,7 @@ content drawn from your conversation -- do not leave the placeholders.
 ```bash
 uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name update-$TARGET \
-    --template crystallize-worker \
+    --template subskill-worker \
     --runtime-dir runtime/update/$TARGET/ \
     --task-file runtime/update/$TARGET/task.md
 ```

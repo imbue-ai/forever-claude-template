@@ -19,6 +19,7 @@ import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
+import { reloadInterface } from "../reload";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
   addAgentsUpdatedListener,
@@ -1197,6 +1198,9 @@ async function handleLayoutOp(event: LayoutOpEvent): Promise<void> {
       return;
     case "refresh":
       await handleRefresh(event.args, requesterAgentId);
+      return;
+    case "reload_system_interface":
+      reloadInterface();
       return;
   }
 }

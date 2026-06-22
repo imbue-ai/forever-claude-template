@@ -51,7 +51,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 # Tool names that count as "pure reads" and are excluded from the tally. The
 # spec (concise.md) is explicit about these three names.
 READ_ONLY_TOOLS: frozenset[str] = frozenset({"Read", "Grep", "Glob"})

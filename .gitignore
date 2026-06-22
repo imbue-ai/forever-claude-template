@@ -330,3 +330,13 @@ scripts/notify_user.local.sh
 
 # Reviewer plugin scratch output
 .reviewer/tmp/
+
+# Playwright MCP scratch output (snapshots, screenshots) and dev-only demo
+# screenshots for the permission-request progress view.
+**/.playwright-mcp/
+**/permission-*.png
+
+# Dev-only visual mockup for the permission-request progress view (not part of
+# the app or its tests)
+apps/system_interface/frontend/permission-demo.html
+apps/system_interface/frontend/src/permission-demo.ts

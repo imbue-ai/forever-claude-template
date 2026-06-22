@@ -719,10 +719,11 @@ class AgentManager:
             # same project-local .mngr/settings.toml that mngr create uses --
             # otherwise observe picks up ~/.mngr config, which inside a Docker
             # agent typically has providers enabled (e.g. modal) that are not
-            # authenticated. Provider errors make `list_agents` error out,
-            # which in turn prevents periodic DISCOVERY_FULL snapshots from
-            # being written, so the system_interface's agent list drifts out
-            # of sync with reality whenever an individual event is missed.
+            # authenticated. `mngr observe` itself now tolerates unauthenticated
+            # providers (its discovery runs under ErrorBehavior.CONTINUE, so a
+            # failing provider is surfaced per-provider and still emits a
+            # DISCOVERY_FULL snapshot); scoping to the project providers via cwd
+            # is kept only to avoid that noise and the wasted credential probes.
             # `is_checked_by_group=False` because we terminate this long-running
             # subprocess explicitly via `.terminate()` in `stop()`; that SIGTERM
             # produces a non-zero exit code that should not surface as a
@@ -1054,9 +1055,11 @@ class AgentManager:
             self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
             self._last_event_type_by_agent[agent_id] = new_last_type
             # Refreshed alongside the type so the stale-tail check sees the
-            # current tail's time. Kept out of the short-circuit above so a new
-            # event that leaves pending/type unchanged does not force a recompute
-            # (and a per-event marker stat) on every streamed line.
+            # current tail's time. This sits under the same short-circuit above:
+            # a new event that leaves pending/type unchanged returns early and
+            # skips both this refresh and the recompute (and its per-event marker
+            # stat), so streamed lines that don't change the derived signals stay
+            # cheap.
             self._last_event_timestamp_by_agent[agent_id] = new_last_timestamp
 
         self._recompute_activity_state(agent_id, broadcast_on_change=True)

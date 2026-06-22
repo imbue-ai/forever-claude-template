@@ -11,32 +11,28 @@ from memory_watchdog.data_types import (
     TmuxPane,
 )
 
-# Maps a bootstrap-managed service (the part of the window name after "svc-") to
-# its tier. Services not listed here -- including any an agent adds to
-# services.toml -- default to AUXILIARY_SERVICE (tier 6).
-_TIER_BY_SERVICE_NAME: Final[dict[str, Tier]] = {
-    "system_interface": Tier.USER_INTERFACE,
-    "cloudflared": Tier.USER_INTERFACE,
-    "memory-watchdog": Tier.RECOVERY,
-    "runtime-backup": Tier.DURABILITY,
-    "host-backup": Tier.DURABILITY,
-    "web": Tier.AUXILIARY_SERVICE,
-    "app-watcher": Tier.AUXILIARY_SERVICE,
-    "deferred-install": Tier.AUXILIARY_SERVICE,
-}
+# Background services run as [program:*] children of supervisord (see
+# supervisord.conf), not as their own tmux windows. A service is identified by a
+# distinctive token in the command line of supervisord's direct child: for the
+# `bash -c "... && realserver"` wrappers that token is the realserver name; for
+# `uv run X` services it is X. The first matching token wins, so the tokens are
+# chosen to be unambiguous across services. A supervisord child whose command
+# matches nothing defaults to AUXILIARY_SERVICE (tier 6) -- so an agent-added
+# program is shed before worker agents but after the recognized infrastructure.
+_SERVICE_TIER_RULES: Final[tuple[tuple[str, str, Tier], ...]] = (
+    ("system-interface", "system_interface", Tier.USER_INTERFACE),
+    ("system_interface", "system_interface", Tier.USER_INTERFACE),
+    ("cloudflare-tunnel", "cloudflared", Tier.USER_INTERFACE),
+    ("run_ttyd", "terminal", Tier.USER_INTERFACE),
+    ("memory-watchdog", "memory-watchdog", Tier.RECOVERY),
+    ("runtime-backup", "runtime-backup", Tier.DURABILITY),
+    ("host-backup", "host-backup", Tier.DURABILITY),
+    ("web-server", "web", Tier.AUXILIARY_SERVICE),
+    ("app-watcher", "app-watcher", Tier.AUXILIARY_SERVICE),
+    ("deferred_install", "deferred-install", Tier.AUXILIARY_SERVICE),
+)
 
-# Maps the non-service ("extra") windows of the services session to their tier.
-# Window "0" is the services agent's idle sleep window -- protected so the
-# session itself stays alive. Unlisted utility windows default to
-# AUXILIARY_SERVICE.
-_TIER_BY_SERVICES_WINDOW_NAME: Final[dict[str, Tier]] = {
-    "0": Tier.INFRASTRUCTURE,
-    "bootstrap": Tier.RECOVERY,
-    "terminal": Tier.USER_INTERFACE,
-    "telegram": Tier.AUXILIARY_SERVICE,
-}
-
-_SVC_PREFIX: Final[str] = "svc-"
+_SUPERVISORD_COMMAND_BASENAME: Final[str] = "supervisord"
 
 # Depth (relative to an agent session's pane shell) at and below which a process
 # is treated as an agent-spawned child (builds, tests, browsers) rather than the
@@ -46,11 +42,30 @@ _AGENT_CHILD_MIN_DEPTH: Final[int] = 2
 
 
 @pure
-def _tier_for_services_window(window_name: str) -> Tier:
-    if window_name.startswith(_SVC_PREFIX):
-        service_name = window_name[len(_SVC_PREFIX) :]
-        return _TIER_BY_SERVICE_NAME.get(service_name, Tier.AUXILIARY_SERVICE)
-    return _TIER_BY_SERVICES_WINDOW_NAME.get(window_name, Tier.AUXILIARY_SERVICE)
+def _command_basename(command_line: str) -> str:
+    first_token = command_line.split(" ", 1)[0] if command_line else ""
+    return first_token.rsplit("/", 1)[-1]
+
+
+@pure
+def _is_supervisord(command_line: str) -> bool:
+    return _command_basename(command_line) == _SUPERVISORD_COMMAND_BASENAME
+
+
+@pure
+def _short_command_label(command_line: str, fallback: str) -> str:
+    """A compact label for a process, for the ledger and banner."""
+    basename = _command_basename(command_line)
+    return basename or fallback
+
+
+@pure
+def _service_tier_and_label(command_line: str) -> tuple[Tier, str]:
+    """Tier + label for one supervisord child, matched by its command line."""
+    for token, label, tier in _SERVICE_TIER_RULES:
+        if token in command_line:
+            return tier, label
+    return Tier.AUXILIARY_SERVICE, _short_command_label(command_line, "service")
 
 
 @pure
@@ -121,11 +136,32 @@ def _walk_subtree_depths(
 
 
 @pure
-def _short_command_label(command_line: str, fallback: str) -> str:
-    """A compact label for a process, for the ledger and banner."""
-    first_token = command_line.split(" ", 1)[0] if command_line else ""
-    basename = first_token.rsplit("/", 1)[-1]
-    return basename or fallback
+def find_services_session_name(
+    processes: Sequence[ProcessInfo],
+    panes: Sequence[TmuxPane],
+) -> str | None:
+    """Return the tmux session that owns supervisord, or None if not found.
+
+    The watchdog runs as a supervisord child with no tmux pane of its own, so it
+    cannot ask tmux "what session am I in?". Instead the services session is
+    defined as whichever session's pane is an ancestor of the supervisord
+    process: walk parent pids up from supervisord until we reach a pane pid.
+    """
+    process_by_pid: dict[int, ProcessInfo] = {p.pid: p for p in processes}
+    session_by_pane_pid: dict[int, str] = {p.pane_pid: p.session_name for p in panes}
+    for process in processes:
+        if not _is_supervisord(process.command_line):
+            continue
+        # Walk up from supervisord toward its pane shell.
+        current: int | None = process.pid
+        seen: set[int] = set()
+        while current is not None and current not in seen:
+            if current in session_by_pane_pid:
+                return session_by_pane_pid[current]
+            seen.add(current)
+            parent = process_by_pid.get(current)
+            current = parent.parent_pid if parent is not None else None
+    return None
 
 
 @pure
@@ -139,12 +175,18 @@ def classify_processes(
 ) -> list[ProcessClassification]:
     """Assign every process an OOM-priority tier.
 
-    Processes are grouped by the tmux pane whose subtree contains them. Panes in
-    the services session map to a tier by window name; panes in an agent session
-    map to the agent's tier, with that agent's tool subprocesses (depth >= 2)
-    dropped to AGENT_CHILD. Processes under no pane (the tmux server, sshd, the
-    container entrypoint, and anything else we do not recognize) are treated as
-    INFRASTRUCTURE so they are never shed.
+    Three passes:
+
+    1. Services. Each supervisord child roots one service's subtree, tiered by
+       matching its command line; supervisord itself is infrastructure. This is
+       how background services are tiered now that they are supervisord children
+       rather than individual ``svc-<name>`` tmux windows.
+    2. Panes. Agent sessions map to their agent's tier, with that agent's tool
+       subprocesses (depth >= 2) dropped to AGENT_CHILD. The services session's
+       remaining processes -- the supervisord launch chain and the services
+       agent's own idle shell -- are infrastructure we never shed.
+    3. Leftovers. Processes under no pane (the tmux server, sshd, the container
+       entrypoint, anything else) are treated as INFRASTRUCTURE.
     """
     process_by_pid: dict[int, ProcessInfo] = {p.pid: p for p in processes}
     children_by_parent = _build_children_by_parent(processes)
@@ -152,8 +194,44 @@ def classify_processes(
     classifications: list[ProcessClassification] = []
     assigned_pids: set[int] = set()
 
-    # Assign each pane's subtree. Panes are processed in order; a process already
-    # claimed by an earlier pane is not reclassified.
+    # Pass 1: supervisord-managed services. supervisord (and its launch chain,
+    # classified as infrastructure in pass 2) is never shed; each direct child
+    # roots a service subtree tiered by command line.
+    for process in processes:
+        if not _is_supervisord(process.command_line):
+            continue
+        assigned_pids.add(process.pid)
+        classifications.append(
+            ProcessClassification(
+                pid=process.pid,
+                resident_kb=process.resident_kb,
+                tier=Tier.INFRASTRUCTURE,
+                label=_SUPERVISORD_COMMAND_BASENAME,
+            )
+        )
+        for child_pid in children_by_parent.get(process.pid, ()):
+            child = process_by_pid.get(child_pid)
+            if child is None:
+                continue
+            tier, label = _service_tier_and_label(child.command_line)
+            for pid, _depth in _walk_subtree_depths(
+                child_pid, children_by_parent, frozenset(assigned_pids)
+            ):
+                descendant = process_by_pid.get(pid)
+                if descendant is None:
+                    continue
+                assigned_pids.add(pid)
+                classifications.append(
+                    ProcessClassification(
+                        pid=pid,
+                        resident_kb=descendant.resident_kb,
+                        tier=tier,
+                        label=label,
+                    )
+                )
+
+    # Pass 2: panes. Assign each pane's subtree; a process already claimed (by
+    # pass 1 or an earlier pane) is not reclassified.
     for pane in panes:
         if pane.pane_pid not in process_by_pid:
             continue
@@ -171,17 +249,17 @@ def classify_processes(
             process = process_by_pid.get(pid)
             if process is None:
                 continue
-            if depth == 0:
-                # The pane's own shell. Never shed it: killing it tears down the
-                # window, which would lose terminal access, prevent bootstrap
-                # from detecting a service exit (its exit-status recorder runs in
-                # this shell), and drop an agent session instead of leaving it
-                # idle for revive-on-message.
+            if is_services_session:
+                # The supervisord launch chain (shell, uv) and the services
+                # agent's own idle shell. Never shed: killing any of these tears
+                # down supervisord or the services session itself.
                 tier = Tier.INFRASTRUCTURE
-                label = pane.window_name if is_services_session else pane.session_name
-            elif is_services_session:
-                tier = _tier_for_services_window(pane.window_name)
                 label = pane.window_name
+            elif depth == 0:
+                # An agent session's pane shell. Never shed it: killing it drops
+                # the session instead of leaving it idle for revive-on-message.
+                tier = Tier.INFRASTRUCTURE
+                label = pane.session_name
             elif agent_name is not None:
                 base_tier = _agent_tier(
                     agent_name, user_created_agent_names, agent_created_agent_names
@@ -203,7 +281,7 @@ def classify_processes(
                 )
             )
 
-    # Everything outside any pane subtree is infrastructure we never shed.
+    # Pass 3: everything outside any pane subtree is infrastructure we never shed.
     for process in processes:
         if process.pid in assigned_pids:
             continue

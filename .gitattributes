@@ -1,0 +1,2 @@
+# Vendored snapshots (mngr, etc.) -- not authored here; collapse in PR diffs.
+vendor/** linguist-generated=true

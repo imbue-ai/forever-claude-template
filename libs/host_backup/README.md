@@ -10,9 +10,9 @@ an encrypted restic repo on cheaper object storage.
 
 ## Behavior
 
-- Single long-running tick loop in tmux window `svc-host-backup` (started by
-  the bootstrap service manager via `[services.host-backup]`). Restart
-  policy: `on-failure`.
+- Single long-running tick loop run as the `host-backup` supervisord program
+  (defined in `supervisord.conf`, started by supervisord after `bootstrap`).
+  Restart policy: `autorestart=true`.
 - The repository is created (and keyed) by the minds app, not by
   host_backup: minds runs `restic init` + `restic key add` from outside the
   workspace and injects the resulting `restic.env`. host_backup just backs up

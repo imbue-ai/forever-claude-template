@@ -13,7 +13,8 @@ transcript via `mngr transcript`. Follow these stages to go from
 "task handed off" to "new skill committed on your branch".
 
 **Principle.** Reliability is the floor; simplicity is the target. Default to
-a single entry point and one flow. Add surface only when a specific invariant
+a subcommand per cleanly-separable step plus a `run all` that chains them (see
+`spec-summary.md`); add surface beyond that only when a specific invariant
 demands it.
 
 Consult `.agents/shared/references/spec-summary.md` for the agentskills.io
@@ -57,18 +58,25 @@ Produce a short outline with:
   script, or prose parameters if the skill is agent-driven).
 - Outputs: what the skill produces (files, stdout, a report the agent
   hands back to the user).
-- A step-by-step flow of the skill's process. For each step, tag it as
-  either `[script]` (deterministic, will live in `scripts/`) or
-  `[prose]` (judgement, will live in SKILL.md as instructions the agent
-  using the skill follows). Use the re-run test to decide: if the step
-  would run the same code every time with only the data varying, it's a
-  script step; if it requires reading output and applying judgement, it's
-  a prose step.
-- Justification: for any subcommand or subflow in the planned flow, what
-  invariant makes it separate vs. inlined? If no invariant demands
-  separation, inline it. 
-- A skill with zero script steps (pure prose
-  recipe) is valid -- do not invent scripts where judgement is clearer.
+- A step-by-step flow of the skill's process. Tag each step as one of the
+  three kinds defined in `.agents/shared/references/spec-summary.md`:
+  `[script]` (deterministic), `[ai-script]` (model judgement scripted as a
+  model call -- the default for any model step), or `[prose]`
+  (user-in-the-loop work). Use the re-run test: a step whose same
+  prompt/criteria run every time with only the data varying is `[ai-script]`,
+  not `[prose]`.
+- Prose justification: apply the execution-mode test in `spec-summary.md`.
+  Tag `[prose]` only when the user must be in the loop while the skill runs;
+  neither a model's judgement nor needing the conversation justifies it. Keep
+  any genuine prose at the edges, not wedged between two scripted sections.
+- Subcommand structure: a subcommand per cleanly-separable step, plus a
+  `run all` that chains them (see `spec-summary.md`). Note any step you keep
+  inlined (e.g. it hands the next a live handle) and any subflow beyond the
+  natural steps -- those need a specific invariant.
+- A skill with zero `[script]`/`[ai-script]` steps (pure prose recipe) is
+  valid only when every step is genuine executor meta-work -- do not invent
+  scripts where judgement is the executor's, but do not park model
+  judgement in prose to avoid scripting it.
 - 2-3 evaluation scenarios you plan to hand-craft (happy path + edge cases).
 - Any edge cases you foresaw but chose not to handle (and why).
 
@@ -106,13 +114,38 @@ Do not proceed to Stage 3 without an explicit yes.
 ## Stage 3: Build the artifact
 
 Follow the layout and frontmatter conventions in
-`.agents/shared/references/spec-summary.md`. Then validate structurally:
+`.agents/shared/references/spec-summary.md`. Then validate:
 
 ```bash
 uv run .agents/shared/scripts/validate_skill.py .agents/skills/<name>
 ```
 
-It must print `ok` before moving on. If it fails, fix and rerun.
+This checks the structure and, when a `run.py` exists, runs
+`scripts/run.py --help` to confirm its imports and PEP 723 dependencies
+resolve. It must print `ok` before moving on. If it fails, fix and rerun.
+
+### Data-capture guidance
+When the skill being built fetches data from external APIs, capture
+*all reasonable fields per record* in the calls you're already making,
+not just the fields the user displayed in the original turn. This keeps
+downstream consumers (e.g. an interface built later on top of the
+captured data) unconstrained. Pagination is a normal part of the
+workflow if the original ask requires it. Do NOT make extra
+un-asked-for API calls just to gather more data.
+
+Go further than fields: **persist the raw payload of each record and a
+reference to its source, durably** (e.g. under `runtime/<name>/`), not
+just the extracted/processed fields (see the preserve-and-surface
+principle in CLAUDE.md for what "raw payload" and "source reference"
+mean). A pipeline that fetches, transforms, and discards the raw payload
+cannot satisfy that principle no matter what consumers do: persisting it
+is what lets a *later* change in processing requirements re-derive new
+fields with no refetch, and what lets surfaces show the raw record or
+link out to the source. Retain whatever a consumer needs to *render*
+the record faithfully later -- e.g. keep the email's content-type and
+HTML body, not just a flattened text field -- so a downstream surface
+can render it in its native format rather than dump escaped source.
+This is a universal postcondition of the skill's data-capture step.
 
 ## Stage 4: Hand-craft and run scenarios
 
@@ -129,9 +162,11 @@ them as files in the skill.
 
 Run each scenario:
 
-- For script steps: invoke `scripts/run.py` (or the relevant helper) with
-  real inputs and inspect the output.
-- For prose steps: walk through the SKILL.md instructions as if you were
+- For `[script]` and `[ai-script]` steps: invoke `scripts/run.py` (or the
+  relevant helper) with real inputs and inspect the output. An `[ai-script]`
+  step makes a real Claude call; run it on a small input to note cost information
+  and confirm that your prompting is functional.
+- For `[prose]` steps: walk through the SKILL.md instructions as if you were
   an agent using the skill, and confirm they produce the expected
   behavior on the scenario's data. Write out this walk-through process; don't just think through it.
 
@@ -215,8 +250,9 @@ Reasons that genuinely warrant giving up:
 - You hit a dependency you cannot resolve (e.g. a required service is
   unreachable, a file format you cannot parse).
 
-"Too judgement-heavy to script" is NOT a valid reason to give up.
-Judgement steps belong in SKILL.md as prose instructions. A skill can be
-pure prose with no scripts at all if that's what the process calls for.
-Only give up if the *process* itself is unstable, not if parts of it
-happen to require judgement.
+"Too judgement-heavy to script" is NOT a valid reason to give up. Model
+judgement that is a fixed part of the flow is scripted as `[ai-script]`
+calls; only genuine executor meta-work stays as SKILL.md
+prose. A skill can be pure prose with no scripts at all if every step is
+executor meta-work. Only give up if the *process* itself is unstable, not
+if parts of it happen to require judgement.

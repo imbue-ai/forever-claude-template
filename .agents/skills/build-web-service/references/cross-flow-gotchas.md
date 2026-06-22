@@ -2,7 +2,7 @@
 
 The system_interface proxies HTTP and WebSocket traffic from
 `/service/<name>/...` to the backend URL you registered. Most apps
-"just work" -- the FastAPI scaffolder picks defaults that sidestep
+"just work" -- the Flask scaffolder picks defaults that sidestep
 the common traps. This file is loaded on demand when verification
 surfaces something odd; skim for the symptom that matches.
 
@@ -15,14 +15,15 @@ tab bar at the top.
 Root cause: the system_interface could not reach the registered
 backend, so the request fell through to the top-level UI. Either:
 
-- The backend never came up (check `tmux capture-pane -t svc-<name> -p`).
+- The backend never came up (check `supervisorctl status <name>` and
+  `/var/log/supervisor/<name>-stderr.log`).
 - The backend bound to a different host than what was registered
   (e.g. bound to a Unix socket, or to an interface the system_interface
   cannot reach inside the container).
 - The `--name` passed to `forward_port.py` does not match the URL
   segment the user clicked.
 
-Fix: re-check pre-flight (bind to 127.0.0.1, port matches services.toml,
+Fix: re-check pre-flight (bind to 127.0.0.1, port matches supervisord.conf,
 name matches the URL segment) and Step 3 verification.
 
 ## Backend redirects (3xx Location headers)
@@ -44,20 +45,20 @@ What this means for you: if your app emits relative `Location`s or
 absolute paths under its own root, redirects work. If it hardcodes
 public URLs at non-prefixed paths, those will land at the wrong place.
 
-## FastAPI absolute URLs (OpenAPI, redirects)
+## Prefix-aware links (Flask serves at `/`)
 
-FastAPI emits absolute URLs in OpenAPI metadata (`/docs`,
-`/openapi.json`) based on `app.root_path`. The scaffolder reads
-`ROOT_PATH` from env and passes it to `FastAPI(root_path=ROOT_PATH)`,
-and the generated services.toml command sets
-`ROOT_PATH=/service/<name>`. So the scaffolded happy path emits
-prefix-correct URLs without further work.
+The Flask starter serves at `/` and needs no prefix configuration.
+The system_interface proxy handles the `/service/<name>/` prefix for
+you: it rewrites absolute paths in the served HTML, and installs a
+scoped service worker that prepends the prefix to the page's own
+fetches. So a Flask app written against `/` works behind the proxy
+unchanged.
 
-If you wrote your own FastAPI runner without using the scaffolder,
-or you want to expose an existing FastAPI app via the wrap-existing
-escape hatch, set `root_path=/service/<name>` either at construction
-time or via the same `ROOT_PATH` env-var pattern. Without it,
-`/openapi.json` will list endpoints at `/`, breaking the API explorer.
+The one thing to watch: if you generate prefix-aware links yourself
+in application code (e.g. building an absolute URL to share or embed),
+account for the `/service/<name>/` prefix in that code. There is no
+`root_path`/`ROOT_PATH` mechanism in the generated runner -- don't
+add one.
 
 ## Static-file servers and trailing slashes
 
@@ -97,19 +98,20 @@ one URL per service name.
 ## Port already in use
 
 If the port you chose is bound by something else, the start command
-will fail loudly inside `svc-<name>` (the framework will print an
-error and exit). The bootstrap manager will keep restarting it if
-`restart = "on-failure"`, producing a tight crash loop visible in
-`tmux capture-pane -t svc-<name> -p`. Pick a different port.
+will fail loudly (the framework will print an error and exit). With
+`autorestart=true`, supervisord will keep restarting it, producing a
+crash loop visible via `supervisorctl status <name>` and
+`/var/log/supervisor/<name>-stderr.log`. Pick a different port.
 
-The scaffolder's port-picking pre-flight (which parses `services.toml`
+The scaffolder's port-picking pre-flight (which parses `supervisord.conf`
 and `runtime/applications.toml`) catches this before you write the
-service entry. For the wrap-existing escape hatch, run `ss -tln`
+program entry. For the wrap-existing escape hatch, run `ss -tln`
 manually before choosing a port.
 
 ## Bind host (wrap-existing path mostly)
 
-The scaffolder generates `uvicorn.run(app, host="127.0.0.1", port=...)`
+The scaffolder generates
+`run_simple("127.0.0.1", port, app, threaded=True, ...)` (werkzeug)
 which is correct. For the wrap-existing escape hatch, many Node
 frameworks default to `0.0.0.0` (Node's
 `http.createServer().listen(port)` binds to `::`/`0.0.0.0` when no

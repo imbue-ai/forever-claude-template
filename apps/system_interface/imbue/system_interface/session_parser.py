@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from loguru import logger as _loguru_logger
+from tk_command_parsing.parser import parse_command
 
 from imbue.system_interface.claude_auth_patterns import is_auth_error_text
 
@@ -34,15 +35,13 @@ _TK_OUTPUT_DECORATION_PATTERN = re.compile(
     r"Updated \S+ -> (?:open|in_progress|closed)|tk-step \S+ (?:title|summary): .*"
 )
 
-# A Bash command that invokes a tk/ticket create|start|close as one of its
-# command words (start of string, or after `$(`, a pipe/semicolon/ampersand, or
-# whitespace -- so batched `S1=$(tk create ...)` forms and long `tk close <id>
-# "<summary>"` calls both match). Such commands carry the step titles/summaries
-# that the chat progress view's historical input-preview fallback reads, so
-# their `input_preview` is exempted from the 200-char truncation below.
-_TK_LIFECYCLE_COMMAND_PATTERN = re.compile(
-    r"(?:^|[\s;&|(])(?:tk|ticket)\s+(?:super\s+)?(?:create|start|close)\b"
-)
+# The tk subcommands whose Bash calls carry the step titles/summaries that the
+# chat progress view's historical input-preview fallback reads -- a command
+# invoking one of these is exempted from the 200-char `input_preview` truncation
+# below so batched `tk create --step` forms and long `tk close <id> "<summary>"`
+# calls survive intact. Recognition is delegated to the shared
+# `tk_command_parsing` parser (see `_is_tk_lifecycle_call`).
+_TK_LIFECYCLE_VERBS = frozenset({"create", "start", "close"})
 
 _SOURCE = "claude/common_transcript"
 
@@ -185,13 +184,22 @@ def _is_tk_lifecycle_call(tool_name: str, tool_input: Any) -> bool:
     """True for a Bash call whose command invokes a tk/ticket create|start|close.
     Their `input_preview` is exempted from truncation so batched multi-create
     commands and long close summaries survive intact for the chat progress
-    view's historical input-preview fallback."""
+    view's historical input-preview fallback.
+
+    Recognition uses the shared `tk_command_parsing` shlex parser rather than a
+    regex, so a `tk close ...` merely *mentioned* inside another command's quoted
+    argument (e.g. `echo "remember to tk close s1"`) is not mistaken for a real
+    tk lifecycle call -- the same shell-awareness the standalone-command gate
+    hook relies on."""
     if tool_name != "Bash" or not isinstance(tool_input, dict):
         return False
     command = tool_input.get("command", "")
     if not isinstance(command, str):
         return False
-    return _TK_LIFECYCLE_COMMAND_PATTERN.search(command) is not None
+    parsed = parse_command(command)
+    if parsed is None:
+        return False
+    return any(segment.tk_verb in _TK_LIFECYCLE_VERBS for segment in parsed.segments)
 
 
 def _truncate_tool_output(content: str) -> str:

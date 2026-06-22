@@ -18,8 +18,11 @@ be useful on its own -- in a context that does not involve the existing skill.
   old skill stays untouched. Don't decompose proactively for hypothetical
   reuse.
 
-Script vs. prose is orthogonal to this decision. An update-in-place can land
-as a new script step, a new prose step, or both. Same for a create-new-skill.
+Step kind (`[script]` / `[ai-script]` / `[prose]`, per
+`.agents/shared/references/spec-summary.md`) is orthogonal to this decision.
+An update-in-place can land as a new deterministic script step, a new
+`[ai-script]` model-call step, a new prose step, or any mix. Same for a
+create-new-skill.
 
 If update-in-place would double the size of the original SKILL.md or blur its
 one-line description, that is a signal to split (combined with the
@@ -27,8 +30,9 @@ standalone-use-case check above).
 
 If the extra work was **one-off creative or exploratory** with no repeatable
 pattern, it is NOT an update candidate -- it stays with the main agent.
-Judgement work with a repeatable recipe IS a candidate; it becomes a prose
-step in SKILL.md.
+Model-judgement work with a repeatable recipe IS a candidate; by default it
+becomes a scripted model step (`[ai-script]`), with prose
+reserved for executor meta-work.
 
 In the `verify` flow the decision has already been made by the committed
 change; the worker's job is to verify, not to re-litigate.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Idempotent installer for packages that are too heavy to bake into the
 # Docker image but not required to start the chat agent or any boot-time
-# service. Run once per container lifetime by the `deferred-install` entry
-# in services.toml, gated by per-package marker files under
+# service. Run once per container lifetime by the one-shot `deferred-install`
+# supervisord program, gated by per-package marker files under
 # /var/lib/minds/deferred-install/done.<package>.
 #
 # Designed to behave the same way across container restarts (no-op when

@@ -1,29 +1,23 @@
-"""Bootstrap service manager.
+"""Bootstrap: first-boot setup, then launch supervisord.
 
-Reads services.toml, reconciles tmux windows to match, and watches for changes.
+`uv run bootstrap` runs once per container boot (from the `bootstrap`
+extra_window). It performs first-boot setup -- global git config, ensuring
+runtime/ exists as a git worktree of the per-agent backup branch
+(mindsbackup/$MNGR_AGENT_ID), writing CLAUDE_CONFIG_DIR into the host env,
+seeding the host-backup config, and creating the initial chat agent -- and then
+`exec`s the system supervisord in the foreground. supervisord (configured by
+supervisord.conf) owns every background service from then on.
 
-Each service defined in services.toml gets its own tmux window named svc-<name>.
-When services.toml changes, new services are started, removed services are
-stopped, and services whose `command` changed are restarted.
-
-Before reconciling services for the first time, runs a one-time pre-services
-init step that ensures runtime/ exists as a git worktree of the per-agent
-backup branch (mindsbackup/$MNGR_AGENT_ID), so any service that subsequently
-writes into runtime/ (cloudflared, app-watcher, telegram, etc.) does so
-inside that worktree.
-
-Environment:
-    Expects to run inside a tmux session (uses the current session name).
+Running supervisord via exec keeps the bootstrap tmux window alive as
+supervisord and lets the supervised services inherit this shell's already-
+sourced agent environment (MNGR_AGENT_STATE_DIR, CLAUDE_CONFIG_DIR, etc.).
 """
 
 import json
 import os
 import shutil
 import subprocess
-import sys
-import time
 from pathlib import Path
-from typing import NamedTuple
 
 from host_backup.config import (
     BACKUP_TOML_PATH,
@@ -35,102 +29,13 @@ from host_backup.config import (
     write_default_restic_env_template,
 )
 from loguru import logger
-from memory_watchdog.ledger import record_service_blocked, record_service_unblocked
 
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
-
-
-SERVICES_FILE = Path("services.toml")
-SVC_PREFIX = "svc-"
-# Tmux window user-option used to remember the command we started a service
-# with, so we can detect command edits in services.toml on the next reconcile.
-SVC_COMMAND_OPTION = "@svc_command"
-# Tmux window user-option that a service window sets to its command's exit
-# status once the command returns. The manager polls this to detect a service
-# that has exited -- the window itself stays open at an idle shell, so its mere
-# existence is not a liveness signal -- and then applies the `restart` policy.
-SVC_EXIT_STATUS_OPTION = "@svc_exit_status"
-# Supported `restart` policies for a service in services.toml. "never" leaves an
-# exited service dead; "on-failure" restarts it when it exits non-zero. An
-# unrecognized value falls back to DEFAULT_RESTART_POLICY (with a warning).
-DEFAULT_RESTART_POLICY = "never"
-VALID_RESTART_POLICIES = frozenset({"never", "on-failure"})
-POLL_INTERVAL = 5  # seconds
-
-# Crash-loop circuit breaker. A service that exits and is restarted more than
-# MAX_RAPID_RESTARTS times within RAPID_RESTART_WINDOW_SECONDS is "blocked":
-# restarts pause for BREAKER_COOLDOWN_SECONDS, the service is recorded as blocked
-# in the shed ledger (so the UI banner can show it), and after the cooldown the
-# breaker resets and one fresh restart is attempted. Without this, a service that
-# OOMs on startup under sustained memory pressure would thrash every poll,
-# repeatedly eating memory and dying.
-RAPID_RESTART_WINDOW_SECONDS = 60.0
-MAX_RAPID_RESTARTS = 3
-BREAKER_COOLDOWN_SECONDS = 60.0
-
-
-class RestartBreakerOutcome(NamedTuple):
-    """The breaker's decision for one exited service this poll."""
-
-    should_restart: bool
-    should_block: bool
-    should_unblock: bool
-    new_restart_times: tuple[float, ...]
-    new_blocked_until: float | None
-
-
-def _evaluate_restart_breaker(
-    now: float,
-    restart_times: tuple[float, ...],
-    blocked_until: float | None,
-) -> RestartBreakerOutcome:
-    """Decide whether to restart, pause, or resume a crash-looping service.
-
-    Pure: all state is passed in and returned, so the breaker can be unit-tested
-    without tmux. A service stays blocked until its cooldown elapses; once it
-    does, the breaker resets (clearing the restart history) and allows one fresh
-    attempt -- unless that attempt would itself exceed the rapid-restart budget.
-    """
-    # Still inside an active cooldown: stay paused.
-    if blocked_until is not None and now < blocked_until:
-        return RestartBreakerOutcome(
-            should_restart=False,
-            should_block=False,
-            should_unblock=False,
-            new_restart_times=restart_times,
-            new_blocked_until=blocked_until,
-        )
-
-    # Either never blocked, or the cooldown just elapsed (a reset = unblock).
-    did_unblock = blocked_until is not None
-    recent_times = (
-        ()
-        if did_unblock
-        else tuple(t for t in restart_times if now - t < RAPID_RESTART_WINDOW_SECONDS)
-    )
-
-    # Too many recent restarts: trip the breaker and pause.
-    if len(recent_times) >= MAX_RAPID_RESTARTS:
-        return RestartBreakerOutcome(
-            should_restart=False,
-            should_block=True,
-            should_unblock=did_unblock,
-            new_restart_times=recent_times,
-            new_blocked_until=now + BREAKER_COOLDOWN_SECONDS,
-        )
-
-    # Within budget: restart and record the attempt.
-    return RestartBreakerOutcome(
-        should_restart=True,
-        should_block=False,
-        should_unblock=did_unblock,
-        new_restart_times=recent_times + (now,),
-        new_blocked_until=None,
-    )
-
+# Path (relative to the repo root, which is bootstrap's cwd) of the supervisord
+# config that defines every background service.
+SUPERVISORD_CONF = Path("supervisord.conf")
+# Container-local directory for supervisord's own log + the per-service logs. Not
+# under runtime/, so these are never backed up.
+SUPERVISOR_LOG_DIR = Path("/var/log/supervisor")
 
 RUNTIME_DIR = Path("runtime")
 RUNTIME_PREEXISTING_DIR = Path("runtime.preexisting")
@@ -147,6 +52,27 @@ _AGENT_ID_ENV_VAR = "MNGR_AGENT_ID"
 _AGENT_STATE_DIR_ENV_VAR = "MNGR_AGENT_STATE_DIR"
 _HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
 _CLAUDE_CONFIG_DIR_ENV_VAR = "CLAUDE_CONFIG_DIR"
+
+# Global git config the old git_auth_setup extra_window used to apply (minus the
+# retired `gh auth setup-git`): rewrite git@ / ssh:// GitHub remotes to https and
+# point core.hooksPath at the repo's git_hooks.
+_GIT_GLOBAL_CONFIG_ARGVS = (
+    (
+        "config",
+        "--global",
+        "--replace-all",
+        "url.https://github.com/.insteadOf",
+        "git@github.com:",
+    ),
+    (
+        "config",
+        "--global",
+        "--add",
+        "url.https://github.com/.insteadOf",
+        "ssh://git@github.com/",
+    ),
+    ("config", "--global", "core.hooksPath", "/mngr/code/scripts/git_hooks"),
+)
 
 
 def _parse_env_file(content: str) -> dict[str, str]:
@@ -498,287 +424,51 @@ def _bootstrap_init_chat_dir() -> None:
     _maybe_create_initial_chat()
 
 
-def _get_session_name() -> str:
-    """Get the current tmux session name."""
-    result = subprocess.run(
-        ["tmux", "display-message", "-p", "#S"],
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
+def _configure_git_global() -> None:
+    """Apply the global git config the old git_auth_setup extra_window set.
 
-
-def _list_managed_windows(session: str) -> dict[str, dict[str, str]]:
-    """List tmux windows managed by bootstrap (prefixed with svc-).
-
-    Returns {service_name: {"window_name": str, "command": str}}. The command
-    is read from the per-window user-option SVC_COMMAND_OPTION that we set when
-    starting the service; it is the empty string if the option is unset (e.g.
-    the window was created by an older manager that did not record it).
+    Rewrites git@ / ssh:// GitHub remotes to https and points core.hooksPath at
+    the repo's git_hooks (see _GIT_GLOBAL_CONFIG_ARGVS). The retired
+    `gh auth setup-git` step is intentionally dropped. Best-effort: a failure
+    here should not block the supervisord launch.
     """
-    result = subprocess.run(
-        ["tmux", "list-windows", "-t", session, "-F", "#{window_name}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return {}
-
-    windows: dict[str, dict[str, str]] = {}
-    for name in result.stdout.strip().split("\n"):
-        if not name.startswith(SVC_PREFIX):
-            continue
-        service_name = name[len(SVC_PREFIX) :]
-        command = _get_window_command(session, name)
-        windows[service_name] = {"window_name": name, "command": command}
-    return windows
-
-
-def _get_window_command(session: str, window_name: str) -> str:
-    """Read the recorded service command from a managed window's user-option."""
-    target = f"{session}:{window_name}"
-    result = subprocess.run(
-        ["tmux", "show-options", "-t", target, "-w", "-v", SVC_COMMAND_OPTION],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return ""
-    return result.stdout.rstrip("\n")
-
-
-def _get_window_exit_status(session: str, window_name: str) -> str:
-    """Read a service window's recorded exit status.
-
-    Returns the exit status string set by the recorder in
-    ``_build_service_keystrokes``, or "" if the service is still running (the
-    option stays unset until its command returns).
-    """
-    target = f"{session}:{window_name}"
-    result = subprocess.run(
-        ["tmux", "show-options", "-t", target, "-w", "-v", SVC_EXIT_STATUS_OPTION],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
-
-
-def _list_exited_services(
-    session: str, current: dict[str, dict[str, str]]
-) -> dict[str, str]:
-    """Return ``{service_name: exit_status}`` for managed windows that exited."""
-    exited: dict[str, str] = {}
-    for name, info in current.items():
-        status = _get_window_exit_status(session, info["window_name"])
-        if status != "":
-            exited[name] = status
-    return exited
-
-
-def _load_services() -> dict[str, dict]:
-    """Load service definitions from services.toml.
-
-    Returns {name: {command: str, restart: str}}.
-    """
-    if not SERVICES_FILE.exists():
-        return {}
-
-    with open(SERVICES_FILE, "rb") as f:
-        data = tomllib.load(f)
-
-    services = data.get("services", {})
-    result = {}
-    for name, config in services.items():
-        if not isinstance(config, dict):
-            continue
-        command = config.get("command")
-        if not command:
-            continue
-        result[name] = {
-            "command": command,
-            "restart": _normalize_restart_policy(name, config.get("restart")),
-        }
-    return result
-
-
-def _normalize_restart_policy(name: str, restart: str | None) -> str:
-    """Validate a service's `restart` value, defaulting unknown ones with a warning.
-
-    An absent policy is the default and is not flagged. A present-but-unrecognized
-    policy (e.g. a typo like "on_failure") is almost certainly a misconfiguration,
-    so it is logged and falls back to DEFAULT_RESTART_POLICY rather than silently
-    disabling restarts for that service.
-    """
-    if restart is None:
-        return DEFAULT_RESTART_POLICY
-    if restart not in VALID_RESTART_POLICIES:
-        logger.warning(
-            "Service {} has unrecognized restart policy {!r}; expected one of {}; "
-            "treating as {!r}",
-            name,
-            restart,
-            sorted(VALID_RESTART_POLICIES),
-            DEFAULT_RESTART_POLICY,
+    for argv in _GIT_GLOBAL_CONFIG_ARGVS:
+        result = subprocess.run(
+            ["git", *argv], capture_output=True, text=True, check=False
         )
-        return DEFAULT_RESTART_POLICY
-    return restart
+        if result.returncode != 0:
+            logger.warning(
+                "git {} failed (rc={}): {}",
+                " ".join(argv),
+                result.returncode,
+                result.stderr.strip(),
+            )
 
 
-def _build_service_keystrokes(command: str, window_target: str) -> str:
-    """Build the keystrokes typed into a service window's shell.
+def _ensure_supervisor_log_dir() -> None:
+    """Create supervisord's log directory if missing.
 
-    Runs the service command, then records its exit status into the window's
-    ``SVC_EXIT_STATUS_OPTION`` user option. The recorder runs in the same shell
-    once the service returns, so the manager can poll that option to detect a
-    service that has exited; the window itself stays open at an idle shell, so
-    its existence alone is not a liveness signal.
-
-    The ``set-option`` is given an explicit ``-t {window_target}``: a service
-    window runs in the background, and a ``tmux set-option -w`` with no target
-    applies to the session's *currently active* window, not the window the
-    command runs in -- so without the explicit target the status would be
-    written to the wrong window and the manager would never see the exit.
-
-    ``$?`` is captured immediately after the command, so it reflects the
-    service's own exit status (128+signal if the service process was killed
-    while its shell survived).
+    supervisord and its child programs write into SUPERVISOR_LOG_DIR but do not
+    create it, so it must exist before we exec supervisord. Best-effort.
     """
-    return (
-        f"{command}; tmux set-option -t {window_target} -w "
-        f'{SVC_EXIT_STATUS_OPTION} "$?"'
-    )
+    try:
+        SUPERVISOR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning(
+            "Failed to create supervisor log dir {}: {}", SUPERVISOR_LOG_DIR, e
+        )
 
 
-def _start_service(session: str, name: str, command: str) -> None:
-    """Start a service in a new tmux window.
+def _exec_supervisord() -> None:
+    """Replace this process with supervisord running in the foreground.
 
-    Creates the window without a command so it uses the session's default-command
-    (which sources env files), then sends the service command via send-keys.
-    This ensures the service process inherits MNGR_AGENT_STATE_DIR and other
-    agent environment variables. Records the command on the window via a user
-    option so subsequent reconciles can detect command edits. The sent
-    keystrokes also append an exit-status recorder (see
-    ``_build_service_keystrokes``) so the manager can detect an exited service
-    and apply its `restart` policy.
+    Uses the system supervisord (installed via scripts/setup_system.sh) and the
+    repo-root supervisord.conf. `-n` keeps it in the foreground (so the
+    bootstrap tmux window stays alive as supervisord) while still creating the
+    [unix_http_server] socket that `supervisorctl` talks to.
     """
-    window_name = f"{SVC_PREFIX}{name}"
-    window_target = f"{session}:{window_name}"
-    logger.info("Starting service: {} ({})", name, command)
-    subprocess.run(
-        ["tmux", "new-window", "-t", session, "-n", window_name, "-d"],
-        check=False,
-    )
-    subprocess.run(
-        ["tmux", "set-option", "-t", window_target, "-w", SVC_COMMAND_OPTION, command],
-        check=False,
-    )
-    subprocess.run(
-        [
-            "tmux",
-            "send-keys",
-            "-t",
-            window_target,
-            _build_service_keystrokes(command, window_target),
-            "Enter",
-        ],
-        check=False,
-    )
-
-
-def _stop_service(session: str, name: str) -> None:
-    """Stop a service by killing its tmux window."""
-    window_name = f"{SVC_PREFIX}{name}"
-    logger.info("Stopping service: {}", name)
-    subprocess.run(
-        ["tmux", "kill-window", "-t", f"{session}:{window_name}"],
-        check=False,
-    )
-
-
-def _restart_service(session: str, name: str, command: str) -> None:
-    """Restart an exited service: kill its stale window and start a fresh one.
-
-    The fresh window has no ``SVC_EXIT_STATUS_OPTION`` set, so the manager
-    does not immediately see it as exited again.
-    """
-    logger.info("Restarting exited service: {}", name)
-    _stop_service(session, name)
-    _start_service(session, name, command)
-
-
-def _get_file_mtime() -> float | None:
-    """Get the modification time of services.toml, or None if it doesn't exist."""
-    if not SERVICES_FILE.exists():
-        return None
-    return SERVICES_FILE.stat().st_mtime
-
-
-def _compute_actions(
-    desired: dict[str, dict],
-    current: dict[str, dict[str, str]],
-) -> tuple[list[str], list[tuple[str, str]]]:
-    """Compute (stops, starts) needed to make `current` match `desired`.
-
-    A service whose command changed appears in both lists -- it must be stopped
-    and then started again.
-    """
-    stops: list[str] = []
-    starts: list[tuple[str, str]] = []
-
-    for name, running in current.items():
-        if name not in desired:
-            stops.append(name)
-        elif running["command"] != desired[name]["command"]:
-            stops.append(name)
-
-    for name, config in desired.items():
-        if name not in current:
-            starts.append((name, config["command"]))
-        elif current[name]["command"] != config["command"]:
-            starts.append((name, config["command"]))
-
-    return stops, starts
-
-
-def _compute_restarts(
-    desired: dict[str, dict],
-    exited: dict[str, str],
-) -> list[str]:
-    """Return the names of exited services that should be restarted.
-
-    Honors each service's `restart` policy from services.toml:
-      - "never" (default): never restarted.
-      - "on-failure": restarted only when the recorded exit status is
-        non-zero (a clean exit is left alone).
-
-    A service that exited but is no longer in `desired` (removed from
-    services.toml) is skipped -- the mtime-driven reconcile removes its
-    window instead.
-    """
-    restarts: list[str] = []
-    for name, status in exited.items():
-        config = desired.get(name)
-        if config is None:
-            continue
-        if (
-            config.get("restart", DEFAULT_RESTART_POLICY) == "on-failure"
-            and status != "0"
-        ):
-            restarts.append(name)
-    return restarts
-
-
-def _reconcile(
-    session: str, desired: dict[str, dict], current: dict[str, dict[str, str]]
-) -> None:
-    """Reconcile the desired services with the currently running windows."""
-    stops, starts = _compute_actions(desired, current)
-    for name in stops:
-        _stop_service(session, name)
-    for name, command in starts:
-        _start_service(session, name, command)
+    logger.info("Launching supervisord with config {}", SUPERVISORD_CONF)
+    os.execvp("supervisord", ["supervisord", "-n", "-c", str(SUPERVISORD_CONF)])
 
 
 def _git_main(*args: str) -> subprocess.CompletedProcess[str]:
@@ -834,6 +524,39 @@ def _runtime_dir_has_files() -> bool:
     return any(RUNTIME_DIR.iterdir())
 
 
+def _create_orphan_runtime_worktree(branch: str) -> subprocess.CompletedProcess[str]:
+    """Add runtime/ as a worktree on a fresh orphan branch, git-version-agnostically.
+
+    `git worktree add --orphan` only exists in git >= 2.42, but the Lima
+    provider's Debian 12 base ships git 2.39. So build the orphan branch with
+    plumbing that has worked for ages -- a parentless commit on the empty tree --
+    then do a normal `git worktree add` for it. Returns the final worktree-add
+    CompletedProcess; if an earlier plumbing step fails, returns that failing
+    CompletedProcess so the caller's existing error handling fires.
+    """
+    empty_tree = _git_main("hash-object", "-w", "-t", "tree", "/dev/null")
+    if empty_tree.returncode != 0:
+        return empty_tree
+    # Commit identity is passed via -c because the container may have no global
+    # git identity yet, and commit-tree refuses to run without one.
+    orphan_commit = _git_main(
+        "-c",
+        f"user.name={RUNTIME_BACKUP_USER_NAME}",
+        "-c",
+        f"user.email={RUNTIME_BACKUP_USER_EMAIL}",
+        "commit-tree",
+        empty_tree.stdout.strip(),
+        "-m",
+        "runtime backup: init",
+    )
+    if orphan_commit.returncode != 0:
+        return orphan_commit
+    branch_result = _git_main("branch", branch, orphan_commit.stdout.strip())
+    if branch_result.returncode != 0:
+        return branch_result
+    return _git_main("worktree", "add", str(RUNTIME_DIR), branch)
+
+
 def _init_runtime_worktree() -> None:
     """One-time setup of runtime/ as a worktree of mindsbackup/$MNGR_AGENT_ID.
 
@@ -884,9 +607,7 @@ def _init_runtime_worktree() -> None:
             "worktree", "add", "-B", branch, str(RUNTIME_DIR), remote_ref
         )
     else:
-        result = _git_main(
-            "worktree", "add", "--orphan", "-b", branch, str(RUNTIME_DIR)
-        )
+        result = _create_orphan_runtime_worktree(branch)
 
     if result.returncode != 0:
         logger.error(
@@ -1079,12 +800,11 @@ def _init_backup_config() -> None:
 
 
 def main() -> None:
-    session = _get_session_name()
-    if not session:
-        logger.error("Not running inside a tmux session")
-        sys.exit(1)
+    logger.info("Bootstrap starting: first-boot setup, then supervisord")
 
-    logger.info("Bootstrap service manager started (session: {})", session)
+    # Apply the global git config (https rewrites + repo hooksPath) before any
+    # service or agent runs git. Replaces the old git_auth_setup extra_window.
+    _configure_git_global()
 
     # Restore runtime/ FIRST so the initial_chat_created signal file (which
     # lives inside the worktree and is replicated to mindsbackup/$MNGR_AGENT_ID
@@ -1092,79 +812,24 @@ def main() -> None:
     # create the initial chat agent. Without this ordering, every container
     # restart sees an empty runtime/, treats the boot as first-ever, and
     # re-creates the welcome chat agent (and auto-commits any uncommitted
-    # work_dir state).
+    # work_dir state). This must also happen before supervisord starts the
+    # runtime-backup / host-backup services that write into runtime/.
     _init_runtime_worktree()
 
     _bootstrap_init_chat_dir()
 
     # Detect the snapshot environment and write runtime/backup.toml +
-    # runtime/secrets/restic.env so the svc-host-backup window can come up
-    # with a coherent default config. Re-runs on every boot to keep
-    # snapshot.method in sync with the detected provider; user-customized
-    # fields in backup.toml are preserved via toml-merge.
+    # runtime/secrets/restic.env so the host-backup service comes up with a
+    # coherent default config. Re-runs on every boot to keep snapshot.method in
+    # sync with the detected provider; user-customized fields in backup.toml are
+    # preserved via toml-merge.
     _init_backup_config()
 
-    last_mtime = None
-    # Cache of the parsed services.toml, refreshed only when the file's mtime
-    # changes. Parsing (and the per-service restart-policy validation/warnings
-    # in _load_services) must NOT run every poll: the restart loop below needs
-    # `desired` each iteration, but re-reading the file every POLL_INTERVAL
-    # would re-emit any unrecognized-policy warning on every tick and re-parse
-    # the file needlessly. So we load once per change and reuse the cache.
-    desired: dict[str, dict] = {}
-
-    # Per-service crash-loop breaker state, keyed by service name.
-    restart_times_by_service: dict[str, tuple[float, ...]] = {}
-    blocked_until_by_service: dict[str, float] = {}
-
-    while True:
-        current_mtime = _get_file_mtime()
-
-        # Reconcile (and reload the cached services) on startup or when
-        # services.toml changes.
-        if current_mtime != last_mtime:
-            desired = _load_services()
-            current = _list_managed_windows(session)
-            _reconcile(session, desired, current)
-            last_mtime = current_mtime
-
-        # Independently of services.toml edits, detect services whose process
-        # has exited and apply each service's `restart` policy. The reconcile
-        # above only fires on mtime changes, and a crashed service leaves its
-        # tmux window open at an idle shell -- so without this a crashed
-        # service would stay dead, and the `restart` policy would be inert.
-        current = _list_managed_windows(session)
-        exited = _list_exited_services(session, current)
-        now = time.monotonic()
-        for name in _compute_restarts(desired, exited):
-            outcome = _evaluate_restart_breaker(
-                now,
-                restart_times_by_service.get(name, ()),
-                blocked_until_by_service.get(name),
-            )
-            restart_times_by_service[name] = outcome.new_restart_times
-            if outcome.new_blocked_until is None:
-                blocked_until_by_service.pop(name, None)
-            else:
-                blocked_until_by_service[name] = outcome.new_blocked_until
-            if outcome.should_unblock:
-                logger.info("Service {} cooldown elapsed; resuming restarts", name)
-                record_service_unblocked(name)
-            if outcome.should_block:
-                logger.warning(
-                    "Service {} crash-looped; pausing restarts for {}s",
-                    name,
-                    BREAKER_COOLDOWN_SECONDS,
-                )
-                record_service_blocked(
-                    name,
-                    f"crash-looped more than {MAX_RAPID_RESTARTS} times in "
-                    f"{RAPID_RESTART_WINDOW_SECONDS:g}s",
-                )
-            if outcome.should_restart:
-                _restart_service(session, name, desired[name]["command"])
-
-        time.sleep(POLL_INTERVAL)
+    # Make sure supervisord's log directory exists, then hand off: replace this
+    # process with supervisord in the foreground. supervisord owns every
+    # background service from here on (see supervisord.conf).
+    _ensure_supervisor_log_dir()
+    _exec_supervisord()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: crystallize-task
-description: "Turn a process from the turn that just finished into a reusable skill. A skill captures a stable process -- SKILL.md prose describing the recipe, with scripts for deterministic steps and prose instructions for nondeterministic steps. Consider using after completing a task where a re-run with new inputs would follow a largely similar process. The process does not have to be the entire turn -- a sub-process (e.g. a data pipeline within a larger build) counts. Strong signal: you learned how to do something through research or debugging that is likely to be useful again."
+description: "Turn a process from the turn that just finished into a reusable skill. A skill captures a stable process -- SKILL.md prose describing the recipe, with scripts for both deterministic steps and model-judgement steps (the latter scripted as AI calls per the use-ai-integration skill), and prose reserved for executor meta-work. Use after completing a task where a re-run with new inputs would follow a largely similar process. Strong signal: you learned how to do something through research or debugging that is likely to be useful again."
 ---
 
 # Crystallizing a task into a skill
@@ -12,8 +12,10 @@ You dispatch the actual build to a sub-agent; your role is to package context,
 launch, and merge.
 
 **Principle.** Reliability is the floor; simplicity is the target. Default to
-a single entry point and one flow. Add surface only when a specific invariant
-demands it. Decompose only when the separate components are likely to be used independently.
+a subcommand per cleanly-separable step plus a `run all` that chains them (see
+`spec-summary.md`); add surface beyond that only when a specific invariant
+demands it. Split into a separate skill only when the components are likely to
+be used independently.
 
 ## When to invoke
 
@@ -25,15 +27,14 @@ Summary:
    touch many files or make many web requests or other tool uses).
 2. **Re-run test**: if the user asked you to do this again with different
    inputs, much of the process would be recognizably the same -- same
-   sources, same steps, same criteria, just different data. Judgement steps
-   in the middle of a flow are fine; they live in SKILL.md as prose
-   instructions.
+   sources, same steps, same criteria, just different data. Model-judgement
+   steps in the middle of a flow do not disqualify it.
 3. You expect this task (or one like it) to recur, either because the user suggested it might or because it seems like a useful task to repeat.
 
-A skill is a SKILL.md (process recipe) plus optional scripts for the
-deterministic steps. Judgement steps live in SKILL.md as prose and are
-executed by the agent using the skill. Do not demand end-to-end
-scriptability before crystallizing.
+A skill is a SKILL.md (process recipe) plus scripts for its flow steps --
+both deterministic steps and LLM-judgement steps. SKILL.md
+prose is reserved for executor meta-work that genuinely needs the agent in
+the loop; everything else shoudl be scripted.
 
 **Default to asking the user**, not to deciding silently. If you can name
 any plausible skill shape, propose it to the user and let them decide.
@@ -60,7 +61,7 @@ Pick a short kebab-case slug `$NAME` for this crystallization (e.g.
 
 Use that same slug everywhere below.
 
-If you were invoked from `do-something-new`, reuse its slug (`$SLUG`) as
+If this skill was invoked from `do-something-new`, reuse its slug (`$SLUG`) as
 `$NAME` -- the `source_artifacts_dir` frontmatter assumes matched paths.
 
 ## Step 1: Confirm
@@ -71,7 +72,7 @@ Triggers that count as explicit invocation:
 - The user typed `/crystallize-task`, said "crystallize this / yes
   crystallize / make a skill out of this" in the immediately-prior
   turn, or otherwise named the skill by hand.
-- The calling skill is `do-something-new` (sample-approval at its Step 5 is the go-ahead).
+- The calling skill is `do-something-new` (after sample approval).
 
 In any of those cases go straight to Step 2 -- asking again is
 redundant and annoying.
@@ -158,29 +159,6 @@ and push it to the lead per the sub-skill's reporting protocol; the
 destination is given by `lead_agent` / `finish_report_path` in
 frontmatter.
 
-## Data-capture guidance
-When the skill being built fetches data from external APIs, capture
-*all reasonable fields per record* in the calls you're already making,
-not just the fields the user displayed in the original turn. This keeps
-downstream consumers (e.g. an interface built later on top of the
-captured data) unconstrained. Pagination is a normal part of the
-workflow if the original ask requires it. Do NOT make extra
-un-asked-for API calls just to gather more data.
-
-Go further than fields: **persist the raw payload of each record and a
-reference to its source, durably** (e.g. under `runtime/<name>/`), not
-just the extracted/processed fields (see the preserve-and-surface
-principle in CLAUDE.md for what "raw payload" and "source reference"
-mean). A pipeline that fetches, transforms, and discards the raw payload
-cannot satisfy that principle no matter what consumers do: persisting it
-is what lets a *later* change in processing requirements re-derive new
-fields with no refetch, and what lets surfaces show the raw record or
-link out to the source. Retain whatever a consumer needs to *render*
-the record faithfully later -- e.g. keep the email's content-type and
-HTML body, not just a flattened text field -- so a downstream surface
-can render it in its native format rather than dump escaped source.
-Make this a postcondition of the skill's data-capture step.
-
 ## Worker sub-skills
 The `crystallize-task-worker`, `heal-skill-worker`, and
 `update-skill-worker` skills have been pre-installed into your
@@ -218,7 +196,7 @@ crystallize runtime dir.
 ```bash
 uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name crystallize-$NAME \
-    --template crystallize-worker \
+    --template subskill-worker \
     --runtime-dir runtime/crystallize/$NAME/ \
     --task-file runtime/crystallize/$NAME/task.md
 ```
@@ -288,8 +266,9 @@ commit so the migration is reviewable on its own.
 - Never crystallize a turn whose process would not repeat recognizably on a
   re-run. If each hypothetical re-run would require entirely different
   steps rather than the same recipe with different data, decline. Note
-  that judgement steps within an otherwise stable process do NOT
-  disqualify crystallization -- they live in SKILL.md as prose.
+  that model-judgement steps within an otherwise stable process do NOT
+  disqualify crystallization -- by default they are scripted as
+  `[ai-script]` calls, with prose reserved for executor meta-work.
 - The worker owns outline and implementation decisions. Do not second-guess
   the worker's skill structure unless something is clearly wrong.
 - Worker failure handling: see `launch-task/references/worker-failure.md`.

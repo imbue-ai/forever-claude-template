@@ -982,6 +982,32 @@ body {
   flex: 1;
 }
 
+/* Live status dot: pulsing green while the sub-agent works. Reuses the
+   agent-activity-pulse keyframes so it matches the main chat's activity dot. */
+.subagent-card-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.subagent-card-status-dot--running {
+  background: var(--color-accent);
+  animation: agent-activity-pulse 1.4s ease-in-out infinite;
+}
+
+/* Settled checkmark shown once the sub-agent finishes, mirroring a done progress step. */
+.subagent-card-status-check {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
+/* Once finished, the card drops its green accent for neutral grey -- green reads as active. */
+.subagent-card--done {
+  border-color: var(--color-border);
+  background: var(--color-surface-secondary);
+}
+
 .subagent-card-description {
   font-size: 13px;
   font-weight: 500;
@@ -1017,11 +1043,10 @@ body {
   text-decoration: underline;
 }
 
-/* Shown while the subagent is still running and not yet linked to its session,
-   so there is no conversation to open yet. Muted and non-interactive. */
+/* The "View conversation" label before the subagent is linked to its session: there is no
+   conversation to open yet, so it renders muted and non-interactive until linkage lands. */
 .subagent-card-link--pending {
-  color: var(--color-text-secondary);
-  font-style: italic;
+  color: var(--color-text-faint);
   cursor: default;
 }
 
@@ -1030,15 +1055,88 @@ body {
   text-decoration: none;
 }
 
-/* ── Permission request footer (inside the tool-call block) ── */
-.tool-call-block--permission-request {
-  border-color: var(--color-accent);
+/* ── Permission request card ──
+   An agent permission request, rendered as a standalone card (not a generic
+   tool block): the specific request, a button that opens the modal, and a
+   disclosure preserving the raw request/response. */
+.permission-request {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-composer);
+  padding: 12px 14px;
+  max-width: 560px;
 }
 
-.tool-call-permission-footer {
-  border-top: 1px solid var(--color-accent);
-  background: var(--color-accent-light);
-  padding: 8px 10px;
+.permission-request-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-primary);
+}
+
+.permission-request-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.permission-request-status {
+  margin-top: 9px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.permission-request-detail {
+  margin-top: 10px;
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+}
+
+.permission-request-detail-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.permission-request-detail-value {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+  border-radius: 5px;
+  padding: 2px 7px;
+}
+
+.permission-request-reason-value {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-text-primary);
+}
+
+.permission-request-actions {
+  margin-top: 12px;
+}
+
+.permission-request-raw {
+  margin-top: 10px;
+}
+
+.permission-request-raw > summary {
+  font-size: 12px;
+  color: var(--color-text-faint);
+  cursor: pointer;
+}
+
+.permission-request-raw > pre {
+  margin: 8px 0 0;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-sidebar);
+  border-radius: 6px;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .permission-request-button {
@@ -1065,6 +1163,84 @@ body {
 
 .permission-request-icon {
   flex-shrink: 0;
+}
+
+/* The granted/denied verdict shown in place of the action button once the user
+   has decided. Granted reads in the accent green; denied in the same red the
+   tool-call error output uses. */
+.permission-request-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.permission-request-verdict--granted {
+  color: var(--color-accent);
+}
+
+.permission-request-verdict--denied {
+  color: #dc2626;
+}
+
+.permission-request-verdict--error {
+  color: #b45309;
+}
+
+.permission-request-verdict-icon {
+  flex-shrink: 0;
+}
+
+/* A hyphenated token in the "Requesting" line (permission name, scope, or path).
+   `nowrap` keeps each on one line so a long name never breaks mid-name; the line
+   wraps between tokens instead. */
+.permission-request-token,
+.permission-request-perm {
+  white-space: nowrap;
+}
+
+/* A requested permission name, hoverable for its plain-English description. The
+   dotted underline signals it's interactive; the tooltip bubble is centered over
+   the name (mirrors the .pv-tl-missing CSS-tooltip pattern -- native `title` is
+   unreliable in the desktop webview). */
+.permission-request-perm {
+  position: relative;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: help;
+}
+
+.permission-request-perm::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  width: max-content;
+  max-width: 280px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--color-text-primary);
+  color: #fff;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.permission-request-perm:hover::after,
+.permission-request-perm:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
 }
 
 /* ── Dockview workspace ── */
@@ -2001,6 +2177,17 @@ body {
    inline as plain chat-style messages, sitting above the timeline thread
    (opaque background + z-index) so the thread doesn't draw through it. */
 .pv-ungrouped {
+  position: relative;
+  z-index: 2;
+  margin: 6px 0 14px 0;
+  background: var(--color-bg);
+}
+
+/* Agent permission request, lifted out of any open step so it is always
+   directly visible and breaks the timeline flow. Positioned like an ungrouped
+   run (opaque background + z-index) so the timeline thread doesn't draw through
+   it; the request block carries its own permission-request styling and button. */
+.pv-permission {
   position: relative;
   z-index: 2;
   margin: 6px 0 14px 0;

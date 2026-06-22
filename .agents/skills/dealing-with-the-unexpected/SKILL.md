@@ -13,7 +13,7 @@ Before doing anything, understand what is actually happening:
 
 - Read any error messages carefully
 - Check the tmux windows: `tmux list-windows -t $(tmux display-message -p '#S')`
-- Check if services are running: look at `services.toml` vs actual tmux windows
+- Check if services are running: `supervisorctl status` (compare against the programs defined in `supervisord.conf`)
 - If the deployment uses telegram, check recent history: `tail -20 runtime/telegram/history.jsonl`
 - Check the wait counter state: `cat runtime/wait_counter 2>/dev/null || echo "no counter"`
 
@@ -26,7 +26,7 @@ Common issues and their causes:
   confirm the relevant env vars are set. See the `send-user-message` skill
   for how channel selection works; fall back to inline responses until the
   channel is restored.
-- **Services not starting**: Check the `bootstrap` tmux window for errors. Verify `services.toml` is valid TOML.
+- **Services not starting**: Run `supervisorctl status` and read the service's logs under `/var/log/supervisor/<name>-stderr.log` (or `supervisorctl tail -f <name> stderr`). The `bootstrap` tmux window shows supervisord's own output. Verify `supervisord.conf` is valid, then `supervisorctl reread && supervisorctl update`.
 - **Wait script behaving oddly**: Check `runtime/wait_counter` contents. Delete it to reset: `rm -f runtime/wait_counter`
 
 ## 3. Fix or escalate

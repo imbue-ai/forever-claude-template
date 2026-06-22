@@ -1,6 +1,6 @@
 ---
 name: build-web-service
-description: Use when you want to create a new web view for the user. Covers scaffolding a new FastAPI service (canonical path) and the escape hatch for wrapping a pre-existing third-party server, plus diagnostic references when things misbehave.
+description: Use when you want to create a new web view for the user. Covers scaffolding a new Flask service (canonical path) and the escape hatch for wrapping a pre-existing third-party server, plus diagnostic references when things misbehave.
 metadata:
   crystallized: true
 ---
@@ -11,13 +11,13 @@ A "web service" here is something the user can click on as a tab in
 the desktop client and see render at `/service/<name>/`, proxied
 through the system_interface.
 
-There is one canonical path (scaffold a new FastAPI lib) and one
+There is one canonical path (scaffold a new Flask lib) and one
 escape hatch (wrap a pre-existing third-party server). Modify/remove
 flows go through the `edit-services` skill.
 
 ## Decide which path applies
 
-- **Authoring routes yourself** (the common case): use the FastAPI
+- **Authoring routes yourself** (the common case): use the Flask
   scaffolder in Step 1. The scaffolder picks correct defaults so most
   framework gotchas don't fire.
 - **Wrapping a pre-existing third-party server** (Jupyter, Grafana,
@@ -25,7 +25,7 @@ flows go through the `edit-services` skill.
   skip the scaffolder, jump to "Escape hatch: wrap an existing server"
   below.
 
-If you would otherwise scaffold a FastAPI lib whose only job is to
+If you would otherwise scaffold a Flask lib whose only job is to
 shell out to a third-party tool, do not do that -- the system_interface
 already proxies `/service/<name>/...` to whatever URL you register.
 Adding a Python proxy in front of the third-party server adds a hop,
@@ -40,11 +40,11 @@ under `libs/<your-package>/` so they get an isolated tab and prefix.
 
 - **Pick a kebab-case service name.** Becomes the URL segment
   `/service/<name>/`. Short and descriptive (`news`, `docs-viewer`)
-  beats clever. Avoid names already used in `services.toml`
+  beats clever. Avoid names already used in `supervisord.conf`
   (`web`, `system_interface`, etc. are reserved by the scaffolder).
 - **Pick a free port.** `ss -tln` lists what's bound. The scaffolder
   picks the lowest free port at or above 8081 by parsing
-  `services.toml` and `runtime/applications.toml`; if you're choosing
+  `supervisord.conf` and `runtime/applications.toml`; if you're choosing
   manually, avoid `8000` (system_interface) and `8080` (the example
   `web` service).
 - **Bind to `127.0.0.1`** (not `0.0.0.0`). The forwarder reaches your
@@ -58,7 +58,7 @@ under `libs/<your-package>/` so they get an isolated tab and prefix.
 ## Step 1: Run the scaffolder (canonical path)
 
 ```bash
-uv run .agents/skills/build-web-service/scripts/scaffold_fastapi_lib.py \
+uv run .agents/skills/build-web-service/scripts/scaffold_flask_lib.py \
     --name <service-name> \
     --description "<one-liner>" \
     [--port <int>] \
@@ -71,7 +71,7 @@ Required:
 
 Optional:
 - `--port`: explicit port; auto-picked if omitted.
-- `--extra-dep`: repeatable. Add libraries beyond `fastapi`/`uvicorn`
+- `--extra-dep`: repeatable. Add libraries beyond `flask`/`flask-sock`
   (e.g. `--extra-dep "jinja2>=3.1" --extra-dep "anthropic>=0.40"`).
 - `--skip-uv-sync`: skip the final `uv sync --all-packages` (for fast
   iteration / dry runs).
@@ -85,10 +85,11 @@ What gets generated:
 - `libs/<package>/pyproject.toml` -- declares
   `[project.scripts] <name> = "<package>.runner:main"`.
 - `libs/<package>/src/<package>/__init__.py` -- empty.
-- `libs/<package>/src/<package>/runner.py` -- sync FastAPI starter.
-  Reads `ROOT_PATH` from env (default empty) and passes it to
-  `FastAPI(...)` so the app emits prefix-aware URLs when reached
-  through the proxy.
+- `libs/<package>/src/<package>/runner.py` -- sync Flask starter.
+  Builds a `Flask` app and serves it with
+  `werkzeug.serving.run_simple(..., threaded=True)`. It serves at `/`;
+  the system_interface proxy handles the `/service/<name>/` prefixing,
+  so no `root_path`/`ROOT_PATH` is needed.
 - `libs/<package>/test_<package>_ratchets.py` -- standard ratchets at
   zero.
 - `libs/<package>/README.md` -- one-line description.
@@ -99,30 +100,35 @@ What gets updated:
   `[project].dependencies`, `libs/<package>` to
   `[tool.uv.workspace].members`, and `<service-name> = { workspace = true }`
   to `[tool.uv.sources]`.
-- `services.toml` -- inserts:
+- `supervisord.conf` -- appends a program block:
 
-  ```toml
-  [services.<name>]
-  command = "ROOT_PATH=/service/<name> python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && uv run <name>"
-  restart = "on-failure"
+  ```ini
+  [program:<name>]
+  command=bash -c "python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && uv run <name>"
+  directory=/mngr/code
+  autostart=true
+  autorestart=true
+  # plus rotated stdout/stderr logfiles under /var/log/supervisor/<name>-*.log
   ```
 
-  The `ROOT_PATH=/service/<name>` prefix is what makes FastAPI emit
-  prefix-correct OpenAPI links and absolute redirects when reached
-  through the system_interface. Standalone `uv run <name>` keeps
-  working at `/` because the env var is unset there.
+  The Flask app serves at `/` and needs no prefix env var: the
+  system_interface proxy handles `/service/<name>/` prefixing (it
+  rewrites absolute paths in served HTML and installs a scoped service
+  worker that prepends the prefix to the page's own fetches). The
+  `bash -c "..."` wrapper is required because supervisord runs commands
+  directly (no shell) and this one chains `forward_port.py` with `&&`.
 
-The bootstrap service manager picks up the new entry automatically
-(no manual restart). Confirm with:
+supervisord does not watch the config, so tell it to pick up the new
+program, then confirm it is running:
 
 ```bash
-tmux list-windows | grep "svc-<name>"
+supervisorctl reread && supervisorctl update
+supervisorctl status <name>
 ```
 
-If the window doesn't appear after a few seconds, capture the bootstrap
-window to a file (`tmux capture-pane -t bootstrap -p > /tmp/bootstrap.txt`)
-and read it -- do not pipe `tmux capture-pane` through `tail`/`head`,
-since CLAUDE.md disallows that.
+If it isn't `RUNNING`, read its log
+(`/var/log/supervisor/<name>-stderr.log`) or run
+`supervisorctl tail <name> stderr`.
 
 ## Step 2: Implement your routes
 
@@ -130,8 +136,10 @@ The starter `runner.py` has just `GET /` (a placeholder HTML page)
 and `GET /health` (returns `{"status": "ok"}`). Replace the
 placeholder with your real routes.
 
-Use **sync handlers** (`def`, not `async def`). The starter is fully
-sync and most pages don't need otherwise.
+Use **sync handlers** (`def`, not `async def`). Flask handlers are
+sync `def`, and the starter runs on the threaded Werkzeug server
+(`run_simple(..., threaded=True)`), so concurrent requests are handled
+by separate threads -- no asyncio needed.
 
 ### Rendering HTML for a human
 
@@ -143,6 +151,14 @@ writing the markup. Always do this before working on UI, regardless of the scope
 Skip this step for routes that emit only JSON, only redirects, or that
 serve an existing third-party UI through the escape hatch below --
 there's no markup to design.
+
+### Calling Claude from your service
+
+If your service needs to call Claude (classify/summarize content, run a one-shot
+agentic task, or launch a full agent), follow the `use-ai-integration` skill: it
+picks the path (a keyed `litellm` call or the keyless `claude_p.py` helper),
+covers the `claude -p` environment fix and the cost model, and saves you from
+hand-rolling the call.
 
 ### Always surface the raw data and its source
 
@@ -177,7 +193,7 @@ Two cases, two patterns:
 
 - **Runtime state files** (caches, cursors, last-visit timestamps,
   JSON snapshots written and read across runs): use cwd-relative
-  paths like `Path("runtime/<name>/...")`. The bootstrap-managed
+  paths like `Path("runtime/<name>/...")`. The supervisord-managed
   services run from `/mngr/code` (repo root), so this resolves
   consistently. Do NOT use `Path(__file__)`-based paths for runtime
   state.
@@ -236,23 +252,29 @@ is hidden).
 ## Escape hatch: wrap an existing server
 
 For pre-existing third-party tools, do not scaffold a lib. Add a
-`services.toml` entry that runs `forward_port.py` and then your
-existing start command:
+`[program:<name>]` block to `supervisord.conf` that runs
+`forward_port.py` and then your existing start command. supervisord runs
+commands directly (no shell), so wrap any command that chains with `&&`
+in `bash -c "..."`:
 
-```toml
-[services.<name>]
-command = "python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && <existing_start_command>"
-restart = "on-failure"
+```ini
+[program:<name>]
+command=bash -c "python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && <existing_start_command>"
+directory=/mngr/code
+autostart=true
+autorestart=true
 ```
 
 Two valid shapes:
 
 - **Inline** (preferred when one line fits):
 
-  ```toml
-  [services.docs-viewer]
-  command = "python3 scripts/forward_port.py --url http://localhost:8090 --name docs-viewer && jupyter notebook --port 8090 --ip 127.0.0.1 --no-browser"
-  restart = "on-failure"
+  ```ini
+  [program:docs-viewer]
+  command=bash -c "python3 scripts/forward_port.py --url http://localhost:8090 --name docs-viewer && jupyter notebook --port 8090 --ip 127.0.0.1 --no-browser"
+  directory=/mngr/code
+  autostart=true
+  autorestart=true
   ```
 
 - **Wrapper script** (preferred for multi-step bootstrap or env exports):
@@ -265,17 +287,23 @@ Two valid shapes:
   exec <existing_start_command>
   ```
 
-  ```toml
-  [services.<name>]
-  command = "bash scripts/run_<name>.sh"
-  restart = "on-failure"
+  ```ini
+  [program:<name>]
+  command=bash scripts/run_<name>.sh
+  directory=/mngr/code
+  autostart=true
+  autorestart=true
   ```
+
+After editing `supervisord.conf`, run `supervisorctl reread &&
+supervisorctl update` to start the new program.
 
 The `forward_port.py` call MUST come first in the command -- the port
 must be registered before the app starts listening, otherwise the
 app-watcher races with the backend coming up.
 
-For schema details on `services.toml`, see the `edit-services` skill.
+For the full program schema and logging knobs, see the `edit-services`
+skill.
 
 Verification and gotchas references apply identically to this path.
 
@@ -305,8 +333,8 @@ also reachable at a public URL in addition to the local one. Two
 caveats:
 
 - **The public hostname is owned server-side**, not by the
-  cloudflared process running in this container. Skimming
-  `svc-cloudflared`'s tmux output will not surface a URL.
+  cloudflared process running in this container. Skimming the
+  `cloudflared` service's logs will not surface a URL.
 - **The public URL is *not* written into `runtime/applications.toml`.**
   `forward_port.py` only stores `name` and `url` (the local
   `http://localhost:<port>` backend address). Do not grep that file
@@ -327,8 +355,16 @@ Removing a web service:
 
 1. `python3 scripts/forward_port.py --name <name> --remove` (drops the
    entry from `runtime/applications.toml`).
-2. Drop `[services.<name>]` from `services.toml` (use `edit-services`
-   for guidance on the toml mechanics).
+2. Stop the program and remove its block from `supervisord.conf`, then
+   reconcile:
+
+   ```bash
+   supervisorctl stop <name>
+   # delete the [program:<name>] block from supervisord.conf
+   supervisorctl reread && supervisorctl update
+   ```
+
+   (See `edit-services` for the mechanics.)
 3. If you scaffolded a lib, also: `rm -rf libs/<package>/` and revert
    the matching diff in the root `pyproject.toml` (drop from
    `[project].dependencies`, `[tool.uv.workspace].members`, and

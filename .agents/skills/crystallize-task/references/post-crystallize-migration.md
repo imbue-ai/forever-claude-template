@@ -101,10 +101,12 @@ or shells out to it, and that service was running before the merge,
 it may have cached imports or be holding old subprocess paths. Restart
 it so the new path takes effect:
 
-- `services.toml`-managed services: kill the wrapper process; the
-  bootstrap manager restarts on `restart = "on-failure"`. If it
-  doesn't (see CLAUDE.md cwd / bootstrap notes), restart manually
-  with `uv run <command>` from the repo root.
+- Supervisord-managed services (programs in `supervisord.conf`):
+  `supervisorctl restart <name>` (or `stop` / `start`). Supervisord
+  also restarts crashed `autorestart=true` services automatically, so
+  killing the process bounces it onto the new code. If a program needs
+  config changes first, edit `supervisord.conf` then
+  `supervisorctl reread && supervisorctl update`.
 - Subagents you started this session: send them a note via
   `mngr message <agent> -m "..."` if they need to pick up the change,
   or restart them.

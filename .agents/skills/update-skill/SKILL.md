@@ -28,13 +28,16 @@ this skill change *and* the change is already committed on the branch.
 Otherwise pick the absorb flow. Absorb is the safe default; its Gate 1
 just re-surfaces the design for an approval pass.
 
-"Repeatable" covers both script-shaped extensions (an extra flag, a new
-output format) and prose-shaped extensions (an additional judgement step
-with a stable recipe). Both fit inside a skill -- scripts in `scripts/`,
-judgement as SKILL.md prose.
+"Repeatable" covers deterministic extensions (an extra flag, a new output
+format), model-judgement extensions (an additional judgement step with a
+stable recipe), and executor meta-work. The first two are scripted -- a
+deterministic step in `scripts/`, a model-judgement step as a scripted
+model call (`[ai-script]`) -- and only executor meta-work fits as
+SKILL.md prose. See `.agents/shared/references/spec-summary.md`.
 
 **Principle.** Reliability is the floor; simplicity is the target.
-Default to a single entry point and one flow. Add surface only when a
+Default to a subcommand per cleanly-separable step plus a `run all` that
+chains them (see `spec-summary.md`); add surface beyond that only when a
 specific invariant demands it.
 
 Whether to update-in-place or split a new sibling skill is a decision the

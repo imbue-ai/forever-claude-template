@@ -12,9 +12,9 @@ this module:
   mutating ops acquire before broadcasting. Conflicting attempts get an
   HTTP 409 with the holder's metadata so they can decide whether to retry.
 
-Read-only ops (``inspect``, ``list``, ``refresh``) bypass the mutex.
-``focus`` acquires it because it mutates the serialized active-panel
-state.
+Read-only ops (``inspect``, ``list``, ``refresh``, ``reload_system_interface``)
+bypass the mutex. ``focus`` acquires it because it mutates the serialized
+active-panel state.
 """
 
 import hashlib
@@ -49,6 +49,7 @@ _KNOWN_OPS: frozenset[str] = frozenset(
         "restore",
         "replace-url",
         "refresh",
+        "reload_system_interface",
     }
 )
 
@@ -84,6 +85,7 @@ _BROADCASTING_OPS: frozenset[str] = frozenset(
         "restore",
         "replace-url",
         "refresh",
+        "reload_system_interface",
     }
 )
 

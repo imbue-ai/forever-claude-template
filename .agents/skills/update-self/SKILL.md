@@ -14,7 +14,7 @@ branch = "main"
 
 ## What this means
 
-The template contains shared infrastructure: skills, scripts, CLAUDE.md scaffolding, Dockerfile, services.toml, etc. When the template is updated, you can pull those changes in here.
+The template contains shared infrastructure: skills, scripts, CLAUDE.md scaffolding, Dockerfile, supervisord.conf, etc. When the template is updated, you can pull those changes in here.
 
 ## Setup
 

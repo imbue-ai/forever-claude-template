@@ -1,4 +1,4 @@
-FROM python:3.12.13-slim
+FROM python:3.12.13-slim-bookworm
 
 # /root/.local/bin holds uv + claude (installed by scripts/setup_system.sh); put
 # it on PATH for every build layer and at runtime.

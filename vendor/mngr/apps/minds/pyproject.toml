@@ -16,10 +16,11 @@ dependencies = [
     "jinjax>=0.45",
     "loguru",
     "imbue-mngr",
+    "imbue-mngr-aws",
     "imbue-mngr-forward",
     "imbue-mngr-latchkey",
     "imbue-mngr-ovh",
-    "imbue-mngr-vps-docker",
+    "imbue-mngr-vps",
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
@@ -49,10 +50,11 @@ build-backend = "hatchling.build"
 [tool.uv.sources]
 concurrency-group = { workspace = true }
 imbue-mngr = { workspace = true }
+imbue-mngr-aws = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-ovh = { workspace = true }
-imbue-mngr-vps-docker = { workspace = true }
+imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }
 
 [tool.hatch.build.targets.wheel]

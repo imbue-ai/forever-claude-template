@@ -13,7 +13,7 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - If you ever need to work with another *git* repo that is *outside* of this monorepo as a read-only dependency, you should do so by adding a git subtree under `vendor/`.
 - If you need to *actively develop* against an external repo (e.g. `mngr`), check out a standalone clone of it under `.external_worktrees/<repo-name>/`. This directory is gitignored so the external clones don't pollute the monorepo. The branch in the external clone should mirror the branch you're on in this monorepo.
 - This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `runtime/tickets/` (the path is set via the `TICKETS_DIR` env var so tickets ride the `mindsbackup/$MNGR_AGENT_ID` runtime-backup branch).
-- All relative paths in this repo assume cwd = repo root (`/code`). The bootstrap service manager runs from there; any process started elsewhere (manual launch, subprocess from a different cwd) must either set cwd to the repo root or use absolute paths. State directories live under `runtime/<feature>/`.
+- All relative paths in this repo assume cwd = repo root (`/code`). Supervisord runs the services from there; any process started elsewhere (manual launch, subprocess from a different cwd) must either set cwd to the repo root or use absolute paths. State directories live under `runtime/<feature>/`.
 - When adding a new web app, do NOT edit `libs/web_server/` -- it's an example placeholder. Use the `build-web-service` skill, which sets up a new lib + service entry + `forward_port.py` registration on its own port.
 
 # Task management (CRITICAL — read this before doing real work)
@@ -180,7 +180,7 @@ Only after doing all of the above should you begin writing code.
 # Important commands and conventions:
 
 - Never run `uv sync`, always run `uv sync --all-packages` instead
-- For browser automation, Playwright's Python API is available in the root venv -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`. The Chromium browser itself (and its apt system libraries) installs asynchronously on first container boot via the `deferred-install` service rather than being baked into the image; if the install hasn't finished yet, any `playwright.chromium.launch()` call will fail with a clear error. Check `/var/lib/minds/deferred-install/done.playwright` (or watch `tmux capture-pane -t svc-deferred-install -p`) to confirm the install completed before using browser automation in a fresh workspace. See `libs/bootstrap/README.md` for the full deferral contract. Chromium works as-is under the docker provider's gVisor (runsc) runtime -- gVisor allows user namespaces, so Chromium's namespace sandbox starts even though the container runs as root (verified: `chromium.launch()` succeeds with and without `--no-sandbox`). If you ever hit a "No usable sandbox!" error (e.g. on a host/runtime that doesn't permit unprivileged user namespaces), pass `chromium.launch(args=["--no-sandbox"])` (or `chromium_sandbox=False`) -- gVisor is the security boundary, so disabling Chromium's in-browser sandbox there is acceptable.
+- For browser automation, Playwright's Python API is available in the root venv -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`. The Chromium browser itself (and its apt system libraries) installs asynchronously on first container boot via the one-shot `deferred-install` supervisord program rather than being baked into the image; if the install hasn't finished yet, any `playwright.chromium.launch()` call will fail with a clear error. Check the marker file `/var/lib/minds/deferred-install/done.playwright` (or run `supervisorctl status deferred-install`, or read `/var/log/supervisor/deferred-install-stdout.log`) to confirm the install completed before using browser automation in a fresh workspace. See `libs/bootstrap/README.md` for the full deferral contract. Chromium works as-is under the docker provider's gVisor (runsc) runtime -- gVisor allows user namespaces, so Chromium's namespace sandbox starts even though the container runs as root (verified: `chromium.launch()` succeeds with and without `--no-sandbox`). If you ever hit a "No usable sandbox!" error (e.g. on a host/runtime that doesn't permit unprivileged user namespaces), pass `chromium.launch(args=["--no-sandbox"])` (or `chromium_sandbox=False`) -- gVisor is the security boundary, so disabling Chromium's in-browser sandbox there is acceptable.
 
 # Always remember these guidelines:
 
@@ -303,7 +303,7 @@ You can (and should) modify your own configuration to improve yourself:
 
 - **CLAUDE.md**: (this file) update these instructions if you discover better ways to operate.
 - **.agents/skills/**: Create new skills or modify existing ones. Each skill is a directory with a SKILL.md file. (Also symlinked from `.claude/skills/`.)
-- **services.toml**: Add, modify, or remove background services. See the `edit-services` skill.
+- **supervisord.conf**: Add, modify, or remove background services. See the `edit-services` skill.
 - **scripts/**: Add utility scripts that help you accomplish your purpose.
 
 Commit your changes to git after making modifications.
@@ -317,6 +317,15 @@ The upstream is defined in `parent.toml`.
 
 - **Prefer an applicable skill over reinventing.** Skill descriptions are
   injected so you can match by purpose, not by name.
+
+- **Run a skill's steps step by step in chat.** When you invoke a skill in a
+  chat turn and it exposes per-step subcommands (plus a `run all`), drive the
+  subcommands one at a time -- mirror each as a `tk` step and surface its
+  output -- so the user gets a rich progress view, rather than running one
+  opaque `run all`. This is not a watch-and-steer mode: run straight through,
+  pausing for the user only at the skill's declared `[prose]` steps. Reserve
+  `run all` for headless or scheduled runs, where there is no chat to show
+  progress in.
 
 - **Live first, ratify at turn-end via the worker pipeline.** All four
   lifecycle skills (`do-something-new`, `crystallize-task`, `heal-skill`,
@@ -361,8 +370,9 @@ Memory is gitignored from the main branch but is backed up automatically by the 
 
 # Services
 
-You can define background services in `services.toml`. 
-The bootstrap service manager (running in a separate tmux window) watches this file and starts/stops tmux windows accordingly.
+You can define background services as supervisord programs in `supervisord.conf`.
+Supervisord (launched by `bootstrap` after first-boot setup) supervises them; each program writes its own rotated logs under `/var/log/supervisor/<name>-stdout.log` and `/var/log/supervisor/<name>-stderr.log`.
+To add, change, or remove a service, edit `supervisord.conf` and run `supervisorctl reread && supervisorctl update` (and `supervisorctl restart <name>` to bounce one). Inspect with `supervisorctl status` / `supervisorctl tail -f <name> stderr`.
 See the `edit-services` skill for details.
 
 # Git

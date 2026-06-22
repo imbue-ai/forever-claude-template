@@ -54,7 +54,11 @@ Valid `name:` values for this worker:
 - Edit the relevant part of the skill to address the root cause. That
   can be scripts under `scripts/`, `SKILL.md` prose, or both. If the
   root cause was an ambiguous or wrong prose instruction, the fix is a
-  SKILL.md edit even if the skill has scripts.
+  SKILL.md edit even if the skill has scripts. If the root cause is a
+  model-judgement step the executor was performing inconsistently from
+  prose, the minimal fix may be to script it as a model call
+  (`[ai-script]`; see `.agents/shared/references/spec-summary.md`) -- but if
+  that grows into a redesign, escalate to `update-skill` per below.
 - Keep the fix minimal. Don't refactor unrelated code or prose.
 - A heal is a minimal fix. If the fix is growing enough to feel like a
   redesign (new subcommands, new flows, expanded contract, new dependencies), stop and

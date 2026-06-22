@@ -1,4 +1,4 @@
-"""Unit tests for the bootstrap service manager's reconciliation logic."""
+"""Unit tests for the bootstrap first-boot setup helpers."""
 
 from __future__ import annotations
 
@@ -10,163 +10,50 @@ import pytest
 from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from bootstrap.manager import (
-    DEFAULT_RESTART_POLICY,
-    MAX_RAPID_RESTARTS,
-    SVC_EXIT_STATUS_OPTION,
     _build_create_chat_command,
-    _build_service_keystrokes,
-    _compute_actions,
-    _compute_restarts,
+    _configure_git_global,
+    _create_orphan_runtime_worktree,
     _ensure_host_claude_config_dir,
-    _evaluate_restart_breaker,
     _format_env_file,
     _initialize_workspace_main_branch,
     _maybe_create_initial_chat,
-    _normalize_restart_policy,
     _parse_env_file,
     _read_host_name,
     _read_main_agent_labels,
     _resolve_services_claude_config_dir,
 )
 
-
-def test_compute_actions_no_changes_when_in_sync() -> None:
-    desired = {"a": {"command": "cmd-a", "restart": "never"}}
-    current = {"a": {"window_name": "svc-a", "command": "cmd-a"}}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == []
-    assert starts == []
+# --- _configure_git_global ---
 
 
-def test_compute_actions_starts_missing_service() -> None:
-    desired = {"a": {"command": "cmd-a", "restart": "never"}}
-    current: dict[str, dict[str, str]] = {}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == []
-    assert starts == [("a", "cmd-a")]
+def test_configure_git_global_sets_insteadof_and_hookspath(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Isolate the global git config to a tmp file so the test does not touch the
+    # developer's real ~/.gitconfig. _configure_git_global should set both
+    # insteadOf rewrites (git@ and ssh://) plus core.hooksPath.
+    gitconfig = tmp_path / ".gitconfig"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
 
+    _configure_git_global()
 
-def test_compute_actions_stops_removed_service() -> None:
-    desired: dict[str, dict] = {}
-    current = {"a": {"window_name": "svc-a", "command": "cmd-a"}}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == ["a"]
-    assert starts == []
+    insteadof = subprocess.run(
+        ["git", "config", "--global", "--get-all", "url.https://github.com/.insteadOf"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+    assert "git@github.com:" in insteadof
+    assert "ssh://git@github.com/" in insteadof
 
-
-def test_compute_actions_restarts_on_command_change() -> None:
-    desired = {"a": {"command": "cmd-a-new", "restart": "never"}}
-    current = {"a": {"window_name": "svc-a", "command": "cmd-a-old"}}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == ["a"]
-    assert starts == [("a", "cmd-a-new")]
-
-
-def test_compute_actions_treats_unknown_recorded_command_as_change() -> None:
-    # A window created by an older manager has no recorded command; reading the
-    # user-option yields "". That mismatch should trigger a restart so the new
-    # manager takes ownership of the window with a known command.
-    desired = {"a": {"command": "cmd-a", "restart": "never"}}
-    current = {"a": {"window_name": "svc-a", "command": ""}}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == ["a"]
-    assert starts == [("a", "cmd-a")]
-
-
-def test_compute_actions_handles_mixed_add_remove_change() -> None:
-    desired = {
-        "keep": {"command": "k", "restart": "never"},
-        "change": {"command": "new", "restart": "never"},
-        "add": {"command": "added", "restart": "never"},
-    }
-    current = {
-        "keep": {"window_name": "svc-keep", "command": "k"},
-        "change": {"window_name": "svc-change", "command": "old"},
-        "remove": {"window_name": "svc-remove", "command": "r"},
-    }
-    stops, starts = _compute_actions(desired, current)
-    assert sorted(stops) == ["change", "remove"]
-    assert sorted(starts) == [("add", "added"), ("change", "new")]
-
-
-# --- Restart policy: _build_service_keystrokes ---
-
-
-def test_build_service_keystrokes_runs_command_then_records_exit_status() -> None:
-    # The service command must run first, then its exit status be recorded so
-    # the manager can detect the service exiting. `$?` must be captured right
-    # after the command so it reflects the service's own status.
-    keys = _build_service_keystrokes("my-server --flag", "sess:svc-foo")
-    assert keys.startswith("my-server --flag;")
-    assert SVC_EXIT_STATUS_OPTION in keys
-    assert '"$?"' in keys
-
-
-def test_build_service_keystrokes_targets_its_own_window_explicitly() -> None:
-    # Regression: a service window runs in the background, so a `set-option -w`
-    # with no target lands on the session's *active* window, not the service's.
-    # The recorder must pass an explicit `-t <window_target>` so the exit status
-    # is written to the window the manager actually polls.
-    keys = _build_service_keystrokes("my-server", "sess:svc-foo")
-    assert "-t sess:svc-foo" in keys
-
-
-# --- Restart policy: _compute_restarts ---
-
-
-def test_compute_restarts_restarts_on_failure_after_nonzero_exit() -> None:
-    desired = {"a": {"command": "cmd", "restart": "on-failure"}}
-    assert _compute_restarts(desired, {"a": "1"}) == ["a"]
-
-
-def test_compute_restarts_skips_on_failure_after_clean_exit() -> None:
-    desired = {"a": {"command": "cmd", "restart": "on-failure"}}
-    assert _compute_restarts(desired, {"a": "0"}) == []
-
-
-def test_compute_restarts_never_policy_is_left_dead() -> None:
-    desired = {"a": {"command": "cmd", "restart": "never"}}
-    assert _compute_restarts(desired, {"a": "1"}) == []
-
-
-def test_compute_restarts_defaults_to_never_when_policy_absent() -> None:
-    desired = {"a": {"command": "cmd"}}
-    assert _compute_restarts(desired, {"a": "1"}) == []
-
-
-def test_compute_restarts_skips_service_removed_from_desired() -> None:
-    # A service that exited but is no longer in services.toml must not be
-    # restarted -- the mtime-driven reconcile removes its window instead.
-    assert _compute_restarts({}, {"gone": "1"}) == []
-
-
-def test_compute_restarts_handles_mixed_services() -> None:
-    desired = {
-        "crash": {"command": "c", "restart": "on-failure"},
-        "clean": {"command": "c", "restart": "on-failure"},
-        "oneshot": {"command": "c", "restart": "never"},
-    }
-    exited = {"crash": "2", "clean": "0", "oneshot": "1"}
-    assert _compute_restarts(desired, exited) == ["crash"]
-
-
-# --- Restart policy: _normalize_restart_policy ---
-
-
-def test_normalize_restart_policy_passes_through_valid_values() -> None:
-    assert _normalize_restart_policy("svc", "never") == "never"
-    assert _normalize_restart_policy("svc", "on-failure") == "on-failure"
-
-
-def test_normalize_restart_policy_defaults_when_absent() -> None:
-    assert _normalize_restart_policy("svc", None) == DEFAULT_RESTART_POLICY
-
-
-def test_normalize_restart_policy_warns_and_defaults_on_unknown_value() -> None:
-    # A typo'd policy must not silently disable restarts; it falls back to the
-    # default so the misconfiguration is visible (warning) and safe.
-    assert _normalize_restart_policy("svc", "on_failure") == DEFAULT_RESTART_POLICY
-    assert _normalize_restart_policy("svc", "always") == DEFAULT_RESTART_POLICY
+    hooks_path = subprocess.run(
+        ["git", "config", "--global", "core.hooksPath"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    assert hooks_path == "/mngr/code/scripts/git_hooks"
 
 
 # --- Env-file helpers ---
@@ -386,67 +273,6 @@ def test_build_create_chat_command_argv_accepted_by_live_cli() -> None:
     assert_mngr_argv_valid(argv)
 
 
-def test_build_create_chat_command_tags_user_created() -> None:
-    cmd = _build_create_chat_command("my-workspace", {"workspace": "my-workspace"})
-    labels = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--label"]
-    assert "user_created=true" in labels
-
-
-# --- _evaluate_restart_breaker ---
-
-
-def test_breaker_allows_restarts_within_budget() -> None:
-    times: tuple[float, ...] = ()
-    blocked: float | None = None
-    now = 1000.0
-    for _ in range(MAX_RAPID_RESTARTS):
-        outcome = _evaluate_restart_breaker(now, times, blocked)
-        assert outcome.should_restart is True
-        assert outcome.should_block is False
-        times = outcome.new_restart_times
-        blocked = outcome.new_blocked_until
-        now += 1.0
-    assert len(times) == MAX_RAPID_RESTARTS
-
-
-def test_breaker_trips_after_too_many_rapid_restarts() -> None:
-    # MAX_RAPID_RESTARTS recent restarts already on record.
-    times = tuple(1000.0 + i for i in range(MAX_RAPID_RESTARTS))
-    outcome = _evaluate_restart_breaker(1000.0 + MAX_RAPID_RESTARTS, times, None)
-    assert outcome.should_restart is False
-    assert outcome.should_block is True
-    assert outcome.new_blocked_until is not None
-
-
-def test_breaker_stays_paused_during_cooldown() -> None:
-    blocked_until = 2000.0
-    outcome = _evaluate_restart_breaker(1990.0, (), blocked_until)
-    assert outcome.should_restart is False
-    assert outcome.should_block is False
-    assert outcome.should_unblock is False
-    assert outcome.new_blocked_until == blocked_until
-
-
-def test_breaker_resumes_after_cooldown_elapses() -> None:
-    blocked_until = 2000.0
-    outcome = _evaluate_restart_breaker(
-        blocked_until + 1.0, (1000.0, 1001.0, 1002.0), blocked_until
-    )
-    # Cooldown elapsed: the history resets and one fresh restart is allowed.
-    assert outcome.should_unblock is True
-    assert outcome.should_restart is True
-    assert outcome.new_blocked_until is None
-
-
-def test_breaker_window_drops_old_restarts() -> None:
-    # Three restarts, but all far older than the rapid window -> not counted, so
-    # a restart is allowed.
-    old_times = (1.0, 2.0, 3.0)
-    outcome = _evaluate_restart_breaker(100_000.0, old_times, None)
-    assert outcome.should_restart is True
-    assert outcome.should_block is False
-
-
 # --- _maybe_create_initial_chat ---
 
 
@@ -608,6 +434,38 @@ def test_initialize_workspace_main_branch_is_idempotent_on_clean_main(
     _initialize_workspace_main_branch()
     branch = _git_in(work_dir, "branch", "--show-current").stdout.strip()
     assert branch == "main"
+
+
+# --- _create_orphan_runtime_worktree ---
+
+
+def test_create_orphan_runtime_worktree_creates_empty_orphan_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The helper must add runtime/ as a worktree on a brand-new orphan branch
+    (no parent, empty tree) using only plumbing that works on old git -- no
+    `git worktree add --orphan` (git >= 2.42), which Lima's Debian 12 lacks."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_in(repo, "init", "-q", "--initial-branch=main")
+    _git_in(repo, "config", "user.email", "seed@test.local")
+    _git_in(repo, "config", "user.name", "seed")
+    (repo / "README.md").write_text("seed\n")
+    _git_in(repo, "add", "-A")
+    _git_in(repo, "commit", "-qm", "seed")
+
+    monkeypatch.chdir(repo)
+    result = _create_orphan_runtime_worktree("mindsbackup/agent-test")
+    assert result.returncode == 0, result.stderr
+
+    runtime = repo / "runtime"
+    assert (runtime / ".git").exists()
+    # The branch is an orphan: its tip commit has no parents.
+    parents = _git_in(runtime, "rev-list", "--parents", "-1", "HEAD").stdout.split()
+    assert len(parents) == 1  # just the commit sha, no parent sha
+    # Nothing is tracked yet (empty tree); the worktree has no repo content.
+    assert _git_in(runtime, "ls-files").stdout.strip() == ""
+    assert not (runtime / "README.md").exists()
 
 
 # --- detect_snapshot_settings / init_backup_config_with_settings ---

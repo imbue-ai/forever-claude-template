@@ -107,10 +107,11 @@ Permission management, or any other commands other than `latchkey curl`, are not
 - All curl arguments are passed through unchanged
 - Return code, stdout and stderr are passed back from curl
 - Unless the user explicitly asks about it, don't discuss Latchkey or the technical details (it's easy for the user to get confused).
+- Unless the user explicitly asks you to do that, do not directly call `latchkey auth browser` or `latchkey auth browser-prepare`. (The Minds app is supposed to do that as part of the permission request approval process.)
 
 ## Currently supported services
 
 Latchkey currently offers varying levels of support for the
 following services: AWS, Calendly, Coolify, Discord, Dropbox, Figma, GitHub, GitLab,
 Gmail, Google Analytics, Google Calendar, Google Docs, Google Drive, Google Sheets,
-Linear, Mailchimp, Notion, Sentry, Slack, Stripe, Telegram, Umami, Yelp, Zoom, and more.
+Linear, Mailchimp, Notion, Sentry, Slack, Stripe, Telegram, Todoist, Umami, Yelp, Zoom, and more.

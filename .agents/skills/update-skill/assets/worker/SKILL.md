@@ -36,13 +36,17 @@ pointers.
 
 ## Principles
 
-"Repeatable" covers both script-shaped extensions (extra flag, new output
-format) and prose-shaped extensions (an additional judgement step with a
-stable recipe). Both land inside a skill: scripts under `scripts/`,
-judgement steps as SKILL.md prose.
+"Repeatable" covers deterministic extensions (extra flag, new output
+format), model-judgement extensions (an additional judgement step with a
+stable recipe), and executor meta-work. The first two are scripted -- a
+deterministic step under `scripts/`, a model-judgement step as a scripted
+model call (`[ai-script]`; see
+`.agents/shared/references/spec-summary.md`) -- so the flow stays runnable
+headless. Only genuine executor meta-work lands as SKILL.md prose.
 
 **Reliability is the floor; simplicity is the target.** Default to a
-single entry point and one flow. Add surface only when a specific
+subcommand per cleanly-separable step plus a `run all` that chains them
+(see `spec-summary.md`); add surface beyond that only when a specific
 invariant demands it.
 
 Consult `.agents/shared/references/spec-summary.md` for the layout,
@@ -72,13 +76,15 @@ Terminal statuses (both flows): `done`, `stuck`, `no-update-needed`.
 
 ## Validation (both flows)
 
-Before emitting Gate 2, validate the target skill's layout:
+Before emitting Gate 2, validate the target skill:
 
 ```bash
 uv run .agents/shared/scripts/validate_skill.py .agents/skills/<name>
 ```
 
-It must print `ok` and exit 0.
+This checks the structure and, when a `run.py` exists, runs
+`scripts/run.py --help` to confirm its imports and PEP 723 dependencies
+resolve. It must print `ok` and exit 0.
 
 ## Scenarios (both flows)
 
