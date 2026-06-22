@@ -124,13 +124,13 @@ is_enabled = false
 [providers.docker]
 is_enabled = false
 isolate_host_volumes = true
-# Run agent containers under the gVisor (`runsc`) runtime to shrink the host
-# kernel attack surface for untrusted agents. `runsc` must be installed and
-# registered with the local Docker daemon (see CLAUDE.md); container creation
-# fails with Docker's native "unknown runtime" error otherwise. Override back to
-# the default runtime where gVisor is unavailable (e.g. CI, Modal) with
-# MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
-docker_runtime = "runsc"
+# No `docker_runtime` is set here, so containers use Docker's default runtime
+# (runc), which is available everywhere -- notably macOS, where gVisor's `runsc`
+# is not. The gVisor-hardened runtime is selected per-create by stacking the
+# `docker_runsc` template overlay below (the minds desktop app does this by
+# default on Linux, where `runsc` is installed). A direct CLI user can opt in
+# with `--template docker --template docker_runsc`, or override either way with
+# MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=<runc|runsc>.
 
 [providers.lima]
 # is_enabled=false (mirrors [providers.docker]) is load-bearing: the lima backend
@@ -203,13 +203,15 @@ extra_provision_command__extend = [
     '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' > "$HOME/.tmux.conf"''',
 ]
 
-# template for docker provider
+# Shared base template for the local docker provider. Used on its own for the
+# default (runc) runtime; stack `--template docker_runsc` on top of it to select
+# the gVisor (runsc) runtime instead (see that overlay below and the
+# [providers.docker] note above). The container-runtime choice is the only
+# difference between the two, so the body lives here once and the overlay reuses
+# it -- nothing to keep in sync.
 [create_templates.docker]
 provider = "docker"
 target_path = "/mngr/code/"
-# gVisor runtime selection lives in the [providers.docker] block above
-# (docker_runtime), not here -- provider config belongs on the provider, and
-# template `--setting` entries don't reliably reach the provider config anyway.
 setting__extend = ["providers.docker.is_enabled=true"]
 build_arg__extend = ["--file=Dockerfile", "."]
 # Security hardening for `docker run`: block privilege escalation via setuid
@@ -243,6 +245,19 @@ pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # before any agent work_dir setup, so the workspace is in place by the
 # time the user's git refs land on top. See scripts/fct_seed.sh.
 post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+
+# gVisor (runsc) runtime overlay for the docker provider. Always stacked on top
+# of `docker` (`--template docker --template docker_runsc`): it reuses the entire
+# docker template body and only switches the provider's container runtime to
+# `runsc`, shrinking the host kernel attack surface for untrusted agents. `runsc`
+# must be installed + registered with the local Docker daemon (see CLAUDE.md);
+# container creation fails with Docker's native "unknown runtime" error
+# otherwise -- which is why this is opt-in rather than the default. The
+# template-contributed provider-config setting reaches the provider at create
+# time: mngr re-applies template `--setting` entries against the provider config
+# after template resolution (imbue-ai/mngr#1914).
+[create_templates.docker_runsc]
+setting__extend = ["providers.docker.docker_runtime=runsc"]
 
 # template for lima VM provider
 [create_templates.lima]
