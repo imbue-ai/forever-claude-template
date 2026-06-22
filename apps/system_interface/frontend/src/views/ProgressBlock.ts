@@ -35,12 +35,12 @@ interface ProgressBlockAttrs {
   /** Optional DOM id for the root, so a virtualized list can measure this
    *  block's height by querying ``.message-list > [id]``. */
   id?: string;
-  /** Drop this block's turn-bottom margin. Set when the NEXT section opens at a
-   *  hidden permission grant/deny (no user bubble), so the resolved card + its
-   *  trailing prose are the seam: without the bottom margin, the gap to the
-   *  resumption block is just that block's normal top margin rather than the two
-   *  turn-margins stacked into an empty void. See conversation-rows /
-   *  SectionView.opened_by_permission_resolution. */
+  /** Drop this block's turn-bottom margin. Set by conversation-rows when the
+   *  NEXT section renders no user bubble (in practice a permission grant/deny
+   *  boundary), so the resolved card + its trailing prose are the seam: without
+   *  the bottom margin, the gap to the resumption block is just that block's
+   *  normal top margin rather than the two turn-margins stacked into an empty
+   *  void. See sectionRendersUserBubble in conversation-rows. */
   flushBottomMargin?: boolean;
 }
 

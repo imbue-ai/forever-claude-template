@@ -120,15 +120,6 @@ export interface SectionView {
   /** The final run of ungrouped prose: the user-facing reply, rendered below
    *  the timeline. */
   trailing_reply: AssistantMessageEvent[];
-  /** True when this section was opened by a hidden permission grant/deny
-   *  notification (the resolution branch in buildSections), so its boundary
-   *  carries NO user bubble. The renderer uses this to collapse the would-be
-   *  empty turn-margin void at the seam: the resolved card + its "I've sent a
-   *  permission request..." prose are the visual break, so the preceding
-   *  (card-ending) block drops its turn-bottom margin and this resumption block
-   *  follows at just its normal top margin. A normal boundary (with a real user
-   *  bubble) leaves this false and keeps full turn separation. */
-  opened_by_permission_resolution: boolean;
 }
 
 /** Detects a `tk`/`ticket` lifecycle invocation at the START of a Bash tool
@@ -370,9 +361,6 @@ type SectionEntry =
 interface SectionBuilder {
   user_event: UserMessageEvent | null;
   key: string;
-  /** See SectionView.opened_by_permission_resolution. Set true only for the
-   *  section the resolution branch opens. */
-  opened_by_permission_resolution: boolean;
   /** Step nodes in first-appearance (transcript) order. */
   steps: Map<string, StepNode>;
   step_order: string[];
@@ -385,15 +373,10 @@ interface SectionBuilder {
   current_step_id: string | null;
 }
 
-function newSection(
-  user_event: UserMessageEvent | null,
-  key: string,
-  opened_by_permission_resolution: boolean,
-): SectionBuilder {
+function newSection(user_event: UserMessageEvent | null, key: string): SectionBuilder {
   return {
     user_event,
     key,
-    opened_by_permission_resolution,
     steps: new Map(),
     step_order: [],
     entries: [],
@@ -425,12 +408,8 @@ export function buildSections(
   const unresolvedPermissions: string[] = [];
   const resolutions = new Map<string, PermissionResolution>();
 
-  const ensureSection = (
-    user_event: UserMessageEvent | null,
-    key: string,
-    opened_by_permission_resolution = false,
-  ): SectionBuilder => {
-    const section = newSection(user_event, key, opened_by_permission_resolution);
+  const ensureSection = (user_event: UserMessageEvent | null, key: string): SectionBuilder => {
+    const section = newSection(user_event, key);
     // Re-open carried-over steps at the top of the new section.
     for (const id of carryover) {
       openStep(section, id, /* is_carryover */ true);
@@ -458,7 +437,7 @@ export function buildSections(
         const resolvedEventId = unresolvedPermissions.shift() as string;
         resolutions.set(resolvedEventId, resolution);
         carryover = current === null ? [] : openStepsAtEnd(current);
-        current = ensureSection(null, `section-after-${e.event_id}`, /* opened_by_permission_resolution */ true);
+        current = ensureSection(null, `section-after-${e.event_id}`);
         continue;
       }
       if (isNonBoundaryUserMessage(e.content ?? "")) {
@@ -773,11 +752,5 @@ function finalizeSection(
     }
   }
 
-  return {
-    user_event: section.user_event,
-    key: section.key,
-    items,
-    trailing_reply,
-    opened_by_permission_resolution: section.opened_by_permission_resolution,
-  };
+  return { user_event: section.user_event, key: section.key, items, trailing_reply };
 }

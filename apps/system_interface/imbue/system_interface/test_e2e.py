@@ -678,15 +678,16 @@ def test_permission_resolution_boundary_has_no_empty_void(tmp_path: Path, page: 
     The hidden grant notification opens a fresh progress block carrying the open
     step over (this turn-boundary carryover is the intended behavior). Because
     that boundary has no user bubble, the two progress blocks' turn-margins would
-    otherwise stack into a ~46px empty void. The structural
-    ``opened_by_permission_resolution`` marker drops the card-ending block's
-    turn-bottom margin so the seam is just the resumption block's normal ~18px top
-    margin.
+    otherwise stack into a ~46px empty void. conversation-rows derives this from
+    the next section rendering no user bubble (sectionRendersUserBubble) and drops
+    the card-ending block's turn-bottom margin via the ``flushBottomMargin`` attr,
+    so the seam is just the resumption block's normal ~18px top margin.
 
     This asserts the REAL DOM shape (a ``.pv-final`` trailing reply is present and
-    the card-ending block carries the structural flush marker), so it cannot pass
-    against a different tree, then measures the boundary gap. It fails against the
-    ~46px void (pre-fix) and passes at the ~18px clean break (post-fix).
+    the card-ending block carries the ``progress-block--flush-bottom`` class), so
+    it cannot pass against a different tree, then measures the boundary gap. It
+    fails against the ~46px void (pre-fix) and passes at the ~18px clean break
+    (post-fix).
     """
     with _serve_agent_chat(tmp_path, _PORT + 3, _permission_resolution_session_events()) as served:
         base_url, _, _ = served
@@ -707,7 +708,7 @@ def test_permission_resolution_boundary_has_no_empty_void(tmp_path: Path, page: 
         # The carried-over step appears in BOTH blocks (the intended carryover).
         expect(page.locator(".pv-tl-title", has_text=_STEP_TITLE)).to_have_count(2)
 
-        # The structural marker manifests as the flush class on the card-ending
+        # The derived flush manifests as the flush class on the card-ending
         # (first) block -- NOT a :has() selector keyed on the card.
         first_block_class = blocks.nth(0).get_attribute("class") or ""
         assert "progress-block--flush-bottom" in first_block_class, (
