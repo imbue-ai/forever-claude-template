@@ -583,72 +583,123 @@ def _tool_result(uuid: str, ts: str, output: str) -> dict[str, Any]:
     }
 
 
-# A steps turn in which the agent declares two steps, opens the first, issues a
-# permission request (with trailing prose), the user grants it (which folds the
-# verdict into the card and opens a fresh section), then the agent continues.
-_PERMISSION_TURN_EVENTS: list[dict[str, Any]] = [
-    {
-        "type": "user",
-        "uuid": "u1",
-        "timestamp": "2026-01-01T00:00:00Z",
-        "message": {"role": "user", "content": "Check my unread email"},
-    },
-    _bash_tool_call("a1", "2026-01-01T00:00:01Z", "tk create --step 'Set up access'\ntk create --step 'Fetch emails'"),
-    _tool_result("a1", "2026-01-01T00:00:02Z", "Created cod-step-aaaa: Set up access\nCreated cod-step-bbbb: Fetch emails"),
-    _bash_tool_call("a2", "2026-01-01T00:00:03Z", "tk start cod-step-aaaa"),
-    _tool_result("a2", "2026-01-01T00:00:04Z", "Updated cod-step-aaaa -> in_progress\ntk-step cod-step-aaaa title: Set up access"),
-    {
+def _text_message(uuid: str, ts: str, text: str) -> dict[str, Any]:
+    """An assistant message that is plain prose only (no tool call)."""
+    return {
         "type": "assistant",
-        "uuid": "a3",
-        "timestamp": "2026-01-01T00:00:05Z",
+        "uuid": uuid,
+        "timestamp": ts,
         "message": {
             "role": "assistant",
             "model": "claude-opus-4-8",
-            "content": [
-                {"type": "tool_use", "id": "tc-a3", "name": "Bash", "input": {"command": _PERMISSION_POST_CMD}},
-                {"type": "text", "text": "I've sent a permission request. Waiting for you to approve it in the Minds app."},
-            ],
-            "stop_reason": "tool_use",
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn",
             "usage": {"input_tokens": 1, "output_tokens": 1},
         },
-    },
-    _tool_result("a3", "2026-01-01T00:00:06Z", _PERMISSION_RESULT_JSON),
-    {
-        "type": "user",
-        "uuid": "u2",
-        "timestamp": "2026-01-01T00:00:07Z",
-        "message": {
-            "role": "user",
-            "content": (
-                "Your permission request for Gmail was granted with the following permissions: "
-                "gmail-read. Please retry the call that was blocked."
-            ),
+    }
+
+
+# The "I've sent a permission request..." line the agent typically speaks after
+# issuing the request.
+_PERMISSION_PROSE = "I've sent a permission request to read your messages. Waiting for you to approve it in the Minds app."
+
+
+def _permission_turn_events(*, with_trailing_reply: bool) -> list[dict[str, Any]]:
+    """A steps turn: declare two steps, open the first, issue a permission request,
+    the user grants it (folding the verdict into the card and opening a fresh
+    section), then the agent continues.
+
+    With ``with_trailing_reply`` the "I've sent..." prose is a SEPARATE assistant
+    message *after* the permission card -- the common real shape, where that prose
+    becomes the section's trailing reply and renders as ``.pv-final`` below the
+    timeline. Otherwise the prose is folded into the permission message itself, so
+    there is no trailing reply and the card is the block's last visible element.
+    """
+    events: list[dict[str, Any]] = [
+        {
+            "type": "user",
+            "uuid": "u1",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "Check my unread email"},
         },
-    },
-    _bash_tool_call("a4", "2026-01-01T00:00:08Z", "tk close cod-step-aaaa 'Got access.'"),
-    _tool_result(
-        "a4",
-        "2026-01-01T00:00:09Z",
-        "Updated cod-step-aaaa -> closed\ntk-step cod-step-aaaa title: Set up access\ntk-step cod-step-aaaa summary: Got access.",
-    ),
-    _bash_tool_call("a5", "2026-01-01T00:00:10Z", "tk start cod-step-bbbb"),
-    _tool_result("a5", "2026-01-01T00:00:11Z", "Updated cod-step-bbbb -> in_progress\ntk-step cod-step-bbbb title: Fetch emails"),
-]
+        _bash_tool_call("a1", "2026-01-01T00:00:01Z", "tk create --step 'Set up access'\ntk create --step 'Fetch emails'"),
+        _tool_result("a1", "2026-01-01T00:00:02Z", "Created cod-step-aaaa: Set up access\nCreated cod-step-bbbb: Fetch emails"),
+        _bash_tool_call("a2", "2026-01-01T00:00:03Z", "tk start cod-step-aaaa"),
+        _tool_result("a2", "2026-01-01T00:00:04Z", "Updated cod-step-aaaa -> in_progress\ntk-step cod-step-aaaa title: Set up access"),
+    ]
+    if with_trailing_reply:
+        events += [
+            _bash_tool_call("a3", "2026-01-01T00:00:05Z", _PERMISSION_POST_CMD),
+            _tool_result("a3", "2026-01-01T00:00:06Z", _PERMISSION_RESULT_JSON),
+            _text_message("a3b", "2026-01-01T00:00:07Z", _PERMISSION_PROSE),
+        ]
+    else:
+        events.append(
+            {
+                "type": "assistant",
+                "uuid": "a3",
+                "timestamp": "2026-01-01T00:00:05Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-8",
+                    "content": [
+                        {"type": "tool_use", "id": "tc-a3", "name": "Bash", "input": {"command": _PERMISSION_POST_CMD}},
+                        {"type": "text", "text": _PERMISSION_PROSE},
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            }
+        )
+        events.append(_tool_result("a3", "2026-01-01T00:00:06Z", _PERMISSION_RESULT_JSON))
+    events += [
+        {
+            "type": "user",
+            "uuid": "u2",
+            "timestamp": "2026-01-01T00:00:08Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "Your permission request for Gmail was granted with the following permissions: "
+                    "gmail-read. Please retry the call that was blocked."
+                ),
+            },
+        },
+        _bash_tool_call("a4", "2026-01-01T00:00:09Z", "tk close cod-step-aaaa 'Got access.'"),
+        _tool_result(
+            "a4",
+            "2026-01-01T00:00:10Z",
+            "Updated cod-step-aaaa -> closed\ntk-step cod-step-aaaa title: Set up access\ntk-step cod-step-aaaa summary: Got access.",
+        ),
+        _bash_tool_call("a5", "2026-01-01T00:00:11Z", "tk start cod-step-bbbb"),
+        _tool_result("a5", "2026-01-01T00:00:12Z", "Updated cod-step-bbbb -> in_progress\ntk-step cod-step-bbbb title: Fetch emails"),
+    ]
+    return events
 
 
-def test_resolved_permission_card_spacing_matches_node_gap(tmp_path: Path, page: Page) -> None:
+@pytest.mark.parametrize("with_trailing_reply", [True, False])
+def test_resolved_permission_card_spacing_matches_node_gap(
+    tmp_path: Path, page: Page, with_trailing_reply: bool
+) -> None:
     """A resolved permission card flows into the next step with normal node spacing.
 
     When the user grants a permission request, the approval message is hidden and
     its verdict is folded into the permission card, but the grant still opens a
     fresh turn section -- so the card ends one progress block and the continuing
-    steps render in the next. Without the spacing fix the seam carried the full
-    turn-separation gap (each block's margins) plus the permission message's own
-    trailing margin, leaving a gap far larger than the normal step-to-step gap.
-    This asserts the gap below the card is now ~ the normal node-to-node gap.
+    steps render in the next. Without the fix the seam carried the full
+    turn-separation gap (each block's margins), far larger than the normal
+    step-to-step gap.
+
+    Both shapes are covered: ``with_trailing_reply`` is the real case where the
+    agent's "I've sent..." prose is a separate message rendered as the block's
+    ``.pv-final`` trailing reply (the gap that originally regressed); the other is
+    the no-trailing-reply case where the card itself is the block's last element.
+    In both, the gap below the block's last visible element must match the normal
+    node-to-node gap.
     """
     port = _PORT + 3
-    agent_info, _ = _make_agent_fixture(tmp_path, session_events=_PERMISSION_TURN_EVENTS)
+    events = _permission_turn_events(with_trailing_reply=with_trailing_reply)
+    agent_info, _ = _make_agent_fixture(tmp_path, session_events=events)
 
     broadcaster = WebSocketBroadcaster()
     manager = AgentManager.build(broadcaster)
@@ -670,8 +721,8 @@ def test_resolved_permission_card_spacing_matches_node_gap(tmp_path: Path, page:
         patch("imbue.system_interface.server.send_message", return_value=True),
         patch("imbue.system_interface.server.discover_agents", return_value=[agent_info]),
     ):
-        server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="error"))
-        thread = threading.Thread(target=server.run, daemon=True)
+        server = make_threaded_server("127.0.0.1", port, app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         def _server_ready() -> bool:
@@ -695,28 +746,36 @@ def test_resolved_permission_card_spacing_matches_node_gap(tmp_path: Path, page:
                 """
                 () => {
                   const perm = document.querySelector('.pv-permission');
-                  const permRect = perm.getBoundingClientRect();
-                  // First timeline node below the permission card (in the next block).
-                  const nodes = Array.from(document.querySelectorAll('.pv-tl-node'));
-                  let next = null;
-                  for (const n of nodes) {
-                    if (n.getBoundingClientRect().top >= permRect.bottom - 1) { next = n; break; }
-                  }
-                  const nextRect = next.getBoundingClientRect();
+                  const blockA = perm.closest('.progress-block');
+                  const final = blockA.querySelector(':scope > .pv-final');
+                  const blocks = Array.from(document.querySelectorAll('.progress-block'));
+                  const blockB = blocks[blocks.indexOf(blockA) + 1];
+                  const nextNode = blockB.querySelector('.pv-tl-node');
+                  // Anchor at the bottom of block A's last visible element: the
+                  // trailing reply if present, else the permission card itself.
+                  const anchor = (final ?? perm).getBoundingClientRect().bottom;
+                  const nextRect = nextNode.getBoundingClientRect();
                   // The normal node-to-node gap is a node's own bottom padding.
-                  const nodePadBottom = parseFloat(getComputedStyle(next).paddingBottom);
+                  const nodePadBottom = parseFloat(getComputedStyle(nextNode).paddingBottom);
                   return {
-                    gapBelowCard: nextRect.top - permRect.bottom,
+                    hasFinal: final !== null,
+                    seamBelowLastVisible: nextRect.top - anchor,
                     normalNodeGap: nodePadBottom,
                   };
                 }
                 """
             )
-            gap = metrics["gapBelowCard"]
+            # The fixture must produce the DOM shape we intend to exercise --
+            # otherwise the test would silently pass against an unrepresentative
+            # tree (as an earlier version did, missing the real trailing-reply bug).
+            assert metrics["hasFinal"] is with_trailing_reply, (
+                f"expected hasFinal={with_trailing_reply}, got {metrics['hasFinal']}"
+            )
+            seam = metrics["seamBelowLastVisible"]
             normal = metrics["normalNodeGap"]
-            # The gap below a resolved card must match the normal node gap, not the
-            # old ~66px turn-separation seam. Allow a few px of sub-pixel slack.
-            assert abs(gap - normal) <= 4, f"gap below resolved permission card {gap}px != normal node gap {normal}px"
+            # The seam below a resolved permission turn must match the normal node
+            # gap, not the old ~46px turn-separation seam. Allow sub-pixel slack.
+            assert abs(seam - normal) <= 4, f"seam below resolved permission turn {seam}px != normal node gap {normal}px"
         finally:
-            server.should_exit = True
+            server.shutdown()
             thread.join(timeout=5.0)

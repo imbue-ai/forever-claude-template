@@ -2178,14 +2178,24 @@ body {
    is folded into the card above (see turn-grouping's permission-resolution
    branch), so the two progress blocks are really one continuous turn. Left
    alone, the seam shows the full turn-separation gap (this block's bottom margin
-   + the next block's top margin) plus the permission message's own contained
-   bottom margin -- far larger than the normal node-to-node spacing. So when a
-   block ends on a permission card (and nothing follows it in the timeline), drop
-   the card's trailing margins and this block's bottom margin; the next block
-   keeps its standard top margin, which equals the normal node-to-node gap. */
-.progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child):not(:has(> .pv-final)) {
+   + the next block's top margin) -- far larger than the normal node-to-node
+   spacing.
+
+   So whenever a block's timeline ends on a permission card, drop the block's
+   bottom margin; the next block keeps its standard top margin, which alone
+   equals the normal node-to-node gap. This applies even when the agent's
+   "I've sent a permission request..." prose follows as a separate message and
+   renders as this block's trailing reply (`.pv-final`) -- the common real
+   case. The guard is deliberately only on the inner-margin rule below, not
+   here. */
+.progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child) {
   margin-bottom: 0;
 }
+
+/* When there is no trailing reply, the permission card itself is the block's
+   last visible element, so its own trailing margins would still pad the seam --
+   zero them too. With a trailing reply present, leave these alone: that margin
+   sits between the card and its own "I've sent..." reply, which is fine. */
 .progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child):not(:has(> .pv-final))
   .pv-permission,
 .progress-block:has(> .pv--timeline > .pv-timeline-nodes > .pv-permission:last-child):not(:has(> .pv-final))
