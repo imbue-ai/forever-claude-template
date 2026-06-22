@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["anyio", "pydantic>=2"]
+# dependencies = ["pydantic>=2"]
 # ///
 """Copyable helper for calling headless ``claude -p`` from a service.
 
@@ -32,14 +32,12 @@ handles the things that are easy to get wrong by hand:
 Both unset ``MAIN_CLAUDE_SESSION_ID`` in the child environment (an inherited value
 makes the child look like mngr's managed main session and trips its
 stop/readiness hooks), request ``--output-format json``, run the blocking
-subprocess off the event loop (so an async service is not blocked), and raise on a
-non-zero exit or a ``claude -p`` error result rather than silently returning empty
-text.
+subprocess synchronously, and raise on a non-zero exit or a ``claude -p`` error
+result rather than silently returning empty text.
 """
 
 from __future__ import annotations
 
-import functools
 import json
 import os
 import subprocess
@@ -47,7 +45,6 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from anyio import to_thread
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 _MAIN_CLAUDE_SESSION_ID = "MAIN_CLAUDE_SESSION_ID"
@@ -221,7 +218,7 @@ def _run_blocking(
     return _parse_result(decoded)
 
 
-async def claude_p_completion(
+def claude_p_completion(
     prompt: str,
     *,
     system: str,
@@ -242,12 +239,10 @@ async def claude_p_completion(
     # working directory, so a throwaway dir keeps that project context out of the
     # answer. Credentials come from the env, not the cwd, so auth is unaffected.
     with tempfile.TemporaryDirectory(prefix="claude_p_completion_") as cwd:
-        return await to_thread.run_sync(
-            functools.partial(_run_blocking, argv, env=env, cwd=cwd)
-        )
+        return _run_blocking(argv, env=env, cwd=cwd)
 
 
-async def claude_p_task(
+def claude_p_task(
     prompt: str,
     *,
     system: str | None = None,
@@ -271,6 +266,4 @@ async def claude_p_task(
         tools=None,
         permission_mode=permission_mode,
     )
-    return await to_thread.run_sync(
-        functools.partial(_run_blocking, argv, env=env, cwd=None)
-    )
+    return _run_blocking(argv, env=env, cwd=None)

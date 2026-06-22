@@ -18,6 +18,7 @@ import pytest
 from mngr_cli_contract.contract import assert_mngr_argv_valid
 from pydantic import SecretStr
 
+from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
 from imbue.system_interface import claude_auth
 from imbue.system_interface.testing import FakeFinishedProcess
 from imbue.system_interface.testing import FakePexpectProcess
@@ -66,9 +67,7 @@ def test_get_auth_status_returns_logged_out_when_runner_raises() -> None:
 
 def test_get_auth_status_parses_logged_in_json() -> None:
     def _runner(_cmd: list[str], _timeout: float) -> FakeFinishedProcess:
-        return FakeFinishedProcess(
-            stdout='{"loggedIn": true, "email": "x@y.com", "subscriptionType": "Pro"}'
-        )
+        return FakeFinishedProcess(stdout='{"loggedIn": true, "email": "x@y.com", "subscriptionType": "Pro"}')
 
     service = claude_auth.ClaudeAuthService(command_runner=_runner)
     status = service.get_auth_status()
@@ -130,9 +129,7 @@ def test_submit_oauth_code_rejects_unknown_session() -> None:
 def test_oauth_session_extracts_url_from_spawner_stdout() -> None:
     fake_url = "https://claude.ai/oauth/authorize?code=abc&state=def"
     fake_process = FakePexpectProcess(url_match=fake_url, expect_return_index=0)
-    service = claude_auth.ClaudeAuthService(
-        pexpect_spawner=lambda *_args, **_kwargs: fake_process
-    )
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_args, **_kwargs: fake_process)
     result = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
     assert result.oauth_url == fake_url
     assert result.session_id
@@ -174,12 +171,8 @@ def test_extract_oauth_url_returns_none_when_no_url_present() -> None:
 
 def test_oauth_session_extracts_clean_url_from_osc8_hyperlink_stream() -> None:
     """End-to-end: a spawner emitting the OSC 8 hyperlink yields one clean URL."""
-    fake_process = FakePexpectProcess(
-        raw_output=_osc8_hyperlink(_REAL_OAUTH_URL), expect_return_index=0
-    )
-    service = claude_auth.ClaudeAuthService(
-        pexpect_spawner=lambda *_args, **_kwargs: fake_process
-    )
+    fake_process = FakePexpectProcess(raw_output=_osc8_hyperlink(_REAL_OAUTH_URL), expect_return_index=0)
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_args, **_kwargs: fake_process)
     result = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
     assert result.oauth_url == _REAL_OAUTH_URL
 
@@ -189,9 +182,7 @@ def test_oauth_session_raises_when_url_unextractable_after_stripping() -> None:
         raw_output="matched something but no url survives stripping",
         expect_return_index=0,
     )
-    service = claude_auth.ClaudeAuthService(
-        pexpect_spawner=lambda *_args, **_kwargs: fake_process
-    )
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_args, **_kwargs: fake_process)
     with pytest.raises(claude_auth.ClaudeAuthError, match="could not be extracted"):
         service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
 
@@ -199,15 +190,9 @@ def test_oauth_session_raises_when_url_unextractable_after_stripping() -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        pytest.param(
-            "https://claude.com/cai/oauth/authorize?code=abc&state=def", id="claudeai-host"
-        ),
-        pytest.param(
-            "https://platform.claude.com/oauth/authorize?code=abc&state=def", id="console-host"
-        ),
-        pytest.param(
-            "https://claude.ai/oauth/authorize?code=abc&state=def", id="legacy-claudeai-host"
-        ),
+        pytest.param("https://claude.com/cai/oauth/authorize?code=abc&state=def", id="claudeai-host"),
+        pytest.param("https://platform.claude.com/oauth/authorize?code=abc&state=def", id="console-host"),
+        pytest.param("https://claude.ai/oauth/authorize?code=abc&state=def", id="legacy-claudeai-host"),
     ],
 )
 def test_oauth_url_regex_accepts_known_host_forms(url: str) -> None:
@@ -223,18 +208,14 @@ def test_oauth_url_regex_accepts_known_host_forms(url: str) -> None:
 
 def test_oauth_session_raises_on_eof_before_url() -> None:
     fake_process = FakePexpectProcess(url_match=None, expect_return_index=1)
-    service = claude_auth.ClaudeAuthService(
-        pexpect_spawner=lambda *_args, **_kwargs: fake_process
-    )
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_args, **_kwargs: fake_process)
     with pytest.raises(claude_auth.ClaudeAuthError, match="before printing OAuth URL"):
         service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
 
 
 def test_oauth_session_raises_on_timeout_waiting_for_url() -> None:
     fake_process = FakePexpectProcess(url_match=None, expect_return_index=2)
-    service = claude_auth.ClaudeAuthService(
-        pexpect_spawner=lambda *_args, **_kwargs: fake_process
-    )
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_args, **_kwargs: fake_process)
     with pytest.raises(claude_auth.ClaudeAuthError, match="Timed out"):
         service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
 
@@ -271,9 +252,34 @@ def test_list_claude_agent_names_raises_on_mngr_failure() -> None:
         service.list_claude_agent_names()
 
 
-def test_restart_all_claude_agents_stops_all_then_starts_all(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_build_list_command_includes_on_error_continue() -> None:
+    """The blanket listing tolerates unauthenticated providers via --on-error continue."""
+    command = claude_auth._build_list_command()
+    assert command[-2:] == ["--on-error", "continue"]
+
+
+def test_list_claude_agent_names_tolerates_provider_inaccessible_exit() -> None:
+    """An unauthenticated provider (exit 6) still yields the healthy providers' agents.
+
+    With --on-error continue, `mngr list` emits the reachable agents and exits
+    EXIT_CODE_PROVIDER_INACCESSIBLE; that is a benign partial success for this
+    blanket listing.
+    """
+    payload = (
+        '{"agents": ['
+        '{"name": "ababa", "type": "claude"}, '
+        '{"name": "feature-x", "type": "claude"}'
+        '], "errors": [{"provider_name": "modal", "message": "not authenticated"}]}'
+    )
+
+    def _runner(_cmd: list[str], _timeout: float) -> FakeFinishedProcess:
+        return FakeFinishedProcess(stdout=payload, returncode=EXIT_CODE_PROVIDER_INACCESSIBLE)
+
+    service = claude_auth.ClaudeAuthService(command_runner=_runner)
+    assert service.list_claude_agent_names() == ["ababa", "feature-x"]
+
+
+def test_restart_all_claude_agents_stops_all_then_starts_all(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every agent is stopped before any is started.
 
     The stop-all/start-all ordering is required so the Claude config
@@ -339,9 +345,7 @@ def test_prepare_claude_config_dismisses_dialogs_and_approves_key(
     assert config["customApiKeyResponses"]["rejected"] == []
 
 
-def test_prepare_claude_config_skips_key_approval_when_no_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_prepare_claude_config_skips_key_approval_when_no_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     claude_auth._prepare_claude_config_for_restart(None)
     config = json.loads((tmp_path / ".claude.json").read_text())
@@ -369,9 +373,7 @@ def test_submit_oauth_code_drives_subprocess_and_returns_status() -> None:
     fake_url = "https://claude.ai/oauth/authorize?x=1"
     fake_process = FakePexpectProcess(url_match=fake_url, expect_return_index=0)
     service = claude_auth.ClaudeAuthService(
-        command_runner=lambda _cmd, _timeout: FakeFinishedProcess(
-            stdout='{"loggedIn": true, "email": "x@y.com"}'
-        ),
+        command_runner=lambda _cmd, _timeout: FakeFinishedProcess(stdout='{"loggedIn": true, "email": "x@y.com"}'),
         pexpect_spawner=lambda *_args, **_kwargs: fake_process,
     )
     start = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
@@ -391,18 +393,14 @@ def test_submit_oauth_code_claudeai_does_not_restart_agents() -> None:
         commands.append(tuple(cmd))
         return FakeFinishedProcess(stdout='{"loggedIn": true}')
 
-    service = claude_auth.ClaudeAuthService(
-        command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process
-    )
+    service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
     start = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
     service.submit_oauth_code(start.session_id, "CODE#STATE")
     assert all(cmd[:2] != ("mngr", "stop") for cmd in commands)
     assert all(cmd[:2] != ("mngr", "start") for cmd in commands)
 
 
-def test_submit_oauth_code_console_restarts_agents(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_submit_oauth_code_console_restarts_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The console provider writes primaryApiKey into the cached .claude.json,
     so every claude agent must be restarted to pick it up."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
@@ -419,9 +417,7 @@ def test_submit_oauth_code_console_restarts_agents(
             return FakeFinishedProcess(returncode=0)
         return FakeFinishedProcess(stdout='{"loggedIn": true}')
 
-    service = claude_auth.ClaudeAuthService(
-        command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process
-    )
+    service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
     start = service.start_oauth_login(claude_auth.OAuthProvider.CONSOLE)
     status = service.submit_oauth_code(start.session_id, "CODE#STATE")
     assert status.logged_in is True
@@ -433,9 +429,7 @@ def test_get_auth_status_overlays_extra_env_onto_status_subprocess() -> None:
     """`extra_env` is passed through to the status subprocess environment."""
     seen_env: dict[str, Mapping[str, str] | None] = {}
 
-    def _runner(
-        _cmd: list[str], _timeout: float, env: Mapping[str, str] | None = None
-    ) -> FakeFinishedProcess:
+    def _runner(_cmd: list[str], _timeout: float, env: Mapping[str, str] | None = None) -> FakeFinishedProcess:
         seen_env["env"] = env
         return FakeFinishedProcess(stdout='{"loggedIn": true}')
 
@@ -447,9 +441,7 @@ def test_get_auth_status_overlays_extra_env_onto_status_subprocess() -> None:
     assert passed["ANTHROPIC_API_KEY"] == "sk-ant-probe"
 
 
-def test_submit_api_key_verifies_status_with_key_in_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_submit_api_key_verifies_status_with_key_in_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The verification `claude auth status` runs with the key in its env.
 
     Regression guard: the system-interface process never receives the key
@@ -461,9 +453,7 @@ def test_submit_api_key_verifies_status_with_key_in_env(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
     the_key = "sk-ant-valid-key-abcdefghijklmnop"
 
-    def _runner(
-        cmd: list[str], _timeout: float, env: Mapping[str, str] | None = None
-    ) -> FakeFinishedProcess:
+    def _runner(cmd: list[str], _timeout: float, env: Mapping[str, str] | None = None) -> FakeFinishedProcess:
         if cmd[:3] == ["mngr", "list", "--format"]:
             return FakeFinishedProcess(stdout='{"agents": []}')
         if cmd[:3] == ["claude", "auth", "status"]:

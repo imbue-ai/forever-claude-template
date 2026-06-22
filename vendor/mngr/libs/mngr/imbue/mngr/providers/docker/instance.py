@@ -43,7 +43,10 @@ from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -72,7 +75,6 @@ from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
-from imbue.mngr.providers.docker.volume import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr.providers.docker.volume import DockerVolume
 from imbue.mngr.providers.docker.volume import LABEL_PREFIX
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
@@ -85,7 +87,9 @@ from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_comman
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
+from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
+from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -93,8 +97,15 @@ from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 
+# PID-1 entrypoint for host containers. Unlike the idle state-container
+# entrypoint, this self-heals sshd on every (re)start once mngr has provisioned
+# this host (tracked by a marker, so a host key pre-baked into the base image is
+# never used by mistake), so the container is reachable again after an
+# out-of-band restart without waiting for `mngr start`.
+HOST_CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
+
 # Container entrypoint as SDK-style command tuple (used by tests)
-CONTAINER_ENTRYPOINT: Final[tuple[str, ...]] = ("sh", "-c", CONTAINER_ENTRYPOINT_CMD)
+CONTAINER_ENTRYPOINT: Final[tuple[str, ...]] = ("sh", "-c", HOST_CONTAINER_ENTRYPOINT_CMD)
 
 # Fallback base image when no image is specified by the user or provider config.
 DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
@@ -552,7 +563,7 @@ class DockerProviderInstance(BaseProviderInstance):
                     self._exec_in_container(container, add_authorized_keys_cmd)
 
         with log_span("Starting sshd in container"):
-            self._exec_in_container(container, "/usr/sbin/sshd -D -o MaxSessions=100", detach=True)
+            self._exec_in_container(container, build_start_sshd_command(), detach=True)
 
     def _get_container_ssh_port(self, container: docker.models.containers.Container) -> int:
         """Get the host-mapped SSH port for a container."""
@@ -870,7 +881,7 @@ kill -TERM 1
         cmd.extend(volume_mount_args)
 
         cmd.extend(list(start_args))
-        cmd.extend(["--entrypoint", "sh", image, "-c", CONTAINER_ENTRYPOINT_CMD])
+        cmd.extend(["--entrypoint", "sh", image, "-c", HOST_CONTAINER_ENTRYPOINT_CMD])
         return cmd
 
     def _run_container(
@@ -1461,28 +1472,82 @@ kill -TERM 1
         age-gate their deletion (and so users can recover via
         ``mngr create --snapshot``). Use ``delete_host`` to permanently
         purge all records.
+
+        Best-effort: each step is attempted, and a real failure (a resource that
+        exists but could not be removed) is recorded and raised as a
+        ``CleanupFailedGroup`` rather than aborting early or being silently swallowed.
+        A resource that was already gone (``docker.errors.NotFound``) is benign. See
+        specs/cleanup-error-aggregation.md.
         """
         host_id = host.id if isinstance(host, HostInterface) else host
 
-        # Stop the host first (without creating a snapshot since we're destroying)
-        self.stop_host(host, create_snapshot=False)
-
-        # Remove the container
-        container = self._find_container_by_host_id(host_id)
-        if container is not None:
+        with collecting_cleanup_failures() as failures:
+            # Stop the host first (without creating a snapshot since we're destroying).
             try:
-                container.remove(force=True)
+                self.stop_host(host, create_snapshot=False)
+            except docker.errors.NotFound:
+                # Container already gone -- benign.
+                pass
             except docker.errors.DockerException as e:
-                logger.warning("Error removing container: {}", e)
+                logger.warning("Failed to stop container for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to stop container for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
 
-        # Untag the per-host build image so built images don't pile up. Safe
-        # now that the container is gone; snapshots keep their own layers.
-        self._remove_build_image(host_id)
+            # Remove the container. A missing container is benign; any other Docker error
+            # leaves the container behind.
+            container = self._find_container_by_host_id(host_id)
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except docker.errors.NotFound:
+                    pass
+                except docker.errors.DockerException as e:
+                    logger.warning("Failed to remove container for host {}: {}", host_id, e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to remove container for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
-        self._mark_host_destroyed(host_id)
+            # Untag the per-host build image so built images don't pile up. Safe
+            # now that the container is gone; snapshots keep their own layers.
+            try:
+                self._remove_build_image(host_id)
+            except docker.errors.NotFound:
+                pass
+            except docker.errors.DockerException as e:
+                logger.warning("Failed to remove build image for host {}: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to remove build image for host {host_id}: {e}",
+                        host_id=host_id,
+                    )
+                )
 
-        self._container_cache_by_id.pop(host_id, None)
-        self._evict_cached_host(host_id)
+            # Mark the host record DESTROYED. A failure here leaves the record inconsistent.
+            try:
+                self._mark_host_destroyed(host_id)
+            except MngrError as e:
+                logger.warning("Failed to mark host {} destroyed: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.OTHER,
+                        message=f"failed to mark host {host_id} destroyed: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+            # Cache eviction always runs (inside the `with` so it precedes any raise).
+            self._container_cache_by_id.pop(host_id, None)
+            self._evict_cached_host(host_id)
 
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a (destroyed) host.

@@ -456,6 +456,16 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
+    @contextmanager
+    def lock_for_starting(self) -> Iterator[None]:
+        """Context manager that serializes concurrent ``mngr start`` runs for this host.
+
+        Holds an exclusive flock(2) that coordinates local (in-host) and remote
+        (over-SSH) starts. Blocks indefinitely until the lock is acquired.
+        """
+        ...
+
+    @abstractmethod
     def get_reported_lock_time(self) -> datetime | None:
         """Return the last modification time of the host lock file, or None if not locked."""
         ...
@@ -630,7 +640,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def destroy_agent(self, agent: AgentInterface) -> None:
-        """Remove an agent and all its associated state from this host."""
+        """Remove an agent and all its associated state from this host.
+
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes; raises ``CleanupFailedGroup`` if any real resources were left behind.
+        See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -640,7 +656,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
-        """Stop the specified agents gracefully within the given timeout."""
+        """Stop the specified agents gracefully within the given timeout.
+
+        Best-effort and aggregate-and-continue: attempts every step for every agent and
+        collects every real failure. Returns normally on full success or benign "already
+        gone" outcomes; raises ``CleanupFailedGroup`` if any real resources were left
+        behind. See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -1029,7 +1051,14 @@ class CreateAgentOptions(FrozenModel):
     plugin_data: dict[str, Any] = Field(
         default_factory=dict,
         description="Opaque dict for plugins to pass data through the creation pipeline. "
-        "Keys are namespaced by plugin (e.g. 'adopt_session' for ClaudeAgent).",
+        "Keys are namespaced by plugin.",
+    )
+    adopt_session: tuple[str, ...] = Field(
+        default=(),
+        description="Session id(s) or path(s) to adopt into the new agent so it resumes that "
+        "conversation (the --adopt option). Repeatable; the last named session is the one resumed "
+        "on startup. Only valid for agent types that support session adoption "
+        "(HasSessionAdoptionMixin); mutually exclusive with cloning via --from.",
     )
     source_agent_state_location: HostLocation | None = Field(
         default=None,
@@ -1095,6 +1124,13 @@ class HostProvisioningOptions(FrozenModel):
         "synchronously, after the host is ready but before any agent work_dir "
         "is touched. Each command runs in order; a non-zero exit aborts the create.",
     )
+    post_host_create_outer_commands: tuple[CommandString, ...] = Field(
+        default=(),
+        description="Shell commands to run once on the host's outer machine (the "
+        "underlying VM/daemon host), synchronously, after the host is ready. Run "
+        "in order; a non-zero exit aborts the create. Skipped (with a warning) "
+        "when the provider exposes no outer host.",
+    )
 
 
 # Mapping from raw-string config/CLI field names to HostProvisioningOptions
@@ -1103,6 +1139,7 @@ class HostProvisioningOptions(FrozenModel):
 # sync.
 HOST_PROVISIONING_FIELD_MAP: tuple[tuple[str, str, Any], ...] = (
     ("post_host_create_command", "post_host_create_commands", CommandString),
+    ("post_host_create_outer_command", "post_host_create_outer_commands", CommandString),
 )
 
 

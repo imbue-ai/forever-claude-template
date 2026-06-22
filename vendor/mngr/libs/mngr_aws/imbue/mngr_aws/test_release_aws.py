@@ -36,14 +36,19 @@ Run manually:
 
 import os
 import subprocess
-import time
-from collections.abc import Iterator
+from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 
 import boto3
 import pytest
 from botocore.exceptions import ClientError
 
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip2
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
+from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
+from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -52,6 +57,9 @@ from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
+from imbue.mngr_vps.primitives import IsolationMode
+from imbue.mngr_vps.testing import VpsCloudReleaseProfile
+from imbue.mngr_vps.testing import find_handle_by_launched_label
 
 pytestmark = [
     pytest.mark.release,
@@ -63,7 +71,9 @@ pytestmark = [
 ]
 
 
-def _write_release_settings(settings_dir: Path) -> None:
+def _write_release_settings(
+    settings_dir: Path, *, terminate_on_shutdown: bool = True, isolation: str | None = None
+) -> None:
     """Write the release-test ``settings.toml`` into ``settings_dir``.
 
     Shared by the prepare fixture and the per-test settings fixture so both the
@@ -73,12 +83,24 @@ def _write_release_settings(settings_dir: Path) -> None:
     not opt in -- without it, a developer machine with a real mngr profile would
     fail before any AWS call.
 
+    ``terminate_on_shutdown`` sets EC2's ``InstanceInitiatedShutdownBehavior``.
+    The default (``True``) makes the release-test instances ephemeral /
+    self-cleaning: any OS shutdown (the ``auto_shutdown_seconds`` time cap, or
+    the idle watcher) TERMINATES the instance, so a leaked instance auto-destroys
+    at the cap. Trip 2's auto-shutdown settings override it to ``False`` so an idle
+    poweroff STOPS (not terminates) the instance and can be resumed.
+
     ``MNGR_PROJECT_CONFIG_DIR`` is the literal directory containing
     ``settings.toml`` (see ``resolve_project_config_dir`` in
     ``mngr/config/pre_readers.py``); it is *not* a project root that gets a
     ``.<root_name>/`` subdirectory appended. So the file is written directly
     into ``settings_dir``.
+
+    ``isolation`` selects the placement shape: ``None`` leaves the default
+    (Docker container); ``"NONE"`` writes ``isolation = "NONE"`` so the bare
+    (no-container) realizer runs the agent directly on the EC2 instance's OS.
     """
+    isolation_line = f'isolation = "{isolation}"\n' if isolation is not None else ""
     (settings_dir / "settings.toml").write_text(
         # Opt this config past the pytest guard: the subprocess inherits
         # ``PYTEST_CURRENT_TEST`` and refuses to load any config that does not
@@ -86,9 +108,13 @@ def _write_release_settings(settings_dir: Path) -> None:
         "is_allowed_in_pytest = true\n"
         "\n[providers.aws]\n"
         'backend = "aws"\n'
-        # Auto-terminate via cloud-init if pytest is killed before the
-        # per-test cleanup runs (combined with InstanceInitiatedShutdownBehavior=terminate).
+        f"{isolation_line}"
+        # Auto-shutdown via cloud-init if pytest is killed before the per-test
+        # cleanup runs. With terminate_on_shutdown=true the shutdown terminates
+        # the instance (self-cleaning); with false it stops it (resumable), and
+        # the conftest session-end scanner reaps a leak.
         f"auto_shutdown_seconds = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS}\n"
+        f"terminate_on_shutdown = {'true' if terminate_on_shutdown else 'false'}\n"
         # Default is already ("0.0.0.0/0",), but write it explicitly so the
         # test settings file is self-documenting -- the test SSH connection
         # from the developer laptop / CI runner needs ingress from any IP.
@@ -96,6 +122,7 @@ def _write_release_settings(settings_dir: Path) -> None:
         # Disable other remote providers so the create-host preflight (and
         # ``mngr list``) doesn't trip on them looking for credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
         "\n[providers.gcp]\nis_enabled = false\n"
         "\n[providers.vultr]\nis_enabled = false\n"
         "\n[providers.ovh]\nis_enabled = false\n"
@@ -163,21 +190,6 @@ def _aws_release_test_security_group_prepared(tmp_path_factory: pytest.TempPathF
     )
 
 
-@pytest.fixture()
-def aws_test_settings_dir(tmp_path: Path, _aws_release_test_security_group_prepared: None) -> Iterator[Path]:
-    """Write a project settings.toml that sets the AWS auto-shutdown TTL.
-
-    The release tests must set ``auto_shutdown_seconds`` on the AWS
-    provider config so the cloud-init self-shutdown safety net actually
-    fires; the production AwsProvider refuses to create an EC2 instance
-    under pytest without it. Using ``MNGR_PROJECT_CONFIG_DIR`` to point
-    the subprocess at this settings file keeps the test-only TTL out of
-    production code paths.
-    """
-    _write_release_settings(tmp_path)
-    yield tmp_path
-
-
 def _run_mngr(
     project_config_dir: Path,
     cwd: Path,
@@ -231,103 +243,124 @@ def _run_mngr(
 
 
 # =============================================================================
-# Provider lifecycle (full create / exec / stop / start / destroy)
+# Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
+# sketchy kill -> gc), parametrized over isolation mode. See
+# `imbue.mngr.providers.provider_release_testing` and
+# `specs/provider-release-tests.md`.
 # =============================================================================
 
 
+class _AwsReleaseProfile(VpsCloudReleaseProfile):
+    """AWS plumbing for the shared provider release trip."""
+
+    provider_name = "aws"
+    name_prefix = AWS_TEST_NAME_PREFIX
+
+    # Trip 4: AWS curates the missing-credential help text toward `aws configure` (the spec's
+    # divergence was fixed in this PR -- see `_aws_unavailable_error` in mngr_aws/backend.py).
+    has_curated_unavailable_help = True
+    credential_setup_command = "aws configure"
+    # AWS captures host_dir to the S3 state bucket at `mngr stop`, so a stopped host's host_dir is
+    # readable offline (Trip 1's opt-in offline-host_dir step).
+    supports_offline_host_dir = True
+
+    def __init__(self, client: AwsVpsClient, isolation: IsolationMode) -> None:
+        super().__init__(client, isolation)
+        self._aws_client = client
+
+    def unavailable_reason(self) -> str | None:
+        if not (aws_credentials_available() and AWS_RELEASE_TESTS_OPT_IN):
+            return "AWS credentials or MNGR_AWS_RELEASE_TESTS=1 not set"
+        return None
+
+    def write_settings(self, settings_dir: Path) -> None:
+        _write_release_settings(settings_dir, isolation="NONE" if self._isolation is IsolationMode.NONE else None)
+
+    def write_auto_shutdown_settings(self, settings_dir: Path) -> None:
+        # Trip 2's idle poweroff must STOP (not terminate) the instance so `mngr start` can resume
+        # it, which on EC2 requires ``InstanceInitiatedShutdownBehavior = stop`` -- the
+        # ``terminate_on_shutdown = false`` variant the resumable-idle test uses.
+        _write_release_settings(
+            settings_dir,
+            terminate_on_shutdown=False,
+            isolation="NONE" if self._isolation is IsolationMode.NONE else None,
+        )
+
+    def create_extra_args(self) -> Sequence[str]:
+        return ()
+
+    def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
+        # Drop the frozen ``AWS_*`` creds the conftest exported and point the config/credentials
+        # files at a path that does not exist, then disable IMDS so boto3's chain resolves nothing
+        # -- ``AwsProviderConfig.get_session`` then raises ``AwsConfigError`` -> the contract
+        # ``ProviderUnavailableError``. ``AWS_EC2_METADATA_DISABLED`` stops a slow IMDS probe (and
+        # any instance-role fallback) on a CI runner with an attached role.
+        return {
+            "AWS_ACCESS_KEY_ID": None,
+            "AWS_SECRET_ACCESS_KEY": None,
+            "AWS_SESSION_TOKEN": None,
+            "AWS_PROFILE": None,
+            "AWS_SHARED_CREDENTIALS_FILE": "/nonexistent/aws/credentials",
+            "AWS_CONFIG_FILE": "/nonexistent/aws/config",
+            "AWS_EC2_METADATA_DISABLED": "true",
+        }
+
+    def find_launched_host_handle(self, host_name: str) -> str | None:
+        return find_handle_by_launched_label(self._aws_client.list_instances(), AWS_PYTEST_LAUNCHED_TAG)
+
+
 @pytest.mark.rsync
-def test_provider_lifecycle_create_exec_and_destroy(
-    aws_test_settings_dir: Path,
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip1(
+    isolation: IsolationMode,
+    tmp_path: Path,
     temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+    _aws_release_test_security_group_prepared: None,
 ) -> None:
-    agent_name = f"{AWS_TEST_NAME_PREFIX}{int(time.time()) % 100000}"
-
-    # ``command`` runs a long-lived shell command -- no agent-specific
-    # setup required (unlike ``claude``, which needs
-    # ``.claude/settings.local.json`` gitignored). ``mngr exec`` runs
-    # against the host's shell regardless of the agent type, so the test
-    # is exercising the AWS provider lifecycle, not the agent itself.
-    # ``-- sleep 99999`` matches the convention used elsewhere
-    # (``base_agent.py``'s error-message hint, ``test_create_commands``,
-    # ``test_create_basic``); the test never connects to its session.
-    result = _run_mngr(
-        aws_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "aws",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
+    run_provider_release_trip1(
+        _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
     )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
-
-    try:
-        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo hello-from-aws")
-        assert result.returncode == 0, f"Exec failed: {result.stderr}"
-        assert "hello-from-aws" in result.stdout
-
-        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "test -d /mngr && echo exists")
-        assert result.returncode == 0, f"host_dir check failed: {result.stderr}"
-        assert "exists" in result.stdout
-
-        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0, f"List failed: {result.stderr}"
-        assert agent_name in result.stdout
-        assert "aws" in result.stdout
-    finally:
-        # --force skips the destroy confirmation, so no stdin input needed.
-        # Result is intentionally not checked: best-effort cleanup.
-        _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
 
 
 @pytest.mark.rsync
-def test_provider_lifecycle_create_stop_start_destroy(
-    aws_test_settings_dir: Path,
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip2(
+    isolation: IsolationMode,
+    tmp_path: Path,
     temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+    _aws_release_test_security_group_prepared: None,
 ) -> None:
-    agent_name = f"{AWS_TEST_NAME_PREFIX}ss-{int(time.time()) % 100000}"
-
-    result = _run_mngr(
-        aws_test_settings_dir,
-        temp_git_repo,
-        "create",
-        agent_name,
-        "--type",
-        "command",
-        "--provider",
-        "aws",
-        "--no-connect",
-        "--",
-        "sleep",
-        "99999",
+    run_provider_release_trip2(
+        _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
     )
-    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
-    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
 
-    try:
-        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "stop", agent_name)
-        assert result.returncode == 0, f"Stop failed: {result.stderr}"
 
-        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "list")
-        assert result.returncode == 0
-        assert agent_name in result.stdout
+@pytest.mark.rsync
+@pytest.mark.parametrize("isolation", [IsolationMode.CONTAINER, IsolationMode.NONE])
+def test_provider_release_trip3(
+    isolation: IsolationMode,
+    tmp_path: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+    _aws_release_test_security_group_prepared: None,
+) -> None:
+    run_provider_release_trip3(
+        _AwsReleaseProfile(client=aws_release_client, isolation=isolation), tmp_path, temp_git_repo
+    )
 
-        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
-        assert result.returncode == 0, f"Start failed: {result.stderr}"
 
-        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-restart")
-        assert result.returncode == 0, f"Post-restart exec failed: {result.stderr}"
-        assert "alive-after-restart" in result.stdout
-    finally:
-        # --force skips the destroy confirmation, so no stdin input needed.
-        # Result is intentionally not checked: best-effort cleanup.
-        _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
+def test_provider_release_trip4(
+    tmp_path: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+) -> None:
+    # No-boot CLI error-classification trip: not parametrized over isolation (the error paths are
+    # isolation-agnostic) and no ``rsync`` mark (it never provisions a host).
+    run_provider_release_trip4(
+        _AwsReleaseProfile(client=aws_release_client, isolation=IsolationMode.CONTAINER), tmp_path, temp_git_repo
+    )
 
 
 # =============================================================================
@@ -340,8 +373,8 @@ def aws_release_client() -> AwsVpsClient:
     """Real AWS API client for release-test read-only calls.
 
     Built with placeholder AMI / security-group IDs because the tests below
-    only exercise read-only API operations (list_instances, list_ssh_keys)
-    that ignore those fields.
+    only exercise read-only API operations (list_instances) that ignore
+    those fields.
     """
     session = boto3.Session(region_name=AWS_DEFAULT_REGION)
     return AwsVpsClient(
@@ -355,11 +388,6 @@ def aws_release_client() -> AwsVpsClient:
 def test_api_client_list_instances_does_not_error(aws_release_client: AwsVpsClient) -> None:
     instances = aws_release_client.list_instances()
     assert isinstance(instances, list)
-
-
-def test_api_client_list_ssh_keys_does_not_error(aws_release_client: AwsVpsClient) -> None:
-    keys = aws_release_client.list_ssh_keys()
-    assert isinstance(keys, list)
 
 
 def _latest_debian_12_amd64_ami_id(region: str) -> str | None:
