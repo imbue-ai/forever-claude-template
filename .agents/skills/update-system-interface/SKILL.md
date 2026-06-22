@@ -230,8 +230,21 @@ python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.p
 `unpreview` kills both preview servers (the inner instance and the wrapper) and
 deregisters both their services (there is no worktree to remove -- the preview
 served the worker's folder in place). It is idempotent, so it is also the safe
-way to clean up after a `preview` that failed partway. Once the preview is down,
-the worker can be destroyed per `launch-task`.
+way to clean up after a `preview` that failed partway.
+
+`unpreview` only handles the *service* side; it does **not** touch the workspace
+layout. The `si-preview` tab you opened earlier with `layout.py open` is a
+separate concern (a layout panel, not a service), so you must close it yourself
+-- otherwise the user is left with a stale tab pointing at a now-deregistered
+service:
+
+```bash
+python3 scripts/layout.py close si-preview
+```
+
+Do this whenever you tear the preview down -- after a successful reveal *or*
+after a rejection where nothing was merged. Once the preview is down and its tab
+is closed, the worker can be destroyed per `launch-task`.
 
 Why this exists as a script and not a checklist: if the backend fails to start,
 the user loses their entire chat UI -- there is nowhere left to surface an error
