@@ -3,15 +3,16 @@
 # requires-python = ">=3.11"
 # dependencies = ["tomlkit>=0.12"]
 # ///
-"""Stand up a new FastAPI web-service lib (and its supervisord program entry).
+"""Stand up a new Flask web-service lib (and its supervisord program entry).
 
-Creates `libs/<package>/` with a sync-FastAPI starter, updates the root
-pyproject.toml workspace/sources/dependencies, appends a `[program:<name>]`
-block to supervisord.conf that sets `ROOT_PATH=/service/<name>` for prefix-aware
-URL emission, and runs `uv sync --all-packages` to materialize the workspace.
+Creates `libs/<package>/` with a Flask starter (synchronous; flask-sock is
+available for WebSockets), updates the root pyproject.toml
+workspace/sources/dependencies, appends a `[program:<name>]` block to
+supervisord.conf, and runs `uv sync --all-packages` to materialize the
+workspace.
 
 Usage:
-    uv run .agents/skills/build-web-service/scripts/scaffold_fastapi_lib.py \\
+    uv run .agents/skills/build-web-service/scripts/scaffold_flask_lib.py \\
         --name inbox-status --description "inbox status dashboard" \\
         [--port 8081] [--extra-dep "jinja2>=3.1"] [--extra-dep "anthropic>=0.40"]
 
@@ -109,7 +110,7 @@ def _pick_port(repo_root: Path, requested: int | None) -> int:
 
 
 def _format_dep_list(extras: Iterable[str]) -> str:
-    base = ['"fastapi>=0.110"', '"uvicorn>=0.29"']
+    base = ['"flask>=3.0"', '"flask-sock>=0.7"', '"werkzeug>=3.0"']
     extras_lines = [f'"{dep}"' for dep in extras]
     all_lines = base + extras_lines
     return ",\n    ".join(all_lines)
@@ -139,7 +140,7 @@ packages = ["src/{package}"]
 """
 
 
-def _lib_runner(name: str, description: str, port: int) -> str:
+def _lib_runner(name: str, package: str, description: str, port: int) -> str:
     return f'''"""{description}.
 
 Services run from /mngr/code (the repo root). Conventions:
@@ -154,42 +155,38 @@ Services run from /mngr/code (the repo root). Conventions:
   configs, bundled JSON): ``Path(__file__).parent / "assets/..."`` is
   fine and is the right pattern.
 
-The ``ROOT_PATH`` env var is read so FastAPI emits prefix-aware
-absolute URLs (OpenAPI links, redirects) when this app is reached
-through the system_interface proxy at ``/service/{name}/``. The
-supervisord program command sets ``ROOT_PATH=/service/{name}`` for
-that case. Standalone ``uv run {name}`` leaves it empty so the app
-serves at ``/``.
+This is a synchronous Flask app served by the threaded Werkzeug server.
+The system_interface proxy at ``/service/{name}/`` rewrites absolute
+paths in served HTML and installs a scoped service worker that prepends
+the prefix to the page's own fetches, so the app can serve at ``/`` and
+still work behind the proxy. Use ``flask_sock`` if you need WebSockets.
 """
 
-import os
+from flask import Flask
+from flask import Response
+from werkzeug.serving import run_simple
 
-import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
-
-ROOT_PATH = os.environ.get("ROOT_PATH", "")
-
-app = FastAPI(title="{name}", root_path=ROOT_PATH)
+app = Flask("{package}", static_folder=None)
 
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> HTMLResponse:
-    return HTMLResponse(
+@app.route("/")
+def index() -> Response:
+    return Response(
         "<!doctype html><html><body>"
         "<h1>{name}</h1>"
         "<p>{description}</p>"
-        "</body></html>"
+        "</body></html>",
+        mimetype="text/html",
     )
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {{"status": "ok"}}
+@app.route("/health")
+def health() -> Response:
+    return Response('{{"status": "ok"}}', mimetype="application/json")
 
 
 def main() -> None:
-    uvicorn.run(app, host="127.0.0.1", port={port})
+    run_simple("127.0.0.1", {port}, app, threaded=True, use_reloader=False, use_debugger=False)
 
 
 if __name__ == "__main__":
@@ -295,7 +292,7 @@ def _write_lib(
     (lib_dir / "README.md").write_text(_lib_readme(name, description))
     (lib_dir / f"test_{package}_ratchets.py").write_text(_lib_ratchets())
     (src_dir / "__init__.py").write_text("")
-    (src_dir / "runner.py").write_text(_lib_runner(name, description, port))
+    (src_dir / "runner.py").write_text(_lib_runner(name, package, description, port))
     return lib_dir
 
 
@@ -349,7 +346,7 @@ def _update_root_pyproject(repo_root: Path, name: str, package: str) -> None:
 
 _SUPERVISORD_PROGRAM_TEMPLATE = """\
 [program:{name}]
-command=bash -c "ROOT_PATH=/service/{name} python3 scripts/forward_port.py --url http://localhost:{port} --name {name} && uv run {name}"
+command=bash -c "python3 scripts/forward_port.py --url http://localhost:{port} --name {name} && uv run {name}"
 directory=/mngr/code
 autostart=true
 autorestart=true
@@ -368,10 +365,9 @@ stderr_logfile_backups=3
 def _update_supervisord_conf(repo_root: Path, name: str, port: int) -> None:
     # supervisord.conf is INI (not TOML) and has hand-written comments worth
     # preserving, so append a [program:<name>] block as text rather than
-    # round-tripping through a parser. ROOT_PATH=/service/<name> makes FastAPI
-    # emit prefix-correct URLs when reached through the system_interface proxy.
-    # The command is wrapped in `bash -c "..."` because supervisord exec's
-    # commands directly (no shell) and this one chains forward_port.py with `&&`.
+    # round-tripping through a parser. The command is wrapped in `bash -c "..."`
+    # because supervisord exec's commands directly (no shell) and this one chains
+    # forward_port.py with `&&`.
     path = repo_root / "supervisord.conf"
     if not path.exists():
         sys.exit(f"error: {path} not found (cannot register the new service)")
@@ -416,7 +412,7 @@ def main() -> None:
         "--extra-dep",
         action="append",
         default=[],
-        help="additional pip dep beyond fastapi/uvicorn (repeatable)",
+        help="additional pip dep beyond flask/flask-sock (repeatable)",
     )
     parser.add_argument(
         "--repo-root",

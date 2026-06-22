@@ -1,4 +1,4 @@
-"""Minimal example FastAPI web server.
+"""Minimal example Flask web server.
 
 Serves a single placeholder page so the "web" application slot in the
 desktop client has something meaningful to render out of the box.
@@ -9,13 +9,12 @@ app-watcher writes the service_registered event to ``events/services/events.json
 
 import os
 
-import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from flask import Flask, Response
+from werkzeug.serving import run_simple
 
 WEB_SERVER_PORT = int(os.environ.get("WEB_SERVER_PORT", "8080"))
 
-app = FastAPI(title="Example web server")
+app = Flask(__name__, static_folder=None)
 
 _PLACEHOLDER_HTML = """<!DOCTYPE html>
 <html>
@@ -37,7 +36,7 @@ _PLACEHOLDER_HTML = """<!DOCTYPE html>
   <p>
     The source lives at <code>libs/web_server/</code> in your project.
     Edit <code>runner.py</code> to add your own routes, or swap it out for
-    any other FastAPI/ASGI app by pointing the <code>web</code> program in
+    any other web app by pointing the <code>web</code> program in
     <code>supervisord.conf</code> at a different command.
   </p>
 </body>
@@ -45,18 +44,25 @@ _PLACEHOLDER_HTML = """<!DOCTYPE html>
 """
 
 
-@app.get("/", response_class=HTMLResponse)
-def index() -> HTMLResponse:
-    return HTMLResponse(_PLACEHOLDER_HTML)
+@app.route("/")
+def index() -> Response:
+    return Response(_PLACEHOLDER_HTML, mimetype="text/html")
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+@app.route("/health")
+def health() -> Response:
+    return Response('{"status": "ok"}', mimetype="application/json")
 
 
 def main() -> None:
-    uvicorn.run(app, host="127.0.0.1", port=WEB_SERVER_PORT)
+    run_simple(
+        "127.0.0.1",
+        WEB_SERVER_PORT,
+        app,
+        threaded=True,
+        use_reloader=False,
+        use_debugger=False,
+    )
 
 
 if __name__ == "__main__":

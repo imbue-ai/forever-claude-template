@@ -1,7 +1,7 @@
 """End-to-end tests for System Interface using Playwright.
 
-These tests start a real FastAPI server with mocked agent discovery,
-then use Playwright to interact with the web UI.
+These tests start a real Flask server (threaded Werkzeug) with mocked agent
+discovery, then use Playwright to interact with the web UI.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from typing import Generator
 from unittest.mock import patch
 
 import pytest
-import uvicorn
 
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
@@ -28,6 +27,7 @@ from imbue.system_interface.config import Config
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
+from imbue.system_interface.wsgi import make_threaded_server
 
 try:
     from playwright.sync_api import Page
@@ -192,8 +192,8 @@ def _serve_agent_chat(
         config = Config(system_interface_host="127.0.0.1", system_interface_port=port)
         app = create_application(config, agent_manager=manager)
 
-        server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="error"))
-        thread = threading.Thread(target=server.run, daemon=True)
+        server = make_threaded_server("127.0.0.1", port, app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         # Wait for server to start
@@ -207,7 +207,7 @@ def _serve_agent_chat(
         try:
             yield base_url, agents, session_file
         finally:
-            server.should_exit = True
+            server.shutdown()
             thread.join(timeout=5.0)
 
 
@@ -358,14 +358,12 @@ def test_tool_calls_render_as_collapsible(tmp_path: Path, page: Page) -> None:
         patch("imbue.system_interface.server.discover_agents", return_value=agents),
         patch("imbue.system_interface.server.send_message", return_value=True),
     ):
-        server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT + 1, log_level="error"))
-        thread = threading.Thread(target=server.run, daemon=True)
+        server = make_threaded_server("127.0.0.1", _PORT + 1, app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         for _ in range(50):
             try:
-                import urllib.request
-
                 urllib.request.urlopen(f"http://127.0.0.1:{_PORT + 1}/api/agents", timeout=0.5)
                 break
             except Exception:
@@ -394,7 +392,7 @@ def test_tool_calls_render_as_collapsible(tmp_path: Path, page: Page) -> None:
             expect(tool_details.first).to_be_visible()
             expect(tool_details.first).to_contain_text("file contents here")
         finally:
-            server.should_exit = True
+            server.shutdown()
             thread.join(timeout=5.0)
 
 
@@ -537,14 +535,12 @@ def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
         patch("imbue.system_interface.server.discover_agents", return_value=[]),
         patch("imbue.system_interface.server.send_message", return_value=True),
     ):
-        server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT + 2, log_level="error"))
-        thread = threading.Thread(target=server.run, daemon=True)
+        server = make_threaded_server("127.0.0.1", _PORT + 2, app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         for _ in range(50):
             try:
-                import urllib.request
-
                 urllib.request.urlopen(f"http://127.0.0.1:{_PORT + 2}/api/agents", timeout=0.5)
                 break
             except Exception:
@@ -556,7 +552,7 @@ def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
             expect(empty_msg).to_be_visible(timeout=5000)
             expect(empty_msg).to_contain_text("No agents found")
         finally:
-            server.should_exit = True
+            server.shutdown()
             thread.join(timeout=5.0)
 
 

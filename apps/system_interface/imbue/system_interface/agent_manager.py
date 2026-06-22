@@ -715,10 +715,11 @@ class AgentManager:
             # same project-local .mngr/settings.toml that mngr create uses --
             # otherwise observe picks up ~/.mngr config, which inside a Docker
             # agent typically has providers enabled (e.g. modal) that are not
-            # authenticated. Provider errors make `list_agents` error out,
-            # which in turn prevents periodic DISCOVERY_FULL snapshots from
-            # being written, so the system_interface's agent list drifts out
-            # of sync with reality whenever an individual event is missed.
+            # authenticated. `mngr observe` itself now tolerates unauthenticated
+            # providers (its discovery runs under ErrorBehavior.CONTINUE, so a
+            # failing provider is surfaced per-provider and still emits a
+            # DISCOVERY_FULL snapshot); scoping to the project providers via cwd
+            # is kept only to avoid that noise and the wasted credential probes.
             # `is_checked_by_group=False` because we terminate this long-running
             # subprocess explicitly via `.terminate()` in `stop()`; that SIGTERM
             # produces a non-zero exit code that should not surface as a
