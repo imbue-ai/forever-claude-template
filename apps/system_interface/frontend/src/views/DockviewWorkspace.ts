@@ -326,10 +326,32 @@ function placementForGroup(
   return {};
 }
 
+// "New browser" is gated on a resolvable ANTHROPIC_API_KEY inside the compute
+// (the browser-use agent needs it). Cached at module load and refreshed each
+// time the "+" dropdown opens, so a key added after boot enables the item
+// without a reload (the fetch resolves in time for the next open).
+let browserKeyAvailable = false;
+function refreshBrowserKeyStatus(): void {
+  fetch(getServiceUrl("browser") + "key-status")
+    .then((r) => (r.ok ? r.json() : { available: false }))
+    .then((status) => {
+      browserKeyAvailable = Boolean(status.available);
+    })
+    .catch(() => {
+      browserKeyAvailable = false;
+    });
+}
+refreshBrowserKeyStatus();
+
+function openBrowserTab(targetGroup?: DockviewGroupPanel): void {
+  openIframeTab(getServiceUrl("browser"), "Browser", "iframe", "browser", targetGroup);
+}
+
 function buildDropdownItems(
   targetGroup?: DockviewGroupPanel,
-): Array<{ label: string; action: () => void; dividerAfter?: boolean }> {
-  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean }> = [];
+): Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean }> {
+  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean }> = [];
+  refreshBrowserKeyStatus();
   const openChatIds = getOpenChatAgentIds();
   const openAppNames = getOpenAppNames();
 
@@ -394,10 +416,18 @@ function buildDropdownItems(
     action: () => openIframeTab(buildTerminalUrl(), "terminal", "iframe", undefined, targetGroup),
   });
 
-  items.push({
-    label: "New URL",
-    action: () => showCustomUrlDialog(targetGroup),
-  });
+  items.push(
+    browserKeyAvailable
+      ? { label: "New browser", action: () => openBrowserTab(targetGroup) }
+      : {
+          label: "New browser",
+          disabled: true,
+          action: () =>
+            alert(
+              "Browser sessions need an Anthropic API key. Create the workspace with the 'Anthropic API key' or 'Imbue Cloud' provider (Subscription mode has no key).",
+            ),
+        },
+  );
 
   items.push({
     label: "New agent",
@@ -439,6 +469,10 @@ function createAddTabButton(group: DockviewGroupPanel): IHeaderActionsRenderer {
         const menuItem = document.createElement("div");
         menuItem.className = "dockview-add-tab-dropdown-item";
         menuItem.textContent = item.label;
+        if (item.disabled) {
+          menuItem.style.opacity = "0.5";
+          menuItem.style.cursor = "not-allowed";
+        }
         menuItem.addEventListener("click", (clickEvent) => {
           clickEvent.stopPropagation();
           dropdown.style.display = "none";
@@ -946,69 +980,6 @@ export function openSubagentTab(agentId: string, subagentSessionId: string, desc
     title: description,
     params,
   });
-}
-
-function showCustomUrlDialog(targetGroup?: DockviewGroupPanel | null): void {
-  const overlay = document.createElement("div");
-  overlay.className = "custom-url-dialog-overlay";
-
-  const dialog = document.createElement("div");
-  dialog.className = "custom-url-dialog";
-
-  dialog.innerHTML = `
-    <h3 class="custom-url-dialog-title">Open Custom URL</h3>
-    <label class="custom-url-dialog-label">URL</label>
-    <input type="url" class="custom-url-dialog-input" placeholder="https://example.com" autofocus />
-    <label class="custom-url-dialog-label">Title (optional)</label>
-    <input type="text" class="custom-url-dialog-input" placeholder="Tab title" />
-    <div class="custom-url-dialog-actions">
-      <button class="custom-url-dialog-cancel">Cancel</button>
-      <button class="custom-url-dialog-open">Open</button>
-    </div>
-  `;
-
-  overlay.appendChild(dialog);
-  document.body.appendChild(overlay);
-
-  const inputs = dialog.querySelectorAll("input");
-  const urlInput = inputs[0] as HTMLInputElement;
-  const titleInput = inputs[1] as HTMLInputElement;
-
-  function close(): void {
-    document.body.removeChild(overlay);
-  }
-
-  function open(): void {
-    const url = urlInput.value.trim();
-    if (!url) return;
-
-    let title = titleInput.value.trim();
-    if (!title) {
-      try {
-        title = new URL(url).hostname;
-      } catch {
-        title = url;
-      }
-    }
-    close();
-    openIframeTab(url, title, "iframe", undefined, targetGroup);
-  }
-
-  dialog.querySelector(".custom-url-dialog-cancel")!.addEventListener("click", close);
-  dialog.querySelector(".custom-url-dialog-open")!.addEventListener("click", open);
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
-  });
-  urlInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") open();
-    if (e.key === "Escape") close();
-  });
-  titleInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") open();
-    if (e.key === "Escape") close();
-  });
-
-  urlInput.focus();
 }
 
 async function saveLayout(): Promise<void> {
@@ -1630,6 +1601,10 @@ function createEmptyStateOverlay(): HTMLElement {
       const menuItem = document.createElement("div");
       menuItem.className = "dockview-add-tab-dropdown-item";
       menuItem.textContent = item.label;
+      if (item.disabled) {
+        menuItem.style.opacity = "0.5";
+        menuItem.style.cursor = "not-allowed";
+      }
       menuItem.addEventListener("click", (clickEvent) => {
         clickEvent.stopPropagation();
         dropdown.style.display = "none";

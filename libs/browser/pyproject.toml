@@ -1,0 +1,23 @@
+[project]
+name = "browser"
+version = "0.1.0"
+description = "Live Chromium with human-in-the-loop control and a browser-use agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "browser-use[core]==0.13.1",
+]
+
+# Entry point is "browser-service", not "browser": browser-use ships its own
+# "browser" console script, which would otherwise shadow this one.
+[project.scripts]
+browser-service = "browser.runner:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/browser"]
