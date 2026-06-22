@@ -2173,6 +2173,27 @@ body {
   background: var(--color-bg);
 }
 
+/* The block immediately before a bubble-less turn boundary drops its turn-bottom
+   margin. When the user grants/denies a permission, the app injects a hidden
+   notification: its bubble is suppressed and its verdict folds into the card
+   above, but it still opens a fresh turn section (see turn-grouping's
+   permission-resolution branch). With no user bubble between them, this
+   (card-ending) block's bottom margin and the resumption block's top margin
+   would stack into an empty void -- far larger than the normal node-to-node
+   spacing. Dropping the bottom margin leaves the seam as just the resumption
+   block's standard top margin.
+
+   This is keyed structurally: conversation-rows adds this class only when the
+   NEXT section renders no user bubble (see sectionRendersUserBubble / the
+   flushBottomMargin attr on ProgressBlock), NOT on the permission card's DOM
+   position. So a permission card that is the genuine last thing in an unresolved
+   turn keeps its normal end-of-turn margin (no following section), and a
+   resolution boundary is handled even when other work follows the card before
+   the grant. */
+.progress-block--flush-bottom {
+  margin-bottom: 0;
+}
+
 /* ─────────────────────────────────────────────────────────────────────
    ACTIVITY INDICATOR (replaces the generic "Running tool..." strip)
    ─────────────────────────────────────────────────────────────────── */

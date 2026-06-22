@@ -43,6 +43,21 @@ export interface RowDescriptor {
 }
 
 /**
+ * Whether a section renders a user-message chat bubble at the top of its turn. A
+ * section does not when it has no user_event at all, or when that event is a
+ * hidden message (a skill expansion, `/welcome`, etc.). In practice the one
+ * bubble-less *boundary* section is the one a permission grant/deny opens (its
+ * user_event is null) -- see the resolution branch in turn-grouping.
+ *
+ * Shared by the bubble-rendering decision and the turn-margin flush decision in
+ * buildRows so the two can never disagree about whether a section shows a bubble.
+ */
+export function sectionRendersUserBubble(section: SectionView): boolean {
+  const userEvent = section.user_event;
+  return userEvent !== null && !isHiddenUserMessage(userEvent.content || "");
+}
+
+/**
  * Flatten the turn-grouped sections into the virtualized list's top-level rows.
  *
  * Each row is one mounted node in the message list. Keeping the grouping here
@@ -53,19 +68,33 @@ export interface RowDescriptor {
  * Every row's rendered root carries a DOM ``id`` equal to its ``key`` so
  * measureRows can read its height.
  */
-function buildRows(
+export function buildRows(
   agentId: string,
   sections: SectionView[],
   toolResults: Map<string, ToolResultEvent>,
 ): RowDescriptor[] {
   const rows: RowDescriptor[] = [];
-  for (const section of sections) {
+  for (let s = 0; s < sections.length; s++) {
+    const section = sections[s];
+    // The next section opens with no user bubble -- in practice a permission
+    // grant/deny boundary, whose verdict folds onto the card above and which
+    // carries the open step over (see turn-grouping's resolution branch). With
+    // no bubble to sit in the turn gap, this (card-ending) block's turn-bottom
+    // margin and the next block's top margin would stack into an empty void. So
+    // when this section emits a progress block, drop its bottom margin and let
+    // the seam be just the next block's normal top margin. Derived from the same
+    // no-bubble predicate as the bubble decision (next section, if any) -- not
+    // from the permission card's position in the DOM.
+    const nextSection = sections[s + 1];
+    const nextHasNoBubble = nextSection !== undefined && !sectionRendersUserBubble(nextSection);
     const userEvent = section.user_event;
-    if (userEvent !== null && !isHiddenUserMessage(userEvent.content || "")) {
+    if (sectionRendersUserBubble(section)) {
+      // The predicate guarantees a real (non-hidden) user_event here.
+      const bubbleEvent = userEvent!;
       rows.push({
-        key: userEvent.event_id,
+        key: bubbleEvent.event_id,
         estimate: ESTIMATED_USER_HEIGHT_PX,
-        render: () => renderUserMessage(userEvent) as m.Vnode,
+        render: () => renderUserMessage(bubbleEvent) as m.Vnode,
       });
     }
 
@@ -83,6 +112,7 @@ function buildRows(
             trailing_reply: section.trailing_reply,
             toolResults,
             agentId,
+            flushBottomMargin: nextHasNoBubble,
           }),
       });
       continue;

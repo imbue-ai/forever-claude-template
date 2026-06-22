@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEvent, ToolResultEvent, AssistantMessageEvent, UserMessageEvent } from "../models/Response";
-import { buildConversationRows, isSubagentRunning } from "./conversation-rows";
+import type { SectionView, StepNode } from "./turn-grouping";
+import { buildConversationRows, buildRows, isSubagentRunning, sectionRendersUserBubble } from "./conversation-rows";
 
 // --- Event builders (mirroring turn-grouping.test.ts) ---
 
@@ -86,6 +87,84 @@ describe("buildConversationRows", () => {
 
     expect(rows.map((r) => r.key)).toEqual(["u-t1", "a-t2"]);
     expect(rows.some((r) => r.key.startsWith("progress-"))).toBe(false);
+  });
+});
+
+// --- Section fixtures for the turn-margin flush logic ---
+
+function stepNode(id: string): StepNode {
+  return {
+    ticket_id: id,
+    title: "A step",
+    status: "active",
+    summary: null,
+    narration: null,
+    is_carryover: false,
+    is_frontier: true,
+    events: [] as AssistantMessageEvent[],
+  };
+}
+
+/** A section carrying a tk step (so buildRows emits a ProgressBlock row),
+ *  opened by the given boundary user_event (null = a bubble-less boundary, the
+ *  shape a permission grant/deny opens). */
+function stepSection(key: string, user_event: UserMessageEvent | null): SectionView {
+  return {
+    user_event,
+    key,
+    items: [{ kind: "step", step: stepNode(`${key}-s1`) }],
+    trailing_reply: [] as AssistantMessageEvent[],
+  };
+}
+
+/** The flushBottomMargin attr buildRows passed to the ProgressBlock emitted for
+ *  the section at `key`, read off the rendered vnode's attrs. */
+function progressFlush(rows: ReturnType<typeof buildRows>, key: string): boolean | undefined {
+  const row = rows.find((r) => r.key === `progress-${key}`);
+  if (row === undefined) throw new Error(`no progress row for ${key}`);
+  const vnode = row.render() as { attrs: { flushBottomMargin?: boolean } };
+  return vnode.attrs.flushBottomMargin;
+}
+
+describe("sectionRendersUserBubble", () => {
+  it("is true for a section opened by a real user message", () => {
+    expect(sectionRendersUserBubble(stepSection("a", userMsg("t0", "show me my email")))).toBe(true);
+  });
+
+  it("is false for a bubble-less boundary section (user_event null)", () => {
+    // The shape a permission grant/deny opens: the verdict folds onto the card
+    // above and the section carries no user bubble.
+    expect(sectionRendersUserBubble(stepSection("a", null))).toBe(false);
+  });
+
+  it("is false for a hidden user message (e.g. a skill expansion)", () => {
+    expect(sectionRendersUserBubble(stepSection("a", userMsg("t0", "/welcome", "u-welcome")))).toBe(false);
+  });
+});
+
+describe("buildRows turn-margin flush", () => {
+  const noToolResults = new Map<string, ToolResultEvent>();
+
+  it("flushes a progress block whose NEXT section renders no user bubble", () => {
+    // Block A (the normal turn that issued the request) is followed by the
+    // bubble-less permission-resolution boundary, so A drops its bottom margin.
+    const sections = [stepSection("a", userMsg("t0", "go")), stepSection("b", null)];
+    const rows = buildRows("agent", sections, noToolResults);
+    expect(progressFlush(rows, "a")).toBe(true);
+  });
+
+  it("does NOT flush when the next section renders a normal user bubble", () => {
+    const sections = [stepSection("a", userMsg("t0", "first")), stepSection("b", userMsg("t1", "second"))];
+    const rows = buildRows("agent", sections, noToolResults);
+    expect(progressFlush(rows, "a")).toBe(false);
+  });
+
+  it("does NOT flush the last section (a genuinely-final unresolved turn)", () => {
+    // A permission card that is the real last thing in the turn keeps its normal
+    // end-of-turn margin: there is no following bubble-less section.
+    const sections = [stepSection("a", userMsg("t0", "go"))];
+    const rows = buildRows("agent", sections, noToolResults);
+    expect(progressFlush(rows, "a")).toBe(false);
   });
 });
 
