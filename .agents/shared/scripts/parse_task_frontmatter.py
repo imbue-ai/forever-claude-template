@@ -13,11 +13,11 @@ flow-specific context (a ticket id, a feature flag, a list of staged
 inputs) without each new key requiring a parser change.
 
 The positional argument is a path that may contain a shell-style glob
-(e.g. ``runtime/crystallize/*/task.md``). The helper resolves the
+(e.g. ``runtime/harden/*/task.md``). The helper resolves the
 glob itself and fails loudly if zero or multiple files match -- so a
 worker whose runtime layout drifts (missing task file, or two copies
 landing in the same tree) cannot silently parse the wrong thing.
-Quote the pattern in the shell (``'runtime/crystallize/*/task.md'``)
+Quote the pattern in the shell (``'runtime/harden/*/task.md'``)
 so the literal glob reaches this script.
 
 On success (exit 0) prints shell-evalable ``KEY=value`` lines to
@@ -26,7 +26,7 @@ metacharacters survive). The required fields come first in fixed
 order; any extra string fields follow alphabetically:
 
     LEAD_AGENT=crystallize-test
-    FINISH_REPORT_PATH=runtime/update/foo/reports/report.md
+    FINISH_REPORT_PATH=runtime/harden/update-foo/reports/report.md
     TICKET_ID=task-42
 
 Non-string frontmatter values (lists, mappings, numbers, bools) are

@@ -670,11 +670,11 @@ def test_await_times_out_when_report_never_appears(
 def test_read_finish_report_path_returns_field(tmp_path: Path) -> None:
     """_read_finish_report_path pulls the path out of the task frontmatter."""
     task = tmp_path / "task.md"
-    _write_await_task(task, Path("runtime/crystallize/demo/reports/report.md"))
+    _write_await_task(task, Path("runtime/harden/crystallize-demo/reports/report.md"))
 
     result = create_worker_mod._read_finish_report_path(task)
 
-    assert result == Path("runtime/crystallize/demo/reports/report.md")
+    assert result == Path("runtime/harden/crystallize-demo/reports/report.md")
 
 
 def test_read_finish_report_path_missing_raises(tmp_path: Path) -> None:
