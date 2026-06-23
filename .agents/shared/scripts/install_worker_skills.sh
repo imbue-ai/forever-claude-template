@@ -26,7 +26,7 @@ fi
 
 destination="$1"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# script lives at <repo>/.agents/shared/scripts; walk up two to reach .agents/shared
+# script lives at <repo>/.agents/shared/scripts; walk up one to reach .agents/shared
 worker_source="$(cd "$script_dir/.." && pwd)/worker"
 
 if [ ! -d "$worker_source" ]; then
