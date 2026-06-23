@@ -1,6 +1,6 @@
 ---
 name: update-artifact
-description: "Change an existing artifact through the background harden pass -- extend, refactor, or verify a skill, a service, or a shared script/reference under .agents/shared/. Invoke at turn-end when a skill ran but you had to do additional repeatable work by hand (emergent change), or when you and the user discussed a change and you applied it live (committed change)."
+description: "Change an existing skill, service, or shared script/reference (under .agents/shared/) -- extend it, refactor it, or just verify it still works. Invoke at turn-end when a skill ran but you had to do extra repeatable work by hand, or when you and the user discussed a change to it and applied it live."
 ---
 
 # Updating an existing artifact

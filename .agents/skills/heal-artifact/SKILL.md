@@ -1,6 +1,6 @@
 ---
 name: heal-artifact
-description: "Fix an existing artifact that errored or delivered a wrong result -- the heal operation of the live-first/ratify-at-turn-end lifecycle. This applies to skills or web services. Invoke at turn-end, after you worked around the failure to satisfy the user's request."
+description: "Fix an existing artifact that errored or delivered a wrong result. This applies to skills or web services. Invoke at turn-end, after you worked around the failure to satisfy the user's request."
 ---
 
 # Healing a broken artifact

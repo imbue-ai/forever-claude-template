@@ -1,6 +1,6 @@
 ---
 name: crystallize-artifact
-description: "Create a new artifact through the background harden pass -- the create operation of the live-first/ratify-at-turn-end lifecycle. The default artifact is a reusable skill: promote a process from the turn that just finished into a committed, tested, reviewed skill (reconstructed from the transcript). Use after a turn whose process would recur with new inputs (strong signal: you learned how to do something through research or debugging that is likely useful again), or when the user says 'crystallize this' / invokes it / a Stop-hook nudge flags a skill shape. The live-half wrappers (build-web-service, fetch-process-show) invoke it with the service / skill artifact once the user has confirmed a cheap prototype."
+description: "Promote the just-finished work into a new, reusable, committed, tested skill. Use when that process would recur with new inputs -- especially something you figured out through research or debugging -- or when the user says 'crystallize this'."
 ---
 
 # Crystallizing an artifact into existence
