@@ -50,7 +50,7 @@ SHELL ["/root/.nix-profile/bin/bash", "-euo", "pipefail", "-c"]
 # Compatibility paths expected by mngr's Docker/SSH provider and by downloaded
 # tools that assume FHS dynamic-loader locations.
 RUN set -eux; \
-    mkdir -p /etc/ssl/certs /etc/ssh /run/sshd /usr/lib /usr/sbin /usr/local/bin /var/empty/sshd; \
+    mkdir -p /etc/fonts /etc/ssl/certs /etc/ssh /run/sshd /usr/lib /usr/sbin /usr/local/bin /var/empty/sshd; \
     ln -sfn /run /var/run; \
     grep -q '^sshd:' /etc/group || echo 'sshd:x:74:' >> /etc/group; \
     grep -q '^sshd:' /etc/passwd || echo 'sshd:x:74:74:Privilege-separated SSH:/var/empty/sshd:/bin/sh' >> /etc/passwd; \
@@ -94,6 +94,9 @@ RUN set -eux; \
     cert_bundle="$FCT_NIX_PROFILE/etc/ssl/certs/ca-bundle.crt"; \
     test -f "$cert_bundle"; \
     ln -sf "$cert_bundle" /etc/ssl/certs/ca-certificates.crt; \
+    fontconfig_conf="$(find /nix/store -path '*/etc/fonts/fonts.conf' -print -quit)"; \
+    test -f "$fontconfig_conf"; \
+    ln -sf "$fontconfig_conf" /etc/fonts/fonts.conf; \
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'test -f /etc/ssl/certs/ca-certificates.crt' > /usr/local/bin/update-ca-certificates; \
     chmod +x /usr/local/bin/update-ca-certificates; \
     dynamic_linker="$(nix-instantiate --eval --strict -E '(import <nixpkgs> {}).stdenv.cc.bintools.dynamicLinker' | tr -d '\"')"; \

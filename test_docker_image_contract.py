@@ -449,6 +449,8 @@ def test_fct_docker_provider_boot_contract(tmp_path: Path) -> None:
                 "case \"${LD_LIBRARY_PATH:-}\" in */nix/var/nix/profiles/fct-workspace/lib*) ;; *) exit 1 ;; esac; "
                 "test -e /var/run; "
                 "test -e /usr/lib/libstdc++.so.6; "
+                "test -f /etc/fonts/fonts.conf; "
+                "! fc-match sans 2>&1 | grep -q 'Fontconfig error'; "
                 "test -d /mngr/code; "
                 "test -f /mngr/code/supervisord.conf; "
                 "command -v mngr >/dev/null; "
@@ -488,6 +490,8 @@ def test_fct_docker_provider_boot_contract(tmp_path: Path) -> None:
                 "    page = browser.new_page()\n"
                 "    page.goto('http://127.0.0.1:8000/', wait_until='domcontentloaded', timeout=15000)\n"
                 "    assert page.title() == 'System Interface'\n"
+                "    page.set_content('<h1>Hello Fontconfig</h1>')\n"
+                "    assert page.locator('h1').inner_text() == 'Hello Fontconfig'\n"
                 "    browser.close()\n"
                 "PY\n"
                 "printf fct-provider-ssh-ok",

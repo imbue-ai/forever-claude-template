@@ -9,3 +9,5 @@
 - Switched the Docker/NixOS workspace flake input from `nixos-unstable` to the current stable `nixos-26.05` branch.
 
 - Pinned the Docker/NixOS workspace base image by digest and added a checked-in Nix closure manifest for the verified `aarch64-linux` build, so the image build fails if the resolved Nix system package closure changes unexpectedly. Added an explicit manifest regeneration script for intentional closure updates.
+
+- Added an `/etc/fonts/fonts.conf` compatibility path in the Docker/NixOS image so Playwright's Chromium can load fontconfig and render text-heavy pages reliably.
