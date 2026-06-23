@@ -8,8 +8,7 @@ proxy. This reference describes what a service *is* and how you run and test one
 
 - The scaffolded lib: `libs/<package>/src/<package>/runner.py` (the Flask app
   and routes), plus its `pyproject.toml`, `README.md`, and
-  `test_<package>_ratchets.py`. Your task file names the exact package and
-  service name.
+  `test_<package>_ratchets.py`.
 - The service entry in `supervisord.conf` and the matching root `pyproject.toml`
   workspace wiring -- you normally do not touch these; the scaffold created them.
 
