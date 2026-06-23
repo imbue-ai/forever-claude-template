@@ -14,26 +14,18 @@ def test_parse_env_file_handles_quotes_and_comments() -> None:
     assert parsed["EMPTY"] == ""
 
 
-def test_resolve_credentials_prefers_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_key_prefers_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-proc")
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example")
-    api_key, base_url = bsession.resolve_anthropic_credentials()
-    assert api_key == "sk-proc"
-    assert base_url == "https://proxy.example"
+    assert bsession.resolve_anthropic_key() == "sk-proc"
 
 
-def test_resolve_credentials_falls_back_to_host_env_file(
+def test_resolve_key_falls_back_to_host_env_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    (tmp_path / "env").write_text(
-        "ANTHROPIC_API_KEY=sk-host\nANTHROPIC_BASE_URL=https://host.example\n"
-    )
+    (tmp_path / "env").write_text("ANTHROPIC_API_KEY=sk-host\n")
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
-    api_key, base_url = bsession.resolve_anthropic_credentials()
-    assert api_key == "sk-host"
-    assert base_url == "https://host.example"
+    assert bsession.resolve_anthropic_key() == "sk-host"
 
 
 def test_anthropic_key_status_reflects_availability(monkeypatch: pytest.MonkeyPatch) -> None:

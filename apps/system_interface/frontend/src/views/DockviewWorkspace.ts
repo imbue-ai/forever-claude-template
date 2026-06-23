@@ -424,7 +424,7 @@ function buildDropdownItems(
           disabled: true,
           action: () =>
             alert(
-              "Browser sessions need an Anthropic API key. Create the workspace with the 'Anthropic API key' or 'Imbue Cloud' provider (Subscription mode has no key).",
+              "Browser sessions need an Anthropic API key. Create the workspace with the 'Anthropic API key' provider (Subscription mode has no key).",
             ),
         },
   );

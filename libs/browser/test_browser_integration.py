@@ -98,7 +98,6 @@ class _FakeAgent:
 
 def test_agent_control_state_machine(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setattr(bsession, "Agent", _FakeAgent)
     monkeypatch.setattr(bsession, "ChatAnthropic", lambda **_kwargs: object())
 

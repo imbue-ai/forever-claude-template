@@ -14,11 +14,10 @@ cast socket's input is dispatched; when the agent has control, human input is
 dropped (``_input_enabled`` cleared) and browser-use drives. "Take control"
 pauses the agent and hands the flag back.
 
-Credentials for browser-use are read lazily from the environment (and a fresh
-re-read of ``$MNGR_HOST_DIR/env``) at run time, so a key submitted after this
-service booted is still picked up without a restart. The Anthropic SDK inside
-``ChatAnthropic`` reads ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL`` from the
-environment, so the proxy (Imbue Cloud) and direct-key cases both work.
+The Anthropic API key is read lazily from the environment (and a fresh re-read of
+``$MNGR_HOST_DIR/env``) at run time, so a key submitted after this service booted
+is still picked up without a restart. Direct Anthropic API key only -- the Imbue
+Cloud / litellm proxy (``ANTHROPIC_BASE_URL``) path is intentionally unsupported.
 """
 
 import asyncio
@@ -124,35 +123,31 @@ def _parse_env_file(text: str) -> dict[str, str]:
     return result
 
 
-def resolve_anthropic_credentials() -> tuple[str | None, str | None]:
-    """Return ``(api_key, base_url)`` from the process env, falling back to ``$MNGR_HOST_DIR/env``.
+def resolve_anthropic_key() -> str | None:
+    """Return a direct Anthropic API key from the process env or ``$MNGR_HOST_DIR/env``.
 
-    The fallback re-reads the host env file fresh so a key submitted after this
-    service started is still found without a restart.
+    Anthropic API only: we deliberately do NOT read ``ANTHROPIC_BASE_URL`` / support
+    the Imbue Cloud / litellm proxy path. The fallback re-reads the host env file fresh
+    so a key submitted after this service started is still found without a restart.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    base_url = os.environ.get("ANTHROPIC_BASE_URL")
     if not api_key:
         host_dir = os.environ.get("MNGR_HOST_DIR")
         if host_dir:
             env_path = Path(host_dir) / "env"
             if env_path.exists():
-                parsed = _parse_env_file(env_path.read_text())
-                api_key = parsed.get("ANTHROPIC_API_KEY")
-                base_url = base_url or parsed.get("ANTHROPIC_BASE_URL")
-    return api_key, base_url
+                api_key = _parse_env_file(env_path.read_text()).get("ANTHROPIC_API_KEY")
+    return api_key
 
 
 def anthropic_key_status() -> tuple[bool, str]:
     """Return ``(available, reason)`` for gating the "New browser" menu item."""
-    api_key, _ = resolve_anthropic_credentials()
-    if api_key:
+    if resolve_anthropic_key():
         return True, "Anthropic API key available"
     return (
         False,
         "Browser sessions need an Anthropic API key. Create the workspace with the "
-        "'Anthropic API key' or 'Imbue Cloud' provider (the 'Claude subscription' "
-        "option has no usable key for browser automation).",
+        "'Anthropic API key' provider (the 'Claude subscription' option has no usable key).",
     )
 
 
@@ -437,7 +432,7 @@ class LiveBrowser(MutableModel):
         Single-flight: any agent already running or paused is stopped first, so only
         one agent ever drives the shared browser.
         """
-        api_key, base_url = resolve_anthropic_credentials()
+        api_key = resolve_anthropic_key()
         if not api_key:
             await self._broadcast({"type": "error", "text": anthropic_key_status()[1]}, chat=True)
             return
@@ -445,11 +440,11 @@ class LiveBrowser(MutableModel):
         self._agent_task = asyncio.current_task()
         await self._set_control("agent")
         await self._broadcast({"type": "chat", "role": "user", "text": prompt}, chat=True)
-        # Credentials go straight to the client -- never into os.environ, which would
+        # Key is passed straight to ChatAnthropic -- never into os.environ, which would
         # leak across the manager's concurrent sessions and race between runs.
         agent = Agent(
             task=prompt,
-            llm=ChatAnthropic(model=_DEFAULT_MODEL, api_key=api_key, base_url=base_url),
+            llm=ChatAnthropic(model=_DEFAULT_MODEL, api_key=api_key),
             browser_session=self._bu_session,
         )
         self._agent = agent
@@ -524,15 +519,25 @@ class LiveBrowser(MutableModel):
         await self._broadcast({"type": "queued", "text": None}, chat=True)
 
     async def take_control(self) -> None:
-        """'Take control': stop the agent completely and give control to the human.
+        """'Interrupt & take control': hand control to the human now, then abort the run.
 
-        There is no resume -- to continue, the user sends a new message (a fresh
-        run on the current browser state). Any queued message is dropped.
+        Flips control to the human first (so the UI unlocks on the first click), then
+        cancels the run task -- aborting an in-flight LLM call / step at once instead of
+        waiting for browser-use's cooperative stop to reach the next step boundary. No
+        resume: to continue, the user sends a new message. Any queued message is dropped.
         """
         self._queued_prompt = None
-        await self._stop_active_agent()
         await self._set_control("human")
         await self._broadcast({"type": "queued", "text": None}, chat=True)
+        agent, task = self._agent, self._agent_task
+        if agent is not None:
+            agent.stop()
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, *_BROWSER_ERRORS):
+                pass
 
     async def _stop_active_agent(self) -> None:
         """Stop any running agent and wait for its run task to unwind."""
