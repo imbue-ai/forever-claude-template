@@ -41,8 +41,10 @@ Cloud / litellm proxy (``ANTHROPIC_BASE_URL``) path is intentionally unsupported
 """
 
 import asyncio
+import base64
 import json
 import os
+import time
 from collections.abc import Awaitable
 from collections.abc import Callable
 from pathlib import Path
@@ -52,6 +54,7 @@ from typing import Literal
 from browser_use import Agent
 from browser_use import BrowserSession
 from browser_use import ChatAnthropic
+from browser_use.skill_cli.actions import ActionHandler
 from fastapi import WebSocket
 from loguru import logger
 from playwright.async_api import Browser
@@ -124,6 +127,18 @@ _MAX_SESSIONS = int(os.environ.get("BROWSER_MAX_SESSIONS", "5"))
 # release; these are the backstop). Both env-tunable.
 _TASK_MAX_STEPS = int(os.environ.get("BROWSER_TASK_MAX_STEPS", "100"))
 _TASK_MAX_SECONDS = float(os.environ.get("BROWSER_TASK_MAX_SECONDS", "900"))
+
+# Direct-control ownership is a STICKY LEASE: an agent acquires a browser on its
+# first command and holds it across subsequent commands. Unlike a `task` (whose
+# ownership is bound to the long run), a lease has no live connection to detect a
+# dead/wandered-off owner, so it auto-releases after this many seconds with no
+# command (the keepalive loop sweeps it). The human take-control is the instant
+# escape hatch; this TTL is the backstop. Env-tunable.
+_LEASE_IDLE_TTL = float(os.environ.get("BROWSER_LEASE_IDLE_TTL", "90"))
+
+# Where `screenshot` writes PNGs (relative to the daemon's cwd = repo root). The
+# CLI prints the path and the agent reads the file; agent + daemon share the FS.
+_SCREENSHOT_DIR = Path(os.environ.get("BROWSER_SCREENSHOT_DIR", "runtime/browser-screenshots"))
 
 
 def _action_summary(action: Any) -> str:
@@ -258,6 +273,13 @@ class LiveBrowser(MutableModel):
     # Serializes ALL ownership changes -- the single mutual-exclusion primitive.
     _control_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     _wait_queue: list[_AcquireWaiter] = PrivateAttr(default_factory=list)
+    # Direct-control: browser-use's own action executor (lazily bound to _bu_session),
+    # the last `state`'s numbered elements (so `click <index>` resolves a node), and
+    # the sticky-lease activity timestamp the idle-TTL sweep checks.
+    _action_handler: ActionHandler | None = PrivateAttr(default=None)
+    _selector_map: dict[int, Any] = PrivateAttr(default_factory=dict)
+    _lease_touched_at: float = PrivateAttr(default=0.0)
+    _screenshot_seq: int = PrivateAttr(default=0)
 
     async def start(self, playwright: Playwright) -> None:
         """Launch the headless Chromium (browser-use) and attach the Playwright observer."""
@@ -449,10 +471,24 @@ class LiveBrowser(MutableModel):
 
     async def _keepalive_loop(self) -> None:
         """Ping cast sockets periodically so a static page (no screencast frames)
-        doesn't let the WS proxy time out the idle stream."""
+        doesn't let the WS proxy time out the idle stream; also sweep idle leases."""
         while not self._closed:
             await asyncio.sleep(_KEEPALIVE_SECONDS)
             await self._broadcast({"type": "ping"})
+            await self._sweep_idle_lease()
+
+    async def _sweep_idle_lease(self) -> bool:
+        """Release a direct-control lease whose owner has gone quiet (dead/wandered-off
+        agent). A running ``task`` (``_agent_task`` set) is connection-bound and exempt;
+        the CAS keeps this from clobbering a freshly-handed-off lease. Returns True if it
+        released one."""
+        if (
+            self.controller == "agent"
+            and self._agent_task is None
+            and time.monotonic() - self._lease_touched_at > _LEASE_IDLE_TTL
+        ):
+            return await self._transition(to="human", expect=("agent", self.owner_agent_id, False))
+        return False
 
     # --- input ----------------------------------------------------------------
 
@@ -527,12 +563,23 @@ class LiveBrowser(MutableModel):
             self._input_enabled.set()
         else:
             self._input_enabled.clear()
+            self._lease_touched_at = time.monotonic()  # start the sticky-lease idle clock
         await self._broadcast(self._control_message())
 
     def _control_message(self) -> dict[str, Any]:
         return {
             "type": "control",
             "owner": self.controller,
+            "owner_agent_id": self.owner_agent_id,
+            "owner_name": self.owner_agent_name,
+            "human_pinned": self.human_pinned,
+        }
+
+    def _control_state(self) -> dict[str, Any]:
+        """Owner snapshot embedded in every direct-command response so the agent can
+        tell, after each call, whether it still holds control (e.g. a human took it)."""
+        return {
+            "controller": self.controller,
             "owner_agent_id": self.owner_agent_id,
             "owner_name": self.owner_agent_name,
             "human_pinned": self.human_pinned,
@@ -742,6 +789,137 @@ class LiveBrowser(MutableModel):
                 await task
             except (asyncio.CancelledError, *_BROWSER_ERRORS):
                 pass
+
+    # --- direct control (Claude drives the browser itself, one command at a time) ---
+
+    def _ensure_action_handler(self) -> ActionHandler:
+        """browser-use's own action executor, bound once to our held BrowserSession."""
+        if self._action_handler is None:
+            self._action_handler = ActionHandler(self._bu_session)
+        return self._action_handler
+
+    async def run_action(
+        self, agent_id: str, agent_name: str | None, action: Callable[[ActionHandler], Awaitable[dict[str, Any]]]
+    ) -> dict[str, Any]:
+        """Run one direct-control action for an agent, returning a result + owner snapshot.
+
+        Ownership is a sticky lease: the first action acquires the browser (CAS, no
+        wait -- a busy browser fails fast rather than blocking a click), later actions
+        refresh it. The CRITICAL guard is the per-command compare-and-set: right before
+        the browser action we re-check ``(agent, me, unpinned)`` under ``_control_lock``,
+        so a human take-control between two commands makes the next one a clean no-op
+        (``lost_control``) instead of touching the human's browser. The action itself
+        runs under ``_lock`` (serialized with screencast tab-switches), NOT under
+        ``_control_lock`` -- so a human take-control stays instant (at worst one
+        in-flight action lands before the next command sees it).
+        """
+        status = await self.acquire(agent_id, agent_name, wait=False)
+        if status != "acquired":
+            return {"ok": False, "status": status, **self._control_state()}
+        async with self._control_lock:
+            if self._state_tuple() != ("agent", agent_id, False):
+                return {"ok": False, "status": "lost_control", **self._control_state()}
+            self._lease_touched_at = time.monotonic()
+        async with self._lock:
+            if self._context is None:
+                return {"ok": False, "status": "closed", **self._control_state()}
+            try:
+                result = await action(self._ensure_action_handler())
+            except _BROWSER_ERRORS as e:
+                logger.debug("direct action failed on browser {} ({})", self.browser_id, e)
+                return {"ok": False, "status": "error", "error": str(e), **self._control_state()}
+        return {"ok": True, "status": "ok", **result, **self._control_state()}
+
+    def _node(self, index: int) -> Any:
+        """Resolve an element index from the last ``state`` snapshot to its DOM node."""
+        return self._selector_map.get(index)
+
+    async def act_state(self, agent_id: str, agent_name: str | None) -> dict[str, Any]:
+        async def _do(handler: ActionHandler) -> dict[str, Any]:
+            summary = await handler.get_state()
+            self._selector_map = dict(getattr(summary.dom_state, "selector_map", {}) or {})
+            elements = summary.dom_state.llm_representation()
+            return {"url": summary.url, "title": summary.title, "elements": elements, "tabs": await self._tab_list()}
+
+        return await self.run_action(agent_id, agent_name, _do)
+
+    async def act_navigate(self, agent_id: str, agent_name: str | None, url: str) -> dict[str, Any]:
+        async def _do(handler: ActionHandler) -> dict[str, Any]:
+            await handler.navigate(url)
+            self._selector_map = {}  # page changed -- old element indices are void
+            return {"navigated": url}
+
+        return await self.run_action(agent_id, agent_name, _do)
+
+    async def act_click(self, agent_id: str, agent_name: str | None, index: int) -> dict[str, Any]:
+        async def _do(handler: ActionHandler) -> dict[str, Any]:
+            node = self._node(index)
+            if node is None:
+                return {"ok": False, "status": "stale_index", "error": f"no element {index}; run `state` first (the page may have changed)"}
+            await handler.click_element(node)
+            self._selector_map = {}  # a click may navigate/mutate -- force a re-`state`
+            return {"clicked": index}
+
+        return await self.run_action(agent_id, agent_name, _do)
+
+    async def act_input(self, agent_id: str, agent_name: str | None, index: int, text: str) -> dict[str, Any]:
+        async def _do(handler: ActionHandler) -> dict[str, Any]:
+            node = self._node(index)
+            if node is None:
+                return {"ok": False, "status": "stale_index", "error": f"no element {index}; run `state` first"}
+            await handler.type_text(node, text)
+            return {"typed_into": index}
+
+        return await self.run_action(agent_id, agent_name, _do)
+
+    async def act_select(self, agent_id: str, agent_name: str | None, index: int, value: str) -> dict[str, Any]:
+        async def _do(handler: ActionHandler) -> dict[str, Any]:
+            node = self._node(index)
+            if node is None:
+                return {"ok": False, "status": "stale_index", "error": f"no element {index}; run `state` first"}
+            await handler.select_dropdown(node, value)
+            return {"selected": value, "index": index}
+
+        return await self.run_action(agent_id, agent_name, _do)
+
+    async def act_scroll(self, agent_id: str, agent_name: str | None, direction: str, amount: int) -> dict[str, Any]:
+        async def _do(handler: ActionHandler) -> dict[str, Any]:
+            await handler.scroll(direction, amount)
+            self._selector_map = {}
+            return {"scrolled": direction}
+
+        return await self.run_action(agent_id, agent_name, _do)
+
+    async def act_keys(self, agent_id: str, agent_name: str | None, keys: str) -> dict[str, Any]:
+        async def _do(handler: ActionHandler) -> dict[str, Any]:
+            await handler.send_keys(keys)
+            return {"keys": keys}
+
+        return await self.run_action(agent_id, agent_name, _do)
+
+    async def act_screenshot(self, agent_id: str, agent_name: str | None) -> dict[str, Any]:
+        async def _do(_handler: ActionHandler) -> dict[str, Any]:
+            data = await self._bu_session.take_screenshot()
+            raw = data if isinstance(data, (bytes, bytearray)) else base64.b64decode(data)
+            _SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            self._screenshot_seq += 1
+            path = _SCREENSHOT_DIR / f"browser-{self.browser_id}-{self._screenshot_seq}.png"
+            path.write_bytes(raw)
+            return {"screenshot_path": str(path.resolve())}
+
+        return await self.run_action(agent_id, agent_name, _do)
+
+    async def act_tab(self, agent_id: str, agent_name: str | None, action: str, index: int | None, url: str | None) -> dict[str, Any]:
+        async def _do(_handler: ActionHandler) -> dict[str, Any]:
+            # Tabs go through OUR Playwright context (same path as the human's tab bar),
+            # so the screencast follows the switch -- not browser-use's separate notion.
+            # "list" is a read-only no-op here; the tab list is returned below.
+            if action in ("activate", "new", "close"):
+                await self._handle_tab_control({"action": action, "index": index or 0, "url": url})
+                self._selector_map = {}
+            return {"tab_action": action, "tabs": await self._tab_list()}
+
+        return await self.run_action(agent_id, agent_name, _do)
 
     # --- socket bookkeeping ---------------------------------------------------
 

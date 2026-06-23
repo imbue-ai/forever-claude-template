@@ -260,3 +260,36 @@ def test_http_new_browser_blocked_until_chromium_installed(monkeypatch: pytest.M
     client = TestClient(runner.app)
     resp = client.post("/browsers")
     assert resp.status_code == 503
+
+
+def test_direct_control_state_click_is_keyless_real_chromium(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct control needs NO Anthropic key (the agent does its own reasoning; the
+    # browser commands are deterministic). Drive a real page: navigate -> state ->
+    # click the link -> the page changes -> re-state, all with no key set.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+
+    async def go() -> None:
+        manager = bsession.BrowserSessionManager()
+        try:
+            browser = await manager.create()
+        except (bsession.BrowserStartupError, PlaywrightError, OSError) as e:
+            pytest.skip(f"Chromium unavailable in this environment: {e}")
+        try:
+            assert (await browser.act_navigate("A", "Alice", "https://example.com"))["ok"]
+            state = await browser.act_state("A", "Alice")
+            assert state["ok"] and "example" in state["url"].lower()
+            assert browser._selector_map, "state should expose numbered elements"
+            assert "controller" in state and state["controller"] == "agent"
+            index = sorted(browser._selector_map)[0]
+            assert (await browser.act_click("A", "Alice", index))["ok"]
+            # The click navigated, so the cached indices were invalidated; re-state works.
+            assert browser._selector_map == {}
+            assert (await browser.act_state("A", "Alice"))["ok"]
+            # Ownership holds for direct commands too: another agent is refused.
+            other = await browser.act_state("B", "Bob")
+            assert other["ok"] is False and other["status"] == "busy_agent"
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(go())

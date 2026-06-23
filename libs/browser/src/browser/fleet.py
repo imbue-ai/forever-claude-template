@@ -199,21 +199,25 @@ def _owner_label(browser: dict[str, Any], me: str | None) -> str:
     return "human (took control)" if browser.get("human_pinned") else "free"
 
 
-def cmd_ls(_args: argparse.Namespace) -> int:
+def cmd_ls(args: argparse.Namespace) -> int:
     status, payload = _request("GET", "/browsers")
     if status != 200:
         _err(payload.get("error", f"ls failed ({status})"))
         return _EXIT_ERROR
     browsers = payload.get("browsers", [])
     if not browsers:
-        _out("no browsers yet (use `new`, or `task 0` to start the default browser)")
+        _out("no browsers yet (use `new`, or `state 0` to start the default browser)")
         return _EXIT_OK
     me = os.environ.get("MNGR_AGENT_ID")
     for browser in browsers:
-        active = next((t for t in browser.get("tabs", []) if t.get("active")), None)
+        tabs = browser.get("tabs", [])
+        active = next((t for t in tabs if t.get("active")), None)
         where = (active.get("url") or active.get("title") or "") if active else "(no tab)"
-        ntabs = len(browser.get("tabs", []))
-        _out(f"browser {browser['id']}: {_owner_label(browser, me)} -- {ntabs} tab(s), active: {where}")
+        _out(f"browser {browser['id']}: {_owner_label(browser, me)} -- {len(tabs)} tab(s), active: {where}")
+        if getattr(args, "include_tabs", False):
+            for tab in tabs:
+                mark = "*" if tab.get("active") else " "
+                _out(f"    [{tab.get('index')}]{mark} {tab.get('title') or ''}  {tab.get('url', '')}")
     return _EXIT_OK
 
 
@@ -311,11 +315,112 @@ def cmd_release(args: argparse.Namespace) -> int:
     return _EXIT_OK
 
 
+# --- direct control: you drive the browser yourself, one command at a time ----
+
+
+def _render_action(payload: dict[str, Any], browser_id: int, kind: str) -> int:
+    """Print one direct-command result and return the exit code (owner-aware)."""
+    if payload.get("ok"):
+        if kind == "state":
+            _out(f"browser {browser_id} @ {payload.get('url', '')}  ({payload.get('title', '')})")
+            tabs = payload.get("tabs", [])
+            if len(tabs) > 1:
+                _out("tabs: " + ", ".join(f"[{t['index']}{'*' if t.get('active') else ''}] {t.get('url', '')}" for t in tabs))
+            _out(payload.get("elements") or "(no interactive elements -- try screenshot)")
+        elif kind == "screenshot":
+            _out(f"screenshot saved: {payload.get('screenshot_path')}  (Read it to view)")
+        elif kind == "tab":
+            tabs = payload.get("tabs", [])
+            _out("tabs: " + ", ".join(f"[{t['index']}{'*' if t.get('active') else ''}] {t.get('title') or t.get('url', '')}" for t in tabs))
+        else:
+            _out(f"ok: {kind}")
+        return _EXIT_OK
+    status = payload.get("status")
+    if status == "busy_human":
+        _err(f"browser {browser_id} is under human control -- it's yours to drive. When you're done, "
+             'click "Return to agents" or tell me to resume (I will reclaim it).')
+        return _EXIT_BUSY
+    if status == "busy_agent":
+        _err(f"browser {browser_id} is held by another agent. Pick another browser, or `acquire {browser_id}` to queue for it.")
+        return _EXIT_BUSY
+    if status == "lost_control":
+        _out(f"lost control of browser {browser_id} (you took over). "
+             'Send me a message ("keep going", "resume") when you want me to continue.')
+        return _EXIT_PREEMPTED
+    if status == "stale_index":
+        _err(payload.get("error") or f"that element index is stale -- run `state {browser_id}` again first")
+        return _EXIT_ERROR
+    if status == "timed_out":
+        _err(f"browser {browser_id} stayed busy; gave up.")
+        return _EXIT_TIMEOUT
+    _err(payload.get("error") or f"command failed ({status})")
+    return _EXIT_ERROR
+
+
+def _action(browser_id: int, verb: str, kind: str, body: dict[str, Any] | None = None) -> int:
+    status, payload = _request("POST", f"/browsers/{browser_id}/{verb}", body or {})
+    if status == 404:
+        _err(payload.get("error", f"no browser {browser_id}"))
+        return _EXIT_ERROR
+    return _render_action(payload, browser_id, kind)
+
+
+def cmd_state(args: argparse.Namespace) -> int:
+    return _action(args.id, "state", "state")
+
+
+def cmd_open(args: argparse.Namespace) -> int:
+    return _action(args.id, "navigate", "navigate", {"url": args.url})
+
+
+def cmd_click(args: argparse.Namespace) -> int:
+    return _action(args.id, "click", "click", {"index": args.index})
+
+
+def cmd_input(args: argparse.Namespace) -> int:
+    return _action(args.id, "input", "input", {"index": args.index, "text": args.text})
+
+
+def cmd_select(args: argparse.Namespace) -> int:
+    return _action(args.id, "select", "select", {"index": args.index, "value": args.value})
+
+
+def cmd_scroll(args: argparse.Namespace) -> int:
+    return _action(args.id, "scroll", "scroll", {"direction": args.direction, "amount": args.amount})
+
+
+def cmd_keys(args: argparse.Namespace) -> int:
+    return _action(args.id, "keys", "keys", {"keys": args.keys})
+
+
+def cmd_screenshot(args: argparse.Namespace) -> int:
+    return _action(args.id, "screenshot", "screenshot")
+
+
+def cmd_tab(args: argparse.Namespace) -> int:
+    body: dict[str, Any] = {"action": args.action}
+    if args.index is not None:
+        body["index"] = args.index
+    if args.url is not None:
+        body["url"] = args.url
+    return _action(args.id, "tab", "tab", body)
+
+
+def cmd_acquire(args: argparse.Namespace) -> int:
+    status, payload = _request("POST", f"/browsers/{args.id}/acquire", {"reclaim": args.reclaim})
+    if payload.get("ok"):
+        _out(f"acquired browser {args.id}")
+        return _EXIT_OK
+    return _render_action(payload, args.id, "acquire")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentic-browser-fleet", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("ls", help="List active browsers, their owners, and their tabs.").set_defaults(func=cmd_ls)
+    p_ls = sub.add_parser("ls", help="List active browsers, their owners, and their tabs.")
+    p_ls.add_argument("--include-tabs", action="store_true", help="List every open tab per browser, not just the active one.")
+    p_ls.set_defaults(func=cmd_ls)
     sub.add_parser("new", help="Start a new browser and print its id.").set_defaults(func=cmd_new)
 
     p_task = sub.add_parser("task", help="Run a browser-use task on a browser; stream its trace.")
@@ -338,6 +443,60 @@ def _build_parser() -> argparse.ArgumentParser:
         p_rel = sub.add_parser(verb, help="Release a browser you hold.")
         p_rel.add_argument("id", type=int)
         p_rel.set_defaults(func=cmd_release)
+
+    # --- direct control: YOU drive. Run `state` to see numbered elements, then click. ---
+    p_state = sub.add_parser("state", help="Show the page: numbered clickable elements + url + tabs. Run this before clicking.")
+    p_state.add_argument("id", type=int)
+    p_state.set_defaults(func=cmd_state)
+
+    p_open = sub.add_parser("open", help="Navigate a browser to a URL.")
+    p_open.add_argument("id", type=int)
+    p_open.add_argument("url")
+    p_open.set_defaults(func=cmd_open)
+
+    p_click = sub.add_parser("click", help="Click the element with the given index (from `state`).")
+    p_click.add_argument("id", type=int)
+    p_click.add_argument("index", type=int)
+    p_click.set_defaults(func=cmd_click)
+
+    p_input = sub.add_parser("input", help="Type text into the element with the given index.")
+    p_input.add_argument("id", type=int)
+    p_input.add_argument("index", type=int)
+    p_input.add_argument("text")
+    p_input.set_defaults(func=cmd_input)
+
+    p_select = sub.add_parser("select", help="Choose an option in a <select> dropdown by visible text.")
+    p_select.add_argument("id", type=int)
+    p_select.add_argument("index", type=int)
+    p_select.add_argument("value")
+    p_select.set_defaults(func=cmd_select)
+
+    p_scroll = sub.add_parser("scroll", help="Scroll the page (down/up).")
+    p_scroll.add_argument("id", type=int)
+    p_scroll.add_argument("direction", nargs="?", default="down", choices=["down", "up"])
+    p_scroll.add_argument("--amount", type=int, default=500, help="Pixels to scroll.")
+    p_scroll.set_defaults(func=cmd_scroll)
+
+    p_keys = sub.add_parser("keys", help='Send keyboard keys (e.g. "Enter", "Control+a").')
+    p_keys.add_argument("id", type=int)
+    p_keys.add_argument("keys")
+    p_keys.set_defaults(func=cmd_keys)
+
+    p_shot = sub.add_parser("screenshot", help="Save a PNG of the browser and print its path (Read it to view).")
+    p_shot.add_argument("id", type=int)
+    p_shot.set_defaults(func=cmd_screenshot)
+
+    p_tab = sub.add_parser("tab", help="Tabs within a browser: list / switch / new / close.")
+    p_tab.add_argument("id", type=int)
+    p_tab.add_argument("action", nargs="?", default="list", choices=["list", "switch", "new", "close"])
+    p_tab.add_argument("index", type=int, nargs="?", default=None, help="Tab index for switch/close.")
+    p_tab.add_argument("--url", default=None, help="URL for `tab new`.")
+    p_tab.set_defaults(func=cmd_tab)
+
+    p_acq = sub.add_parser("acquire", help="Reserve a browser across several commands (optional; the first command auto-acquires).")
+    p_acq.add_argument("id", type=int)
+    p_acq.add_argument("--reclaim", action="store_true", help="Take a browser back from a human -- ONLY when they told you to resume.")
+    p_acq.set_defaults(func=cmd_acquire)
 
     return parser
 

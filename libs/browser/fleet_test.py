@@ -70,3 +70,37 @@ def test_parser_accepts_task_flags() -> None:
     assert fleet._build_parser().parse_args(["ls"]).func is fleet.cmd_ls
     assert fleet._build_parser().parse_args(["new"]).func is fleet.cmd_new
     assert fleet._build_parser().parse_args(["unlock", "1"]).func is fleet.cmd_release
+
+
+@pytest.mark.parametrize(
+    "payload,kind,expected",
+    [
+        ({"ok": True, "url": "https://x", "title": "X", "elements": "[1]<a>", "tabs": []}, "state", fleet._EXIT_OK),
+        ({"ok": True, "screenshot_path": "/tmp/s.png"}, "screenshot", fleet._EXIT_OK),
+        ({"ok": True, "clicked": 5}, "click", fleet._EXIT_OK),
+        ({"ok": False, "status": "busy_human"}, "click", fleet._EXIT_BUSY),
+        ({"ok": False, "status": "busy_agent"}, "state", fleet._EXIT_BUSY),
+        ({"ok": False, "status": "lost_control"}, "click", fleet._EXIT_PREEMPTED),
+        ({"ok": False, "status": "stale_index", "error": "run state"}, "click", fleet._EXIT_ERROR),
+        ({"ok": False, "status": "timed_out"}, "state", fleet._EXIT_TIMEOUT),
+        ({"ok": False, "status": "error", "error": "boom"}, "click", fleet._EXIT_ERROR),
+    ],
+)
+def test_render_action_exit_codes(payload: dict, kind: str, expected: int) -> None:
+    # The exit code an agent branches on per direct command is load-bearing.
+    assert fleet._render_action(payload, browser_id=0, kind=kind) == expected
+
+
+def test_parser_accepts_direct_verbs() -> None:
+    p = fleet._build_parser()
+    assert p.parse_args(["state", "0"]).func is fleet.cmd_state
+    assert p.parse_args(["open", "0", "https://x"]).func is fleet.cmd_open
+    click = p.parse_args(["click", "1", "18"])
+    assert click.func is fleet.cmd_click and click.id == 1 and click.index == 18
+    typed = p.parse_args(["input", "0", "3", "hello there"])
+    assert typed.func is fleet.cmd_input and typed.text == "hello there"
+    assert p.parse_args(["screenshot", "2"]).func is fleet.cmd_screenshot
+    tab = p.parse_args(["tab", "0", "switch", "1"])
+    assert tab.func is fleet.cmd_tab and tab.action == "switch" and tab.index == 1
+    assert p.parse_args(["acquire", "0", "--reclaim"]).reclaim is True
+    assert p.parse_args(["ls", "--include-tabs"]).include_tabs is True

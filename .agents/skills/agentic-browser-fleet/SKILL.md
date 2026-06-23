@@ -1,302 +1,347 @@
 ---
 name: agentic-browser-fleet
-description: Drive a fleet of shared Chromium browsers by handing high-level goals to autonomous browser-use agents. Use when the user wants you to do something on the web (log in somewhere, fill a form, scrape a page, click through a flow) rather than just fetch a URL. You orchestrate via the `agentic-browser-fleet` CLI; you never click pages yourself.
+description: Drive a fleet of shared Chromium browsers yourself, one command at a time, from your shell. Use when the user wants you to do something on the web (log in somewhere, fill a form, click through a flow, read a page that needs interaction) rather than just fetch a URL. YOU hold the wheel: you run `agentic-browser-fleet` commands, look at the page, decide what to click, and click it -- in this same chat, with your own reasoning.
 ---
 
-# Driving the browser fleet
+# Driving the browser fleet (you hold the wheel)
 
-There are **two** agents in this picture, and keeping them straight is the
-whole game:
+There are "two agents" here only in name. **You are the driver.** You run
+`agentic-browser-fleet <cmd> <id> ...` commands directly. There is no
+separate brain doing the thinking -- the thinking is *yours*, right here in
+this chat.
 
-- **You (the orchestrator).** The Claude Code agent reading this. You never
-  touch a page, never click, never type into a field. You run
-  `agentic-browser-fleet` commands. That is your *entire* interface to the
-  browser.
-- **The browser-use agent.** When you run `task <id> "<prompt>"`, the daemon
-  spins up an autonomous *browser-use* agent on that browser. *It* does the
-  clicking, typing, and navigating to accomplish the goal you handed it. It
-  streams its reasoning back to you as `[thinking] ...` / `[action] ...`
-  lines on the CLI's stdout -- i.e. into *your* output, where the user can
-  read it.
+The core loop is dead simple:
 
-"Take control" is a **human** action in the UI. The agent never invokes it.
-If you ever feel like you want to "take control," you are confused -- you
-drive by issuing another `task`, not by grabbing the wheel.
+1. `state <id>` prints the page as a numbered list of clickable elements.
+2. *You* read it and reason about which element you want.
+3. You `click <id> <index>` (or `input`, `select`, `scroll`, ...).
+4. You run `state <id>` again to see what changed, and repeat.
 
-The CLI is a thin HTTP client to a per-workspace browser daemon. It is
-stateless: each command opens a connection, does its thing, and exits.
+That's it. You are not handing off a goal and watching a trace scroll by;
+you are looking at the page and operating it yourself, step by step, the way
+a person clicking through a website would.
 
-Run it from the repo root via `uv run`:
+> There *is* an optional `task <id> "<goal>"` that hands a whole goal to an
+> autonomous browser-use agent (it uses an LLM and needs an API key). That is
+> a **fallback**, not the main path -- see the very end. Drive it yourself first.
+
+Run every command from the repo root via `uv run`:
 
 ```bash
 uv run agentic-browser-fleet <command> ...
 ```
 
-It requires `MNGR_AGENT_ID` in the environment (it is set automatically
-inside an agent shell). If it is missing, the CLI exits `64` telling you to
-run it from inside an agent.
+It needs `MNGR_AGENT_ID` in the environment (set automatically inside an
+agent shell). Without it the CLI exits `64`. If it can't reach the browser
+daemon it exits `69`.
 
-## The mental model in one paragraph
+## The loop, worked end to end
 
-You give a browser a *goal*, not a *script*. `task 0 "log into example.com
-and download last month's invoice"` hands that sentence to the browser-use
-agent on browser 0; the agent figures out the clicks. You watch its trace
-scroll by in your own output and you read its final `done:` line. The browser
-tab that pops into the UI is a **viewer** for the human -- the trace is in
-*your* stdout, not in the tab.
+```text
+uv run agentic-browser-fleet open 0 https://example.com      -> ok: navigate
+uv run agentic-browser-fleet state 0
+  browser 0 @ https://example.com/  (Example Domain)
+  Example Domain
+  This domain is for use in illustrative examples...
+  [18]<a /> Learn more
+uv run agentic-browser-fleet click 0 18                      -> ok: click
+uv run agentic-browser-fleet state 0     # re-state: the page is now iana.org
+  browser 0 @ https://www.iana.org/help/example-domains  (Example Domains)
+  ...
+```
+
+You opened a URL, asked the page what was on it, saw element `[18]` was the
+"Learn more" link, clicked it, then re-ran `state` to see the new page.
+Every clickable thing gets a `[number]` -- that number is what you pass to
+`click`/`input`/`select`. **The numbers come from the last `state` and change
+every time the page changes** (see "Always state before you click").
 
 ## Commands
 
-### `ls` -- see the fleet
+Every command's **first argument is the browser id** (`0` is the default
+browser). The fleet-level commands (`ls`, `new`) are the exception.
+
+### Picking and making browsers
 
 ```bash
 uv run agentic-browser-fleet ls
 ```
 
-```
+```text
 browser 0: you -- 2 tab(s), active: https://example.com/invoices
 browser 1: agent alice -- 1 tab(s), active: https://news.example.com
 browser 2: human (took control) -- 1 tab(s), active: https://bank.example.com
 browser 3: free -- 1 tab(s), active: (no tab)
 ```
 
-Each line shows the browser id, who controls it (`you`, `agent <name>`,
-`human (took control)`, or `free`), tab count, and the active tab's URL. If
-there are no browsers yet it tells you to use `new` or `task 0`.
-
-### `new` -- start a browser
-
-```bash
-uv run agentic-browser-fleet new
-# -> started browser 4
-```
-
-Prints the new browser's id. You usually do not need this -- `task <id>` on a
-not-yet-existing default browser (`task 0`) is the common entry point. Exits
-`3` if the daemon refuses to start another (e.g. a fleet cap).
-
-### `task <id> "<prompt>"` -- the workhorse
+`ls` shows the whole fleet: each browser's id, who controls it (`you`,
+`agent <name>`, `human (took control)`, or `free`), tab count, and the
+active tab's URL -- so you can pick one. Add `--include-tabs` to list every
+tab of every browser:
 
 ```bash
-uv run agentic-browser-fleet task 0 "go to news.ycombinator.com and give me the titles of the top 5 stories"
+uv run agentic-browser-fleet ls --include-tabs
+#     [0]* Invoices            https://example.com/invoices
+#     [1]  Dashboard           https://example.com/home
 ```
 
-This is what you'll use 95% of the time. It:
+`new` starts another browser and prints its id:
 
-1. Pulls browser 0 into a UI pane next to your chat (so the human can watch).
-2. **Acquires** the browser (waiting in a FIFO queue if another agent holds
-   it -- see Ownership below).
-3. Hands your prompt to the browser-use agent and streams its trace:
+```bash
+uv run agentic-browser-fleet new        # -> started browser 4
+```
 
-   ```
-   (working on browser 0)
-   [thinking] I need to navigate to the Hacker News front page.
-   [action] navigate https://news.ycombinator.com
-   [thinking] Reading the story titles from the listing.
-   [action] extract top 5 story titles
-   done: 1. ... 2. ... 3. ... 4. ... 5. ...
-   ```
+If there are no browsers yet, `ls` tells you to `new` or just `state 0`
+(running any command on browser 0 starts it).
 
-4. **Releases** the browser automatically when it finishes. *The connection
-   is the lease* -- when `task` exits (success, error, or you Ctrl-C it), the
-   browser frees. This is why you normally never call `lock`/`unlock`
-   yourself.
+### Looking at the page
 
-Read the final line: `done: <result>` is the answer. Relay it to the user.
+```bash
+uv run agentic-browser-fleet state 0
+```
 
-Flags:
+Prints `browser 0 @ <url>  (<title>)`, a `tabs:` line if more than one tab is
+open, then the numbered interactive elements. If a page has no interactive
+elements it prints `(no interactive elements -- try screenshot)`. **This is
+your eyes. Run it constantly.**
 
-| Flag | Effect |
+```bash
+uv run agentic-browser-fleet screenshot 0
+# -> screenshot saved: /path/to/shot.png  (Read it to view)
+```
+
+`screenshot` saves a PNG and prints its path. Then **Read that path** with
+your Read tool to actually *see* the page -- use this for visual layouts,
+canvas, charts, captchas, or anything `state`'s text list can't convey.
+
+### Acting on the page
+
+| Command | What it does |
 |---|---|
-| `--reclaim` | Resume a browser a **human** took control of. Use ONLY when the human told you to (see Ownership). Never on your own. |
-| `--no-wait` | If another agent holds the browser, fail fast (`exit 3`) instead of queueing behind them. |
-| `--max-wait S` | Wait at most `S` seconds in the queue for another agent to release, then give up (`exit 4`). Default: wait indefinitely. |
-| `--no-pane` | Do not pull the browser into a UI pane. Use for headless/background work the human isn't watching. |
+| `open <id> <url>` | Navigate the browser to a URL. (`-> ok: navigate`) |
+| `click <id> <index>` | Click the element with that index from the last `state`. (`-> ok: click`) |
+| `input <id> <index> "text"` | Type text into the field at that index. (`-> ok: input`) |
+| `select <id> <index> "value"` | Choose an option in a `<select>` dropdown by its visible text. (`-> ok: select`) |
+| `scroll <id> [down|up] [--amount N]` | Scroll the page. Direction defaults to `down`; `--amount` is pixels (default 500). |
+| `keys <id> "Enter"` | Send keyboard keys, e.g. `"Enter"`, `"Control+a"`, `"Tab"`. |
 
-### `lock <id>` / `unlock <id>` (alias `release <id>`)
-
-`lock` holds a browser in the foreground until you Ctrl-C (it prints
-`holding browser <id> (Ctrl-C to release)` and blocks). `unlock`/`release`
-frees a browser you hold.
-
-**You rarely need these.** `task` already acquires-and-releases around each
-goal. Reach for `lock` only when you must keep one browser reserved across
-*several* separate `task` invocations and cannot tolerate another agent
-slipping in between them. The same queueing/`--no-wait`/`--max-wait`
-semantics apply to `lock`.
+A typical fill-and-submit:
 
 ```bash
-# Reserve browser 1 across a multi-step sequence, then free it.
-uv run agentic-browser-fleet lock 1        # blocks, holding it (Ctrl-C to free)
-# ... in another shell, run several `task 1 ...` while the lock is held ...
-uv run agentic-browser-fleet release 1     # or just Ctrl-C the lock
+uv run agentic-browser-fleet state 0                          # find the field indices
+uv run agentic-browser-fleet input 0 5 "alice@example.com"    # email field
+uv run agentic-browser-fleet input 0 6 "hunter2"              # password field
+uv run agentic-browser-fleet click 0 7                        # the "Log in" button
+uv run agentic-browser-fleet state 0                          # re-state: did we land on the dashboard?
 ```
 
-`release` on a browser that wasn't yours prints `browser <id> was not yours
-to release` and still exits 0.
+(Or, instead of clicking the button, `keys 0 "Enter"` to submit the focused form.)
 
-## Ownership (read this carefully)
+### Tabs within one browser
 
-Every browser has **exactly one** controller at a time. The rules the daemon
-enforces, and how you must react:
+```bash
+uv run agentic-browser-fleet tab 0 list           # list this browser's tabs
+uv run agentic-browser-fleet tab 0 new --url https://example.com/help
+uv run agentic-browser-fleet tab 0 switch 1       # make tab index 1 active
+uv run agentic-browser-fleet tab 0 close 2        # close tab index 2
+```
 
-1. **`task`/`lock` acquire it; ending the command releases it.** No manual
-   bookkeeping in the normal case.
+`tab` (no action) defaults to `list`. After `switch`/`new`/`close` the active
+page changed, so **run `state <id>` again** before clicking anything.
 
-2. **Agents never preempt each other.** If another agent holds the browser,
-   `task` does **not** barge in -- it **waits in a FIFO queue** and streams:
+### Ownership commands
 
-   ```
-   browser 1 is busy (agent alice) -- waiting for it to free up...
-   ```
+```bash
+uv run agentic-browser-fleet acquire 0            # reserve browser 0 across commands
+uv run agentic-browser-fleet acquire 0 --reclaim  # take it back from a human -- ONLY on their say-so
+uv run agentic-browser-fleet release 0            # let it go (alias: unlock 0)
+```
 
-   When alice's connection drops, the queue advances and your task runs. Use
-   `--no-wait` to fail fast instead, or `--max-wait S` to bound the wait.
+You usually don't need `acquire` -- your first command auto-acquires the
+browser and you keep a sticky lease across subsequent commands (see
+Ownership). `acquire` is for explicitly reserving a browser, or for queueing
+behind / reclaiming one that's held. `release` (alias `unlock`) hands it back;
+releasing one that wasn't yours prints `browser <id> was not yours to release`
+and still exits `0`.
 
-3. **A human can take control at any time from the UI.** If a human takes
-   control *while your task is running*, your task **ends immediately**:
+## Key rules (internalize these)
 
-   ```
-   lost control of browser 1 (you took over). Send me a message
-   ("keep going", "resume", whatever) when you want me to continue.
-   ```
+### 1. Choosing a browser
 
-   This is **exit code 2 (preempted)**. Do **NOT** retry automatically. Tell
-   the user something like: *"You took over browser 1 -- say 'keep going'
-   when you want me to resume."* Then stop and wait for them.
+Every command takes the browser id first. Run `ls` (or `ls --include-tabs`)
+to see the fleet and pick one; `new` makes a fresh one; `0` is the default.
+Drive several browsers at once just by using different ids -- they're
+independent.
 
-4. **Resuming after a human took control requires `--reclaim` -- and explicit
-   permission.** Only when the human *explicitly* tells you to resume
-   ("keep going" / "resume" / "take it back") do you re-run the same task
-   with `--reclaim`:
+### 2. Always `state` before you `click`
 
-   ```bash
-   uv run agentic-browser-fleet task 1 "<the original goal, or where to pick up>" --reclaim
-   ```
+The `[number]` indices come from the **latest** `state` and are
+**ephemeral** -- the page re-numbers its elements whenever it changes. So:
 
-   **NEVER pass `--reclaim` on your own initiative.** Reclaiming yanks the
-   browser back from a human who is actively using it -- that is grabbing the
-   wheel. `--reclaim` is *only* ever a direct response to "keep going."
+> **Re-run `state <id>` after every `open`, `click`, `select`, `scroll`, or
+> `tab` command -- and after you regain control of a browser.** Requery the
+> page before you act on it.
 
-5. **Starting a task on a human-held browser without `--reclaim` fails.** You
-   get `exit 3` and:
+This isn't bureaucracy; it's how you avoid clicking the wrong thing. If you
+click against a stale index, the CLI does **not** mis-click -- it refuses and
+tells you to re-`state` first:
 
-   ```
-   browser 1 is under human control. It is yours to drive; when you are done,
-   click "Return to agents" (or tell me to resume and I will reclaim it).
-   ```
+```text
+uv run agentic-browser-fleet click 0 18
+  that element index is stale -- run `state 0` again first      (exit 1)
+```
 
-### Exit codes -- branch on these
+Treat that error as "I forgot to look first" -- run `state 0`, find the
+element again under its *new* number, and click that.
+
+### 3. No API key needed
+
+You are the reasoning. You're already authenticated as yourself, and
+`state` / `open` / `click` / `input` / `select` / `scroll` / `keys` /
+`screenshot` / `tab` are all deterministic mechanical operations -- no LLM,
+no key. (Only the optional `task` fallback at the very end spins up a
+browser-use agent that needs an API key.)
+
+### 4. Ownership, and the human at the wheel
+
+Every browser has exactly one controller; every command's output names the
+owner. The rules:
+
+- **You auto-acquire and hold a sticky lease.** Your first command on a
+  browser acquires it, and it stays yours across the commands that follow.
+  No manual `acquire`/`release` in the normal case.
+- **A human can take control** from the UI at any time. Your *next* command
+  then comes back:
+
+  ```text
+  lost control of browser 0 (you took over). Send me a message
+  ("keep going", "resume") when you want me to continue.        (exit 2)
+  ```
+
+  This is **exit 2 (preempted)**. **STOP.** Do not retry, do not reclaim.
+  Tell the user you lost control and wait. Resume **only** when they
+  explicitly say so ("keep going" / "resume") -- and only then run
+  `acquire <id> --reclaim` (or pass `--reclaim` on your next action). Never
+  pass `--reclaim` on your own initiative; that's yanking the wheel from a
+  human who's using it.
+
+- **Agents never preempt each other.** A browser another agent holds returns:
+
+  ```text
+  browser 1 is held by another agent. Pick another browser, or
+  `acquire 1` to queue for it.                                  (exit 3)
+  ```
+
+  Pick a different id, or `acquire 1` to queue.
+
+- **An idle lease frees itself.** If you walk away from a browser for a while
+  (~90s), the daemon auto-releases it so it isn't stuck to you forever. If a
+  later command says you no longer hold it, just acquire it again.
+
+### 5. The human can watch live; your trace is here
+
+The browser shows up live in a minds tab that pulls in next to your chat, so
+the human can watch you operate it in real time. But that tab is **viewer
+only** -- your actual output (the `state` listings, the `ok:`/error lines,
+the screenshot paths) is in **your CLI output, here in the chat**, not in the
+tab. Read and relay the CLI output; don't tell the user to "check the tab"
+for results.
+
+### 6. Multiple browsers, multiple tabs, sub-agents
+
+- **Multiple browsers:** just use different ids. They don't interfere.
+- **Tabs:** `tab <id> ...` manages tabs *within* one browser.
+- **Sub-agents:** if you launch a sub-agent (via `launch-task`) that will run
+  `agentic-browser-fleet` itself, set `BROWSER_FLEET_ANCHOR=chat:<your-name>`
+  in its environment so its browser panes open next to **your** chat (where
+  the human is watching), not next to the sub-agent's own. `create_worker.py`
+  has no flag to inject env vars, so put the export in the **task file** you
+  write for the sub-agent:
+
+  ```text
+  ## Environment
+  Before running any agentic-browser-fleet command, export:
+
+      export BROWSER_FLEET_ANCHOR=chat:<your MNGR_AGENT_NAME>
+
+  so the browser panes open next to the orchestrator's chat.
+  ```
+
+  If unset it still works -- the pane just opens next to the sub-agent's own
+  chat. It's an ergonomics nicety for the human, not a correctness
+  requirement.
+
+## Exit codes -- branch on these
 
 | Code | Name | Meaning | What to do |
 |---|---|---|---|
-| `0` | done | Task completed (or `lock`/`release` succeeded). | Read the `done:` line; relay the result. |
-| `1` | error | The browser-use agent or daemon errored. | Read the `error:` line. Fix the prompt or report the failure; don't blindly retry. |
-| `2` | preempted | A human took control mid-task. | Stop. Tell the user you lost control; resume only on their say-so (with `--reclaim`). Do NOT auto-retry. |
-| `3` | busy | Held by a human, or held by another agent and you passed `--no-wait`, or `new` was refused. | Human-held: ask the user (then `--reclaim` if they agree). Agent-held: re-run without `--no-wait` to queue. |
-| `4` | timed-out | You passed `--max-wait` and another agent still held it when time ran out. | Try again later, queue without `--max-wait`, or pick a different browser. |
+| `0` | ok | The command succeeded. | Read the output; for `state`, decide your next click. |
+| `1` | error | Command failed, or a **stale index** (you clicked before re-`state`ing). | Run `state <id>` again, find the element's new number, retry. For other errors, read the message. |
+| `2` | preempted | A human took control. | **Stop.** Tell the user; resume only on their explicit say-so (then `--reclaim`). Never auto-retry. |
+| `3` | busy | Held by a human, or held by another agent. | Human: ask the user (then `--reclaim` if they agree). Another agent: pick a different browser, or `acquire <id>` to queue. |
+| `4` | timed-out | You waited (`task --max-wait`) and another agent still held it. | Try later, or pick a different browser. |
 | `64` | usage | `MNGR_AGENT_ID` unset / bad arguments. | Run from inside an agent shell; fix the command. |
-| `69` | no daemon | Can't reach the browser daemon. | The browser service isn't running -- report it; this isn't something to retry blindly. |
-
-## The UI pane
-
-Any browser you `task` (or `lock`) is automatically pulled into a split pane
-to the right of your chat via `scripts/layout.py`, so the human can watch the
-browser-use agent work in real time. Pass `--no-pane` to skip this for
-headless background work.
-
-Crucially: **the tab is viewer-only.** The agent's `[thinking]`/`[action]`
-trace and the final `done:` result appear in **this CLI's stdout** (your
-output), *not* inside the browser tab. So always read and relay the CLI
-output -- don't tell the user "check the tab" for results. The tab is just
-the live picture; the words are in your stream.
-
-If pulling the pane fails (e.g. layout unavailable), it's non-fatal: the
-browser still runs and you'll see a one-line warning. The task proceeds
-regardless.
-
-## Sub-agents that use browsers
-
-If you delegate to a sub-agent (via the `launch-task` skill) and that
-sub-agent will run `agentic-browser-fleet` itself, its browser panes should
-open next to **your** chat -- where the human is watching -- not buried by the
-sub-agent's own (often unwatched) chat.
-
-The mechanism: `_pull_in_pane` reads `BROWSER_FLEET_ANCHOR` and, if set,
-splits the new browser pane *relative to that anchor* (`scripts/layout.py
-split <ref> --relative-to <anchor> --direction right`). The anchor is a chat
-ref of the form `chat:<agent-name>`. So set it to **your own** chat ref in the
-sub-agent's environment:
-
-```
-BROWSER_FLEET_ANCHOR=chat:<your MNGR_AGENT_NAME>
-```
-
-`launch-task`'s `create_worker.py` has **no** flag for injecting arbitrary
-env vars into the worker. The way to get a value into the sub-agent's
-environment is through the **task file**: in the task body you write for the
-sub-agent (the human-readable instructions), tell it to export the anchor
-before any browser work, e.g.:
-
-```
-## Environment
-Before running any `agentic-browser-fleet` command, export:
-
-    export BROWSER_FLEET_ANCHOR=chat:<your-orchestrator-name>
-
-so the browser panes open next to the orchestrator's chat (where the human
-is watching), not next to yours.
-```
-
-(Substitute your actual `MNGR_AGENT_NAME` for `<your-orchestrator-name>`.)
-
-If the anchor is unset it still works fine -- the sub-agent's browser pane
-just opens next to its own chat instead. The anchor is an
-ergonomics-for-the-human optimization, not a correctness requirement.
-
-## Working several browsers at once
-
-Each `task` connection is independent, so concurrency is just "run more than
-one `task`." Background them and collect results. Use distinct browser ids so
-they don't queue behind each other:
-
-```bash
-# Three browsers working in parallel (Bash run_in_background: true on each).
-uv run agentic-browser-fleet task 0 "summarize the front page of site-a.com"
-uv run agentic-browser-fleet task 1 "check whether site-b.com is up and what it says"
-uv run agentic-browser-fleet task 2 "grab the latest headline from site-c.com"
-```
-
-If you instead point two `task`s at the *same* id, the second waits in the
-FIFO queue for the first to finish (that's the ownership rule, not a bug). One
-goal per browser at a time; spread work across ids for true parallelism.
+| `69` | no daemon | Can't reach the browser daemon. | The browser service isn't running -- report it; don't blindly retry. |
 
 ## Quick recipes
 
 ```bash
-# One-off: do a thing, get the answer.
-uv run agentic-browser-fleet task 0 "what's the current price shown on example.com/pricing for the Pro plan?"
+# Look, then act.
+uv run agentic-browser-fleet state 0
+uv run agentic-browser-fleet click 0 12
+uv run agentic-browser-fleet state 0            # always re-state after acting
 
-# Don't wait if someone else is on it; just tell me it's busy.
-uv run agentic-browser-fleet task 1 "..." --no-wait
+# Read a page's pricing by eye when the text list isn't enough.
+uv run agentic-browser-fleet open 0 https://example.com/pricing
+uv run agentic-browser-fleet screenshot 0       # then Read the printed PNG path
 
-# Wait up to 30s for another agent to free browser 1, then give up.
-uv run agentic-browser-fleet task 1 "..." --max-wait 30
+# Search and submit with the keyboard.
+uv run agentic-browser-fleet open 0 https://news.ycombinator.com
+uv run agentic-browser-fleet state 0
+uv run agentic-browser-fleet input 0 3 "browser automation"
+uv run agentic-browser-fleet keys 0 "Enter"
+uv run agentic-browser-fleet state 0
 
-# Headless background job the human isn't watching (no pane).
-uv run agentic-browser-fleet task 2 "..." --no-pane
+# Two browsers, independently (no queueing -- different ids).
+uv run agentic-browser-fleet open 0 https://site-a.com
+uv run agentic-browser-fleet open 1 https://site-b.com
 
-# Human took control, then said "keep going" -- and ONLY then:
-uv run agentic-browser-fleet task 1 "continue where we left off: submit the form" --reclaim
+# Human took over, then said "keep going" -- and ONLY then:
+uv run agentic-browser-fleet acquire 1 --reclaim
+uv run agentic-browser-fleet state 1            # re-state after regaining control
 ```
+
+## Fallback only: `task <id> "<goal>"` (delegate to a browser-use agent)
+
+When a page is genuinely beyond step-by-step control -- a `<canvas>` app, a
+drag-heavy visual editor, a flow where `state` shows nothing useful even with
+a screenshot -- you can hand the *whole goal* to an autonomous browser-use
+agent instead of driving it yourself:
+
+```bash
+uv run agentic-browser-fleet task 0 "log into example.com and download last month's invoice"
+```
+
+This spins up a browser-use agent on browser 0, streams its
+`[thinking]`/`[action]` trace into your output, and ends with a `done:` line
+you relay. It **uses an LLM and needs an API key**, and it takes the wheel
+away from your direct control for its duration. Flags: `--reclaim` (resume a
+human-held browser, same rules as above), `--no-wait` (fail fast instead of
+queueing behind another agent), `--max-wait S` (bound the queue wait, then
+exit `4`), `--no-pane` (don't pull it into a UI pane).
+
+**Prefer driving it yourself.** Reach for `task` only when direct control
+truly can't see or manipulate the page.
 
 ## Don'ts
 
-- Don't try to click/type/navigate yourself. Hand a goal to `task`; the
-  browser-use agent does the interaction.
-- Don't "take control" -- that's a human-only UI action.
+- Don't `click <index>` without a fresh `state` first -- the indices go stale
+  the moment the page changes.
+- Don't "take control" -- that's a human-only UI action. You drive by issuing
+  commands, not by grabbing the wheel.
 - Don't pass `--reclaim` unless the human explicitly told you to resume a
   browser they took over.
 - Don't auto-retry on exit `2` (preempted). Stop and wait for the human.
-- Don't tell the user to "look in the tab" for results -- the trace and the
-  answer are in the CLI output you're already reading.
+- Don't tell the user to "look in the tab" for results -- your output is the
+  CLI output you're already reading. The tab is just the live picture.
+- Don't jump to `task` for ordinary pages. Drive them yourself.

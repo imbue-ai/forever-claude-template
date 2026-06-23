@@ -1,4 +1,5 @@
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -271,5 +272,82 @@ def test_ids_are_monotonic_and_never_reused(monkeypatch: pytest.MonkeyPatch) -> 
         assert (await mgr.create()).browser_id == 3
         with pytest.raises(KeyError):
             mgr.get(1)
+
+    asyncio.run(go())
+
+
+# --- direct control: sticky lease + per-command CAS --------------------------
+
+
+def _direct_ready(browser_id: int = 1) -> bsession.LiveBrowser:
+    # A LiveBrowser wired enough to run run_action without a real Chromium: a
+    # non-None _context passes the "closed" guard, and a pre-set _action_handler
+    # skips constructing a real ActionHandler (the fake action ignores it).
+    browser = bsession.LiveBrowser(browser_id=browser_id)
+    browser._context = object()  # type: ignore[assignment]
+    browser._action_handler = object()  # type: ignore[assignment]
+    return browser
+
+
+def test_run_action_acquires_then_reports_busy_to_others() -> None:
+    browser = _direct_ready()
+
+    async def fake(_handler: Any) -> dict[str, Any]:
+        return {"did": "it"}
+
+    async def go() -> None:
+        # First command acquires the sticky lease and returns the owner snapshot.
+        result = await browser.run_action("A", "Alice", fake)
+        assert result["ok"] and result["did"] == "it"
+        assert result["controller"] == "agent" and result["owner_agent_id"] == "A"
+        assert browser._state_tuple() == ("agent", "A", False)
+        # Another agent's command is refused (agents never preempt).
+        result = await browser.run_action("B", "Bob", fake)
+        assert result["ok"] is False and result["status"] == "busy_agent"
+        # A human take-control blocks the owning agent's next command too.
+        await browser.take_control()
+        result = await browser.run_action("A", "Alice", fake)
+        assert result["ok"] is False and result["status"] == "busy_human"
+
+    asyncio.run(go())
+
+
+def test_run_action_per_command_cas_catches_mid_sequence_takeover(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The critical guard: even if acquire reports success, the per-command CAS
+    # re-checks ownership right before acting -- so a take-control that landed in
+    # between makes the command a clean no-op instead of touching the human's browser.
+    browser = _direct_ready(2)
+
+    async def fake_acquire(*_args: Any, **_kwargs: Any) -> str:
+        return "acquired"  # pretend we got it, but DON'T flip control state
+
+    monkeypatch.setattr(bsession.LiveBrowser, "acquire", fake_acquire)
+
+    async def fake(_handler: Any) -> dict[str, Any]:
+        raise AssertionError("the action must NOT run when control was lost")
+
+    async def go() -> None:
+        result = await browser.run_action("A", "Alice", fake)
+        assert result["ok"] is False and result["status"] == "lost_control"
+
+    asyncio.run(go())
+
+
+def test_idle_lease_sweep_releases_only_a_quiet_lease() -> None:
+    browser = _direct_ready(3)
+
+    async def go() -> None:
+        await browser.acquire("A", "Alice")
+        # Fresh lease -> not swept.
+        assert await browser._sweep_idle_lease() is False
+        assert browser._state_tuple() == ("agent", "A", False)
+        # A running task is connection-bound -> exempt even if "idle".
+        browser._lease_touched_at = time.monotonic() - (bsession._LEASE_IDLE_TTL + 10)
+        browser._agent_task = asyncio.current_task()
+        assert await browser._sweep_idle_lease() is False
+        # A quiet, task-free lease past the TTL -> released back to the human.
+        browser._agent_task = None
+        assert await browser._sweep_idle_lease() is True
+        assert browser._state_tuple() == ("human", None, False)
 
     asyncio.run(go())

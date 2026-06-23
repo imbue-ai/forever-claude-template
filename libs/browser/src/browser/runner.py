@@ -309,6 +309,139 @@ async def hold_browser(browser_id: int, request: Request) -> Response:
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
+# --- direct control: Claude drives the browser itself, one command at a time ---
+
+
+async def _direct_target(browser_id: int, request: Request) -> "tuple[LiveBrowser, str, str | None] | JSONResponse":
+    """Resolve (browser, agent_id, agent_name) for a direct command, or an error response."""
+    agent_id, agent_name = _agent_identity(request)
+    if not agent_id:
+        return JSONResponse({"error": "X-Mngr-Agent-Id header required"}, status_code=400)
+    try:
+        session = await _resolve(browser_id)
+    except KeyError:
+        return JSONResponse({"error": f"No browser {browser_id}"}, status_code=404)
+    except _STARTUP_ERRORS as e:
+        return JSONResponse({"error": f"Could not start browser {browser_id}: {e}"}, status_code=503)
+    return session, agent_id, agent_name
+
+
+async def _body(request: Request) -> dict[str, Any]:
+    return await request.json() if await request.body() else {}
+
+
+@app.post("/browsers/{browser_id}/acquire")
+async def cmd_acquire(browser_id: int, request: Request) -> JSONResponse:
+    """Explicitly reserve a browser across a run of commands (optional; the first
+    command auto-acquires). ``--reclaim`` takes it back from a human who said 'keep going'."""
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    body = await _body(request)
+    status = await session.acquire(
+        agent_id, agent_name,
+        reclaim=bool(body.get("reclaim", False)),
+        wait=bool(body.get("wait", False)),
+        max_wait=body.get("max_wait"),
+    )
+    return JSONResponse({"ok": status == "acquired", "status": status, **session._control_state()})
+
+
+@app.post("/browsers/{browser_id}/state")
+async def cmd_state(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    return JSONResponse(await session.act_state(agent_id, agent_name))
+
+
+@app.post("/browsers/{browser_id}/navigate")
+async def cmd_navigate(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    body = await _body(request)
+    url = body.get("url")
+    if not url:
+        return JSONResponse({"error": "url is required"}, status_code=400)
+    return JSONResponse(await session.act_navigate(agent_id, agent_name, url))
+
+
+@app.post("/browsers/{browser_id}/click")
+async def cmd_click(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    body = await _body(request)
+    return JSONResponse(await session.act_click(agent_id, agent_name, int(body.get("index", -1))))
+
+
+@app.post("/browsers/{browser_id}/input")
+async def cmd_input(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    body = await _body(request)
+    return JSONResponse(await session.act_input(agent_id, agent_name, int(body.get("index", -1)), str(body.get("text", ""))))
+
+
+@app.post("/browsers/{browser_id}/select")
+async def cmd_select(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    body = await _body(request)
+    return JSONResponse(await session.act_select(agent_id, agent_name, int(body.get("index", -1)), str(body.get("value", ""))))
+
+
+@app.post("/browsers/{browser_id}/scroll")
+async def cmd_scroll(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    body = await _body(request)
+    return JSONResponse(await session.act_scroll(agent_id, agent_name, str(body.get("direction", "down")), int(body.get("amount", 500))))
+
+
+@app.post("/browsers/{browser_id}/keys")
+async def cmd_keys(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    body = await _body(request)
+    keys = body.get("keys")
+    if not keys:
+        return JSONResponse({"error": "keys is required"}, status_code=400)
+    return JSONResponse(await session.act_keys(agent_id, agent_name, str(keys)))
+
+
+@app.post("/browsers/{browser_id}/screenshot")
+async def cmd_screenshot(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    return JSONResponse(await session.act_screenshot(agent_id, agent_name))
+
+
+@app.post("/browsers/{browser_id}/tab")
+async def cmd_tab(browser_id: int, request: Request) -> JSONResponse:
+    target = await _direct_target(browser_id, request)
+    if isinstance(target, JSONResponse):
+        return target
+    session, agent_id, agent_name = target
+    body = await _body(request)
+    return JSONResponse(await session.act_tab(agent_id, agent_name, str(body.get("action", "list")), body.get("index"), body.get("url")))
+
+
 @app.websocket("/browsers/{browser_id}/cast")
 async def cast_socket(websocket: WebSocket, browser_id: int) -> None:
     await websocket.accept()
