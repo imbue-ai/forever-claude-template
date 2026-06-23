@@ -117,13 +117,13 @@ function stepSection(key: string, user_event: UserMessageEvent | null): SectionV
   };
 }
 
-/** The flushBottomMargin attr buildRows passed to the ProgressBlock emitted for
+/** The isResumption attr buildRows passed to the ProgressBlock emitted for
  *  the section at `key`, read off the rendered vnode's attrs. */
-function progressFlush(rows: ReturnType<typeof buildRows>, key: string): boolean | undefined {
+function progressIsResumption(rows: ReturnType<typeof buildRows>, key: string): boolean | undefined {
   const row = rows.find((r) => r.key === `progress-${key}`);
   if (row === undefined) throw new Error(`no progress row for ${key}`);
-  const vnode = row.render() as { attrs: { flushBottomMargin?: boolean } };
-  return vnode.attrs.flushBottomMargin;
+  const vnode = row.render() as { attrs: { isResumption?: boolean } };
+  return vnode.attrs.isResumption;
 }
 
 describe("sectionRendersUserBubble", () => {
@@ -142,29 +142,31 @@ describe("sectionRendersUserBubble", () => {
   });
 });
 
-describe("buildRows turn-margin flush", () => {
+describe("buildRows resumption marking", () => {
   const noToolResults = new Map<string, ToolResultEvent>();
 
-  it("flushes a progress block whose NEXT section renders no user bubble", () => {
-    // Block A (the normal turn that issued the request) is followed by the
-    // bubble-less permission-resolution boundary, so A drops its bottom margin.
+  it("marks a bubble-less non-first section's block as a resumption", () => {
+    // Block B is the permission-resolution boundary: it is not the first section
+    // and renders no user bubble, so its block carries the resumption marker.
+    // Block A (the normal turn that issued the request) does not.
     const sections = [stepSection("a", userMsg("t0", "go")), stepSection("b", null)];
     const rows = buildRows("agent", sections, noToolResults);
-    expect(progressFlush(rows, "a")).toBe(true);
+    expect(progressIsResumption(rows, "b")).toBe(true);
+    expect(progressIsResumption(rows, "a")).toBe(false);
   });
 
-  it("does NOT flush when the next section renders a normal user bubble", () => {
+  it("does NOT mark a section that renders a normal user bubble", () => {
     const sections = [stepSection("a", userMsg("t0", "first")), stepSection("b", userMsg("t1", "second"))];
     const rows = buildRows("agent", sections, noToolResults);
-    expect(progressFlush(rows, "a")).toBe(false);
+    expect(progressIsResumption(rows, "b")).toBe(false);
   });
 
-  it("does NOT flush the last section (a genuinely-final unresolved turn)", () => {
-    // A permission card that is the real last thing in the turn keeps its normal
-    // end-of-turn margin: there is no following bubble-less section.
-    const sections = [stepSection("a", userMsg("t0", "go"))];
+  it("does NOT mark the first section even when it renders no user bubble", () => {
+    // The first `section-pre` is bubble-less but `s === 0`, so it is not a
+    // resumption boundary -- only a later bubble-less section is.
+    const sections = [stepSection("a", null)];
     const rows = buildRows("agent", sections, noToolResults);
-    expect(progressFlush(rows, "a")).toBe(false);
+    expect(progressIsResumption(rows, "a")).toBe(false);
   });
 });
 

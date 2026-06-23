@@ -76,17 +76,15 @@ export function buildRows(
   const rows: RowDescriptor[] = [];
   for (let s = 0; s < sections.length; s++) {
     const section = sections[s];
-    // The next section opens with no user bubble -- in practice a permission
-    // grant/deny boundary, whose verdict folds onto the card above and which
-    // carries the open step over (see turn-grouping's resolution branch). With
-    // no bubble to sit in the turn gap, this (card-ending) block's turn-bottom
-    // margin and the next block's top margin would stack into an empty void. So
-    // when this section emits a progress block, drop its bottom margin and let
-    // the seam be just the next block's normal top margin. Derived from the same
-    // no-bubble predicate as the bubble decision (next section, if any) -- not
-    // from the permission card's position in the DOM.
-    const nextSection = sections[s + 1];
-    const nextHasNoBubble = nextSection !== undefined && !sectionRendersUserBubble(nextSection);
+    // Whether THIS section is a resumption boundary: not the first section AND
+    // it renders no user bubble. In practice the only such section is one a
+    // permission grant/deny opens -- its verdict folds onto the card above, it
+    // shows no bubble, and it carries the open step over (see turn-grouping's
+    // resolution branch). The block it emits is marked `isResumption` so CSS can
+    // collapse the gap to whatever precedes it; the first `section-pre` is also
+    // bubble-less but is `s === 0`, so it is correctly excluded. Derived from the
+    // shared no-bubble predicate, not from the permission card's DOM position.
+    const isResumption = s > 0 && !sectionRendersUserBubble(section);
     const userEvent = section.user_event;
     if (sectionRendersUserBubble(section)) {
       // The predicate guarantees a real (non-hidden) user_event here.
@@ -112,7 +110,7 @@ export function buildRows(
             trailing_reply: section.trailing_reply,
             toolResults,
             agentId,
-            flushBottomMargin: nextHasNoBubble,
+            isResumption,
           }),
       });
       continue;

@@ -153,13 +153,15 @@ def _serve_agent_chat(
     auto-opening that chat. Shared by the ``e2e_server`` fixture and tests that
     need their own custom session transcript on a separate port.
 
-    Mirrors the real workspace closely enough for the chat to render: the env is
-    isolated (MNGR_HOST_DIR -> fixture tree so ``_find_agent`` resolves the
-    agent's state dir + env file; MNGR_AGENT_ID cleared so the layout endpoint
-    404s and the UI auto-opens the fixture chat instead of reading the real
-    workspace's layout.json), discovery + send_message are mocked, and the agent
-    is seeded into a directly-built AgentManager (the autouse conftest fixture
-    no-ops AgentManager.start, so background discovery never runs).
+    Isolate the workspace environment: point MNGR_HOST_DIR at the fixture's tmp
+    tree so the session endpoint (_find_agent) resolves the fixture agent's state
+    dir + env file, and clear MNGR_AGENT_ID so the layout endpoint has no
+    primary-agent dir to read from (returns 404 -> the UI auto-opens the fixture
+    chat) and never reads or writes the real workspace's layout.json. This
+    overrides the autouse _isolate_system_interface_tests fixture's env for the
+    duration of the context. Discovery + send_message are mocked, and the agent is
+    seeded into a directly-built AgentManager (the autouse conftest fixture no-ops
+    AgentManager.start, so background discovery never runs).
     """
     agent_info, session_file = _make_agent_fixture(tmp_path, session_events=session_events)
     agents = [agent_info]
@@ -170,6 +172,11 @@ def _serve_agent_chat(
         patch("imbue.system_interface.server.send_message", return_value=True),
         patch("imbue.system_interface.server.discover_agents", return_value=agents),
     ):
+        # The autouse conftest fixture no-ops AgentManager.start (so background
+        # mngr discovery never runs in tests), so seed the agent into the manager
+        # directly and inject it. The UI renders its agent list from the WebSocket
+        # agents_updated snapshot, which the server sends from this manager on
+        # connect.
         broadcaster = WebSocketBroadcaster()
         manager = AgentManager.build(broadcaster)
         with manager._lock:
@@ -558,7 +565,7 @@ _STEP_TITLE = "Fetch your unread emails"
 
 
 def _permission_resolution_session_events() -> list[dict[str, Any]]:
-    """The real chat shape that motivated the structural spacing fix.
+    """The real chat shape that motivated the boundary spacing fix.
 
     Reproduces, in order:
       1. a user turn that opens a step (``tk start``),
@@ -674,16 +681,15 @@ def test_permission_resolution_boundary_has_no_empty_void(tmp_path: Path, page: 
     The hidden grant notification opens a fresh progress block carrying the open
     step over (this turn-boundary carryover is the intended behavior). Because
     that boundary has no user bubble, the two progress blocks' turn-margins would
-    otherwise stack into a ~46px empty void. conversation-rows derives this from
-    the next section rendering no user bubble (sectionRendersUserBubble) and drops
-    the card-ending block's turn-bottom margin via the ``flushBottomMargin`` attr,
-    so the seam is just the resumption block's normal ~18px top margin.
+    otherwise stack into a ~46px empty void. The resumption block is marked
+    ``progress-block--resumption``; a CSS ``:has(+ .progress-block--resumption)``
+    rule zeroes the preceding element's turn-bottom margin so the seam is just the
+    resumption block's normal ~18px top margin.
 
     This asserts the REAL DOM shape (a ``.pv-final`` trailing reply is present and
-    the card-ending block carries the ``progress-block--flush-bottom`` class), so
-    it cannot pass against a different tree, then measures the boundary gap. It
-    fails against the ~46px void (pre-fix) and passes at the ~18px clean break
-    (post-fix).
+    the resumption block carries the intrinsic marker), so it cannot pass against
+    a different tree, then measures the boundary gap. It fails against the ~46px
+    void (pre-fix) and passes at the ~18px clean break (post-fix).
     """
     with _serve_agent_chat(tmp_path, _PORT + 3, _permission_resolution_session_events()) as served:
         base_url, _, _ = served
@@ -704,15 +710,16 @@ def test_permission_resolution_boundary_has_no_empty_void(tmp_path: Path, page: 
         # The carried-over step appears in BOTH blocks (the intended carryover).
         expect(page.locator(".pv-tl-title", has_text=_STEP_TITLE)).to_have_count(2)
 
-        # The derived flush manifests as the flush class on the card-ending
-        # (first) block -- NOT a :has() selector keyed on the card.
+        # The intrinsic marker is on the resumption (second) block -- NOT on the
+        # card-ending block, and NOT a :has() selector keyed on the card's
+        # position.
         first_block_class = blocks.nth(0).get_attribute("class") or ""
-        assert "progress-block--flush-bottom" in first_block_class, (
-            f"the card-ending block should carry the structural flush marker; got class={first_block_class!r}"
+        assert "progress-block--resumption" not in first_block_class, (
+            f"the card-ending block must not carry the resumption marker; got class={first_block_class!r}"
         )
         second_block_class = blocks.nth(1).get_attribute("class") or ""
-        assert "progress-block--flush-bottom" not in second_block_class, (
-            "the resumption block must not drop its own top-margin seam"
+        assert "progress-block--resumption" in second_block_class, (
+            f"the resumption block should carry the intrinsic marker; got class={second_block_class!r}"
         )
 
         # Measure the boundary gap: the vertical distance between the two blocks'
