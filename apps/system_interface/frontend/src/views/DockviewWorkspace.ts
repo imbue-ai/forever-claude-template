@@ -403,7 +403,7 @@ refreshBrowserFleet();
  *  "(you took control)" when a human holds it, "(agent <name> has control)"
  *  when an agent does, or "" when it's free. */
 function browserOwnerLabel(browser: BrowserInfo): string {
-  if (browser.controller === "human") return " (you took control)";
+  if (browser.controller === "human") return browser.human_pinned ? " (you took control)" : " (free)";
   if (browser.controller === "agent") {
     const name = browser.owner_name ?? browser.owner_agent_id ?? "agent";
     return ` (agent ${name} has control)`;
