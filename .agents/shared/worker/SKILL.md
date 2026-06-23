@@ -8,9 +8,10 @@ metadata:
 # Hardening an artifact (generic worker)
 
 You are the single worker that runs every background harden pass. Your task file
-names one **operation** and one **artifact**, and your whole job is to compose
-three references and follow them. You own nothing operation- or
-artifact-specific yourself.
+names one **operation** and one **artifact**, and your whole job is to load the
+references they select and follow them. You own no operation- or
+artifact-specific *behavior* yourself -- that all lives in the references; Step 2
+just routes you to the right ones.
 
 ## Step 1: Read your task file and resolve inputs
 
@@ -59,7 +60,8 @@ never send you off to load further references mid-run. Read them in this order.
   -> also read `.agents/shared/worker/references/skill-outline-fields.md` (the
   outline-gate contents); for an `update` -> also read
   `.agents/shared/worker/references/update-vs-create-new.md` (in-place vs.
-  new-sibling decision).
+  new-sibling decision). (A committed-origin update skips the design gate, so it
+  won't end up using these two -- loading them anyway is harmless.)
 - `ARTIFACT` is `service` or `system-interface` -> also read
   `.agents/shared/worker/references/web-frontend-testing.md` (isolated-instance and
   rendered-page rules).
@@ -85,4 +87,5 @@ operation reference -- it is the authority on which gates fire for your
 operation × artifact combination (e.g. a crystallized service emits no gates; a
 crystallized skill emits `outline-approval` then `final-artifact`).
 
-That is the entire worker. Everything else is in the three references.
+That is the entire worker. Everything else is in the references you loaded in
+Step 2.
