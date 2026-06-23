@@ -327,41 +327,59 @@ The upstream is defined in `parent.toml`.
   `run all` for headless or scheduled runs, where there is no chat to show
   progress in.
 
-- **Live first, ratify at turn-end via the worker pipeline.** All four
-  lifecycle skills (`do-something-new`, `crystallize-task`, `heal-skill`,
-  `update-skill`) follow the same shape: handle the user's immediate
-  request *live* in the current chat to keep the conversation interactive
-  and iterative; at turn-end, invoke the appropriate worker-backed skill
-  to formalize the work through validation, scenario testing, and proper
-  commits. If you find yourself committing a change to any
-  contract-bearing file (a skill, a hook script with a documented
-  contract, an invariant elsewhere) and stopping there, you've skipped
-  the ratify step. The live phase is necessary but not sufficient -- the
-  worker pipeline exists to add the rigor that's awkward to do
-  interactively.
+- **Live first, ratify at turn-end via the worker pipeline.** The
+  lifecycle skills follow the same shape: handle the user's immediate
+  request *live* in the current chat to keep it interactive and iterative;
+  at turn-end, formalize the work through a background worker. Three shared
+  references carry the core: the **live** half is the interactive-delivery
+  shape (`.agents/shared/references/interactive-delivery.md`), specialized
+  by `do-something-new`'s routes (`fetch-process-show` for data,
+  `build-web-service` for web views); the turn-end **harden pass** follows
+  the universal contract
+  (`.agents/shared/worker/references/harden-artifact.md`), driven by three generic
+  operation leads -- `crystallize-artifact` (create), `update-artifact`
+  (change), `heal-artifact` (fix) -- each parameterized by the artifact
+  (skill / service / system-interface). A single generic `harden-worker`
+  composes that contract with one operation reference (`op-crystallize.md` /
+  `op-update.md` / `op-heal.md`) and one artifact reference
+  (`artifact-skill.md` / `artifact-service.md` / `artifact-system-interface.md`)
+  per task. The leads sit on the worker **plumbing**, `lead-proxy.md` +
+  `worker-reporting.md`. The harden pass **always runs in a background
+  worker** -- the main agent never runs the code-guardian gates or the
+  thorough test passes itself (do not start those flows in the main agent).
+  If you find yourself committing a change to any contract-bearing file (a
+  skill, a hook script with a documented contract, an invariant elsewhere)
+  and stopping there, you've skipped the ratify step. The live phase is
+  necessary but not sufficient -- the worker pipeline exists to add the rigor
+  that's awkward to do interactively.
 
   Concrete cases:
   - **Net-new task needing research / experimentation**: invoke
-    `do-something-new` to drive the live phase. It hands off to
-    `crystallize-task` at the end.
-  - **Stop-hook crystallization nudge** after a normal turn that turned
-    out to be cohesive, likely to recur, and mostly deterministic:
-    invoke `crystallize-task` to ratify the just-finished work.
-    Otherwise acknowledge and move on.
+    `do-something-new`. It routes to `fetch-process-show` (data) or
+    `build-web-service` (web view) -- or applies the shared
+    interactive-delivery shape directly when neither fits -- to drive the
+    live phase. Both hand their confirmed artifact to `crystallize-artifact`
+    (artifact = skill for the data pipeline, service for the web view).
+  - **Crystallization nudge** after a normal turn that turned out to be
+    cohesive, likely to recur, and mostly deterministic: invoke
+    `crystallize-artifact` (artifact = skill) to ratify the just-finished
+    work. Otherwise acknowledge and move on. (This is a manual judgement at
+    turn-end, not a wired hook.)
   - **A skill errored or delivered a wrong result**: fulfil the user's
     request live by working around the failure, then at turn-end invoke
-    `heal-skill`. Never patch the skill inline -- `heal-skill` is the
+    `heal-artifact`. Never patch the skill inline -- `heal-artifact` is the
     ratify path.
   - **You and the user discussed and applied a change to an existing
     skill**: edit live so the user can iterate, then at turn-end invoke
-    `update-skill` (verify flow). Direct Edit + commit skips the
-    ratification. (For non-skill contract-bearing files like hook
-    scripts or CLAUDE.md itself, no worker pipeline exists today --
-    apply the live phase carefully and add manual rigor at turn-end:
-    real test fixtures, end-to-end exercise of new code paths, etc.)
+    `update-artifact` (committed origin -- skips the design gate, verifies
+    the live commit). Direct Edit + commit skips the ratification. (For
+    non-skill contract-bearing files like hook scripts or CLAUDE.md itself,
+    no worker pipeline exists today -- apply the live phase carefully and add
+    manual rigor at turn-end: real test fixtures, end-to-end exercise of new
+    code paths, etc.)
   - **A skill use was successful but required manual post-processing**:
-    do the post-work live, then at turn-end invoke `update-skill`
-    (absorb flow) so the skill swallows the gap.
+    do the post-work live, then at turn-end invoke `update-artifact`
+    (emergent origin) so the skill swallows the gap.
 
 # Memory
 

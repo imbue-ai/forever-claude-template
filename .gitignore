@@ -29,13 +29,12 @@ specs/login-modal-reshape/
 # clones, separate from the read-only vendor/ subtrees. See CLAUDE.md.
 **/.external_worktrees/
 
-# Worker sub-skills installed into a worker's tree at provision time by
-# install_worker_skills.sh (from each lifecycle skill's assets/worker/). They
-# are scratch copies that must never be committed -- otherwise a worker's
-# broad `git add` would carry them onto its branch and the post-crystallize
-# merge would leak them into main. The source assets at
-# .agents/skills/<parent>/assets/worker/ are deeper than this glob and stay
-# tracked.
+# The generic harden worker installed into a worker's tree at provision time by
+# install_worker_skills.sh (from the single source at .agents/shared/worker/).
+# It is a scratch copy that must never be committed -- otherwise a worker's
+# broad `git add` would carry it onto its branch and the merge would leak it
+# into main. The source at .agents/shared/worker/ is not matched by this glob
+# and stays tracked.
 .agents/skills/*-worker/
 
 # Byte-compiled / optimized / DLL files

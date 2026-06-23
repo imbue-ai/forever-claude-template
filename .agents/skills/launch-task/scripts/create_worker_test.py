@@ -75,7 +75,7 @@ def _make_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
     runtime.mkdir(parents=True)
     task = runtime / "task.md"
     task.write_text("---\nlead_agent: lead\n---\n\nbody\n")
-    artifacts = tmp_path / "runtime" / "do-something-new" / "demo"
+    artifacts = tmp_path / "runtime" / "fetch-process-show" / "demo"
     artifacts.mkdir(parents=True)
     (artifacts / "sample.json").write_text("{}")
     return runtime, task, artifacts
@@ -690,11 +690,11 @@ def test_await_times_out_when_report_never_appears(
 def test_read_finish_report_path_returns_field(tmp_path: Path) -> None:
     """_read_finish_report_path pulls the path out of the task frontmatter."""
     task = tmp_path / "task.md"
-    _write_await_task(task, Path("runtime/crystallize/demo/reports/report.md"))
+    _write_await_task(task, Path("runtime/harden/crystallize-demo/reports/report.md"))
 
     result = create_worker_mod._read_finish_report_path(task)
 
-    assert result == Path("runtime/crystallize/demo/reports/report.md")
+    assert result == Path("runtime/harden/crystallize-demo/reports/report.md")
 
 
 def test_read_finish_report_path_missing_raises(tmp_path: Path) -> None:

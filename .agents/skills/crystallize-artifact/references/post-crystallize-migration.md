@@ -15,14 +15,14 @@ consumer ever ran against the runtime path), and that's fine.
 
 Look for code on the merged branch that referenced either:
 
-- `runtime/do-something-new/<slug>/...`
+- `runtime/fetch-process-show/<slug>/...`
 - `runtime/<other-calling-skill>/<slug>/...`
 - A symlink, env var, or hardcoded constant pointing at one of the above.
 
 Use ripgrep (or your grep tool) with the slug as the search anchor:
 
 ```bash
-rg -n "runtime/do-something-new/<slug>" -g '!runtime/'
+rg -n "runtime/fetch-process-show/<slug>" -g '!runtime/'
 rg -n "<slug>/fetch.py" -g '!runtime/'
 ```
 
@@ -31,8 +31,8 @@ crystallized skill path. The standard switch is:
 
 | Old reference                                                  | New reference                                            |
 | -------------------------------------------------------------- | -------------------------------------------------------- |
-| `runtime/do-something-new/<slug>/fetch.py`                     | `.agents/skills/<name>/scripts/run.py`                   |
-| `runtime/do-something-new/<slug>/sample.json`                  | run the skill with `--output <path>` to regenerate       |
+| `runtime/fetch-process-show/<slug>/fetch.py`                     | `.agents/skills/<name>/scripts/run.py`                   |
+| `runtime/fetch-process-show/<slug>/sample.json`                  | run the skill with `--output <path>` to regenerate       |
 | Inline import of the fetch script                              | `subprocess.run(["uv", "run", "python", "<skill-path>"])`|
 
 If a consumer has explicit fallback logic (e.g. "use the skill if
@@ -57,7 +57,7 @@ Skip the delete if any of the following:
 - The directory contains user-supplied state (auth tokens, captured
   inputs you'd lose) -- read it first to be sure.
 
-`runtime/crystallize/<slug>/` itself (the dir holding `task.md`,
+`runtime/harden/crystallize-<name>/` itself (the dir holding `task.md`,
 `reports/`, and `ticket_id.txt`) is also stale post-merge,
 but **do not delete it yet** -- section 5 below still needs to read
 `ticket_id.txt`. Section 6's commit cleanup removes it after the
@@ -84,8 +84,8 @@ Two kinds of consumer to update:
 
 - **Code consumers** keying on a field name or exit code -- the rename
   breaks them silently; grep for the old names and update.
-- **Surfaces** built during `do-something-new` Step 7 (web views, etc.)
-  that render the sample/pipeline output. Point them at the new output
+- **Surfaces** built during `fetch-process-show`'s deliver phase (web
+  views, etc.) that render the sample/pipeline output. Point them at the new output
   and update their rendering to the new shape.
 
 **If the shape changed, re-confirm with the user.** They signed off on
@@ -113,12 +113,12 @@ it so the new path takes effect:
 
 ## 5. Close the tracking ticket
 
-`crystallize-task` Step 2 wrote the ticket ID to
-`runtime/crystallize/<slug>/ticket_id.txt` at launch time. Read it and
+`crystallize-artifact` Step 2 wrote the ticket ID to
+`runtime/harden/crystallize-<name>/ticket_id.txt` at launch time. Read it and
 close:
 
 ```bash
-TICKET_FILE="runtime/crystallize/<slug>/ticket_id.txt"
+TICKET_FILE="runtime/harden/crystallize-<name>/ticket_id.txt"
 if command -v tk >/dev/null 2>&1 && [ -s "$TICKET_FILE" ]; then
     tk close "$(cat "$TICKET_FILE")"
 fi
@@ -134,11 +134,11 @@ have a list command in this build -- look for the ticket in
 The migration touches consumer code and removes runtime artifacts;
 those should be a separate commit from the merge so the migration is
 reviewable on its own. Now that section 5 has read `ticket_id.txt`,
-also delete `runtime/crystallize/<slug>/` (unless the user asked to
+also delete `runtime/harden/crystallize-<name>/` (unless the user asked to
 keep the scratch around).
 
 ```bash
-rm -rf runtime/crystallize/<slug>/
+rm -rf runtime/harden/crystallize-<name>/
 git add <consumer-files-you-changed>
 git commit -m "post-crystallize migration for <slug>: switch consumers to skill path"
 ```

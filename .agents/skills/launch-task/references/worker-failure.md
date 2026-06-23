@@ -1,10 +1,10 @@
 # Worker failure handling
 
 When a sub-agent you launched via `launch-task` (or a derivative skill like
-`crystallize-task`, `heal-skill`, `update-skill`) finishes in a failed state --
-or finishes DONE but produced the wrong result -- do **not** silently retry and
-do **not** try to fix the worker's output inline. The main-agent layer is not
-where worker bugs get fixed.
+`crystallize-artifact`, `update-artifact`, `heal-artifact`) finishes in a failed
+state -- or finishes DONE but produced the wrong result -- do **not** silently
+retry and do **not** try to fix the worker's output inline. The main-agent layer
+is not where worker bugs get fixed.
 
 ## What counts as a failure
 
@@ -15,8 +15,8 @@ where worker bugs get fixed.
   not implement what the task file asked for.
 - User rejected the worker's Gate 2 proposal and the worker stopped instead
   of iterating.
-- For crystallize / heal / update workers: the pushed report at
-  `runtime/<flow>/<name>/reports/report.md` has frontmatter
+- For harden workers (crystallize / update / heal): the pushed report at
+  `runtime/harden/<slug>/reports/report.md` has frontmatter
   `type: status, name: stuck`, or the 30m poll timeout tripped without
   any report arriving. The first case is the worker explicitly giving
   up (the report body names a reason); the second means the worker
@@ -56,5 +56,5 @@ instead of guessing.
 
 The main-agent layer has a narrow role: dispatch, observe, merge, report.
 Deciding *why* a worker's script or SKILL.md misbehaved and applying a fix
-is exactly the job of `heal-skill` / `update-skill` -- both of which expect
+is exactly the job of `heal-artifact` / `update-artifact` -- both of which expect
 to run *after* the user has weighed in.

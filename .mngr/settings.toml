@@ -560,14 +560,15 @@ agent_args = [
     "You were launched by another agent. List any questions at the end of your final response, along with the assumptions you made.",
 ]
 
-# Subskill-worker template: sub-agent for any flow that hands its worker a
-# bundled sub-skill -- the crystallize-task / heal-skill / update-skill lifecycle
-# and the update-system-interface flow. Inherits from `worker`, adds:
-#  - MNGR_AGENT_ROLE=worker so the crystallization Stop hook skips in-worker.
-#  - A pre-provision step that installs the bundled worker sub-skills from
-#    each parent skill's assets/worker/ directory into the worker's
-#    .agents/skills/ tree. The installer auto-discovers any parent skill
-#    under .agents/skills/ that has an assets/worker/ subdir.
+# Subskill-worker template: sub-agent for any flow that hands its worker the
+# generic harden worker -- the crystallize-artifact / update-artifact /
+# heal-artifact lifecycle (across skills, services, and the system interface).
+# Inherits from `worker`, adds:
+#  - MNGR_AGENT_ROLE=worker so the harden Stop hook skips in-worker.
+#  - A pre-provision step that installs the single generic worker sub-skill from
+#    .agents/shared/worker/ into the worker's .agents/skills/ tree as
+#    `harden-worker`. The worker reads the operation + artifact from its task
+#    file and composes the matching references.
 [create_templates.subskill-worker]
 type = "worker"
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]

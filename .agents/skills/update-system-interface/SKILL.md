@@ -12,6 +12,14 @@ make every change in an **isolated worktree clone**, verify it builds and passes
 there, and only merge it back into the served tree once it's known-good. This
 skill is the single canonical path for that.
 
+This is the **system-interface specialization of the generic artifact
+lifecycle.** It reuses the generic update orchestration -- the task file, the
+generic `harden-worker`, and the report poll -- from `update-artifact` with
+`artifact=system-interface`, and adds the one thing the system interface needs
+that no other artifact does: a `safe-reveal` go-live (pre-merge **preview**, then
+a reveal-or-roll-back script). The worker/orchestration core is shared; the
+preview and reveal are owned here.
+
 ## The hard rule
 
 **Never edit the system-interface tree that is being served to the user.** Do
@@ -25,69 +33,75 @@ modify the served tree at all (they only boot throwaway servers against the
 worker's separate, already-built work_dir, so even the pre-merge preview can't
 reach what the user is looking at).
 
-That isolated clone is a `launch-task` worker: it runs in its own git worktree
-with its own copy of the source, so a half-broken build can never reach what the
-user is looking at. The worker is just the mechanism for getting that safe,
-separate place to work.
+That isolated clone is the generic harden worker -- its own git worktree and
+copy of the source, so a half-broken build can never reach the user. The worker
+is just the mechanism for that safe, separate place to work.
 
 ## Flow overview
 
-1. **Delegate** the change to a worker via the `launch-task` skill. The worker
-   follows the bundled `update-system-interface-worker` sub-skill, which owns all
-   the detail of how to build, test, and verify the change in isolation.
-2. The **worker** implements + builds + tests it on its own branch (`mngr/<name>`),
-   then reports `done`.
+1. **Delegate** the change to the generic worker via the `update-artifact`
+   orchestration core (`artifact=system-interface`). The worker follows
+   `harden-artifact.md` + `op-update.md` + `artifact-system-interface.md`, which
+   own how to build, test, and verify the change in isolation.
+2. The **worker** implements + builds + tests it on its own branch, then reports
+   `done` (the system interface emits **no gate** -- approval is your preview).
 3. You **preview** the change *before merging*: the worker is a local
    worktree-agent in this container that already built its own work_dir, so one
    command boots that folder and serves it -- wrapped in a labeled "preview"
-   frame so the tab reads as a proposed change, not the live UI -- for the user
-   to click around. The user approves or rejects.
+   frame -- for the user to click around. The user approves or rejects.
 4. **On approval**, you **record the known-good revision, then merge** the
    worker's branch.
 5. You **reveal** the merged change with one command (refresh dependencies,
    rebuild/restart as needed, verify the live UI is healthy, auto-rollback on
-   failure), then **tear down the preview**. On rejection, you just tear down the
+   failure), then **tear down the preview**. On rejection, you tear down the
    preview and hand back -- nothing is merged.
 
-## 1-2. Delegate to a worker
+## 1-2. Delegate via the generic update orchestration
 
-Follow the `launch-task` skill for the mechanics (task file, `create_worker.py
-launch`, background-poll the report, handle `done`/`stuck`), with two
-specifics for this flow:
+Follow `update-artifact` Steps 1-3 (open a ticket, write the task file, launch
+the worker, background-poll the report) with these system-interface specifics:
 
-- **Launch the worker with the `--template subskill-worker` template** (not the
-  default `worker`). That template installs the bundled
-  `update-system-interface-worker` sub-skill into the worker's `.agents/skills/`
-  tree so the worker can load it.
-- **Keep the task brief short and point it at the sub-skill.** You do not need to
-  restate how the worker builds or tests anything -- that all lives in the
-  sub-skill. The brief only needs:
-  - `## What to do`: the actual UI change the user asked for.
-  - `## Context`: any specifics (which panel, desired behavior, constraints).
-  - `## Success criteria`: what "done" looks like for this change, plus the
-    standing line: *follow the `update-system-interface-worker` sub-skill for
-    how to run, test, verify, and what not to touch; report `done` only when its
-    testing contract and the review gates all pass.*
+- **Pick a slug** `$SLUG` for the change. The worker agent / branch is
+  `update-$SLUG` / `mngr/update-$SLUG`; the runtime dir is
+  `runtime/harden/update-$SLUG/`.
+- **Task-file frontmatter:** `operation: update`, `artifact: system-interface`,
+  plus the standard `lead_agent` / `finish_report_path`
+  (`runtime/harden/update-$SLUG/reports/report.md`). Per the system-interface
+  exception in `op-update.md`, there is **no `## Change origin` marker** -- the
+  body is a plain change brief, not an absorb/verify incident.
+- **Task-file body:** `## What to do` (the actual UI change the user asked for),
+  `## Context` (which panel, desired behavior, constraints), and `## Success
+  criteria` (what "done" looks like, plus the standing line: *follow the
+  installed `harden-worker` sub-skill; it composes `harden-artifact.md`,
+  `op-update.md`, and `artifact-system-interface.md` for how to run, test,
+  verify, and what not to touch; report `done` only when its testing contract
+  and the review gates all pass*).
+- **Launch** with `--template subskill-worker` (installs the generic
+  `harden-worker`) per `update-artifact` Step 3, then background-poll per
+  `.agents/shared/references/lead-proxy.md`.
+- **Terminal handling differs:** the system interface emits no gate, and on
+  `done` you do **not** merge here (that is `update-artifact` Step 4's behavior
+  for other artifacts). Instead, go to the preview below. On `stuck` or a
+  dead-worker timeout, surface to the user per
+  `.agents/skills/launch-task/references/worker-failure.md` -- do **not**
+  preview, merge, or reveal, and do not retry silently.
 
 ## 3. Preview the change before merging
 
-Handle the worker's report per `launch-task` (its `## 4` and the referenced
-`lead-proxy.md`). On a terminal `done`, show the user the change *before* merging
-anything. The worker is a local worktree sub-agent in this same container, so its
+On a terminal `done`, show the user the change *before* merging. The worker's
 work_dir is a folder it has **already built** (its `done` contract runs
 `uv sync` + `npm run build`). The preview just boots that folder -- no fetch, no
-re-checkout, no rebuild.
-
-**Do not destroy the worker yet** -- the preview serves its work_dir in place, so
-the worker must stay alive until the user gives a verdict.
+re-checkout, no rebuild. **Do not destroy the worker yet** -- the preview serves
+its work_dir in place, so the worker must stay alive until the user gives a
+verdict.
 
 First resolve the worker's work_dir, then boot it:
 
 ```bash
-WORK_DIR=$(mngr ls --include 'name == "<name>"' --format json \
+WORK_DIR=$(mngr ls --include 'name == "update-<slug>"' --format json \
     | python3 -c 'import sys, json; print(json.load(sys.stdin)["agents"][0]["work_dir"])')
 python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py preview \
-    --slug <name> --work-dir "$WORK_DIR"
+    --slug update-<slug> --work-dir "$WORK_DIR"
 ```
 
 This boots the worker's already-built instance on a free port with layout
@@ -95,11 +109,11 @@ persistence neutered (it reads the same agents, so the user's real conversations
 render, but it cannot clobber the live `layout.json`), then boots a small wrapper
 page that embeds it in a labeled "preview" frame. The user-facing `si-preview`
 service points at that wrapper (the inner instance is registered separately as
-`si-preview-app`), so the tab reads as a clearly-marked proposed change rather
-than a confusing nested clone of the live UI. It does **not** merge, touch the
-served tree, or modify the worker's folder. Exit `0` means the preview is up; a
-non-zero exit means it failed to boot (or the work_dir was wrong / the worker was
-already destroyed) and tore itself down -- diagnose before retrying.
+`si-preview-app`), so the tab reads as a clearly-marked proposed change. It does
+**not** merge, touch the served tree, or modify the worker's folder. Exit `0`
+means the preview is up; a non-zero exit means it failed to boot (or the
+work_dir was wrong / the worker was already destroyed) and tore itself down --
+diagnose before retrying.
 
 Open it as a tab and ask the user to explore:
 
@@ -111,10 +125,6 @@ Then confirm with the user via `send-user-message`: a binary keep/discard *and*
 room for free-form notes (what looks off, what they'd change). Wait for their
 answer before doing anything else.
 
-On `stuck` or a timeout with a dead worker, surface to the user per
-`launch-task`'s failure flow -- **do not** preview, merge, or reveal, and do not
-retry silently.
-
 ## 4. On approval: record known-good, then merge
 
 If the user **approves** the preview:
@@ -125,9 +135,10 @@ If the user **approves** the preview:
    ```bash
    ROLLBACK_TO=$(git rev-parse HEAD)
    ```
-2. **Merge** the worker's branch (`mngr/<name>`) into the working branch the live
-   UI is served from. Commit the merge so the tree is clean (the reveal refuses
-   to run on a dirty tree, so a rollback can never clobber unrelated work).
+2. **Merge** the worker's branch (`mngr/update-$SLUG`) into the working branch
+   the live UI is served from. Commit the merge so the tree is clean (the reveal
+   refuses to run on a dirty tree, so a rollback can never clobber unrelated
+   work).
 
 If the user **rejects**, do not merge. Tear down the preview (see the end of the
 next section) and hand back with their feedback -- decide *with them* whether to
@@ -163,8 +174,7 @@ motion -- you do not run `npm`/`uv`/`mngr` by hand. It:
 - **Reveals**: rebuilds the gitignored `static/` bundle and broadcasts a
   `reload_system_interface` op so open browsers reload into the new assets
   (frontend); restarts the services agent so the editable backend re-imports the
-  merged `.py` (backend). Restarting does not kill you -- you (a chat agent) and
-  the services agent are distinct agents sharing one work_dir.
+  merged `.py` (backend).
 - **Verifies** the live service is healthy by polling its loopback endpoint.
 - **Auto-rolls-back on any failure**: restores the tree to `--rollback-to` as a
   forward revert commit, rebuilds/restarts from it, and re-confirms the UI is
@@ -184,14 +194,15 @@ Once you no longer need the preview (after a successful reveal, *or* after a
 rejection where nothing was merged), tear it down:
 
 ```bash
-python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py unpreview --slug <name>
+python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py unpreview --slug update-<slug>
 ```
 
 `unpreview` kills both preview servers (the inner instance and the wrapper) and
 deregisters both their services (there is no worktree to remove -- the preview
 served the worker's folder in place). It is idempotent, so it is also the safe
 way to clean up after a `preview` that failed partway. Once the preview is down,
-the worker can be destroyed per `launch-task`.
+the worker can be destroyed per `launch-task`. Close the `update-$SLUG` ticket
+the orchestration opened.
 
 Why this exists as a script and not a checklist: if the backend fails to start,
 the user loses their entire chat UI -- there is nowhere left to surface an error
@@ -206,13 +217,13 @@ top-level page, so it does **not** reveal a system-interface code change.
 ## Why this shape
 
 The UI is what the user is actively looking at, so the design goal is "never
-serve a half-broken UI," not "iterate in place fast." The worker's isolated
-worktree clone + in-process testing + Playwright verification + review gates make
-it safe to merge; the pre-merge preview lets the user actually click around the
-change before anything lands -- and since the worker already built its own
-work_dir (a folder in this same container), the preview just boots that folder
-in place rather than re-cloning or rebuilding; and the reveal script's
-pre-flight, health probe, and autonomous rollback make it safe to reveal in one
-motion. Preview setup and teardown are deterministic, so they live as
-`preview`/`unpreview` sub-commands of the same script rather than as agent prose
--- the only non-deterministic part, gating on the user's judgment, stays with you.
+serve a half-broken UI," not "iterate in place fast." The worker's isolated clone
+(in-process testing, Playwright verification, review gates) makes it safe to
+merge; the pre-merge preview lets the user actually click around the change
+before anything lands -- and since the worker already built its own work_dir, the
+preview just boots that folder in place rather than re-cloning or rebuilding; and
+the reveal script's pre-flight, health probe, and autonomous rollback make it
+safe to reveal in one motion. Preview setup and teardown are deterministic, so
+they live as `preview`/`unpreview` sub-commands of the same script rather than as
+agent prose -- the only non-deterministic part, gating on the user's judgment,
+stays with you.

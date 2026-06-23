@@ -1,6 +1,6 @@
 ---
 name: build-web-service
-description: Use when you want to create a new web view for the user. Covers scaffolding a new Flask service (canonical path) and the escape hatch for wrapping a pre-existing third-party server, plus diagnostic references when things misbehave.
+description: "Use when you want to create a new web view for the user -- a page, dashboard, or app they can open as a tab. Runs an interactive flow: confirm the look and feel on a cheap throwaway mock first, then build the real site to a usable state, then harden it in the background. Covers scaffolding a new Flask service (canonical path) and the escape hatch for wrapping a pre-existing third-party server."
 metadata:
   crystallized: true
 ---
@@ -14,6 +14,55 @@ through the system_interface.
 There is one canonical path (scaffold a new Flask lib) and one
 escape hatch (wrap a pre-existing third-party server). Modify/remove
 flows go through the `edit-services` skill.
+
+## This is the web specialization of the interactive-delivery shape
+
+**Read `.agents/shared/references/interactive-delivery.md` first.** Building a web
+view is not a "scaffold, implement, ship" recipe -- it is an *interactive* flow:
+you confirm the look-and-feel on a cheap throwaway mock *before* building the real
+thing, build to a usable state in the foreground, and defer the thorough
+testing + review gates to a background worker. The phases below fill in that
+shared skeleton for web work. The single biggest mistake this skill exists to
+prevent is building (and testing, and hardening) a whole site before the user has
+confirmed the basic shape is what they want.
+
+Map of the flow:
+
+- **Step 0 -- clarify and plan** (skeleton phases 1-3): blocking questions only,
+  in business terms; a small plan; wait for approval.
+- **Step 1 -- scaffold + throwaway mock** (skeleton phases 4-6): scaffold the
+  service, put a mock UI in front of the user, loop to explicit confirmation of
+  the look-and-feel. Hard gate.
+- **Step 2-4 -- build to a usable site** (the existing build mechanics, run
+  *after* confirmation): implement real routes, verify, surface the tab.
+- **Step 5 -- finalize in the background** (skeleton phase 7): once the user
+  confirms the *working* site looks right, hand thorough testing + the review
+  gates to a background worker. The main agent never runs those itself.
+
+If you were sent here by `fetch-process-show` for a web view over fetched data,
+the data sample is already confirmed -- but you still run your own mock
+confirmation here, because the data sample confirms the data *shape*, not the UI
+shape. Render the handed-off `sample.json` in the mock so the user judges the UI
+against real data.
+
+## Step 0: Clarify and plan (business terms only)
+
+Ask only the questions that genuinely *block* -- a fork that is both genuinely
+uncertain *and* expensive to reverse later. Most web views have none: default to
+the simplest conventional choice and to a **single user**, state each default in
+one line, and move on. Cheap-to-reverse choices (persistence, auto-reload vs.
+reload-to-refresh, latest-only vs. history) are not P0 -- pick the obvious
+default and let them surface during the mock loop or as a later follow-up
+surface, where the user can react to something concrete rather than answer
+"should this update on its own?" in the abstract.
+
+If you *do* hit a real blocker, phrase it as the user-visible consequence that
+motivates it -- never a technical term (this system serves non-technical users):
+"should everyone see the same list?" not "do we need multi-tenancy?".
+
+Record your stated defaults -- they are the architecture you build once, after
+the mock converges. Do not build any of it yet. Then propose a small plan and
+wait for approval.
 
 ## Decide which path applies
 
@@ -130,7 +179,52 @@ If it isn't `RUNNING`, read its log
 (`/var/log/supervisor/<name>-stderr.log`) or run
 `supervisorctl tail <name> stderr`.
 
-## Step 2: Implement your routes
+### Put a throwaway mock in front of the user (the confirmation gate; looped)
+
+Scaffolding the service is fine before confirmation -- it is cheap and reversible.
+**Building the real data layer or state architecture before the user confirms the
+look-and-feel is the tripwire: do not.** Instead, serve a *throwaway mock* of the
+proposed UI as a route inside the scaffolded service, so the user sees it as a
+real tab and reacts to the actual look-and-feel.
+
+This is skeleton phase 5 (the cheap throwaway artifact). Keep it disposable:
+
+- The mock renders **static / hard-coded content** that demonstrates the proposed
+  layout and interactions -- no real fetching, no persistence, no backend logic.
+  Invoke the `frontend-design` skill before writing the markup (see Step 2).
+- If you were handed a confirmed `sample.json` (the `fetch-process-show` hybrid),
+  render *that real data* in the mock so the user judges the UI against real
+  content. Otherwise use representative placeholder data that covers the shapes
+  the real view will show (including an empty state and a busy/overflow state).
+- `layout.py open <name>` to surface it (see Step 4 for the command), then loop:
+  present -> take feedback -> update the mock so the change is *visible* ->
+  re-present. Do not accept feedback and move on having only asserted you'll apply
+  it.
+- Loop until the user **explicitly confirms** the look-and-feel is right.
+
+The user may respond to the mock with a request for functionality that requires updated backend support.
+Your mocks should remain mostly frontend code but demonstrate how things would likely look and feel
+once that updated backend code is implemented. Be careful to confirm that the user will be happy
+with how things look and feel and approximately function prior to doing the heavy work of building out backend code.
+
+**Hard gate (skeleton phase 6).** Do not implement real routes, data, or state
+(Step 2 onward) until that confirmation. The mock is the single source of truth
+for the UI shape: if later work changes the look-and-feel, re-confirm before
+calling the site done.
+
+For the **escape-hatch path** (wrapping a third-party tool) there is no markup you
+author, so there is no mock to build -- the demonstration is the wrapped tool
+itself. Stand it up, show it to the user, and confirm it's what they wanted before
+investing in configuration or integration around it.
+
+## Step 2: Build the real routes to a usable site (after confirmation)
+
+Everything from here runs **only after** the user has confirmed the mock. The
+goal of the foreground work is a *usable* site the user can actually try -- not a
+fully hardened one. Implement the real routes (replacing the mock), wire in the
+data/state architecture you recorded in Step 0, run the Step 3 smoke verify, and
+surface the tab (Step 4). Then **stop and hand the running site to the user** --
+the thorough testing and review gates happen in the background (Step 5), not here.
 
 The starter `runner.py` has just `GET /` (a placeholder HTML page)
 and `GET /health` (returns `{"status": "ok"}`). Replace the
@@ -164,27 +258,25 @@ hand-rolling the call.
 
 When a view renders data *derived* from underlying records (a summary,
 a reformatted list, extracted fields), include -- by default, without
-the user asking -- a clean affordance to see the raw record the view
-was built from and/or jump to its source. Concretely: a "view raw"
-control that shows the original record **rendered in its native format
--- an HTML email as the rendered email (not escaped HTML source text),
-JSON pretty-printed, markdown rendered. The point is the faithful
-original minus your processing, presented as a human would actually
-read it.** When you render untrusted third-party HTML (a raw email
-body is the common case), sandbox it -- a sandboxed `iframe` or a
-sanitizer -- so the view can't run scripts or phone home via tracking
-pixels. And, when the record came from an external service, an "open in
-<source>" link back to the origin (e.g. open the email in Gmail).
-This is the surfacing half of the preserve-and-surface principle in
-CLAUDE.md: the derived view inevitably leaves gaps (a field the agent
-didn't extract, a rendering it didn't anticipate), and a raw/source
-affordance lets the user bridge that gap immediately instead of waiting
-for a rebuild. Design it in from the first version -- it depends on the
-data layer having persisted the raw payload and source reference (see
-the crystallize data-capture guidance), so confirm that's available and
+the user asking -- a "view raw" control showing the original record
+**rendered in its native format** (an HTML email as the rendered email,
+not escaped source; JSON pretty-printed; markdown rendered -- the
+faithful original minus your processing) plus, for records from an
+external service, an "open in <source>" link back to the origin (e.g.
+open the email in Gmail). When you render untrusted third-party HTML (a
+raw email body is the common case), sandbox it -- a sandboxed `iframe`
+or a sanitizer -- so the view can't run scripts or phone home via
+tracking pixels.
+
+This is the surfacing half of the preserve-and-surface principle
+(CLAUDE.md): the derived view inevitably leaves gaps (a field the agent
+didn't extract, a rendering it didn't anticipate), and the raw/source
+affordance lets the user bridge them without waiting for a rebuild.
+Design it in from the first version -- it depends on the data layer
+having persisted the raw payload and source reference (see the
+crystallize data-capture guidance), so confirm that's available and
 flag it if it isn't. Keep it unobtrusive (a small per-record control,
-not clutter), and don't call it out in your chat messages -- it should
-just be there for the user who goes looking. Always present, never
+not clutter) and don't call it out in chat -- always present, never
 announced.
 
 ### File-path conventions
@@ -248,6 +340,52 @@ when the user is asking about what tabs are available (it prints every
 user-facing registered service plus every mngr-level agent, with
 open/running flags; the workspace chrome's own `system_interface` entry
 is hidden).
+
+## Step 5: Finalize in the background (after the user confirms the working site)
+
+The foreground work stops at a usable, surfaced site. The thorough pass --
+extending Playwright coverage, the full test suite and ratchets, `/autofix`, and
+the code-guardian gates -- runs in a **background harden worker**, never in the
+main agent. This is skeleton phase 7: the harden pass
+(`.agents/shared/worker/references/harden-artifact.md`), here the **crystallize**
+operation with the **service** artifact -- the scaffolded service is already on
+disk and the user confirmed it live, so nothing needs reconstructing and there
+are no worker gates.
+
+**The trigger is an explicit confirmation on the *working* site -- never your own
+sense that the code looks done.** Once the usable site is in front of the user,
+ask a plain "this generally looks good?" and hand off only once they confirm by
+exercising the real behavior. (The mock confirmed the UX *shape*; this confirms
+the real *behavior* -- the point where deep changes actually surface, so
+finalizing earlier risks hardening an architecture the user is about to
+invalidate.)
+
+Reading the confirmation signal:
+
+- If the user keeps asking for changes, each one is a **cheap foreground
+  iteration that resets the clock** -- you have run no gates or thorough tests
+  yet, so pivots stay cheap. Do not hand off until their response is a
+  confirmation rather than a change request.
+- If the user starts asking for surface-level (cosmetic) tweaks, or pivots to a
+  slightly unrelated task or follow-up, treat that as a sign the core is settled:
+  still ask, but ground it -- "seems like we've got the core thing settled here
+  -- good to lock it in?" -- rather than leaving it open-ended.
+- Wait for an explicit confirmation rather than firing on a timeout or silence.
+  The user is never blocked: they already hold the usable site.
+
+On confirmation, **hand the confirmed service to the `crystallize-artifact`
+skill with `artifact=service`.** It owns the rest -- the tracking ticket, the
+task file (set `artifact: service`), launching the generic `harden-worker`,
+polling, merging on `done`, and refreshing the tab after merge. Give it only:
+the slug (the service name), and a task body naming the built lib path, the
+service name, the URL segment, and what the service does. The generic worker
+loads `harden-artifact.md` + `op-crystallize.md` + `artifact-service.md` and
+reports `done` once its testing contract and the review gates pass; there is no
+worker gate because the user already confirmed the live site.
+
+The confirmed mock plus the confirmed working site remain the single source of
+truth: if finalization changes the look-and-feel, re-confirm with the user before
+calling the work done.
 
 ## Escape hatch: wrap an existing server
 
@@ -328,44 +466,13 @@ Flags:
 
 ## The global (Cloudflare) URL
 
-If the workspace has Cloudflare tunneling configured, the service is
-also reachable at a public URL in addition to the local one. Two
-caveats:
-
-- **The public hostname is owned server-side**, not by the
-  cloudflared process running in this container. Skimming the
-  `cloudflared` service's logs will not surface a URL.
-- **The public URL is *not* written into `runtime/applications.toml`.**
-  `forward_port.py` only stores `name` and `url` (the local
-  `http://localhost:<port>` backend address). Do not grep that file
-  for a public URL.
-
-The reliable way to get the public URL is through the desktop client
-itself: when the user clicks the service tab, the client resolves the
-public hostname via its services API. If you need the exact URL for
-testing, ask the user to read it from their browser's address bar.
-
-If the workspace does not have a tunnel token configured, this section
-does not apply -- the local `http://127.0.0.1:8000/service/<name>/`
-URL is the only entry point.
+If the workspace has Cloudflare tunneling configured, the service is also
+reachable at a public URL -- with caveats about where that hostname lives and
+why it isn't in `runtime/applications.toml`. See
+[references/public-url.md](references/public-url.md).
 
 ## Cleanup
 
-Removing a web service:
-
-1. `python3 scripts/forward_port.py --name <name> --remove` (drops the
-   entry from `runtime/applications.toml`).
-2. Stop the program and remove its block from `supervisord.conf`, then
-   reconcile:
-
-   ```bash
-   supervisorctl stop <name>
-   # delete the [program:<name>] block from supervisord.conf
-   supervisorctl reread && supervisorctl update
-   ```
-
-   (See `edit-services` for the mechanics.)
-3. If you scaffolded a lib, also: `rm -rf libs/<package>/` and revert
-   the matching diff in the root `pyproject.toml` (drop from
-   `[project].dependencies`, `[tool.uv.workspace].members`, and
-   `[tool.uv.sources]`).
+To remove a web service (drop the `applications.toml` entry, stop and unregister
+the supervisord program, and revert the scaffolded lib), see
+[references/cleanup.md](references/cleanup.md).

@@ -1,9 +1,8 @@
 # When to crystallize
 
-You reached this file because the stop hook flagged a possible skill shape
-in the just-finished turn. Your job now is to decide whether to invoke
-`crystallize-task` -- and the **default is to ask the user**, not to
-decide silently.
+You are deciding whether the just-finished turn is worth crystallizing into a
+reusable skill via `crystallize-artifact` (artifact = skill) -- and the
+**default is to ask the user**, not to decide silently.
 
 ## The rule
 
@@ -33,8 +32,7 @@ classify each step:
 The identical and structurally-same parts are the skill's deterministic
 substructure. The judgement parts are ALSO part of the skill -- scripted as
 `[ai-script]` model calls so the flow runs headless. A step stays `[prose]`
-only when the skill needs the *user* in the loop while it runs, per the
-execution-mode test in `.agents/shared/references/spec-summary.md`.
+only when the skill needs the *user* in the loop while it runs.
 
 If much of the re-run would be literally the same work, you have a
 candidate. Diff the original run against the hypothetical re-run; what's
@@ -44,7 +42,7 @@ shared is the skill's process.
 
 A skill is a SKILL.md recipe ("do X, then Y, then Z") plus supporting
 scripts, references, or assets. Each step is `[script]`, `[ai-script]`, or
-`[prose]` (see `.agents/shared/references/spec-summary.md`). Model-judgement
+`[prose]`. Model-judgement
 steps are scripted as `[ai-script]` calls by default, not parked in prose, so
 a process like fetch (`[script]`) -> natural-language filter (`[ai-script]`)
 -> dedupe and format (`[script]`) runs fully headless.
@@ -58,8 +56,10 @@ step is deterministic.
 Before you decline, check whether your reasoning matches any of these:
 
 - **"This was one-off."** This turn may have involved one-off work (e.g. identifying data sources); that does not mean that the whole task was one-off. Consider the output that you generated - is it possible the user may want this output regenerated based on updated data or using different parameter values?
-- **"The data sources change too fast."** Fragility is manageable via `heal-skill` when the skill is
-  used often. You can flag to the user if you think this is a serious concern, but it shouldn't by itself be a reason not to crystallize.
+- **"The data sources change too fast."** Fragility is manageable via
+  `heal-artifact` when the skill is used often. You can flag to the user if you
+  think this is a serious concern, but it shouldn't by itself be a reason not to
+  crystallize.
 - **"The hard part was judgement."** Setup judgement (which sites, which
   filters, which approach) is often a one-time cost paid during the first
   run; the crystallized skill captures the *post-setup* process. Ongoing

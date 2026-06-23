@@ -29,16 +29,16 @@ mngr create my-workspace main -t local \
 ## Create templates
 
 - `worker` - For sub-agents created via the launch-task skill (includes code review)
-- `subskill-worker` - Sub-agent for any flow that hands its worker a bundled sub-skill (the skill crystallization / heal / update lifecycle and the update-system-interface flow). Inherits from `worker` and pre-installs every parent skill's bundled `<parent>-worker` sub-skill (auto-discovered from each `assets/worker/` directory) into its own `.agents/skills/`.
+- `subskill-worker` - Sub-agent for any flow that hands its worker the generic harden worker (the crystallize / update / heal artifact lifecycle, including the update-system-interface flow). Inherits from `worker` and pre-installs the single generic worker from `.agents/shared/worker/` into its own `.agents/skills/` as `harden-worker`.
 
-## Skill crystallization lifecycle
+## Artifact harden lifecycle
 
-The main agent can promote ad-hoc work into reusable deterministic skills, heal skills that fail, and extend skills that came up short. The user-invokable surface is three skills (main agent side):
+The main agent can promote ad-hoc work into reusable artifacts, fix artifacts that fail, and extend artifacts that came up short -- across skills, web services, and the system interface. The user-invokable surface is three generic operation leads (main agent side), each parameterized by the artifact:
 
-- `crystallize-task` - Turn the just-finished turn into a new skill. Triggered by a Stop-hook reminder when the turn used >=8 non-read tool calls (detection lives in `scripts/detect_crystallization_candidate.py`).
-- `heal-skill` - Repair a skill that errored or produced wrong results.
-- `update-skill` - Extend a skill (or split off a new sibling) when post-processing revealed a gap.
+- `crystallize-artifact` - Create a new artifact (default: a skill reconstructed from the just-finished turn). Invoked directly post-turn, or by the live-half wrappers (`build-web-service`, `fetch-process-show`) once a prototype is confirmed.
+- `heal-artifact` - Fix a skill or service that errored or produced wrong results.
+- `update-artifact` - Extend / refactor / verify a skill, service, or shared reference; one flow with a committed-vs-emergent design-gate toggle.
 
-Each of these spawns a `subskill-worker` sub-agent that runs a matching build / heal / update sub-skill bundled under each parent skill's `assets/worker/` directory (`.agents/skills/crystallize-task/assets/worker/`, `.agents/skills/heal-skill/assets/worker/`, `.agents/skills/update-skill/assets/worker/`). Workers commit to `mngr/<task-name>` branches; main merges on user approval. (The same template also backs the `update-system-interface` flow, whose worker sub-skill is bundled at `.agents/skills/update-system-interface/assets/worker/`.)
+Each lead spawns a `subskill-worker` sub-agent that runs the single generic `harden-worker` sub-skill. The worker reads the operation and artifact from its task file and composes the universal `harden-artifact.md` contract with one `op-*.md` and one `artifact-*.md` reference under `.agents/shared/worker/references/`. Workers commit to `mngr/<task-name>` branches; main merges on user approval. (The same template also backs the `update-system-interface` flow, which wraps `update-artifact` with `artifact=system-interface` and adds its preview / safe-reveal go-live.)
 
 Crystallized skills are marked with `metadata.crystallized: true` in their SKILL.md frontmatter and follow the [agentskills.io](https://agentskills.io/specification) layout (`scripts/run.py` as a PEP 723 script, companion SKILL.md, optional `references/` and `assets/`).
