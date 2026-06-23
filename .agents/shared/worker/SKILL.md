@@ -31,45 +31,39 @@ loudly if `OPERATION` or `ARTIFACT` is unset -- the lead must supply both.
 
 ## Step 2: Load the references that define your run
 
-Everything you need is loaded here, at the top level -- the references below
-never send you off to load further references mid-run. Read them in this order.
+Read these top to bottom, then follow them.
 
-**Always, in order:**
+Filenames are relative to `.agents/shared/worker/references/`, except the two
+marked **[shared]**, which live in `.agents/shared/references/`.
 
-1. `.agents/shared/worker/references/harden-artifact.md` -- the universal contract (the
-   bar, isolation, reporting, testing/hardening, review gates,
-   preserve-and-surface, give-up).
-2. `.agents/shared/worker/references/op-<OPERATION>.md` -- your operation's pre-work,
-   stages, the exact gate / terminal-status `name:` values that apply, and the
-   gate report body templates (keyed by artifact where they differ).
-3. `.agents/shared/worker/references/artifact-<ARTIFACT>.md` -- what the artifact is:
-   where it lives, how to run/test it in isolation, scenario specifics, and how
-   to work on it safely.
-4. `.agents/shared/references/worker-reporting.md` -- the report-file procedure
-   and task-file frontmatter schema (Step 3 uses it).
-5. `.agents/shared/worker/references/transcript-exploration.md` -- how to find the
-   work in the lead's transcript. (Skip only when you are crystallizing a
-   pre-built service or verifying an already-committed update -- those read the
-   artifact or the diff directly rather than the transcript.)
+| Load when | Reference | What it gives you |
+|---|---|---|
+| every run | `harden-artifact.md` | the universal contract: the bar, isolation, reporting, testing/hardening, review gates, preserve-and-surface, give-up |
+| every run | `op-<OPERATION>.md` | your operation's spine: pre-work, stages, which gates fire and their `name:` values, gate report templates |
+| every run | `artifact-<ARTIFACT>.md` | the artifact itself: where it lives, how to run/test it in isolation, how to edit it safely |
+| every run | `worker-reporting.md` **[shared]** | the report-file procedure and task-file frontmatter schema (Step 3 uses it) |
+| you reconstruct the work from the lead's session | `transcript-exploration.md` | how to find the work in the lead's transcript |
+| `ARTIFACT` is `skill` | `spec-summary.md` **[shared]** | the agentskills.io layout/spec authority |
+| `ARTIFACT` is `skill`, and your operation runs an outline gate | `skill-outline-fields.md` | what goes inside the outline gate |
+| `ARTIFACT` is `skill`, on an emergent `update` | `update-vs-create-new.md` | update-in-place vs. split-a-new-sibling |
+| `ARTIFACT` is `service` or `system-interface` | `web-frontend-testing.md` | isolated-instance and rendered-page rules |
 
-**Then, conditionally:**
+The two conditional cases that need defining:
 
-- `ARTIFACT` is `skill` -> also read
-  `.agents/shared/references/spec-summary.md` (the agentskills.io layout/spec
-  authority). When the operation designs the skill (`crystallize`, or `update`)
-  -> also read `.agents/shared/worker/references/skill-outline-fields.md` (the
-  outline-gate contents); for an `update` -> also read
-  `.agents/shared/worker/references/update-vs-create-new.md` (in-place vs.
-  new-sibling decision). (A committed-origin update skips the design gate, so it
-  won't end up using these two -- loading them anyway is harmless.)
-- `ARTIFACT` is `service` or `system-interface` -> also read
-  `.agents/shared/worker/references/web-frontend-testing.md` (isolated-instance and
-  rendered-page rules).
+- **"you reconstruct the work from the lead's session"** -- a skill
+  `crystallize`, an emergent `update`, or any `heal`: the work or incident you
+  must reproduce lives only in the conversation. The other runs are handed a
+  materialized source instead and skip `transcript-exploration.md` -- a committed
+  `update` reads the diff, a service `crystallize` reads the pre-built service on
+  disk, and a system-interface change reads its brief.
+- **"runs an outline gate"** -- a skill `crystallize` or an emergent skill
+  `update`. A committed `update` and any `heal` have no outline gate, so they
+  never use `skill-outline-fields.md` or `update-vs-create-new.md` (loading them
+  anyway is harmless).
 
-Then follow them. The operation reference is the lifecycle spine -- it owns the
-stages, which gates fire and in what order, and the report templates. The
-artifact reference is the operation-agnostic description of the thing you are
-hardening -- its layout, test mechanics, and isolation rules. Where the operation
+The operation reference is the lifecycle spine -- it owns the stages, which gates
+fire and in what order, and the report templates. The artifact reference is the
+operation-agnostic description of the thing you are hardening. Where the operation
 reference needs an artifact-specific value (a gate template's field list, the
 crystallize shape), it carries that itself, keyed by artifact.
 

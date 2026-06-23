@@ -9,8 +9,8 @@ The artifact already exists on disk, so there is nothing to reconstruct. The one
 axis of variation is a **design-gate toggle** keyed on whether the change is
 already committed:
 
-- **Committed** -- you and the user discussed the change live and it is already
-  committed on the branch (the worker branched off it, so it is present in your
+- **Committed** -- the lead and the user discussed the change live and it is
+  already committed on the branch (you branched off it, so it is present in your
   worktree). The design was approved organically in chat, so **skip the design
   gate**; read the committed change as ground truth, verify it, and present the
   final gate.

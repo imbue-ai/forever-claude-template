@@ -61,8 +61,8 @@ specifics, but the shape below holds for all of them.
    yet. The confirmation from phase 5 is what unlocks this.
 
 7. **Harden / ratify.** The expensive, thorough pass: real tests, review gates,
-   polish. This **always runs in a background worker**; you (as the main agent)
-   never run the code-guardian gates or the thorough test passes itself.
+   polish. This **always runs in a background worker**; you never run the
+   code-guardian gates or the thorough test passes yourself.
    Backgrounding never strands the user, because they already have the confirmed
    artifact (or a usable build of it) to work with while the slow checks run
    behind them. Notably, this means that at the time of backgrounding there must

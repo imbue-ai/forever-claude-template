@@ -179,7 +179,7 @@ If it isn't `RUNNING`, read its log
 (`/var/log/supervisor/<name>-stderr.log`) or run
 `supervisorctl tail <name> stderr`.
 
-### Put a throwaway mock in front of the user (the confirmation gate)
+### Put a throwaway mock in front of the user (the confirmation gate; looped)
 
 Scaffolding the service is fine before confirmation -- it is cheap and reversible.
 **Building the real data layer or state architecture before the user confirms the
@@ -201,6 +201,11 @@ This is skeleton phase 5 (the cheap throwaway artifact). Keep it disposable:
   re-present. Do not accept feedback and move on having only asserted you'll apply
   it.
 - Loop until the user **explicitly confirms** the look-and-feel is right.
+
+The user may respond to the mock with a request for functionality that requires updated backend support.
+Your mocks should remain mostly frontend code but demonstrate how things would likely look and feel
+once that updated backend code is implemented. Be careful to confirm that the user will be happy
+with how things look and feel and approximately function prior to doing the heavy work of building out backend code.
 
 **Hard gate (skeleton phase 6).** Do not implement real routes, data, or state
 (Step 2 onward) until that confirmation. The mock is the single source of truth

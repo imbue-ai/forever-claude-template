@@ -29,10 +29,10 @@ one-line description, that is a signal to split (combined with the
 standalone-use-case check above).
 
 If the extra work was **one-off creative or exploratory** with no repeatable
-pattern, it is NOT an update candidate -- it stays with the main agent.
+pattern, it is NOT an update candidate -- it stays with the lead.
 Model-judgement work with a repeatable recipe IS a candidate; by default it
 becomes a scripted model step (`[ai-script]`), with prose
 reserved for executor meta-work.
 
-In the `verify` flow the decision has already been made by the committed
-change; the worker's job is to verify, not to re-litigate.
+In the committed (verify) path the decision has already been made by the
+committed change; your job is to verify it, not to re-litigate.

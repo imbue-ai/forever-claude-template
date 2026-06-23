@@ -1,6 +1,6 @@
 ---
 name: update-artifact
-description: "Change an existing artifact through the background harden pass -- extend, refactor, or verify a skill, a service, or a shared script/reference under .agents/shared/. Invoke at turn-end when a skill ran but you had to do additional repeatable work by hand (emergent change), or when you and the user discussed a change and you applied it live (committed change). One flow with a design-gate toggle: committed changes skip the design gate and just verify; emergent changes reconstruct the work and run a design gate first."
+description: "Change an existing artifact through the background harden pass -- extend, refactor, or verify a skill, a service, or a shared script/reference under .agents/shared/. Invoke at turn-end when a skill ran but you had to do additional repeatable work by hand (emergent change), or when you and the user discussed a change and you applied it live (committed change)."
 ---
 
 # Updating an existing artifact
@@ -9,6 +9,8 @@ This is the **change** lead of the generic artifact lifecycle. The artifact
 already exists; you dispatch a generic worker to harden the change in the
 background, proxy its gates, merge, and go live. There is one flow with a
 **design-gate toggle** keyed on whether the change is already committed.
+
+**NOTE: If the artifact in question is the system_interface service, defer to the `update-system-interface` skill flow instead**
 
 ## The two origins
 

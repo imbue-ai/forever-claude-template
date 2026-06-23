@@ -1,6 +1,6 @@
 ---
 name: heal-artifact
-description: "Fix an existing artifact that errored or delivered a wrong result -- the heal operation of the live-first/ratify-at-turn-end lifecycle. The default artifact is a skill: a crystallized or hand-authored skill under .agents/skills/ that should have worked but didn't. Invoke at turn-end, after you worked around the failure to satisfy the user's request. Also heals a broken web service. (System-interface regressions go through update-system-interface, which owns the safe-reveal go-live.)"
+description: "Fix an existing artifact that errored or delivered a wrong result -- the heal operation of the live-first/ratify-at-turn-end lifecycle. This applies to skills or web services. Invoke at turn-end, after you worked around the failure to satisfy the user's request."
 ---
 
 # Healing a broken artifact
@@ -11,6 +11,8 @@ generic worker to reproduce the incident, find the root cause, apply a minimal
 fix, re-run scenarios, and present a single approval gate. Heal is a turn-end
 action -- do not interrupt in-flight work to invoke it; the user's original
 request is already delivered.
+
+**NOTE: If the issue in question was with the system_interface service, you should defer to the `update-system-interface` skill flow instead**
 
 ## The artifact parameter
 
