@@ -131,7 +131,7 @@ isolate_host_volumes = true
 # the default runtime where gVisor is unavailable (e.g. CI, Modal) with
 # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
 docker_runtime = "runsc"
-# First-time Dockerfile.nixos builds pull a large Nix base and closure; keep the
+# First-time nix/Dockerfile builds pull a large Nix base and closure; keep the
 # Docker provider timeout wide enough for that separate template path.
 build_timeout_seconds = 5400
 
@@ -254,7 +254,7 @@ target_path = "/mngr/code/"
 # Keep this as a separate mode rather than stacking after the docker template:
 # docker already contributes --file=Dockerfile and the build context.
 setting__extend = ["providers.docker.is_enabled=true"]
-build_arg__extend = ["--file=Dockerfile.nixos", "."]
+build_arg__extend = ["--file=nix/Dockerfile", "."]
 # Same runtime contract as create_templates.docker; only the build Dockerfile differs.
 start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 idle_mode = "disabled"

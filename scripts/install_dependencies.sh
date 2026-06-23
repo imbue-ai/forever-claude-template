@@ -10,7 +10,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/root/.local/bin:$PATH"
 if [ -f /etc/profile.d/fct_path.sh ]; then
-    # Dockerfile.nixos writes the Nix profile paths here instead of baking them
+    # nix/Dockerfile writes the Nix profile paths here instead of baking them
     # into Dockerfile-level ENV declarations.
     # shellcheck source=/dev/null
     . /etc/profile.d/fct_path.sh

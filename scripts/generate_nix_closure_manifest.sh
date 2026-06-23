@@ -2,7 +2,7 @@
 set -euo pipefail
 
 image_tag="${FCT_NIX_CLOSURE_IMAGE_TAG:-fct-nixos-closure-manifest:local}"
-dockerfile="${FCT_DOCKERFILE:-Dockerfile.nixos}"
+dockerfile="${FCT_DOCKERFILE:-nix/Dockerfile}"
 platform="${FCT_DOCKER_PLATFORM:-}"
 
 build_args=(

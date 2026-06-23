@@ -1,6 +1,6 @@
 - Added a locked Nix flake for the Docker/NixOS workspace system package set, so the Nix-managed tools resolve through a committed `flake.lock` instead of the base image's ambient `<nixpkgs>` channel.
 
-- Updated `Dockerfile.nixos` to build the workspace system environment from the locked flake while leaving Docker base-image digest pinning as a later golden-image hardening step.
+- Updated the Docker/NixOS Dockerfile to build the workspace system environment from the locked flake while leaving Docker base-image digest pinning as a later golden-image hardening step.
 
 - Moved the Docker/NixOS workspace package set to Node 24 because the locked `nixpkgs` revision marks Node 20 as insecure/end-of-life, and the workspace still needs npm for global CLI installation.
 
@@ -12,4 +12,6 @@
 
 - Added an `/etc/fonts/fonts.conf` compatibility path in the Docker/NixOS image so Playwright's Chromium can load fontconfig and render text-heavy pages reliably.
 
-- Refactored `Dockerfile.nixos` to delegate Nix profile setup, closure verification, and compatibility shims to a parallel `setup_system_nixos.sh` script so the Dockerfile structure stays close to the Debian Dockerfile.
+- Refactored the Docker/NixOS Dockerfile to delegate Nix profile setup, closure verification, and compatibility shims to a parallel `setup_system_nixos.sh` script so the Dockerfile structure stays close to the Debian Dockerfile.
+
+- Moved the Docker/NixOS Dockerfile to `nix/Dockerfile` so IDEs recognize it as a Dockerfile while keeping the repo-root Docker build context.

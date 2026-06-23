@@ -163,7 +163,7 @@ def test_docker_nixos_template_uses_nix_dockerfile_as_separate_path() -> None:
     assert result["provider"] == "docker"
     assert result["target_path"] == "/mngr/code/"
     assert result["idle_mode"] == "disabled"
-    assert result["build_arg"] == ("--file=Dockerfile.nixos", ".")
+    assert result["build_arg"] == ("--file=nix/Dockerfile", ".")
     assert result["post_host_create_command"] == ("/usr/local/bin/fct-seed",)
     assert "ANTHROPIC_API_KEY" in result["pass_host_env"]
     assert "ANTHROPIC_BASE_URL" in result["pass_host_env"]

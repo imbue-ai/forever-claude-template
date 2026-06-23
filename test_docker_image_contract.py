@@ -32,9 +32,10 @@ _IMAGE_TAG = os.environ.get("FCT_DOCKER_IMAGE_TAG", "fct-docker-image-contract:l
 _BUILD_TIMEOUT_SECONDS = int(os.environ.get("FCT_DOCKER_BUILD_TIMEOUT_SECONDS", "3600"))
 _RUN_TIMEOUT_SECONDS = int(os.environ.get("FCT_DOCKER_RUN_TIMEOUT_SECONDS", "300"))
 _PROVIDER_TEMPLATE = os.environ.get("FCT_DOCKER_PROVIDER_TEMPLATE", "docker-nixos")
+_IS_NIXOS_DOCKERFILE = Path(_DOCKERFILE).as_posix().lstrip("./") == "nix/Dockerfile"
 _EXPECTED_NODE_MAJOR = os.environ.get(
     "FCT_EXPECTED_NODE_MAJOR",
-    "24" if Path(_DOCKERFILE).name == "Dockerfile.nixos" else "20",
+    "24" if _IS_NIXOS_DOCKERFILE else "20",
 )
 
 

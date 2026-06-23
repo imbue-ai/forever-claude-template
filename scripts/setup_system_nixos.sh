@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NixOS-backed system-toolchain setup for Dockerfile.nixos.
+# NixOS-backed system-toolchain setup for nix/Dockerfile.
 #
 # Mirrors scripts/setup_system.sh at the Dockerfile level while keeping the
 # Nix-specific profile build, closure verification, and FHS compatibility shims
