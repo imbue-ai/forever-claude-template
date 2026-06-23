@@ -7,3 +7,5 @@
 - Updated the Docker image contract smoke test so the Debian Dockerfile continues to expect Node 20 while the Docker/NixOS path expects Node 24 by default.
 
 - Switched the Docker/NixOS workspace flake input from `nixos-unstable` to the current stable `nixos-26.05` branch.
+
+- Pinned the Docker/NixOS workspace base image by digest and added a checked-in Nix closure manifest for the verified `aarch64-linux` build, so the image build fails if the resolved Nix system package closure changes unexpectedly. Added an explicit manifest regeneration script for intentional closure updates.

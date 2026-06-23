@@ -1,4 +1,4 @@
-FROM nixos/nix:2.34.7
+FROM nixos/nix:2.34.7@sha256:bf1d938835ab96312f098fa6c2e9cab367728e0aad0646ee3e02a787c80d8fb8 AS fct-nix-profile
 
 SHELL ["/root/.nix-profile/bin/bash", "-euo", "pipefail", "-c"]
 
@@ -14,6 +14,7 @@ ARG CLAUDE_CODE_VERSION=2.1.160
 ARG UV_VERSION=0.11.7
 ARG MODAL_VERSION=1.4.2
 ARG LATCHKEY_VERSION=2.17.1
+ARG FCT_NIX_CLOSURE_MODE=verify
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 ENV OPENSSL_armcap=0
 ENV NPM_CONFIG_PREFIX=/usr/local
@@ -23,10 +24,28 @@ ENV NPM_CONFIG_PREFIX=/usr/local
 # ============================================================================
 COPY flake.nix flake.lock /tmp/fct-nix/
 COPY nix/fct-workspace-env.nix /tmp/fct-nix/nix/fct-workspace-env.nix
+COPY nix/fct-workspace-closure.*.txt /tmp/fct-nix/nix/
 RUN nix --extra-experimental-features "nix-command flakes" build \
       --no-update-lock-file \
       --out-link "$FCT_NIX_PROFILE" \
-      /tmp/fct-nix#fct-workspace-env
+      /tmp/fct-nix#fct-workspace-env \
+    && case "$(uname -m)" in \
+      x86_64) fct_nix_system=x86_64-linux ;; \
+      aarch64|arm64) fct_nix_system=aarch64-linux ;; \
+      *) echo "unsupported docker architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac \
+    && expected_manifest="/tmp/fct-nix/nix/fct-workspace-closure.${fct_nix_system}.txt" \
+    && mkdir -p /etc/fct-workspace \
+    && nix-store -q --requisites "$FCT_NIX_PROFILE" | sort > /etc/fct-workspace/nix-closure.txt \
+    && case "$FCT_NIX_CLOSURE_MODE" in \
+      verify) test -f "$expected_manifest" && diff -u "$expected_manifest" /etc/fct-workspace/nix-closure.txt ;; \
+      generate) true ;; \
+      *) echo "unsupported FCT_NIX_CLOSURE_MODE: $FCT_NIX_CLOSURE_MODE" >&2; exit 1 ;; \
+    esac
+
+FROM fct-nix-profile AS workspace
+
+SHELL ["/root/.nix-profile/bin/bash", "-euo", "pipefail", "-c"]
 
 # Compatibility paths expected by mngr's Docker/SSH provider and by downloaded
 # tools that assume FHS dynamic-loader locations.

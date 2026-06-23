@@ -287,6 +287,10 @@ test "$(readlink /worktree)" = "/mngr/worktree"
 test -x /usr/local/bin/fct-seed
 test -L /usr/local/bin/tk
 test -L /usr/local/bin/ticket
+if [ -n "${FCT_NIX_PROFILE:-}" ]; then
+  test -s /etc/fct-workspace/nix-closure.txt
+  grep -E '/nix/store/.+-nodejs-24\.16\.0' /etc/fct-workspace/nix-closure.txt >/dev/null
+fi
 test -d /docker_build_code
 test -f /docker_build_code/pyproject.toml
 test -f /docker_build_code/supervisord.conf
