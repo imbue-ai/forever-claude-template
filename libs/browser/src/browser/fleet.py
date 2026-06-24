@@ -237,6 +237,17 @@ def cmd_new(_args: argparse.Namespace) -> int:
     return _EXIT_BUSY if status == 409 else _EXIT_ERROR
 
 
+def cmd_close(args: argparse.Namespace) -> int:
+    """Close an entire browser (all its tabs) and free its resources -- not just one tab.
+    Use this when you're permanently done with a browser; the id is retired (never reused)."""
+    status, payload = _request("DELETE", f"/browsers/{args.id}")
+    if status != 200:
+        _err(payload.get("error", f"close failed ({status})"))
+        return _EXIT_ERROR
+    _out(f"closed browser {args.id}")
+    return _EXIT_OK
+
+
 def _render_event(event: dict[str, Any], browser_id: int) -> int | None:
     """Print one task/hold event; return an exit code for terminal events, else None."""
     kind = event.get("type")
@@ -442,6 +453,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ls.add_argument("--include-tabs", action="store_true", help="List every open tab per browser, not just the active one.")
     p_ls.set_defaults(func=cmd_ls)
     sub.add_parser("new", help="Start a new browser and print its id.").set_defaults(func=cmd_new)
+
+    p_close = sub.add_parser("close", help="Close an entire browser (all tabs) and retire its id. For one tab, use `tab <id> close`.")
+    p_close.add_argument("id", type=int)
+    p_close.set_defaults(func=cmd_close)
 
     p_task = sub.add_parser("task", help="Run a browser-use task on a browser; stream its trace.")
     p_task.add_argument("id", type=int, help="Browser id (0 is the default browser).")

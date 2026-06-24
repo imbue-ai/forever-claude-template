@@ -14,7 +14,8 @@ browsers, each with an atomic ownership state machine, plus an
 - Browsers have stable integer ids (0 is the default, created on demand; others
   are monotonic and never reused). `GET /browsers` / `ls [--include-tabs]` list
   the fleet with each browser's owner and tabs; `new` starts another (409 when
-  full).
+  full); `close <id>` shuts an entire browser down (all its tabs) and retires its
+  id -- distinct from `tab <id> close`, which closes a single tab.
 
 - Each browser is controlled by exactly one party at a time -- a specific agent
   (by `MNGR_AGENT_ID`) or the human -- via one compare-and-set transition guarded

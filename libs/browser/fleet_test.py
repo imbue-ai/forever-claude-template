@@ -106,3 +106,5 @@ def test_parser_accepts_direct_verbs() -> None:
     assert tab.func is fleet.cmd_tab and tab.action == "switch" and tab.index == 1
     assert p.parse_args(["acquire", "0", "--reclaim"]).reclaim is True
     assert p.parse_args(["ls", "--include-tabs"]).include_tabs is True
+    close = p.parse_args(["close", "4"])
+    assert close.func is fleet.cmd_close and close.id == 4
