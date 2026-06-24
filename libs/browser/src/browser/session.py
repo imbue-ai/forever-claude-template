@@ -47,6 +47,7 @@ import os
 import time
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -325,10 +326,16 @@ class LiveBrowser(MutableModel):
     # When a resume-queue agent was handed the browser but hasn't sent a command
     # yet (the claim window); 0.0 once it claims (or when no grant is pending).
     _granted_at: float = PrivateAttr(default=0.0)
-    # Strong refs to in-flight _wake_agent tasks. asyncio keeps only weak references
-    # to bare create_task() results, so without this the wake (an `mngr message`
-    # subprocess) could be garbage-collected before it runs.
-    _wake_tasks: set[Any] = PrivateAttr(default_factory=set)
+    # Strong refs to in-flight fire-and-forget tasks (the _wake_agent subprocess, the
+    # crash announcement). asyncio keeps only weak references to bare create_task()
+    # results, so without this they could be garbage-collected before they run.
+    _bg_tasks: set[Any] = PrivateAttr(default_factory=set)
+    # Set once Chromium dies unexpectedly (OS/OOM kill, segfault) -- detected via the
+    # Playwright observer's `disconnected` event, or lazily when an action finds the
+    # connection gone. A crashed browser reports "crashed" to agents and the viewer
+    # rather than silently freezing; its id is never reused (a new browser gets a new
+    # number), so the dead one stays clearly labeled.
+    _crashed: bool = PrivateAttr(default=False)
 
     async def start(self, playwright: Playwright) -> None:
         """Launch the headless Chromium (browser-use) and attach the Playwright observer."""
@@ -353,6 +360,10 @@ class LiveBrowser(MutableModel):
             raise BrowserStartupError("browser-use BrowserSession did not expose a cdp_url after start")
         observer = await playwright.chromium.connect_over_cdp(cdp_url)
         self._observer = observer
+        # Detect an unexpected Chromium death (OS/OOM kill, segfault): the observer's
+        # CDP connection drops and Playwright fires `disconnected`. Our own close()
+        # also fires it, so the handler ignores the case where _closed is already set.
+        observer.on("disconnected", self._on_disconnected)
         self._context = observer.contexts[0] if observer.contexts else await observer.new_context()
         self._context.on("page", self._on_new_page)
         pages = self._context.pages
@@ -543,6 +554,8 @@ class LiveBrowser(MutableModel):
         while not self._closed:
             await asyncio.sleep(_KEEPALIVE_SECONDS)
             await self._broadcast({"type": "ping"})
+            if self._crashed:
+                continue  # a dead browser: keep the proxy alive, but no sweeps/handoffs
             changed = (
                 await self._sweep_unclaimed_grant()
                 or await self._sweep_stale_human_pin()
@@ -747,11 +760,35 @@ class LiveBrowser(MutableModel):
         """Drop an agent from the resume queue (it took control / no longer waiting)."""
         self._resume_queue = [(aid, an) for (aid, an) in self._resume_queue if aid != agent_id]
 
+    def _spawn(self, coro: Coroutine[Any, Any, None]) -> None:
+        """Run a fire-and-forget coroutine, holding a strong ref so it isn't GC'd."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
     def _spawn_wake(self, agent_id: str, agent_name: str | None) -> None:
         """Schedule a wake, holding a strong ref so the task isn't GC'd before it runs."""
-        task = asyncio.create_task(self._wake_agent(agent_id, agent_name))
-        self._wake_tasks.add(task)
-        task.add_done_callback(self._wake_tasks.discard)
+        self._spawn(self._wake_agent(agent_id, agent_name))
+
+    def _on_disconnected(self, _browser: Browser) -> None:
+        """Playwright fires this when the Chromium CDP connection drops. During our own
+        teardown (``_closed``) it's expected; otherwise the browser crashed -- record it
+        and tell the viewer. The agent finds out on its next command (see run_action)."""
+        if self._closed or self._crashed:
+            return
+        self._crashed = True
+        self._spawn(self._announce_crash())
+
+    async def _announce_crash(self) -> None:
+        logger.warning("browser {} crashed (Chromium connection lost)", self.browser_id)
+        await self._broadcast({"type": "crashed", "browser_id": self.browser_id})
+
+    def _observer_alive(self) -> bool:
+        """Whether the Chromium connection is still up (cheap, no round-trip)."""
+        return self._observer is not None and self._observer.is_connected()
+
+    def _crashed_payload(self) -> dict[str, Any]:
+        return {"ok": False, "status": "crashed", **self._control_state()}
 
     async def _wake_agent(self, agent_id: str, agent_name: str | None) -> None:
         """Message a queued agent that the browser is its again, so it resumes in a
@@ -1044,6 +1081,10 @@ class LiveBrowser(MutableModel):
         ``_control_lock`` -- so a human take-control stays instant (at worst one
         in-flight action lands before the next command sees it).
         """
+        # The browser died (OS/OOM kill, crash): don't try to acquire or drive a
+        # corpse -- tell the agent it's gone so it starts a fresh one.
+        if self._crashed:
+            return self._crashed_payload()
         # Did I already hold the lease, or does this command newly take the browser?
         # The client uses this to surface the browser pane exactly once -- on the
         # first command for a browser (and again after a human hands it back) --
@@ -1069,6 +1110,12 @@ class LiveBrowser(MutableModel):
                 result = await action(self._ensure_action_handler())
             except _BROWSER_ERRORS as e:
                 logger.debug("direct action failed on browser {} ({})", self.browser_id, e)
+                # If the connection is gone, the browser crashed (the `disconnected`
+                # event may not have fired yet) -- classify it so the agent gets a
+                # clear "crashed, start a new one" rather than a raw CDP exception.
+                if not self._observer_alive():
+                    self._on_disconnected(self._observer)  # idempotent: marks + announces once
+                    return self._crashed_payload()
                 return {"ok": False, "status": "error", "error": str(e), **self._control_state()}
         return {"ok": True, "status": "ok", "newly_acquired": not was_mine, **result, **self._control_state()}
 
@@ -1176,9 +1223,11 @@ class LiveBrowser(MutableModel):
         """Send current control + tab state to a freshly-connected cast socket (initial sync)."""
         await ws.send_json(self._control_message())
         await ws.send_json({"type": "tabs", "tabs": await self._tab_list()})
+        if self._crashed:  # a viewer opening a crashed browser sees the crash state at once
+            await ws.send_json({"type": "crashed", "browser_id": self.browser_id})
 
     async def describe(self) -> dict[str, Any]:
-        """Snapshot for ``GET /browsers``: id, owner, and the current tab list."""
+        """Snapshot for ``GET /browsers``: id, owner, crash state, and the tab list."""
         return {
             "id": self.browser_id,
             "controller": self.controller,
@@ -1186,7 +1235,8 @@ class LiveBrowser(MutableModel):
             "owner_name": self.owner_agent_name,
             "human_pinned": self.human_pinned,
             "waiting": self._waiting_names(),
-            "tabs": await self._tab_list(),
+            "crashed": self._crashed,
+            "tabs": [] if self._crashed else await self._tab_list(),
         }
 
     async def _broadcast(self, message: dict[str, Any]) -> None:
@@ -1270,9 +1320,12 @@ class BrowserSessionManager(MutableModel):
     async def create(self) -> LiveBrowser:
         """Start a new browser with the next monotonic id ('New browser' / fleet ``new``)."""
         async with self._lock:
-            if len(self._browsers) >= _MAX_SESSIONS:
+            # Crashed browsers are dead shells kept only to report "crashed"; they
+            # don't count toward the cap, so a crash never blocks opening a new one.
+            live = sum(1 for browser in self._browsers.values() if not getattr(browser, "_crashed", False))
+            if live >= _MAX_SESSIONS:
                 raise FleetFullError(
-                    f"Too many open browsers ({len(self._browsers)}/{_MAX_SESSIONS}). "
+                    f"Too many open browsers ({live}/{_MAX_SESSIONS}). "
                     "Close one before opening another."
                 )
             browser_id = self._next_id

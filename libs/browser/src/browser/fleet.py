@@ -196,6 +196,8 @@ def _pull_in_pane(browser_id: int) -> None:
 
 
 def _owner_label(browser: dict[str, Any], me: str | None) -> str:
+    if browser.get("crashed"):
+        return "crashed (gone -- start a new one)"
     if browser["controller"] == "agent":
         name = browser.get("owner_name") or browser.get("owner_agent_id") or "?"
         return "you" if browser.get("owner_agent_id") == me else f"agent {name}"
@@ -356,6 +358,10 @@ def _render_action(payload: dict[str, Any], browser_id: int, kind: str) -> int:
              "Tell the user you'll pick up when they hand it back, then end your turn; "
              f"re-run `state {browser_id}` when you resume.")
         return _EXIT_PREEMPTED
+    if status == "crashed":
+        _err(f"browser {browser_id} crashed (Chromium was killed -- e.g. out of memory) and is gone. "
+             f"Start a fresh one with `new` (it gets a new number); browser {browser_id} won't come back.")
+        return _EXIT_ERROR
     if status == "stale_index":
         _err(payload.get("error") or f"that element index is stale -- run `state {browser_id}` again first")
         return _EXIT_ERROR

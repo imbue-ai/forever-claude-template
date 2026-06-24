@@ -298,3 +298,32 @@ def test_direct_control_state_click_is_keyless_real_chromium(monkeypatch: pytest
             await manager.shutdown()
 
     asyncio.run(go())
+
+
+def test_browser_crash_is_detected_and_reported_real_chromium(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Kill the live Chromium out from under the session (simulating an OS/OOM kill,
+    # NOT our own close()), and confirm the daemon detects the crash and reports it
+    # cleanly to the agent instead of leaking a raw CDP exception.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    async def go() -> None:
+        manager = bsession.BrowserSessionManager()
+        try:
+            browser = await manager.create()
+        except (bsession.BrowserStartupError, PlaywrightError, OSError) as e:
+            pytest.skip(f"Chromium unavailable in this environment: {e}")
+        try:
+            assert (await browser.act_state("A", "Alice"))["ok"]  # healthy first
+            # Kill Chromium directly (this is NOT close(), so _closed stays False ->
+            # it looks exactly like an external crash).
+            await browser._bu_session.kill()
+            # The next command must report "crashed" -- via the disconnected event if
+            # it already fired, otherwise via the lazy is_connected() check on failure.
+            result = await browser.act_state("A", "Alice")
+            assert result["ok"] is False and result["status"] == "crashed"
+            assert browser._crashed is True
+            assert (await browser.describe())["crashed"] is True
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(go())

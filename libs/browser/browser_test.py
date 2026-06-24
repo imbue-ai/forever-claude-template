@@ -366,6 +366,68 @@ def test_take_control_evicts_waiters() -> None:
 # --- manager: ids + cap ------------------------------------------------------
 
 
+def test_crashed_browser_reports_crashed_to_agent_and_viewer() -> None:
+    # When Chromium dies, the browser reports "crashed" to the agent's next command
+    # (it doesn't try to drive a corpse), surfaces it to viewers, and shows in describe().
+    browser = bsession.LiveBrowser(browser_id=3)
+
+    async def go() -> None:
+        browser._on_disconnected(None)  # simulate Playwright's disconnected event
+        assert browser._crashed is True
+        # An agent command short-circuits to a clear "crashed" status (no acquire).
+        result = await browser.act_state("A", "Alice")
+        assert result["ok"] is False and result["status"] == "crashed"
+        # And it's reported in the fleet snapshot, with no tabs.
+        desc = await browser.describe()
+        assert desc["crashed"] is True and desc["tabs"] == []
+
+    asyncio.run(go())
+
+
+def test_intentional_close_is_not_reported_as_a_crash() -> None:
+    # close() tears down the observer (which also fires `disconnected`); that's
+    # expected teardown, not a crash, so _crashed must stay False.
+    browser = bsession.LiveBrowser(browser_id=3)
+
+    async def go() -> None:
+        browser._closed = True  # close() sets this before tearing down the observer
+        browser._on_disconnected(None)
+        assert browser._crashed is False
+
+    asyncio.run(go())
+
+
+def test_crashed_browsers_do_not_count_toward_the_fleet_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A crashed shell lingers (to report "crashed") but must not block opening a new
+    # browser, so the cap counts only live browsers.
+    monkeypatch.setattr(bsession, "_MAX_SESSIONS", 2)
+    mgr = bsession.BrowserSessionManager()
+    live = bsession.LiveBrowser(browser_id=1)
+    dead = bsession.LiveBrowser(browser_id=2)
+    dead._crashed = True
+    mgr._browsers[1] = live
+    mgr._browsers[2] = dead
+    mgr._next_id = 3  # ids 1 and 2 were already handed out
+
+    async def go() -> None:
+        # 1 live + 1 crashed, cap 2 -> a new browser is still allowed (the crash is
+        # not counted). We can't launch real Chromium here, so just assert the cap
+        # check passes by confirming it does NOT raise FleetFullError before launch.
+        # Stub the launch to avoid starting Chromium.
+        async def fake_start_and_register(self: bsession.BrowserSessionManager, browser_id: int) -> object:
+            obj = bsession.LiveBrowser(browser_id=browser_id)
+            self._browsers[browser_id] = obj
+            return obj
+
+        monkeypatch.setattr(
+            bsession.BrowserSessionManager, "_start_and_register_locked", fake_start_and_register
+        )
+        result = await mgr.create()
+        assert result.browser_id == 3  # allowed despite 2 entries (one crashed)
+
+    asyncio.run(go())
+
+
 def test_create_rejects_when_fleet_full(monkeypatch: pytest.MonkeyPatch) -> None:
     # The cap must reject before launching Chromium, so a small compute can't be OOM-ed.
     monkeypatch.setattr(bsession, "_MAX_SESSIONS", 2)

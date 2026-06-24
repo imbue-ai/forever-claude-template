@@ -260,6 +260,18 @@ owner. The rules:
   (~90s), the daemon auto-releases it so it isn't stuck to you forever. If a
   later command says you no longer hold it, just acquire it again.
 
+- **A browser can crash.** If Chromium is killed (out of memory, a crash), your
+  next command on it comes back:
+
+  ```text
+  browser 0 crashed (Chromium was killed -- e.g. out of memory) and is gone.
+  Start a fresh one with `new` (it gets a new number).            (exit 1)
+  ```
+
+  That browser is **gone for good** -- don't retry it or re-`state` it. Run `new`
+  to get a fresh browser (it gets a new id, opens in its own tab; the crashed one
+  stays visibly marked "crashed" so nothing is silently reused), and carry on there.
+
 ### 5. The human can watch live; your trace is here
 
 The browser shows up live in a minds tab that pulls in next to your chat, so

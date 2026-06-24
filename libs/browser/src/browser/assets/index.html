@@ -99,6 +99,7 @@
   let browserId = null;
   let reconnectTimer = null;
   let closedForGood = false;  // set on a 1008 close: the browser is gone, stop reconnecting.
+  let crashed = false;        // set on a {type:"crashed"} message: Chromium died; show a dead state.
 
   function wsUrl(path) {
     const u = new URL(path, document.baseURI);
@@ -181,6 +182,23 @@
     hasFrame = false;
     placeholder.textContent = msg || "Loading…";
     placeholder.style.display = "block";
+  }
+
+  // The browser's Chromium died (OS/OOM kill, crash). Show a clear, terminal dead
+  // state -- distinct from the agent-control overlay and the "reconnecting" state --
+  // and lock the controls. This browser is gone; a new one opens as a separate tab.
+  function showCrashed() {
+    crashed = true;
+    hasFrame = false;
+    stopIdleTimer();
+    overlay.classList.remove("show");
+    returnBar.classList.remove("show");
+    placeholder.textContent =
+      "This browser crashed (Chromium was killed — e.g. out of memory). Open a new browser from the + menu.";
+    placeholder.style.display = "block";
+    tabbar.style.opacity = "0.5";
+    tabbar.style.pointerEvents = "none";
+    [urlInput, newtabBtn, backBtn, forwardBtn, reloadBtn].forEach((el) => (el.disabled = true));
   }
 
   function renderTabs(tabs) {
@@ -304,7 +322,9 @@
     castWs = new WebSocket(wsUrl("browsers/" + id + "/cast"));
     castWs.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
-      if (m.type === "frame") drawFrame(m.data);
+      if (m.type === "crashed") showCrashed();
+      else if (crashed) return;  // once crashed, ignore any late frames/control/tabs
+      else if (m.type === "frame") drawFrame(m.data);
       else if (m.type === "control") setControl(m);
       else if (m.type === "tabs") renderTabs(m.tabs);
       // m.type === "ping" -> ignore; it only keeps the proxy stream alive.

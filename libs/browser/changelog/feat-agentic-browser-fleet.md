@@ -88,3 +88,13 @@ browsers, each with an atomic ownership state machine, plus an
     - The resume queue is reported in the same `waiting` list the viewer and `ls`
       already show, and a rejected `busy_agent` command now also queues the agent to
       be woken when that browser frees.
+
+- Browser-crash detection. If a browser's Chromium dies unexpectedly (OS/OOM kill,
+  segfault), the daemon detects it -- via the Playwright observer's `disconnected`
+  event, or lazily when a command finds the connection gone -- and marks the browser
+  crashed instead of silently freezing. An agent's next command returns a clear
+  "browser N crashed ... start a fresh one with `new`" (rather than a raw CDP
+  exception); the live viewer tab shows a distinct "This browser crashed" state; and
+  `ls` / `GET /browsers` report it. A crashed id is never reused (a new browser gets
+  a new number, in its own tab), and crashed shells don't count toward the fleet cap,
+  so a crash never blocks opening a new browser.
