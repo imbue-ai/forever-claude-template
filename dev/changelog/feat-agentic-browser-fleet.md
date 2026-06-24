@@ -21,5 +21,13 @@ wait" rule: when *another agent* holds a browser, take a different one (their ta
 lives there); when a *human* takes *your* browser mid-task, your work is on it, so
 wait and resume that same one.
 
+The take-control guidance is now a true handoff: when a human takes the wheel, the
+agent tells the user it will pick up automatically, **ends its turn** (no polling),
+and resumes when the daemon messages it that the browser was handed back -- re-running
+`state` first because the page changed. And the release rule is spelled out by case:
+release a browser when the task on it finishes, when the user says stop, or when you
+switch away from it; keep several browsers only while you're still actively driving
+them, then release each.
+
 The `scripts/layout.py` agent helper can now address a specific browser session
 as a pane ref (`service:browser?session=<id>`).

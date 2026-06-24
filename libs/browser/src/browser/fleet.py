@@ -342,15 +342,19 @@ def _render_action(payload: dict[str, Any], browser_id: int, kind: str) -> int:
         return _EXIT_OK
     status = payload.get("status")
     if status == "busy_human":
-        _err(f"browser {browser_id} is under human control -- it's yours to drive. When you're done, "
-             'click "Return to agents" or tell me to resume (I will reclaim it).')
-        return _EXIT_BUSY
+        _out(f"browser {browser_id}: the human took control -- you're queued to resume. "
+             "They can see you're waiting, and you'll be messaged to pick up when they hand it "
+             f"back. Tell the user, then end your turn; re-run `state {browser_id}` when you resume.")
+        return _EXIT_PREEMPTED
     if status == "busy_agent":
-        _err(f"browser {browser_id} is held by another agent. Pick another browser, or `acquire {browser_id}` to queue for it.")
+        _out(f"browser {browser_id} is held by another agent -- you're queued for it and will be "
+             f"messaged when it frees. For unrelated work, use a different browser (or `new`); "
+             f"re-run `state {browser_id}` when you resume.")
         return _EXIT_BUSY
     if status == "lost_control":
-        _out(f"lost control of browser {browser_id} (you took over). "
-             'Send me a message ("keep going", "resume") when you want me to continue.')
+        _out(f"browser {browser_id}: the human took control mid-step -- you're queued to resume. "
+             "Tell the user you'll pick up when they hand it back, then end your turn; "
+             f"re-run `state {browser_id}` when you resume.")
         return _EXIT_PREEMPTED
     if status == "stale_index":
         _err(payload.get("error") or f"that element index is stale -- run `state {browser_id}` again first")

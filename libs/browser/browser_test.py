@@ -8,6 +8,10 @@ import pytest
 from browser import session as bsession
 
 
+async def _noop_wake(self: bsession.LiveBrowser, agent_id: str, agent_name: str | None) -> None:
+    """Stand-in for ``_wake_agent`` in tests: skip the real ``mngr message`` subprocess."""
+
+
 # --- env / key helpers (unchanged) -------------------------------------------
 
 
@@ -129,6 +133,95 @@ def test_take_control_preempts_pins_and_reclaim_resumes() -> None:
         # Only an explicit reclaim (the human told the agent to resume) takes it back.
         assert await browser.acquire("B", "Bob", reclaim=True) == "acquired"
         assert browser._state_tuple() == ("agent", "B", False)
+
+    asyncio.run(go())
+
+
+def test_enqueue_on_busy_queues_for_resume_and_wakes_on_handback(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Direct-control handoff: a human takes control, the agent's next command is
+    # rejected (busy_human) and the agent is queued to resume. When the human hands
+    # back, the queued agent is granted control and messaged to resume.
+    woken: list[str | None] = []
+
+    async def fake_wake(self: bsession.LiveBrowser, agent_id: str, agent_name: str | None) -> None:
+        woken.append(agent_name)
+
+    monkeypatch.setattr(bsession.LiveBrowser, "_wake_agent", fake_wake)
+    browser = bsession.LiveBrowser(browser_id=1)
+
+    async def go() -> None:
+        await browser.acquire("A", "Alice")
+        await browser.take_control()  # human grabs it, pins (active)
+        # A's next direct command is rejected AND it's queued to resume.
+        assert await browser.acquire("A", "Alice", wait=False, enqueue_on_busy=True) == "busy_human"
+        assert browser._waiting_names() == ["Alice"]
+        # Human hands back -> A is granted control and woken to resume.
+        assert await browser.return_to_agents() is True
+        assert browser._state_tuple() == ("agent", "A", False)
+        assert browser._waiting_names() == []  # dequeued on grant
+        await asyncio.sleep(0)  # let the wake task run
+        assert woken == ["Alice"]
+
+    asyncio.run(go())
+
+
+def test_stale_human_pin_yields_to_a_queued_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A human who took control but walked away (no input within the active grace)
+    # should not block a queued agent forever: the sweep hands the browser back.
+    monkeypatch.setattr(bsession.LiveBrowser, "_wake_agent", _noop_wake)
+    browser = bsession.LiveBrowser(browser_id=1)
+
+    async def go() -> None:
+        await browser.acquire("A", "Alice")
+        await browser.take_control()  # pin is fresh -> A is blocked and queues
+        assert await browser.acquire("A", "Alice", wait=False, enqueue_on_busy=True) == "busy_human"
+        assert await browser._sweep_stale_human_pin() is False  # pin still active: not yet
+        # The human goes quiet (no input past the grace) -> the pin is now stale.
+        browser._human_touched_at = time.monotonic() - bsession._HUMAN_ACTIVE_GRACE - 1
+        assert await browser._sweep_stale_human_pin() is True
+        assert browser._state_tuple() == ("agent", "A", False)
+
+    asyncio.run(go())
+
+
+def test_stale_human_pin_persists_when_nobody_waits() -> None:
+    # With no agent queued, a stale pin is NOT swept away (there's nobody to hand to);
+    # the next agent that wants it takes it lazily via acquire().
+    browser = bsession.LiveBrowser(browser_id=1)
+
+    async def go() -> None:
+        await browser.acquire("A", "Alice")
+        await browser.take_control()
+        browser._human_touched_at = time.monotonic() - bsession._HUMAN_ACTIVE_GRACE - 1  # stale
+        assert await browser._sweep_stale_human_pin() is False  # nobody waiting -> persists
+        assert browser._state_tuple() == ("human", None, True)
+        # A newly-arriving agent finds the pin stale and just takes it.
+        assert await browser.acquire("B", "Bob", wait=False) == "acquired"
+
+    asyncio.run(go())
+
+
+def test_unclaimed_grant_passes_to_next_waiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An agent granted the browser from the resume queue but that never sends a
+    # command (interrupted/killed) has its grant revoked after the claim window, so
+    # the browser doesn't sit idle on a no-show.
+    monkeypatch.setattr(bsession.LiveBrowser, "_wake_agent", _noop_wake)
+    browser = bsession.LiveBrowser(browser_id=1)
+
+    async def go() -> None:
+        await browser.acquire("A", "Alice")
+        await browser.take_control()
+        await browser.acquire("A", "Alice", wait=False, enqueue_on_busy=True)  # A queues
+        await browser.return_to_agents()  # A granted + (fake) woken, but never sends a command
+        assert browser._state_tuple() == ("agent", "A", False)
+        assert browser._granted_at  # claim window armed (A hasn't sent a command)
+        # Simulate the claim window elapsing with no command from A (lease stays older
+        # than the grant -> A never claimed): the sweep revokes and frees the browser.
+        overdue = time.monotonic() - bsession._CLAIM_WINDOW - 1
+        browser._granted_at = overdue
+        browser._lease_touched_at = overdue - 1
+        assert await browser._sweep_unclaimed_grant() is True
+        assert browser._state_tuple() == ("human", None, False)
 
     asyncio.run(go())
 

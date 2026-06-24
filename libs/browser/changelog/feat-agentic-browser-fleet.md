@@ -64,3 +64,24 @@ browsers, each with an atomic ownership state machine, plus an
   ("Agents waiting to use this browser: ..."), and the "Return control to agents"
   button only appears when one is actually waiting -- otherwise it reads "No agents
   are waiting" with no button (there is nobody to hand back to).
+
+- Take-control is now a true handoff. When a human takes a browser an agent was
+  driving, the agent is queued to *resume* (rather than just stopped): its next
+  command returns a clear "the human took control -- you're queued to resume"
+  message, and the daemon messages the agent to pick up the moment the human hands
+  the browser back (it re-reads the page with `state` and continues). This is the
+  CAPTCHA / login handoff flow. Mechanics:
+
+    - A human pin only *blocks* agents while the human is actively driving; if they
+      go quiet for a grace period (`BROWSER_HUMAN_ACTIVE_GRACE`, default 20s) the pin
+      yields -- a queued agent is handed the browser automatically, and a freshly
+      arriving agent simply takes it. So a forgotten hold never blocks the fleet.
+
+    - An agent handed the browser from the resume queue but that never sends a
+      command (it was interrupted) has its grant revoked after a short claim window
+      (`BROWSER_CLAIM_WINDOW`, default 12s), so the browser passes to the next waiter
+      instead of sitting idle for the full idle-TTL on a no-show.
+
+    - The resume queue is reported in the same `waiting` list the viewer and `ls`
+      already show, and a rejected `busy_agent` command now also queues the agent to
+      be woken when that browser frees.

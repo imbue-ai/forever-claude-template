@@ -212,28 +212,36 @@ owner. The rules:
 - **You auto-acquire and hold a sticky lease.** Your first command on a
   browser acquires it, and it stays yours across the commands that follow --
   no manual `acquire` needed.
-- **Release it the moment you're done.** When you've finished with a browser
-  and are handing back to the user (you're ending your turn, or you no longer
-  need it), run `release <id>` for each browser you drove. That hands control
-  straight back to the human -- the live pane becomes interactive immediately,
-  instead of making them wait out the ~90s idle timeout while a grey "Agent has
-  control" overlay sits on a browser you're finished with. (If you forget, the
-  idle lease frees itself after ~90s; releasing is the instant, polite version
-  -- prefer it.)
-- **A human can take control** from the UI at any time. Your *next* command
-  then comes back:
+- **Release a browser when it leaves your active work.** Run `release <id>` so
+  control returns to the human immediately (not after the ~90s idle timeout,
+  and the grey "Agent has control" overlay clears). Concretely:
+  - **Task finished** on that browser -> release it.
+  - **The user tells you to stop** -> release every browser you were driving, as
+    part of stopping.
+  - **You switch to a different browser** for the rest of the task -> release the
+    one you're leaving behind.
+  - **Driving several browsers at once?** Keep them until you're *fully* done,
+    then release each.
+
+  (If you forget, the idle lease frees itself after ~90s; releasing is the
+  instant, polite version -- prefer it.)
+- **A human can take control** (to solve a CAPTCHA, finish a login, fix
+  something). Your *next* command then comes back:
 
   ```text
-  lost control of browser 0 (you took over). Send me a message
-  ("keep going", "resume") when you want me to continue.        (exit 2)
+  browser 0: the human took control -- you're queued to resume. They'll see
+  you waiting, and I'll message you when they hand it back.        (exit 2)
   ```
 
-  This is **exit 2 (preempted)**. **STOP.** Do not retry, do not reclaim.
-  Tell the user you lost control and wait. Resume **only** when they
-  explicitly say so ("keep going" / "resume") -- and only then run
-  `acquire <id> --reclaim` (or pass `--reclaim` on your next action). Never
-  pass `--reclaim` on your own initiative; that's yanking the wheel from a
-  human who's using it.
+  **Don't retry, don't `--reclaim`.** Tell the user the human took the wheel
+  and that you'll **pick up automatically** when they hand it back -- then
+  **end your turn** (don't poll or spin). You're already in that browser's
+  wait-queue; the moment the human clicks "Return control to agents" (or steps
+  away from it), the daemon hands the browser back to you and **sends you a
+  message to resume**. When that wake arrives, **re-run `state <id>` first** --
+  the page changed while they were driving -- then carry on. (An explicit
+  `acquire <id> --reclaim` still exists for "take it back right now on the
+  user's say-so", but you normally just wait for the automatic hand-back.)
 
 - **Agents never preempt each other.** A browser another agent holds returns:
 

@@ -136,6 +136,19 @@ _TASK_MAX_SECONDS = float(os.environ.get("BROWSER_TASK_MAX_SECONDS", "900"))
 # escape hatch; this TTL is the backstop. Env-tunable.
 _LEASE_IDLE_TTL = float(os.environ.get("BROWSER_LEASE_IDLE_TTL", "90"))
 
+# A human take-control only *blocks* agents while the human is actively using the
+# browser. If they haven't touched it in this many seconds, the pin is treated as
+# stale and the next agent that wants the browser takes it (a forgotten/idle hold
+# yields). Active CAPTCHA/login solving keeps refreshing this, so it stays held.
+_HUMAN_ACTIVE_GRACE = float(os.environ.get("BROWSER_HUMAN_ACTIVE_GRACE", "20"))
+
+# When the browser frees and is handed to a queued agent, that agent is *messaged*
+# to resume (it ended its turn). If it doesn't actually take the wheel (send a
+# command) within this window -- e.g. it was interrupted/killed -- the grant is
+# revoked and the browser passes to the next waiter, instead of sitting idle for
+# the full _LEASE_IDLE_TTL on a no-show.
+_CLAIM_WINDOW = float(os.environ.get("BROWSER_CLAIM_WINDOW", "12"))
+
 # Where `screenshot` writes PNGs (relative to the daemon's cwd = repo root). The
 # CLI prints the path and the agent reads the file; agent + daemon share the FS.
 _SCREENSHOT_DIR = Path(os.environ.get("BROWSER_SCREENSHOT_DIR", "runtime/browser-screenshots"))
@@ -285,6 +298,18 @@ class LiveBrowser(MutableModel):
     _selector_map: dict[int, Any] = PrivateAttr(default_factory=dict)
     _lease_touched_at: float = PrivateAttr(default=0.0)
     _screenshot_seq: int = PrivateAttr(default=0)
+    # Direct-control resume queue: agents whose command was rejected (a human or
+    # another agent held the browser). They ended their turns; when the browser
+    # frees they are handed it FIFO and messaged to resume (see _wake_agent). This
+    # is separate from _wait_queue (the connection-bound blocking waiters used by
+    # `task`/`hold`). ``(agent_id, agent_name)`` per entry, deduped by id.
+    _resume_queue: list[tuple[str, str | None]] = PrivateAttr(default_factory=list)
+    # Last time the human actually drove the browser (input/nav). A pin older than
+    # _HUMAN_ACTIVE_GRACE no longer blocks agents.
+    _human_touched_at: float = PrivateAttr(default=0.0)
+    # When a resume-queue agent was handed the browser but hasn't sent a command
+    # yet (the claim window); 0.0 once it claims (or when no grant is pending).
+    _granted_at: float = PrivateAttr(default=0.0)
 
     async def start(self, playwright: Playwright) -> None:
         """Launch the headless Chromium (browser-use) and attach the Playwright observer."""
@@ -499,8 +524,12 @@ class LiveBrowser(MutableModel):
         while not self._closed:
             await asyncio.sleep(_KEEPALIVE_SECONDS)
             await self._broadcast({"type": "ping"})
-            released = await self._sweep_idle_lease()
-            if not released and self.controller == "agent":
+            changed = (
+                await self._sweep_unclaimed_grant()
+                or await self._sweep_stale_human_pin()
+                or await self._sweep_idle_lease()
+            )
+            if not changed and self.controller == "agent":
                 await self._broadcast(self._control_message())
 
     async def _sweep_idle_lease(self) -> bool:
@@ -514,6 +543,57 @@ class LiveBrowser(MutableModel):
             and time.monotonic() - self._lease_touched_at > _LEASE_IDLE_TTL
         ):
             return await self._transition(to="human", expect=("agent", self.owner_agent_id, False))
+        return False
+
+    async def _sweep_unclaimed_grant(self) -> bool:
+        """A resume-queue agent was handed the browser and messaged to resume, but
+        hasn't sent a command within ``_CLAIM_WINDOW`` (it was interrupted/killed, or
+        never woke). Revoke the grant so the browser passes to the next waiter instead
+        of sitting idle for the full idle-TTL on a no-show. ``_granted_at`` is set only
+        for a pending grant and cleared the instant the agent sends its first command
+        (``run_action``)."""
+        async with self._control_lock:
+            if (
+                self.controller == "agent"
+                and self._granted_at
+                and self._agent_task is None
+                and self._lease_touched_at < self._granted_at
+                and time.monotonic() - self._granted_at > _CLAIM_WINDOW
+            ):
+                self._granted_at = 0.0
+                await self._write_control_locked("human", None, None, pinned=False)
+                await self._settle_queue_locked()
+                return True
+        return False
+
+    def _human_pin_active(self) -> bool:
+        """A human pin still blocks agents only while the human is *actively* driving --
+        within ``_HUMAN_ACTIVE_GRACE`` of their last input. A stale pin (walked away)
+        yields: a queued agent is handed it by the keepalive sweep, and a freshly
+        arriving agent takes it via :meth:`acquire`."""
+        return (
+            self.controller == "human"
+            and self.human_pinned
+            and time.monotonic() - self._human_touched_at <= _HUMAN_ACTIVE_GRACE
+        )
+
+    async def _sweep_stale_human_pin(self) -> bool:
+        """A human holds the browser but hasn't driven it in ``_HUMAN_ACTIVE_GRACE`` and
+        an agent is queued to resume -> hand it back automatically (the human finished
+        the CAPTCHA/login and wandered off without clicking "Return control"). A pin
+        with NO agent waiting persists -- there's nobody to hand to, and a newly
+        arriving agent takes it lazily via :meth:`acquire`. An actively-driven pin keeps
+        refreshing ``_human_touched_at`` and is never yanked."""
+        async with self._control_lock:
+            if (
+                self.controller == "human"
+                and self.human_pinned
+                and self._resume_queue
+                and not self._human_pin_active()
+            ):
+                await self._write_control_locked("human", None, None, pinned=False)
+                await self._settle_queue_locked()
+                return True
         return False
 
     # --- input ----------------------------------------------------------------
@@ -531,6 +611,10 @@ class LiveBrowser(MutableModel):
             async with self._control_lock:
                 if not self._input_enabled.is_set():
                     return
+                # The human is actively driving -> keep the pin fresh (so a queued
+                # agent doesn't take the browser out from under an active CAPTCHA/login).
+                if self.controller == "human" and self.human_pinned:
+                    self._human_touched_at = time.monotonic()
                 await self._dispatch_input(message)
 
     async def _dispatch_input(self, message: dict[str, Any]) -> None:
@@ -598,6 +682,14 @@ class LiveBrowser(MutableModel):
             self._lease_touched_at = time.monotonic()  # start the sticky-lease idle clock
         await self._broadcast(self._control_message())
 
+    def _waiting_names(self) -> list[str]:
+        """Display names of every agent queued for this browser: the resume queue
+        (agents auto-queued when their command was rejected) first, then any
+        connection-bound task/hold waiters."""
+        names = [name or agent_id for (agent_id, name) in self._resume_queue]
+        names += [w.agent_name or w.agent_id for w in self._wait_queue]
+        return names
+
     def _control_message(self) -> dict[str, Any]:
         msg: dict[str, Any] = {
             "type": "control",
@@ -606,7 +698,7 @@ class LiveBrowser(MutableModel):
             "owner_name": self.owner_agent_name,
             "human_pinned": self.human_pinned,
             # Agents queued (monitor-and-wait) behind the current owner, in FIFO order.
-            "waiting": [w.agent_name or w.agent_id for w in self._wait_queue],
+            "waiting": self._waiting_names(),
         }
         # While an agent holds a sticky direct-control lease (not a connection-bound
         # task), tell the viewer how long it has been idle and when the idle-TTL will
@@ -627,23 +719,68 @@ class LiveBrowser(MutableModel):
             "human_pinned": self.human_pinned,
         }
 
-    async def _settle_queue_locked(self) -> None:
-        """Reconcile the FIFO wait-queue with the current control state. Holds ``_control_lock``.
+    def _enqueue_resume_locked(self, agent_id: str, agent_name: str | None) -> None:
+        """Add an agent to the resume queue (deduped by id). Caller holds _control_lock."""
+        if not any(aid == agent_id for (aid, _) in self._resume_queue):
+            self._resume_queue.append((agent_id, agent_name))
 
-        * human-pinned -> evict every waiter (agents never wait on a human).
-        * free (unpinned human) -> hand the browser to the first waiter, gaplessly.
-        * agent-owned -> nothing (someone holds it; waiters stay queued).
+    def _dequeue_resume_locked(self, agent_id: str) -> None:
+        """Drop an agent from the resume queue (it took control / no longer waiting)."""
+        self._resume_queue = [(aid, an) for (aid, an) in self._resume_queue if aid != agent_id]
+
+    async def _wake_agent(self, agent_id: str, agent_name: str | None) -> None:
+        """Message a queued agent that the browser is its again, so it resumes in a
+        fresh turn (it ended its turn when it lost control). Best-effort: shells out to
+        ``mngr message`` (the same path launch-task uses to message agents). If it
+        fails, or the agent never shows, the claim window passes the browser on."""
+        target = agent_name or agent_id
+        text = (
+            f"Browser {self.browser_id} was handed back to you (the human finished with it). "
+            f"Re-run `state {self.browser_id}` to re-read the page, then continue where you left off."
+        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "mngr",
+                "message",
+                target,
+                "--message",
+                text,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        except OSError as e:
+            logger.warning("could not wake agent {} for browser {} ({})", target, self.browser_id, e)
+
+    async def _settle_queue_locked(self) -> None:
+        """Reconcile both wait-queues with the current control state. Holds ``_control_lock``.
+
+        * human-pinned -> evict the connection-bound ``_wait_queue`` (task/hold waiters
+          never block on a human); the resume queue PERSISTS -- those agents want the
+          browser back *after* the human is done.
+        * free (unpinned human) -> hand the browser to the first waiter: a live
+          ``_wait_queue`` waiter if any, else the first ``_resume_queue`` agent, which
+          is messaged to resume (it ended its turn) and put on the claim clock.
+        * agent-owned -> nothing (someone holds it; queues stay put).
         """
         if self.controller == "human" and self.human_pinned:
             waiters, self._wait_queue = self._wait_queue, []
             for waiter in waiters:
                 waiter.granted = False
                 waiter.event.set()
-        elif self.controller == "human" and self._wait_queue:
+            return
+        if self.controller != "human":
+            return
+        if self._wait_queue:
             waiter = self._wait_queue.pop(0)
             await self._write_control_locked("agent", waiter.agent_id, waiter.agent_name, pinned=False)
             waiter.granted = True
             waiter.event.set()
+        elif self._resume_queue:
+            agent_id, agent_name = self._resume_queue.pop(0)
+            await self._write_control_locked("agent", agent_id, agent_name, pinned=False)
+            self._granted_at = time.monotonic()  # start the claim window
+            asyncio.create_task(self._wake_agent(agent_id, agent_name))
 
     async def _transition(
         self,
@@ -688,30 +825,44 @@ class LiveBrowser(MutableModel):
         reclaim: bool = False,
         wait: bool = True,
         max_wait: float | None = None,
+        enqueue_on_busy: bool = False,
         on_wait: Callable[[str | None, str | None], Awaitable[None]] | None = None,
     ) -> str:
         """Acquire control for an agent. Returns one of:
 
         ``"acquired"`` -- the agent now controls the browser.
-        ``"busy_human"`` -- a human holds it (pinned); only an explicit ``reclaim``
-            (the human told the agent to resume) takes it. Agents never wait on a human.
+        ``"busy_human"`` -- a human is *actively* driving it (pinned, within the active
+            grace); only an explicit ``reclaim`` takes it. A stale pin (human walked
+            away) is treated as free and taken.
         ``"busy_agent"`` -- another agent holds it and ``wait`` was False.
         ``"timed_out"`` -- waited ``max_wait`` seconds for another agent to release.
 
         With ``wait`` (the default) and another agent in control, the caller parks in
         a FIFO queue and is handed the browser the instant that agent releases.
+
+        With ``enqueue_on_busy`` (the direct-control path), a ``busy_human`` /
+        ``busy_agent`` result also adds the agent to the resume queue: it ended its
+        turn, and the daemon will message it to resume when the browser frees.
         """
         async with self._control_lock:
             if self.controller == "agent" and self.owner_agent_id == agent_id:
                 self.owner_agent_name = agent_name  # refresh display name on re-acquire
+                self._dequeue_resume_locked(agent_id)
                 return "acquired"
-            if self.controller == "human" and self.human_pinned and not reclaim:
+            if not reclaim and self._human_pin_active():
+                if enqueue_on_busy:
+                    self._enqueue_resume_locked(agent_id, agent_name)
+                    await self._broadcast(self._control_message())
                 return "busy_human"
-            if self.controller == "human":  # free, or reclaim of a pinned human
+            if self.controller == "human":  # free, a stale pin, or reclaim of a pin
+                self._dequeue_resume_locked(agent_id)
                 await self._write_control_locked("agent", agent_id, agent_name, pinned=False)
                 return "acquired"
             # controller == "agent", a different agent -> must wait or fail fast.
             if not wait:
+                if enqueue_on_busy:
+                    self._enqueue_resume_locked(agent_id, agent_name)
+                    await self._broadcast(self._control_message())
                 return "busy_agent"
             busy_id, busy_name = self.owner_agent_id, self.owner_agent_name
             waiter = _AcquireWaiter(agent_id, agent_name)
@@ -743,9 +894,13 @@ class LiveBrowser(MutableModel):
 
         Always wins (no ``expect``): flips to a pinned human and cancels the run. The
         cancel happens outside the control lock, so the run's finally can re-enter the
-        state machine without deadlocking. No resume: the human hands back via
-        :meth:`return_to_agents`, or tells an agent to resume (which uses ``reclaim``).
+        state machine without deadlocking. The human hands back explicitly via
+        :meth:`return_to_agents`, but the pin also yields on its own once the human
+        stops driving for ``_HUMAN_ACTIVE_GRACE`` (so a forgotten hold doesn't block a
+        queued agent forever); ``_human_touched_at`` is stamped now and refreshed on
+        each input.
         """
+        self._human_touched_at = time.monotonic()
         return await self._transition(to="human", pinned=True, preempt=True)
 
     async def return_to_agents(self) -> bool:
@@ -860,13 +1015,19 @@ class LiveBrowser(MutableModel):
         # first command for a browser (and again after a human hands it back) --
         # rather than on every click.
         was_mine = self._state_tuple() == ("agent", agent_id, False)
-        status = await self.acquire(agent_id, agent_name, wait=False)
+        status = await self.acquire(agent_id, agent_name, wait=False, enqueue_on_busy=True)
         if status != "acquired":
             return {"ok": False, "status": status, **self._control_state()}
         async with self._control_lock:
             if self._state_tuple() != ("agent", agent_id, False):
+                # A human grabbed control in the tiny window between acquire and here.
+                # Queue this agent to resume (same as the busy_human path) so the
+                # daemon messages it back when the human hands the browser over.
+                self._enqueue_resume_locked(agent_id, agent_name)
+                await self._broadcast(self._control_message())
                 return {"ok": False, "status": "lost_control", **self._control_state()}
             self._lease_touched_at = time.monotonic()
+            self._granted_at = 0.0  # the agent claimed (sent a command); cancel the claim window
         async with self._lock:
             if self._context is None:
                 return {"ok": False, "status": "closed", **self._control_state()}
@@ -990,7 +1151,7 @@ class LiveBrowser(MutableModel):
             "owner_agent_id": self.owner_agent_id,
             "owner_name": self.owner_agent_name,
             "human_pinned": self.human_pinned,
-            "waiting": [w.agent_name or w.agent_id for w in self._wait_queue],
+            "waiting": self._waiting_names(),
             "tabs": await self._tab_list(),
         }
 

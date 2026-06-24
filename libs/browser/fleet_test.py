@@ -78,7 +78,9 @@ def test_parser_accepts_task_flags() -> None:
         ({"ok": True, "url": "https://x", "title": "X", "elements": "[1]<a>", "tabs": []}, "state", fleet._EXIT_OK),
         ({"ok": True, "screenshot_path": "/tmp/s.png"}, "screenshot", fleet._EXIT_OK),
         ({"ok": True, "clicked": 5}, "click", fleet._EXIT_OK),
-        ({"ok": False, "status": "busy_human"}, "click", fleet._EXIT_BUSY),
+        # busy_human now means "the human is driving -- you're queued to resume; stop
+        # and wait for the wake", i.e. preempted (exit 2), not a generic busy (exit 3).
+        ({"ok": False, "status": "busy_human"}, "click", fleet._EXIT_PREEMPTED),
         ({"ok": False, "status": "busy_agent"}, "state", fleet._EXIT_BUSY),
         ({"ok": False, "status": "lost_control"}, "click", fleet._EXIT_PREEMPTED),
         ({"ok": False, "status": "stale_index", "error": "run state"}, "click", fleet._EXIT_ERROR),
