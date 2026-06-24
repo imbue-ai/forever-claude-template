@@ -318,7 +318,11 @@ def _stream_filtered_events(
                 keepalive_counter += 1
                 if keepalive_counter >= 8:
                     keepalive_counter = 0
-                    yield ": keepalive\n\n"
+                    # A real ``data:`` event (not an SSE ``:`` comment, which
+                    # EventSource silently swallows) so the client's staleness
+                    # watchdog can see the stream is alive and distinguish a quiet
+                    # connection from a half-open/zombie one that never reconnects.
+                    yield 'data: {"type": "keepalive"}\n\n'
     except GeneratorExit:
         pass
     finally:
