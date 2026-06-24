@@ -59,3 +59,8 @@ browsers, each with an atomic ownership state machine, plus an
   sticky lease will auto-release (the 90s idle-TTL). It also lists any agents queued
   (monitor-and-wait) behind the current owner. The same `waiting` queue is reported
   by `GET /browsers` and shown in `agentic-browser-fleet ls` (`[queued: ...]`).
+
+- When you hold control, the bar now lists the agents queued to use that browser
+  ("Agents waiting to use this browser: ..."), and the "Return control to agents"
+  button only appears when one is actually waiting -- otherwise it reads "No agents
+  are waiting" with no button (there is nobody to hand back to).

@@ -15,5 +15,11 @@ with no access to this workspace's browser fleet or its live panes, so the agent
 drives the browser itself in this chat rather than delegating it to a background
 sub-agent.
 
+The skill now also states the fleet cap (5 browsers; `new` past it returns "Too
+many open browsers", so release/close one first) and the "another browser vs.
+wait" rule: when *another agent* holds a browser, take a different one (their task
+lives there); when a *human* takes *your* browser mid-task, your work is on it, so
+wait and resume that same one.
+
 The `scripts/layout.py` agent helper can now address a specific browser session
 as a pane ref (`service:browser?session=<id>`).

@@ -171,7 +171,9 @@ and still exits `0`.
 Every command takes the browser id first. Run `ls` (or `ls --include-tabs`)
 to see the fleet and pick one; `new` makes a fresh one; `0` is the default.
 Drive several browsers at once just by using different ids -- they're
-independent.
+independent. The fleet is **capped (5 by default)**; `new` past the cap returns
+"Too many open browsers (5/5)" -- you can't exceed it, so `release` or close a
+browser you're done with before opening another.
 
 ### 2. Always `state` before you `click`
 
@@ -240,7 +242,11 @@ owner. The rules:
   `acquire 1` to queue for it.                                  (exit 3)
   ```
 
-  Pick a different id, or `acquire 1` to queue.
+  Default to a **different** browser (or `new`): that agent's task lives on
+  browser 1, so start yours elsewhere. Only `acquire 1` to queue when you
+  specifically need *that* browser. (This is the opposite of a **human** taking
+  *your* browser mid-task -- there your work is on it, so you wait and resume
+  that same browser rather than switching.)
 
 - **An idle lease frees itself.** If you walk away from a browser for a while
   (~90s), the daemon auto-releases it so it isn't stuck to you forever. If a
