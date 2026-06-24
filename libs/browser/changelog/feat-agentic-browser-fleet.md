@@ -112,3 +112,18 @@ browsers, each with an atomic ownership state machine, plus an
   that to a clear "still starting up, try again" message and the viewer shows a brief
   "restoring" banner. A fresh workspace seeds browser 0 at the home page. Closing a
   browser forgets its profile; a crashed browser is never restored as healthy.
+
+- The viewer now ALWAYS shows a control indicator: a persistent "You have control"
+  bar whenever you can drive the browser -- including a fresh, AI-untouched browser
+  in its resting state -- not only after you explicitly take control. (Previously a
+  resting browser showed no indicator at all.)
+
+- Each browser the agent surfaces now opens as its OWN pane to the right (the layout
+  split uses `--new-group`), instead of being tabbed into an existing browser pane.
+
+- A non-primary agent (a `launch-task` sub-agent, or a second "+ New agent") that can
+  reach the fleet daemon over the network but can't drive this workspace's layout no
+  longer waits 5s and prints a confusing "service not registered / running headless"
+  error when it tries to surface a pane. It now says plainly that the browser is
+  running but its pane can only be shown by the primary agent (open it from the "+"
+  menu), and the misleading "headless" wording is gone from the pane-pull failure path.

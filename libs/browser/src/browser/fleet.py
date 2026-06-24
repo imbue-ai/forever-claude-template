@@ -173,23 +173,37 @@ def _layout(*args: str) -> bool:
 
 
 def _pull_in_pane(browser_id: int) -> None:
-    """Split browser ``browser_id`` into a pane on the right of the controlling
-    agent's chat (chat on the left, browser on the right -- one pane per browser).
+    """Surface browser ``browser_id`` as its OWN pane to the right of the controlling
+    agent's chat (chat on the left, each browser in a separate pane).
+
+    ``--new-group`` forces a fresh pane rather than tabbing the browser into an
+    existing pane group, so opening a second browser lands beside the first, not as a
+    tab inside it. Splitting an already-open browser is a no-op that just focuses it,
+    so this is safe to call again on re-acquire.
 
     Anchor chain: ``$BROWSER_FLEET_ANCHOR`` (a parent passes its chat to sub-agents)
-    -> the caller's own chat (``self``). Splitting an already-open browser is a
-    no-op that just focuses it, so this is safe to call again on re-acquire. Best
-    effort: a layout failure never fails the command (the browser still runs
-    headless), it just warns.
+    -> the caller's own chat (``self``). Best effort: a layout failure never fails the
+    command (the browser is still running and reachable), it just warns.
     """
+    # A non-primary agent (a launch-task sub-agent, or a second "+ New agent") reaches
+    # the daemon over the network via MINDS_BROWSER_SERVICE_URL, but it lives in a
+    # different container and CANNOT drive this workspace's dockview layout -- the live
+    # pane is owned by the primary agent's UI. Don't wait 5s on a registry that isn't
+    # there or emit a scary error; just say it plainly. The browser still works.
+    if os.environ.get(_ENV_URL):
+        _err(f"browser {browser_id} is running, but I can't open its live pane from here "
+             "(only the workspace's primary agent shows browser panes). Open it from the "
+             '"+" menu, or have the main agent drive the browser.')
+        return
     ref = f"service:browser?session={browser_id}"
     anchor = os.environ.get(_ENV_ANCHOR)
-    if anchor and _layout("split", ref, "--relative-to", anchor, "--direction", "right"):
+    if anchor and _layout("split", ref, "--relative-to", anchor, "--direction", "right", "--new-group"):
         return
     if anchor:
         _err(f"anchor {anchor!r} not found; splitting browser {browser_id} next to my own chat instead")
-    if not _layout("split", ref, "--relative-to", "self", "--direction", "right"):
-        _err(f"could not pull browser {browser_id} into view (it is still running headless)")
+    if not _layout("split", ref, "--relative-to", "self", "--direction", "right", "--new-group"):
+        _err(f"opened browser {browser_id} (running), but couldn't auto-open its pane -- "
+             'open it from the "+" menu if you want to watch.')
 
 
 # --- commands -----------------------------------------------------------------

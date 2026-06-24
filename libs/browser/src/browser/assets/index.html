@@ -25,8 +25,9 @@
   #url { flex: 1; padding: 5px 8px; background: #1e1e1e; border: 1px solid #444; color: #ddd; border-radius: 4px; }
   #url:disabled { opacity: .5; }
 
-  /* A small persistent bar shown only when the human has explicitly taken
-     control (human_pinned), so handing back to the agents is always discoverable. */
+  /* A small persistent status bar shown whenever the human can drive the browser
+     (resting/AI-untouched OR explicitly taken). Always-on "You have control"
+     indicator; the hand-back button appears only when an agent is queued for it. */
   #returnbar { display: none; align-items: center; gap: 10px; padding: 6px 10px; background: #2a2a2a; border-bottom: 1px solid #333; font-size: 12px; color: #4ec9b0; }
   #returnbar.show { display: flex; }
   #returnbtn { padding: 5px 12px; background: #0e639c; border: none; color: #fff; border-radius: 4px; cursor: pointer; }
@@ -165,17 +166,19 @@
       releaseSeconds = null;
       waitingList = [];
     }
-    // Human-control bar: list the agents queued to use this browser, and show the
-    // hand-back button ONLY when one is actually waiting -- otherwise there is
-    // nobody to return to, and the next agent that wants the browser just takes it.
-    if (humanPinned) {
+    // Control-status bar: ALWAYS visible whenever the human can drive -- whether the
+    // browser is freshly opened and AI-untouched (resting) or the human explicitly took
+    // it (pinned). There is always a clear "You have control" indicator; only when an
+    // agent is queued for this browser does the "Return control to agents" button show
+    // (otherwise there's nobody to hand back to -- the next agent just takes it).
+    if (!agentDriving) {
       const waiting = Array.isArray(state.waiting) ? state.waiting : [];
       returnQueue.textContent = waiting.length
         ? "You have control. Agents waiting to use this browser: " + waiting.join(", ")
-        : "You have control. No agents are waiting — the next agent that wants this browser can take over.";
+        : "You have control.";
       returnBtn.style.display = waiting.length ? "" : "none";
     }
-    returnBar.classList.toggle("show", humanPinned);
+    returnBar.classList.toggle("show", !agentDriving);
   }
 
   function showLoading(msg) {
