@@ -466,7 +466,26 @@ class AgentSessionWatcher:
         if session_id is None:
             return True
         with self._lock:
-            return session_id in self._main_session_ids
+            if session_id in self._main_session_ids:
+                return True
+            # Drop only KNOWN subagent sessions (registered in _session_states by
+            # _discover_subagent_sessions). An unknown session_id is almost always a
+            # main session id Claude just rotated to that this hot path has not yet
+            # re-discovered -- get_tail_events re-discovers before reading, this live
+            # filter does not. Defaulting it to "main" keeps its events on the live
+            # stream; dropping it silently froze the chat (the rotated main turn,
+            # e.g. the reply after a skill/subagent runs, only reappeared on reload).
+            # Worst case a truly-stray event renders once inline; far better than
+            # hanging the whole conversation.
+            if session_id in self._session_states:
+                return False
+            logger.warning(
+                "[diag-mainsess] session_id={} not in main_ids (n={}) and not a known session "
+                "-> default MAIN (this was dropped before the fix)",
+                session_id,
+                len(self._main_session_ids),
+            )
+            return True
 
     def _selected_states_current(self, session_id: str | None) -> list[SessionFileState]:
         """Discover sessions, bring the selected files' caches current, return them.
