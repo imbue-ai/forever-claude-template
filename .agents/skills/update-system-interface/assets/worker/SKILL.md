@@ -55,28 +55,39 @@ replies via `mngr message` and you resume. For terminal statuses, the run ends.
 - Frontend: `cd apps/system_interface/frontend && npm run build` (you must be
   able to produce a clean build) plus `npm run lint` and `npm run test`.
 - If you want to drive the UI manually during development, launch a **throwaway**
-  instance on an alternate port against fixture data, e.g.
-  `SYSTEM_INTERFACE_PORT=8137 uv run system-interface` from
-  `apps/system_interface/` -- a disposable instance, never the live one.
+  instance on an alternate port, e.g. `SYSTEM_INTERFACE_PORT=8137 uv run
+  system-interface` from `apps/system_interface/` -- a disposable instance, never
+  the live one. With `MNGR_HOST_DIR` left at its default it discovers the **real**
+  agents (this is how you open the motivating conversation named in `## Real
+  scenario`); point it at fixture data instead when you want an isolated,
+  reproducible scene for a committed test.
 
 ## Testing contract (verify it actually works, then crystallize)
 
-- **If the task file has a `## Real scenario to reproduce` section, your fixture
-  MUST reproduce that exact DOM shape -- do not invent a simpler one.** This is
-  the most dangerous failure mode for a UI bug fix: you run in an isolated
-  worktree and cannot see the conversation/screen that motivated the change, so
-  it is tempting to build a plausible-looking fixture from imagination. If that
-  fixture's structure differs from the real case even slightly (e.g. prose that
-  is a separate trailing message vs. folded into a card), your CSS selector or
-  assertion can match your fixture while never matching reality -- and your test
-  passes against a structure that does not exist. Build the fixture to match the
-  lead-provided structure (same element nesting, same classes present), assert
-  the DOM actually has that shape (so the test can't silently pass against the
-  wrong tree), and confirm your regression test **fails before your fix and
-  passes after** by reverting the change. Reproduce the lead's measured
-  before-value and hit the stated target value. If the task gives no real
-  scenario but the change is clearly motivated by one, ask the lead for it
-  (a `question` gate) rather than guessing.
+- **If the task names a real motivating conversation under `## Real scenario`,
+  LOOK AT IT before you touch anything -- do not imagine it.** You are *not* cut
+  off from that conversation. Boot your built instance with `MNGR_HOST_DIR` left
+  at its default (see "How to run" below): the system interface then discovers
+  the same real agents the user sees, so you can drive Playwright (`--no-sandbox`)
+  to the named agent's conversation and **screenshot the actual thing the user
+  complained about** (use the tab bar's add-tab `+` dropdown to switch to the
+  agent, or navigate to it directly). Open the screenshot and study the real
+  rendering. Fix against *that*, then re-render the same conversation and confirm
+  with your own eyes that it now looks right. This is the whole point: you see the
+  real case rather than reconstructing it from the brief.
+
+  Only after you have seen and fixed the real case do you crystallize a committed
+  regression test. A CI test can't depend on a user's conversation existing, so
+  its fixture is necessarily synthetic -- but shape it from the **real DOM you
+  just observed** (same element nesting, same classes present), not from
+  imagination, assert the DOM actually has that shape (so the test can't silently
+  pass against the wrong tree), and confirm it **fails before your fix and passes
+  after** by reverting the change. If you genuinely cannot reach the named agent
+  (it isn't discoverable from your instance), raise a `question` gate rather than
+  falling back to a guessed fixture.
+- **If the task says there is no real scenario** (net-new work with no precedent
+  in any existing conversation), build a representative synthetic fixture as usual
+  -- there is nothing real to point at, so a faithful fixture is correct here.
 - **For any change that touches the frontend, you MUST look at the rendered page
   -- not just assert on the DOM.** This is the single most important step and the
   one most easily skipped. A clean build and passing Playwright assertions prove

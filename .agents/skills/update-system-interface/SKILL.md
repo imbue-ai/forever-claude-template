@@ -59,32 +59,40 @@ specifics for this flow:
   default `worker`). That template installs the bundled
   `update-system-interface-worker` sub-skill into the worker's `.agents/skills/`
   tree so the worker can load it.
-- **Ground the brief in the REAL motivating scenario.** If the change is
-  motivated by how something actually looks/behaves in a specific real
-  conversation or screen (the usual case for a bug report -- "this gap looks
-  wrong *here*"), the worker runs in an isolated worktree with its own empty
-  agent and **cannot see that scenario**. Left to imagine it, the worker will
-  invent a fixture, get the structure subtly wrong, and "verify" against its own
-  invention -- a green check that proves nothing. So before/while briefing,
-  **capture the real artifact yourself and hand it to the worker**:
-  - Identify the motivating agent/conversation (often the lead's own
-    `$MNGR_AGENT_ID`) and render it in the *live* UI with Playwright
-    (`--no-sandbox`). Capture the actual DOM structure and computed measurements
-    that define the bug (element nesting, which classes are present, the measured
-    px gap/size, etc.).
-  - Put those concrete facts in the brief under a `## Real scenario to reproduce`
-    section, and require the worker's reproduction fixture to **match that exact
-    DOM shape** (not a simplified guess) and its regression test to **fail
-    before the fix and pass after**. State the measured before-value and the
-    target value so "done" is objectively checkable.
+- **Judge whether a real scenario motivates the change, and if so point the
+  worker straight at it -- don't transcribe it.** Most UI fixes come from how
+  something *actually* renders in a specific real conversation -- "this gap looks
+  wrong *here*", or "I don't like how permission requests render" said in a
+  conversation where a permission request happened (the discontent is with *that*
+  rendering, in *that* conversation). The worker is **not** cut off from that
+  conversation: the system interface discovers agents from the shared
+  `MNGR_HOST_DIR`, so an instance the worker boots in its own worktree renders
+  the very same real conversations the user is looking at. So do **not** measure
+  the DOM and write it into the brief -- that is a lossy game of telephone (you
+  look at the real thing, transcribe it, and the worker reconstructs it from your
+  prose, losing fidelity at each hop). Instead, just decide which case you are in
+  and say so:
+  - **A real conversation motivated it** (the usual case for a bug report): name
+    the motivating agent -- usually your own `$MNGR_AGENT_ID`, or whichever agent
+    the user was looking at when they complained -- in a `## Real scenario`
+    section, and describe in plain words what looks wrong about it. Tell the
+    worker to open *that* conversation in its own instance and look at it before
+    changing anything. The worker sees the real thing firsthand; it does not
+    reconstruct it from your description.
+  - **No real scenario** (e.g. a net-new control or layout with no precedent in
+    any existing conversation): say so in the brief and let the worker build a
+    representative fixture as usual. Don't manufacture a fake "real scenario."
+  A change can be partly both -- anchored in a real conversation but adding
+  something new -- in which case name the real anchor and call out the new part.
+  Use your judgment.
 - **Keep the rest of the task brief short and point it at the sub-skill.** You do
   not need to restate how the worker builds or tests anything -- that all lives
   in the sub-skill. The brief only needs:
   - `## What to do`: the actual UI change the user asked for.
   - `## Context`: any specifics (which panel, desired behavior, constraints).
-  - `## Real scenario to reproduce` (when applicable): the captured real DOM
-    shape + measurements from above, as the worker's reproduction fixture and
-    acceptance target.
+  - `## Real scenario` (when applicable): the motivating agent id + what looks
+    wrong in plain words. The worker opens that conversation and sees it
+    firsthand. Omit it (or write "no real scenario") for net-new work.
   - `## Success criteria`: what "done" looks like for this change, plus the
     standing line: *follow the `update-system-interface-worker` sub-skill for
     how to run, test, verify, and what not to touch; report `done` only when its
@@ -129,20 +137,19 @@ python3 scripts/layout.py open si-preview
 ```
 
 **Self-verify against the real scenario before you ask the user.** The preview's
-inner instance opens on its server's *primary* agent -- which is the worker's
-own (empty) agent, not the motivating conversation. So neither the user nor you
-sees the real case by default. Before showing it off:
+inner instance opens on its server's *primary* agent -- the worker's own (empty)
+agent, not the motivating conversation -- so the real case isn't on screen by
+default. If a real conversation motivated the change:
 
-- Render the **motivating** conversation in the preview's inner app with
-  Playwright (`--no-sandbox`): use the tab bar's add-tab (`+`) dropdown and pick
-  the real agent (its `.dockview-add-tab-dropdown-item`), or otherwise navigate
-  to it.
-- Re-take the same DOM measurement you captured pre-brief and **confirm the fix
-  actually moved the number** (e.g. the gap went from the measured before-value
-  to the target). A worker reporting `done` with passing tests is not proof the
-  real case is fixed -- you caught the scenario, so you confirm it. If it did not
-  move, the fix missed the real DOM: re-brief the worker (with the fresh
-  measurement) rather than merging.
+- Open the **motivating** conversation in the preview's inner app with Playwright
+  (`--no-sandbox`): use the tab bar's add-tab (`+`) dropdown and pick the real
+  agent (its `.dockview-add-tab-dropdown-item`), or otherwise navigate to it.
+- Look at it and **confirm the change actually fixed the real case**, comparing
+  it against what looked wrong in the original complaint. A worker reporting
+  `done` with passing tests is not proof the real case is fixed -- you have the
+  real conversation right in front of you, so confirm it with your own eyes. If
+  it still looks wrong, the fix missed the real DOM: re-brief the worker rather
+  than merging.
 - Tell the user how to see the real case themselves (the preview opens on the
   worker's empty agent; they switch via the `+` dropdown to the motivating
   agent).
