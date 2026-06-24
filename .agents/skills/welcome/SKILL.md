@@ -16,6 +16,19 @@ Tell it what you want, how it can be better, and it'll take care of it.
 
 **What do you want to start with?**
 
+```minds-choices
+[
+  {"title": "I have something in mind", "subtitle": "Tell me what you'd like to work on.", "prefill": ""},
+  {"title": "Suggest a few things", "subtitle": "I'll show you a few ways to get started.", "prefill": "Suggest a few things I could work on."}
+]
+```
+
 ---
 
-That is the entire welcome message. Stop after printing it.
+That is the entire welcome message. Stop after printing it. Output the
+` ```minds-choices ` block exactly as written -- it renders as two clickable
+cards in the chat, and clicking one fills in the user's message for them.
+
+If the user then asks you to suggest things to work on (for example by picking
+"Suggest a few things"), the `suggest-starting-points` skill takes over and shows
+the four starting-point cards.

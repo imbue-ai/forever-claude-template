@@ -1034,6 +1034,59 @@ body {
   text-decoration: none;
 }
 
+/* ── Choice cards ──
+   Clickable cards substituted for a `minds-choices` marker block in an assistant
+   message (see views/choice-cards.ts). Each card prefills the composer with its
+   phrase on click. Styled as a vertical stack of selectable options. */
+.choice-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 0.75em;
+  margin-bottom: 0.25em;
+  max-width: 560px;
+}
+
+.choice-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-bg-composer);
+  cursor: pointer;
+  transition:
+    border-color 120ms,
+    background-color 120ms,
+    box-shadow 120ms;
+}
+
+.choice-card:hover {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+}
+
+.choice-card:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-light);
+}
+
+.choice-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.choice-card-subtitle {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+
 /* ── Permission request card ──
    An agent permission request, rendered as a standalone card (not a generic
    tool block): the specific request, a button that opens the modal, and a

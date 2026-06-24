@@ -21,6 +21,7 @@ import {
   isSkillExpansionUserMessage,
 } from "./message-classification";
 import { PermissionCard } from "./permission-card";
+import { parseChoiceSegments, renderChoiceCards } from "./choice-cards";
 
 /** Build a tool_call_id -> tool_result map, merging skill-expansion
  *  user_messages into the output of their preceding "Skill" tool call so
@@ -354,7 +355,16 @@ export function renderAssistantMessageChildren(
 
   const children: m.Children[] = [];
   if (textContent) {
-    children.push(m(MarkdownContent, { content: textContent }));
+    // Substitute clickable choice cards for any `minds-choices` marker block,
+    // rendering the surrounding prose through MarkdownContent as usual. A message
+    // with no marker yields a single markdown segment, so this is a no-op there.
+    for (const segment of parseChoiceSegments(textContent)) {
+      if (segment.kind === "choices") {
+        children.push(renderChoiceCards(segment.choices, agentId));
+      } else {
+        children.push(m(MarkdownContent, { content: segment.text }));
+      }
+    }
   }
   for (const toolCall of toolCalls) {
     // Render the rich card as soon as we have the Agent call's description (from the tool

@@ -7,6 +7,7 @@ import {
   removePendingMessage,
 } from "../models/PendingMessages";
 import { describeRequestError } from "../models/request-error";
+import { consumeInputDraft } from "../models/InputDraft";
 import { isWorkingActivityState } from "./ActivityIndicator";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
@@ -48,6 +49,21 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         currentAgentId = agentId;
         messageText = localStorage.getItem(messageTextKey(agentId)) ?? "";
         isInterruptInFlight = false;
+      }
+
+      // Pick up a one-shot prefill queued by a clicked choice card (prefill only;
+      // the user still sends). An empty draft clears and focuses the box. Mirror
+      // the per-agent localStorage persistence the live input uses so the prefill
+      // survives a reload or agent switch.
+      const draft = consumeInputDraft(agentId);
+      if (draft !== null) {
+        messageText = draft;
+        if (draft.length > 0) {
+          localStorage.setItem(messageTextKey(agentId), draft);
+        } else {
+          localStorage.removeItem(messageTextKey(agentId));
+        }
+        requestAnimationFrame(() => focusMessageTextarea());
       }
 
       async function handleSend(): Promise<void> {
