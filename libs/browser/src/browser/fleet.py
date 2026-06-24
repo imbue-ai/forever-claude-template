@@ -234,7 +234,8 @@ def cmd_new(_args: argparse.Namespace) -> int:
         _out(f"started browser {payload['id']}")
         return _EXIT_OK
     _err(payload.get("error", f"new failed ({status})"))
-    return _EXIT_BUSY if status == 409 else _EXIT_ERROR
+    # 409 = fleet full, 503 = chromium installing / fleet still restoring -- both "try later".
+    return _EXIT_BUSY if status in (409, 503) else _EXIT_ERROR
 
 
 def cmd_close(args: argparse.Namespace) -> int:
@@ -243,7 +244,7 @@ def cmd_close(args: argparse.Namespace) -> int:
     status, payload = _request("DELETE", f"/browsers/{args.id}")
     if status != 200:
         _err(payload.get("error", f"close failed ({status})"))
-        return _EXIT_ERROR
+        return _EXIT_BUSY if status == 503 else _EXIT_ERROR  # 503 = fleet still restoring
     _out(f"closed browser {args.id}")
     return _EXIT_OK
 
@@ -369,6 +370,10 @@ def _render_action(payload: dict[str, Any], browser_id: int, kind: str) -> int:
              "Tell the user you'll pick up when they hand it back, then end your turn; "
              f"re-run `state {browser_id}` when you resume.")
         return _EXIT_PREEMPTED
+    if status == "initializing":
+        _err("the browser fleet is still starting up (restoring your saved browsers) -- "
+             "try again in a few seconds. `ls` and `state` work now; this command needs the fleet ready.")
+        return _EXIT_BUSY
     if status == "crashed":
         _err(f"browser {browser_id} crashed (Chromium was killed -- e.g. out of memory) and is gone. "
              f"Start a fresh one with `new` (it gets a new number); browser {browser_id} won't come back.")

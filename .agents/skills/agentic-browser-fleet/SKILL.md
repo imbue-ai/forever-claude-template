@@ -272,6 +272,19 @@ owner. The rules:
   to get a fresh browser (it gets a new id, opens in its own tab; the crashed one
   stays visibly marked "crashed" so nothing is silently reused), and carry on there.
 
+- **Browsers persist across a restart.** The fleet (browsers, their tabs, and their
+  cookies/logins/history) is saved, so after the workspace stops and reopens your
+  browsers come back -- often still logged in. You don't do anything for this; just
+  know a site you logged into earlier is probably still logged in. Right after a
+  restart the fleet is restoring: a state-changing command may briefly come back
+
+  ```text
+  the browser fleet is still starting up (restoring your saved browsers) --
+  try again in a few seconds.                                     (exit 3)
+  ```
+
+  Just wait a moment and retry (`ls` and `state` work during this window).
+
 ### 5. The human can watch live; your trace is here
 
 The browser shows up live in a minds tab that pulls in next to your chat, so

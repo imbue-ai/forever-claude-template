@@ -29,5 +29,12 @@ release a browser when the task on it finishes, when the user says stop, or when
 switch away from it; keep several browsers only while you're still actively driving
 them, then release each.
 
+The skill also documents that a crashed browser is gone for good (start a `new` one),
+and that the fleet now persists across a workspace restart: browsers, their tabs, and
+their cookies/logins come back, so a site logged into earlier is likely still logged
+in -- and right after a restart a state-changing command may briefly return "still
+starting up (restoring your saved browsers)", which the agent just waits out and
+retries (`ls`/`state` work during that window).
+
 The `scripts/layout.py` agent helper can now address a specific browser session
 as a pane ref (`service:browser?session=<id>`).

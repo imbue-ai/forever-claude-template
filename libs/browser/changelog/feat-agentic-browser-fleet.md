@@ -99,3 +99,16 @@ browsers, each with an atomic ownership state machine, plus an
   `ls` / `GET /browsers` report it. A crashed id is never reused (a new browser gets
   a new number, in its own tab), and crashed shells don't count toward the fleet cap,
   so a crash never blocks opening a new browser.
+
+- The fleet now persists across a workspace stop/restart. Each browser gets its own
+  persistent Chromium profile under `$MNGR_HOST_DIR/browser-profiles/` (on the
+  workspace volume), so cookies/logins/history come back -- using Chromium's own
+  profile persistence (a `user_data_dir`), not anything hand-rolled. A tiny manifest
+  (`runtime/browser-fleet.json`, git-backed to the mindsbackup branch) records which
+  browsers existed and their tab URLs, so even a full rebuild restores the tab list.
+  On daemon startup the fleet is restored eager-sequentially (one browser at a time --
+  no cold-boot memory spike) behind an init gate: state-changing commands return a 503
+  "initializing" until restore completes, while `ls`/`state` stay open; the CLI maps
+  that to a clear "still starting up, try again" message and the viewer shows a brief
+  "restoring" banner. A fresh workspace seeds browser 0 at the home page. Closing a
+  browser forgets its profile; a crashed browser is never restored as healthy.

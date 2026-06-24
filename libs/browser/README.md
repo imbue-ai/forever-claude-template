@@ -27,3 +27,19 @@ agent, identified by its `MNGR_AGENT_ID`, or the human).
   the live browser and, when an agent is driving, a grey "Agent has control"
   overlay with a "Take control" button; the agent's trace lives in the agent's
   output, not the tab.
+- **Persistence**: the fleet survives a workspace stop/restart. Each browser gets
+  its own persistent Chromium profile under `$MNGR_HOST_DIR/browser-profiles/`
+  (Tier A -- on the workspace volume), so cookies/logins/history come back; Chromium
+  does this itself, we just point `user_data_dir` at a durable dir. A tiny manifest
+  (`runtime/browser-fleet.json`, Tier B -- git-backed to the mindsbackup branch)
+  records which browsers existed and their tab URLs, so even a full rebuild restores
+  the tab list (logged out, since profiles are volume-only). On daemon startup the
+  fleet is restored **eager-sequentially** (one browser at a time, no cold-boot
+  memory spike) behind an **init gate**: state-changing commands return a 503
+  "initializing" until restore finishes, while `ls`/`state` stay open. A fresh
+  workspace seeds browser 0 at the home page. `close <id>` retires a browser and
+  forgets its profile; a crashed browser is never restored as healthy.
+  - The profile dir name contains the literal `browser-use-user-data-dir-` substring
+    on purpose -- it makes browser_use's `_copy_profile()` use the dir in place
+    instead of copying it to a temp dir (which would silently defeat persistence).
+    Pinned by `browser-use==0.13.1` and guarded by an integration test.

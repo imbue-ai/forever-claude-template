@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 from playwright.async_api import Error as PlaywrightError
 
+from browser import manifest
 from browser import runner
 from browser import session as bsession
 
@@ -327,3 +328,97 @@ def test_browser_crash_is_detected_and_reported_real_chromium(monkeypatch: pytes
             await manager.shutdown()
 
     asyncio.run(go())
+
+
+# --- persistence: HTTP init gate + close-forgets-profile (fake browser) -------
+
+
+def test_init_gate_blocks_state_changing_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # While the fleet is still restoring, state-changing routes return 503
+    # "initializing" but read-only routes stay open.
+    _install_fake_browser(monkeypatch)
+    runner._init_done.clear()  # simulate "still restoring"
+    client = TestClient(runner.app)
+    create = client.post("/browsers")
+    assert create.status_code == 503 and create.json()["status"] == "initializing"
+    click = client.post("/browsers/0/click", json={"index": 0}, headers={"X-Mngr-Agent-Id": "A"})
+    assert click.status_code == 503 and click.json()["status"] == "initializing"
+    assert client.get("/health").json()["initializing"] is True
+    assert client.get("/init-status").status_code == 200
+    # conftest re-sets _init_done on teardown.
+
+
+def test_startup_opens_gate_even_if_restore_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Poison-pill: a restore that raises must still open the gate (finally), never
+    # wedge the daemon shut.
+    async def boom(self: bsession.BrowserSessionManager) -> None:
+        raise RuntimeError("restore exploded")
+
+    monkeypatch.setattr(bsession.BrowserSessionManager, "restore", boom)
+    monkeypatch.setenv("BROWSER_SKIP_INSTALL_CHECK", "1")
+    runner._init_done.clear()
+    with TestClient(runner.app):  # the context manager fires startup + shutdown
+        pass
+    assert runner._init_done.is_set()
+
+
+def test_close_endpoint_deletes_profile_and_drops_from_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    profile = bsession._profile_dir(2)
+    profile.mkdir(parents=True)
+    fake = _install_fake_browser(monkeypatch, browser_id=2)
+    fake._bu_session = object()  # type: ignore[assignment]
+
+    async def fake_close(self: bsession.LiveBrowser) -> None:  # avoid real Chromium teardown
+        return None
+
+    monkeypatch.setattr(bsession.LiveBrowser, "close", fake_close)
+    client = TestClient(runner.app)
+    resp = client.delete("/browsers/2")
+    assert resp.status_code == 200
+    assert not profile.exists()  # the persistent profile is forgotten on explicit close
+    saved = manifest.read_manifest()
+    assert saved is not None and all(e.id != 2 for e in saved.browsers)
+
+
+# --- persistence: the core promise, against real Chromium --------------------
+
+
+def test_profile_persists_across_manager_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole point of persistence: a cookie set in one daemon "session" is still
+    # there after a restart, because the persistent user_data_dir is used IN PLACE
+    # (not copied to a throwaway temp dir -- the browser_use _copy_profile trap).
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    future_expiry = 4102444800.0  # year 2100 -> a persistent (on-disk) cookie, not session-only
+
+    async def go() -> None:
+        first = bsession.BrowserSessionManager()
+        try:
+            await first.restore()  # first boot seeds browser 0
+        except (bsession.BrowserStartupError, PlaywrightError, OSError) as e:
+            pytest.skip(f"Chromium unavailable in this environment: {e}")
+        try:
+            browser = first.get(0)
+            assert (await browser.act_navigate("A", "Alice", "https://example.com"))["ok"]
+            # Anti-_copy_profile tripwire: the live profile is our persistent dir, NOT a temp copy.
+            assert str(_profile_dir_for(0)) == str(browser._bu_session.browser_profile.user_data_dir)
+            await browser._context.add_cookies(
+                [{"name": "fleet_test", "value": "persisted", "url": "https://example.com", "expires": future_expiry}]
+            )
+            await first._save_manifest()
+        finally:
+            await first.shutdown()  # clean stop flushes the profile to disk
+
+        second = bsession.BrowserSessionManager()
+        await second.restore()
+        try:
+            cookies = await second.get(0)._context.cookies("https://example.com")
+            assert any(c["name"] == "fleet_test" and c["value"] == "persisted" for c in cookies)
+        finally:
+            await second.shutdown()
+
+    asyncio.run(go())
+
+
+def _profile_dir_for(browser_id: int):
+    # Helper kept tiny so the tripwire reads clearly above.
+    return bsession._profile_dir(browser_id)

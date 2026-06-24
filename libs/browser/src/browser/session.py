@@ -44,6 +44,7 @@ import asyncio
 import base64
 import json
 import os
+import shutil
 import time
 from collections.abc import Awaitable
 from collections.abc import Callable
@@ -67,6 +68,7 @@ from playwright.async_api import Playwright
 from playwright.async_api import async_playwright
 from pydantic import PrivateAttr
 
+from browser import manifest as fleet_manifest
 from imbue.imbue_common.mutable_model import MutableModel
 
 # browser-use phones home anonymized telemetry by default; disable it (the
@@ -168,6 +170,61 @@ def _repo_root() -> Path:
 # Where `screenshot` writes PNGs (relative to the daemon's cwd = repo root). The
 # CLI prints the path and the agent reads the file; agent + daemon share the FS.
 _SCREENSHOT_DIR = Path(os.environ.get("BROWSER_SCREENSHOT_DIR", "runtime/browser-screenshots"))
+
+# Per-browser persistent Chromium profiles (cookies/logins/history) live here, on the
+# workspace volume under $MNGR_HOST_DIR -- Tier A durability: they survive stop/start
+# and restart of a single workspace (lost only on a permanent delete). They are NOT
+# under runtime/ (which is git-backed to the mindsbackup branch) -- a fat, churny
+# profile would bloat that branch. Override the root for tests / alternate layouts.
+_PROFILE_ROOT = Path(
+    os.environ.get(
+        "BROWSER_PROFILE_ROOT",
+        str(Path(os.environ.get("MNGR_HOST_DIR", "/mngr")) / "browser-profiles"),
+    )
+)
+# Seconds to wait for one tab's navigation during restore, so a slow SSO redirect
+# can't stall the sequential relaunch of the rest of the fleet.
+_RESTORE_NAV_TIMEOUT = float(os.environ.get("BROWSER_RESTORE_NAV_TIMEOUT", "20"))
+# How often the manager re-checkpoints the manifest (a no-op when nothing changed).
+# Topology changes (create/close) checkpoint immediately; this catches tab-URL drift
+# so an ungraceful daemon kill loses at most this many seconds of tab changes (the
+# profile's cookies/logins persist regardless).
+_MANIFEST_CHECKPOINT_SECONDS = float(os.environ.get("BROWSER_CHECKPOINT_SECONDS", "10"))
+# Lock files Chromium leaves in a profile; a hard kill (crash/OOM/container stop)
+# orphans them and the next launch on that profile would refuse to start. Safe to
+# remove because restore is sequential and the prior Chromium for this dir is dead.
+_SINGLETON_LOCK_NAMES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+
+
+def _profile_dir(browser_id: int) -> Path:
+    """The persistent Chromium ``user_data_dir`` for a browser id.
+
+    The ``browser-use-user-data-dir-`` prefix in the final path component is
+    LOAD-BEARING, not cosmetic: browser_use's ``BrowserProfile._copy_profile()``
+    (profile.py) treats any other path as a "real" profile to COPY into a throwaway
+    temp dir (because the bundled binary is "Google Chrome for Testing", so its
+    is_chrome check is True) -- which would silently defeat persistence and recopy
+    50-500MB on every launch. A path containing this substring hits its early-return
+    and is used in place. Pinned by browser-use==0.13.1 and guarded by an integration
+    test; do not rename without updating that test.
+    """
+    return _PROFILE_ROOT / f"browser-use-user-data-dir-{browser_id}"
+
+
+def _clear_stale_singleton(profile_dir: Path) -> None:
+    """Remove Chromium's Singleton* lock files left behind by a hard kill, so a
+    relaunch on this persistent profile isn't refused. Called only at launch, never
+    while a browser is live (one live Chromium per profile dir)."""
+    for name in _SINGLETON_LOCK_NAMES:
+        try:
+            (profile_dir / name).unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug("could not clear {} in {} ({})", name, profile_dir, e)
+
+
+def _is_restorable_url(url: str | None) -> bool:
+    """Whether a tab URL is worth persisting/reopening (skip blank and internal pages)."""
+    return bool(url) and not url.startswith(("about:", "chrome:", "chrome-error:", "devtools:"))
 
 
 def _action_summary(action: Any) -> str:
@@ -337,14 +394,29 @@ class LiveBrowser(MutableModel):
     # number), so the dead one stays clearly labeled.
     _crashed: bool = PrivateAttr(default=False)
 
-    async def start(self, playwright: Playwright) -> None:
-        """Launch the headless Chromium (browser-use) and attach the Playwright observer."""
+    async def start(self, playwright: Playwright, restore_tabs: list[str] | None = None) -> None:
+        """Launch the headless Chromium (browser-use) and attach the Playwright observer.
+
+        Uses a persistent ``user_data_dir`` per browser id so cookies/logins/history
+        survive a restart (Chromium's own persistence; we serialize none of it). When
+        ``restore_tabs`` is given (a list of URLs from the manifest), reopen those tabs
+        in order instead of the single default home page; the persistent profile means
+        they come back logged in.
+        """
         self._playwright = playwright
         self._input_enabled.set()
         chromium_path = playwright.chromium.executable_path
+        profile_dir = _profile_dir(self.browser_id)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        _clear_stale_singleton(profile_dir)  # a prior hard kill may have orphaned a lock
         self._bu_session = BrowserSession(
             headless=_HEADLESS,
             executable_path=chromium_path,
+            # Persistent profile on the workspace volume -- the whole point of
+            # persistence. The dir name (see _profile_dir) is load-bearing for
+            # browser_use. We deliberately do NOT set storage_state (it would
+            # overwrite the live profile).
+            user_data_dir=str(profile_dir),
             args=["--disable-dev-shm-usage"],
             keep_alive=True,
             # Pin a fixed viewport + window so every site renders at the same
@@ -370,12 +442,33 @@ class LiveBrowser(MutableModel):
         page = pages[0] if pages else await self._context.new_page()
         self._track_nav(page)
         await self._set_active_page(page)
-        try:
-            await page.goto(_HOME_URL)
-        except _BROWSER_ERRORS as e:
-            logger.debug("initial nav to {} ignored ({})", _HOME_URL, e)
+        await self._open_initial_tabs(page, restore_tabs)
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
         logger.info("LiveBrowser {} started (cdp_url={})", self.browser_id, cdp_url)
+
+    async def _open_initial_tabs(self, first_page: Page, restore_tabs: list[str] | None) -> None:
+        """Navigate the initial page(s): the saved tabs on restore, else the home page.
+
+        Each navigation is bounded by ``_RESTORE_NAV_TIMEOUT`` so one slow/hung URL
+        can't stall startup, and failures are swallowed (a tab that won't load just
+        comes up blank -- the profile's cookies are already attached either way)."""
+        urls = [u for u in (restore_tabs or []) if _is_restorable_url(u)] or [_HOME_URL]
+
+        async def _go(page: Page, url: str) -> None:
+            try:
+                await asyncio.wait_for(page.goto(url), timeout=_RESTORE_NAV_TIMEOUT)
+            except (TimeoutError, *_BROWSER_ERRORS) as e:
+                logger.debug("restore nav to {} ignored ({})", url, e)
+
+        await _go(first_page, urls[0])
+        for url in urls[1:]:
+            try:
+                page = await self._context.new_page()
+            except _BROWSER_ERRORS as e:
+                logger.debug("restore new-tab for {} ignored ({})", url, e)
+                continue
+            self._track_nav(page)
+            await _go(page, url)
 
     # --- screencast / active tab ---------------------------------------------
 
@@ -1299,17 +1392,24 @@ class BrowserSessionManager(MutableModel):
     _playwright: Playwright | None = PrivateAttr(default=None)
     _next_id: int = PrivateAttr(default=1)  # 0 is reserved for the default browser
     _lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+    # Last manifest JSON written, so the periodic checkpoint is a no-op when nothing
+    # changed (idle workspaces produce zero backup-branch churn).
+    _last_manifest_json: str | None = PrivateAttr(default=None)
+    _closed: bool = PrivateAttr(default=False)
+    _checkpoint_task: "asyncio.Task[None] | None" = PrivateAttr(default=None)
 
-    async def _start_and_register_locked(self, browser_id: int) -> LiveBrowser:
+    async def _start_and_register_locked(
+        self, browser_id: int, restore_tabs: list[str] | None = None
+    ) -> LiveBrowser:
         """Launch + register one browser. Caller must hold ``self._lock`` for the whole
         call so a concurrent create can't observe a stale count (no cap overshoot) or
-        race the id assignment."""
+        race the id assignment. ``restore_tabs`` (manifest URLs) reopens prior tabs."""
         if self._playwright is None:
             self._playwright = await async_playwright().start()
         session = LiveBrowser(browser_id=browser_id)
         started = False
         try:
-            await session.start(self._playwright)
+            await session.start(self._playwright, restore_tabs=restore_tabs)
             started = True
         finally:
             if not started:
@@ -1344,6 +1444,9 @@ class BrowserSessionManager(MutableModel):
         # Dict access raises KeyError for a missing/closed id; callers turn it into a 404.
         return self._browsers[browser_id]
 
+    def has_browser(self, browser_id: int) -> bool:
+        return browser_id in self._browsers
+
     async def list_browsers(self) -> list[dict[str, Any]]:
         return [await self._browsers[bid].describe() for bid in sorted(self._browsers)]
 
@@ -1352,7 +1455,133 @@ class BrowserSessionManager(MutableModel):
         if session is not None:
             await session.close()
 
+    # --- persistence: profiles (Tier A) + manifest (Tier B) -------------------
+
+    def live_browsers(self) -> list[LiveBrowser]:
+        """Non-crashed sessions, by id -- the set worth persisting/restoring."""
+        return [self._browsers[i] for i in sorted(self._browsers) if not self._browsers[i]._crashed]
+
+    async def _snapshot_manifest_locked(self) -> fleet_manifest.Manifest:
+        """Build the durable manifest (ids + tab URLs + active tab). Caller holds ``_lock``.
+        Records topology ONLY -- never ownership/queues (process-scoped) or profile bytes."""
+        entries: list[fleet_manifest.ManifestEntry] = []
+        for browser in self.live_browsers():
+            urls: list[str] = []
+            active_tab = 0
+            for tab in await browser._tab_list():
+                if _is_restorable_url(tab.get("url")):
+                    if tab.get("active"):
+                        active_tab = len(urls)
+                    urls.append(tab["url"])
+            entries.append(
+                fleet_manifest.ManifestEntry(id=browser.browser_id, tabs=urls, active_tab=active_tab)
+            )
+        return fleet_manifest.Manifest(next_id=self._next_id, browsers=entries)
+
+    async def _save_manifest(self) -> None:
+        """Checkpoint the manifest if it changed (no-op when nothing did -- idle
+        workspaces produce zero backup churn). Snapshots under ``_lock``, writes
+        outside it; never called while holding ``_control_lock`` (ownership isn't
+        persisted, so there's no lock-ordering hazard)."""
+        async with self._lock:
+            snapshot = await self._snapshot_manifest_locked()
+        blob = snapshot.model_dump_json()
+        if blob == self._last_manifest_json:
+            return
+        fleet_manifest.write_manifest(snapshot)
+        self._last_manifest_json = blob
+
+    def _scan_profile_ids(self) -> list[int]:
+        """Browser ids that have a persistent profile dir on disk (sorted)."""
+        prefix = "browser-use-user-data-dir-"
+        ids: list[int] = []
+        if _PROFILE_ROOT.exists():
+            for child in _PROFILE_ROOT.iterdir():
+                suffix = child.name[len(prefix):]
+                if child.is_dir() and child.name.startswith(prefix) and suffix.isdigit():
+                    ids.append(int(suffix))
+        return sorted(ids)
+
+    def _sweep_orphan_profiles(self, live_ids: set[int]) -> None:
+        """Delete profile dirs not backing a live browser, to bound Tier-A disk."""
+        for pid in self._scan_profile_ids():
+            if pid not in live_ids:
+                shutil.rmtree(_profile_dir(pid), ignore_errors=True)
+
+    def forget_profile_dir(self, browser_id: int) -> None:
+        """Delete a browser's persistent profile (called on explicit `close`)."""
+        shutil.rmtree(_profile_dir(browser_id), ignore_errors=True)
+
+    async def restore(self) -> None:
+        """Bring the fleet back on daemon startup: relaunch saved browsers EAGER-
+        SEQUENTIALLY (one at a time -- no cold-boot memory spike), seed browser 0 on a
+        fresh workspace, then reconcile the manifest and sweep orphan profiles. Each
+        browser is independently guarded so one bad/locked profile never aborts the rest.
+        """
+        saved = fleet_manifest.read_manifest()
+        profile_ids = self._scan_profile_ids()
+
+        def _live_count() -> int:
+            return sum(1 for b in self._browsers.values() if not b._crashed)
+
+        async with self._lock:
+            if saved is not None:
+                # Set the id high-water mark BEFORE relaunching so nothing re-hands a
+                # retired id, and a later create() continues past the restored max.
+                restored_ids = [e.id for e in saved.browsers]
+                self._next_id = max(saved.next_id, max(restored_ids, default=0) + 1, 1)
+                for entry in sorted(saved.browsers, key=lambda e: e.id):
+                    if _live_count() >= _MAX_SESSIONS:
+                        logger.warning("restore hit the fleet cap; skipping browser {}", entry.id)
+                        continue
+                    try:
+                        await self._start_and_register_locked(entry.id, restore_tabs=entry.tabs or None)
+                    except (BrowserStartupError, *_BROWSER_ERRORS) as e:
+                        logger.warning("could not restore browser {} ({}); skipping", entry.id, e)
+            elif profile_ids:
+                # Manifest lost but profiles survived: relaunch each profile (tabs
+                # unknown -> home), rather than wiping surviving logins as a "first boot".
+                self._next_id = max(profile_ids, default=0) + 1
+                for pid in profile_ids:
+                    if _live_count() >= _MAX_SESSIONS:
+                        break
+                    try:
+                        await self._start_and_register_locked(pid)
+                    except (BrowserStartupError, *_BROWSER_ERRORS) as e:
+                        logger.warning("could not restore profile {} ({}); skipping", pid, e)
+            # Always ensure the default browser exists (true first boot seeds it at home).
+            if 0 not in self._browsers and _live_count() < _MAX_SESSIONS:
+                try:
+                    await self._start_and_register_locked(0)
+                except (BrowserStartupError, *_BROWSER_ERRORS) as e:
+                    logger.warning("could not seed browser 0 ({})", e)
+            live_ids = {bid for bid, browser in self._browsers.items() if not browser._crashed}
+        # Outside the lock: reconcile the manifest (drops skipped/crashed) + sweep orphans.
+        await self._save_manifest()
+        self._sweep_orphan_profiles(live_ids)
+
+    def start_checkpointing(self) -> None:
+        """Begin periodically re-checkpointing the manifest (catches tab-URL drift)."""
+        if self._checkpoint_task is None:
+            self._checkpoint_task = asyncio.create_task(self._checkpoint_loop())
+
+    async def _checkpoint_loop(self) -> None:
+        while not self._closed:
+            await asyncio.sleep(_MANIFEST_CHECKPOINT_SECONDS)
+            try:
+                await self._save_manifest()
+            except OSError as e:  # a transient write failure shouldn't kill the loop
+                logger.debug("manifest checkpoint write ignored ({})", e)
+
     async def shutdown(self) -> None:
+        self._closed = True
+        if self._checkpoint_task is not None:
+            self._checkpoint_task.cancel()
+        # Final checkpoint so a clean stop captures the latest tabs before teardown.
+        try:
+            await self._save_manifest()
+        except OSError as e:
+            logger.debug("final manifest checkpoint ignored ({})", e)
         for browser_id in list(self._browsers):
             await self.close(browser_id)
         if self._playwright is not None:

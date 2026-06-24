@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from browser import manifest
 from browser import session as bsession
 
 
@@ -444,7 +445,9 @@ def test_create_rejects_when_fleet_full(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_ids_are_monotonic_and_never_reused(monkeypatch: pytest.MonkeyPatch) -> None:
     # Stub the Chromium launch so we exercise pure id-allocation logic.
-    async def fake_start(self: bsession.LiveBrowser, _playwright: Any) -> None:
+    async def fake_start(
+        self: bsession.LiveBrowser, _playwright: Any, restore_tabs: list[str] | None = None
+    ) -> None:
         return None
 
     monkeypatch.setattr(bsession.LiveBrowser, "start", fake_start)
@@ -463,6 +466,127 @@ def test_ids_are_monotonic_and_never_reused(monkeypatch: pytest.MonkeyPatch) -> 
             mgr.get(1)
 
     asyncio.run(go())
+
+
+# --- persistence: restore + manifest (stubbed Chromium) ----------------------
+# The autouse conftest fixture redirects the profile root + manifest path to tmp.
+
+
+def _stub_start(monkeypatch: pytest.MonkeyPatch, fail_ids: set[int] | None = None) -> list[tuple[int, Any]]:
+    """Replace LiveBrowser.start with a no-op that records (id, restore_tabs); ids in
+    ``fail_ids`` raise BrowserStartupError (to test resilient restore)."""
+    calls: list[tuple[int, Any]] = []
+
+    async def fake_start(
+        self: bsession.LiveBrowser, _playwright: Any, restore_tabs: list[str] | None = None
+    ) -> None:
+        calls.append((self.browser_id, restore_tabs))
+        if fail_ids and self.browser_id in fail_ids:
+            raise bsession.BrowserStartupError(f"boom {self.browser_id}")
+
+    monkeypatch.setattr(bsession.LiveBrowser, "start", fake_start)
+    return calls
+
+
+def _manager() -> bsession.BrowserSessionManager:
+    mgr = bsession.BrowserSessionManager()
+    mgr._playwright = object()  # type: ignore[assignment]  # skip async_playwright().start()
+    return mgr
+
+
+def test_restore_sets_next_id_high_water_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_start(monkeypatch)
+    # next_id is stale (1) but a browser with id 5 exists -> next_id must jump past it,
+    # so a retired id is never re-handed-out.
+    manifest.write_manifest(
+        manifest.Manifest(next_id=1, browsers=[manifest.ManifestEntry(id=5, tabs=["https://x"])])
+    )
+    mgr = _manager()
+    asyncio.run(mgr.restore())
+    assert mgr._next_id == 6
+    assert mgr.has_browser(5) and mgr.has_browser(0)  # restored 5, seeded the default 0
+
+
+def test_restore_passes_saved_tabs_and_comes_up_resting(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_start(monkeypatch)
+    manifest.write_manifest(
+        manifest.Manifest(next_id=3, browsers=[manifest.ManifestEntry(id=2, tabs=["https://x", "https://y"])])
+    )
+    mgr = _manager()
+    asyncio.run(mgr.restore())
+    assert (2, ["https://x", "https://y"]) in calls  # saved tabs forwarded to start()
+    restored = mgr.get(2)
+    # Ownership/queues are NOT persisted: a restored browser is resting.
+    assert restored._state_tuple() == ("human", None, False)
+    assert restored._resume_queue == [] and restored._wait_queue == []
+
+
+def test_snapshot_excludes_crashed_and_persists_only_topology() -> None:
+    mgr = bsession.BrowserSessionManager()
+    healthy = bsession.LiveBrowser(browser_id=0)
+    healthy.controller = "agent"  # ownership state that must NOT be persisted
+    healthy.owner_agent_id = "x"
+    healthy.human_pinned = True
+    crashed = bsession.LiveBrowser(browser_id=1)
+    crashed._crashed = True
+    mgr._browsers[0] = healthy
+    mgr._browsers[1] = crashed
+
+    async def go() -> bsession.fleet_manifest.Manifest:
+        async with mgr._lock:
+            return await mgr._snapshot_manifest_locked()
+
+    snap = asyncio.run(go())
+    assert [e.id for e in snap.browsers] == [0]  # crashed browser 1 excluded
+    assert set(snap.browsers[0].model_dump().keys()) == {"id", "tabs", "active_tab"}
+
+
+def test_first_boot_seeds_browser_0_at_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_start(monkeypatch)  # no manifest, no profiles on disk
+    mgr = _manager()
+    asyncio.run(mgr.restore())
+    assert calls == [(0, None)]  # only the default browser, at the home page
+    assert manifest.read_manifest() is not None  # manifest written so the systems agree
+
+
+def test_manifest_loss_with_surviving_profiles_relaunches_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No manifest, but a profile dir survived on the volume -> relaunch it (tabs unknown),
+    # rather than treating this as a first boot and wiping the saved login.
+    (bsession._PROFILE_ROOT / "browser-use-user-data-dir-2").mkdir(parents=True)
+    calls = _stub_start(monkeypatch)
+    mgr = _manager()
+    asyncio.run(mgr.restore())
+    assert (2, None) in calls and mgr.has_browser(2)
+    assert mgr.has_browser(0)
+
+
+def test_restore_skips_a_failing_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_start(monkeypatch, fail_ids={2})
+    manifest.write_manifest(
+        manifest.Manifest(
+            next_id=4,
+            browsers=[manifest.ManifestEntry(id=0), manifest.ManifestEntry(id=2), manifest.ManifestEntry(id=3)],
+        )
+    )
+    mgr = _manager()
+    asyncio.run(mgr.restore())
+    assert mgr.has_browser(0) and mgr.has_browser(3) and not mgr.has_browser(2)
+    reconciled = manifest.read_manifest()
+    assert reconciled is not None and all(e.id != 2 for e in reconciled.browsers)
+
+
+def test_restore_sweeps_orphan_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    root = bsession._PROFILE_ROOT
+    for n in (0, 2, 9):
+        (root / f"browser-use-user-data-dir-{n}").mkdir(parents=True)
+    _stub_start(monkeypatch)
+    manifest.write_manifest(
+        manifest.Manifest(next_id=3, browsers=[manifest.ManifestEntry(id=0), manifest.ManifestEntry(id=2)])
+    )
+    mgr = _manager()
+    asyncio.run(mgr.restore())
+    assert not (root / "browser-use-user-data-dir-9").exists()  # orphan (no live browser) swept
+    assert (root / "browser-use-user-data-dir-0").exists() and (root / "browser-use-user-data-dir-2").exists()
 
 
 # --- direct control: sticky lease + per-command CAS --------------------------

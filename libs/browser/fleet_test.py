@@ -82,6 +82,9 @@ def test_parser_accepts_task_flags() -> None:
         # and wait for the wake", i.e. preempted (exit 2), not a generic busy (exit 3).
         ({"ok": False, "status": "busy_human"}, "click", fleet._EXIT_PREEMPTED),
         ({"ok": False, "status": "busy_agent"}, "state", fleet._EXIT_BUSY),
+        # the fleet is still restoring saved browsers -> try again (busy), not a hard error.
+        ({"ok": False, "status": "initializing"}, "click", fleet._EXIT_BUSY),
+        ({"ok": False, "status": "crashed"}, "state", fleet._EXIT_ERROR),
         ({"ok": False, "status": "lost_control"}, "click", fleet._EXIT_PREEMPTED),
         ({"ok": False, "status": "stale_index", "error": "run state"}, "click", fleet._EXIT_ERROR),
         ({"ok": False, "status": "timed_out"}, "state", fleet._EXIT_TIMEOUT),

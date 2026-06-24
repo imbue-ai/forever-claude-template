@@ -57,6 +57,47 @@ _STARTUP_ERRORS = (BrowserStartupError, PlaywrightError, RuntimeError, OSError, 
 app = FastAPI(title="browser", root_path=ROOT_PATH)
 manager = BrowserSessionManager()
 
+# Init gate: cleared at import, set when startup restore finishes (always, even on
+# failure -- see _startup). State-changing routes return 503 "initializing" until then;
+# read-only routes (state/ls/health) stay open so the user can watch the fleet come back.
+_init_done = asyncio.Event()
+_init_status: dict[str, Any] = {"phase": "initializing"}
+
+
+def _require_ready() -> JSONResponse | None:
+    """503 while the fleet is still restoring saved browsers; None once ready."""
+    if not _init_done.is_set():
+        return JSONResponse(
+            {
+                "error": "Browser fleet is still restoring your saved browsers; try again in a moment.",
+                "status": "initializing",
+            },
+            status_code=503,
+        )
+    return None
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    """Restore the saved fleet (eager-sequential) behind the init gate. The gate is
+    ALWAYS opened in ``finally`` so a restore failure can never wedge the daemon shut."""
+    global _init_status
+    try:
+        ready, reason = deferred_install_ready()
+        if not ready:
+            # Chromium isn't installed yet; don't block. The lazy ensure_browser_0 path
+            # brings the fleet back on first access once the install marker appears.
+            _init_status = {"phase": "waiting_for_chromium", "reason": reason}
+            return
+        await manager.restore()
+        manager.start_checkpointing()
+        _init_status = {"phase": "ready"}
+    except _STARTUP_ERRORS as e:
+        logger.error("browser fleet restore failed ({}); serving an empty fleet", e)
+        _init_status = {"phase": "ready", "error": str(e)}
+    finally:
+        _init_done.set()
+
 
 def _ndjson(event: dict[str, Any]) -> str:
     return json.dumps(event, default=str) + "\n"
@@ -138,8 +179,14 @@ def index() -> HTMLResponse:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, object]:
+    return {"status": "ok", "initializing": not _init_done.is_set()}
+
+
+@app.get("/init-status")
+def init_status() -> dict[str, Any]:
+    """Restore progress: phase is initializing / waiting_for_chromium / ready."""
+    return _init_status
 
 
 @app.get("/key-status")
@@ -154,15 +201,21 @@ async def list_browsers() -> JSONResponse:
     available, _ = anthropic_key_status()
     ready, _ = deferred_install_ready()
     if ready:
+        had_zero = manager.has_browser(0)
         try:
             await manager.ensure_browser_0()
         except _STARTUP_ERRORS as e:
             logger.debug("ensure_browser_0 during list ignored ({})", e)
+        else:
+            if not had_zero:  # lazily materialized 0 (e.g. after a degraded init) -- persist it
+                await manager._save_manifest()
     return JSONResponse({"browsers": await manager.list_browsers(), "key_available": available})
 
 
 @app.post("/browsers")
 async def create_browser() -> JSONResponse:
+    if (gate := _require_ready()) is not None:
+        return gate
     ready, reason = deferred_install_ready()
     if not ready:
         return JSONResponse({"error": reason}, status_code=503)
@@ -174,17 +227,27 @@ async def create_browser() -> JSONResponse:
     except _STARTUP_ERRORS as e:
         logger.error("failed to create browser: {}", e)
         return JSONResponse({"error": f"Could not start browser: {e}"}, status_code=503)
+    await manager._save_manifest()  # a new browser is a topology change -- persist it now
     return JSONResponse({"id": session.browser_id, "key_available": available})
 
 
 @app.delete("/browsers/{browser_id}")
 async def close_browser(browser_id: int) -> JSONResponse:
+    if (gate := _require_ready()) is not None:
+        return gate
     await manager.close(browser_id)
+    # Order matters: rewrite the manifest (id now gone) BEFORE deleting the profile,
+    # so a crash between them leaves an orphan dir (GC'd next boot), never a manifest
+    # entry pointing at a deleted profile.
+    await manager._save_manifest()
+    manager.forget_profile_dir(browser_id)
     return JSONResponse({"closed": True})
 
 
 @app.post("/browsers/{browser_id}/release")
 async def release_browser(browser_id: int, request: Request) -> JSONResponse:
+    if (gate := _require_ready()) is not None:
+        return gate
     agent_id, _ = _agent_identity(request)
     if not agent_id:
         return JSONResponse({"error": "X-Mngr-Agent-Id header required"}, status_code=400)
@@ -204,6 +267,8 @@ async def run_task(browser_id: int, request: Request) -> Response:
     the browser. A human take-control cancels the run task too, surfacing a single
     ``preempted`` event. The agent identity comes from the ``X-Mngr-Agent-*`` headers.
     """
+    if (gate := _require_ready()) is not None:
+        return gate
     agent_id, agent_name = _agent_identity(request)
     if not agent_id:
         return JSONResponse({"error": "X-Mngr-Agent-Id header required"}, status_code=400)
@@ -272,6 +337,8 @@ async def hold_browser(browser_id: int, request: Request) -> Response:
     Connection-bound, so a held lease always frees: when the holding client goes
     away (Ctrl-C / death) the browser is released. No fire-and-forget lock exists.
     """
+    if (gate := _require_ready()) is not None:
+        return gate
     agent_id, agent_name = _agent_identity(request)
     if not agent_id:
         return JSONResponse({"error": "X-Mngr-Agent-Id header required"}, status_code=400)
@@ -312,8 +379,16 @@ async def hold_browser(browser_id: int, request: Request) -> Response:
 # --- direct control: Claude drives the browser itself, one command at a time ---
 
 
-async def _direct_target(browser_id: int, request: Request) -> "tuple[LiveBrowser, str, str | None] | JSONResponse":
-    """Resolve (browser, agent_id, agent_name) for a direct command, or an error response."""
+async def _direct_target(
+    browser_id: int, request: Request, gated: bool = True
+) -> "tuple[LiveBrowser, str, str | None] | JSONResponse":
+    """Resolve (browser, agent_id, agent_name) for a direct command, or an error response.
+
+    ``gated`` (default True) blocks the command with 503 "initializing" while the fleet
+    is still restoring; read-only verbs (``state``) pass ``gated=False`` so the agent
+    can look at whatever has already come back."""
+    if gated and (gate := _require_ready()) is not None:
+        return gate
     agent_id, agent_name = _agent_identity(request)
     if not agent_id:
         return JSONResponse({"error": "X-Mngr-Agent-Id header required"}, status_code=400)
@@ -354,7 +429,9 @@ async def cmd_acquire(browser_id: int, request: Request) -> JSONResponse:
 
 @app.post("/browsers/{browser_id}/state")
 async def cmd_state(browser_id: int, request: Request) -> JSONResponse:
-    target = await _direct_target(browser_id, request)
+    # `state` is read-only -- allowed during init so the agent can look at the page
+    # even before the whole fleet has finished restoring.
+    target = await _direct_target(browser_id, request, gated=False)
     if isinstance(target, JSONResponse):
         return target
     session, agent_id, agent_name = target
@@ -456,8 +533,16 @@ async def cast_socket(websocket: WebSocket, browser_id: int) -> None:
         return
     session.add_cast_socket(websocket)
     await session.send_initial_state(websocket)
+    if not _init_done.is_set():
+        # Tell the viewer the fleet is still restoring; it shows a banner and clears it
+        # on the first live frame/control once this browser is up.
+        await websocket.send_json({"type": "initializing"})
     try:
         async for message in websocket.iter_json():
+            # During init the view streams read-only: a human can't grab control of a
+            # half-restored fleet. The viewer shows "initializing" until the gate opens.
+            if not _init_done.is_set():
+                continue
             kind = message.get("type")
             if kind == "take_control":
                 await session.take_control()
