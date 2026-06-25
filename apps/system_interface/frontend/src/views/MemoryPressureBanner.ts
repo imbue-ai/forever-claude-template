@@ -142,25 +142,21 @@ export function MemoryPressureBanner(): m.Component {
             : null,
         ]),
         expanded && hasDetails
-          ? m(
-              "ul",
-              { class: "memory-pressure-banner__list" },
-              [
-                ...items.map((item) => {
-                  const detail = shedItemDetail(item);
-                  return m("li", { class: "memory-pressure-banner__item" }, [
-                    m("span", { class: "memory-pressure-banner__item-name" }, detail.name),
-                    m("span", { class: "memory-pressure-banner__item-meta" }, detail.meta),
-                  ]);
-                }),
-                ...blocked.map((service) =>
-                  m("li", { class: "memory-pressure-banner__item" }, [
-                    m("span", { class: "memory-pressure-banner__item-name" }, service),
-                    m("span", { class: "memory-pressure-banner__item-meta" }, "Service paused"),
-                  ]),
-                ),
-              ],
-            )
+          ? m("ul", { class: "memory-pressure-banner__list" }, [
+              ...items.map((item) => {
+                const detail = shedItemDetail(item);
+                return m("li", { class: "memory-pressure-banner__item" }, [
+                  m("span", { class: "memory-pressure-banner__item-name" }, detail.name),
+                  m("span", { class: "memory-pressure-banner__item-meta" }, detail.meta),
+                ]);
+              }),
+              ...blocked.map((service) =>
+                m("li", { class: "memory-pressure-banner__item" }, [
+                  m("span", { class: "memory-pressure-banner__item-name" }, service),
+                  m("span", { class: "memory-pressure-banner__item-meta" }, "Service paused"),
+                ]),
+              ),
+            ])
           : null,
       ]);
     },
