@@ -183,6 +183,26 @@ def _diag_threads() -> Response:
     return Response("\n".join(sections), mimetype="text/plain")
 
 
+def _diag_sessions(agent_id: str) -> Response:
+    agent_info = _find_agent(agent_id)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+    watcher = get_state().get_or_create_watcher(agent_info)
+    watcher._discover_sessions()
+    with watcher._lock:
+        states = list(watcher._session_states.items())
+        main_ids = set(watcher._main_session_ids)
+    sections: list[str] = []
+    for session_id, state in states:
+        kind = "main" if session_id in main_ids else "subagent"
+        sections.append(f"\n===== {kind} session {session_id} file={state.file_path} =====")
+        try:
+            sections.append(state.file_path.read_text()[-40000:])
+        except OSError as exc:
+            sections.append(f"(read error: {exc})")
+    return Response("\n".join(sections), mimetype="text/plain")
+
+
 def _index_catch_all(path: str) -> Response:
     return _index()
 
@@ -1013,6 +1033,7 @@ def create_application(
 
     application.add_url_rule("/", view_func=_index, methods=["GET"])
     application.add_url_rule("/diag/threads", view_func=_diag_threads, methods=["GET"])
+    application.add_url_rule("/diag/sessions/<agent_id>", view_func=_diag_sessions, methods=["GET"])
     application.add_url_rule("/favicon.ico", view_func=_favicon, methods=["GET"])
     application.add_url_rule("/api/agents", view_func=_list_agents_endpoint, methods=["GET"])
     application.add_url_rule("/api/agents/create-worktree", view_func=_create_worktree_agent, methods=["POST"])
