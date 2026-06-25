@@ -566,32 +566,39 @@ def _read_memory_status() -> MemoryStatusResponse:
     )
     if not file_path.exists():
         return healthy
+    # Reading and projecting are guarded together: besides IO / JSON-syntax
+    # errors, a status file that parses to a non-dict (e.g. ``null`` or a list)
+    # or carries a non-numeric value where a number is expected would otherwise
+    # raise AttributeError / TypeError / ValueError out of the comprehension and
+    # surface as an HTTP 500. The docstring promises a malformed or
+    # future-schema status file leaves the banner hidden, so all of those fall
+    # back to the healthy response (logged once, never silent).
     try:
         raw = json.loads(file_path.read_text())
-    except (OSError, json.JSONDecodeError) as e:
+        recently_shed = [
+            RecentShedItem(
+                label=str(item.get("label", "")),
+                tier_rank=int(item.get("tier_rank", 0)),
+                count=int(item.get("count", 0)),
+                reclaimed_kb=int(item.get("reclaimed_kb", 0)),
+                owning_agent_name=(
+                    str(item["owning_agent_name"])
+                    if item.get("owning_agent_name") is not None
+                    else None
+                ),
+            )
+            for item in raw.get("recently_shed", [])
+            if isinstance(item, dict)
+        ]
+        return MemoryStatusResponse(
+            is_under_pressure=bool(raw.get("is_under_pressure", False)),
+            used_fraction=float(raw.get("used_fraction", 0.0)),
+            recently_shed=recently_shed,
+            blocked_services=[str(s) for s in raw.get("blocked_services", [])],
+        )
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError) as e:
         _loguru_logger.warning("Failed to read memory watchdog status file: {}", e)
         return healthy
-    recently_shed = [
-        RecentShedItem(
-            label=str(item.get("label", "")),
-            tier_rank=int(item.get("tier_rank", 0)),
-            count=int(item.get("count", 0)),
-            reclaimed_kb=int(item.get("reclaimed_kb", 0)),
-            owning_agent_name=(
-                str(item["owning_agent_name"])
-                if item.get("owning_agent_name") is not None
-                else None
-            ),
-        )
-        for item in raw.get("recently_shed", [])
-        if isinstance(item, dict)
-    ]
-    return MemoryStatusResponse(
-        is_under_pressure=bool(raw.get("is_under_pressure", False)),
-        used_fraction=float(raw.get("used_fraction", 0.0)),
-        recently_shed=recently_shed,
-        blocked_services=[str(s) for s in raw.get("blocked_services", [])],
-    )
 
 
 def _memory_status_endpoint() -> Response:

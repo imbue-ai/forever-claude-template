@@ -504,6 +504,27 @@ def test_memory_status_reflects_pressure_file(
     assert data["blocked_services"] == ["web"]
 
 
+def test_memory_status_healthy_when_status_file_malformed(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A status file that parses to a non-dict must not 500 the endpoint.
+
+    The endpoint promises a malformed/future-schema status file leaves the banner
+    hidden rather than erroring. A top-level ``null`` (valid JSON, not a dict)
+    would otherwise raise AttributeError out of the projection, so this guards the
+    healthy fallback for that case.
+    """
+    monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(tmp_path))
+    status_path = tmp_path / "runtime" / "memory_watchdog" / "status.json"
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text("null")
+    response = client.get("/api/memory-status")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["is_under_pressure"] is False
+    assert data["recently_shed"] == []
+
+
 def test_create_chat_agent_without_work_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     """Creating a chat agent without a primary agent work dir returns 400."""
     monkeypatch.delenv("MNGR_AGENT_WORK_DIR", raising=False)
