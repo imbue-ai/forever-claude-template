@@ -38,8 +38,8 @@ from memory_watchdog.ledger import (
     write_status,
 )
 from memory_watchdog.shedder import (
-    select_tiers_to_shed,
-    shed_tier,
+    select_processes_to_shed,
+    shed_processes,
     summarize_recent_sheds,
 )
 from memory_watchdog.system_probe import (
@@ -66,6 +66,13 @@ SHED_SUSTAINED_SECONDS: Final[float] = 10.0
 # The shedder stops escalating once usage drops back below this (lower than the
 # arm threshold so it does not immediately re-arm on noise).
 SHED_RELIEF_THRESHOLD: Final[float] = 0.80
+# Processes below this resident size are never shed: killing one frees too little
+# to relieve pressure, so it would be pure collateral. This protects the small
+# but functionally critical helpers that share the agent-child tier with real
+# memory hogs -- transcript streamers, background-task loops, a lead's
+# worker-report poll, bare `sleep`s -- which a whole-tier shed used to take down
+# alongside the one process actually holding the memory.
+MIN_SHEDDABLE_RSS_KB: Final[int] = 10 * 1024
 # The banner shows while usage is above this, or while anything was shed within
 # the recent window.
 BANNER_PRESSURE_THRESHOLD: Final[float] = 0.80
@@ -133,36 +140,32 @@ def _shed_until_relieved(
     classifications: Sequence[ProcessClassification],
     pressure: MemoryPressure,
 ) -> list[ShedRecord]:
-    """Shed tiers from most expendable up, stopping once the projected reclaim
-    is enough.
+    """Shed individual processes, most expendable and largest first, stopping
+    once the projected reclaim is enough.
 
-    Which tiers to shed is decided up front by ``select_tiers_to_shed``, which
-    projects how much each tier would free from its processes' resident memory
-    instead of re-reading /proc between kills. That avoids the over-shed bug
-    where the kernel had not yet reclaimed a just-killed process's pages, so an
-    immediate re-read still showed high usage and the shedder escalated into the
-    user's own agents (the last sheddable tier) even though a cheaper tier had
-    already freed enough. The next poll re-reads real usage and sheds again if
-    the estimate fell short.
+    Which processes to shed is decided up front by ``select_processes_to_shed``,
+    which orders candidates by tier shed-priority then resident size and projects
+    how much each would free, instead of re-reading /proc between kills. That
+    avoids the over-shed bug where the kernel had not yet reclaimed a just-killed
+    process's pages, so an immediate re-read still showed high usage and the
+    shedder escalated into the user's own agents even though a cheaper kill had
+    already freed enough. Selecting per process (rather than whole tiers) also
+    means a single large hog is shed on its own, sparing the small helpers that
+    share its tier. The next poll re-reads real usage and sheds again if the
+    estimate fell short.
     """
-    tiers_to_shed = select_tiers_to_shed(
+    targets = select_processes_to_shed(
         classifications,
         pressure.available_kb,
         pressure.total_kb,
         SHED_RELIEF_THRESHOLD,
+        MIN_SHEDDABLE_RSS_KB,
     )
-    all_records: list[ShedRecord] = []
-    for tier in tiers_to_shed:
-        records = shed_tier(classifications, tier)
-        if records:
-            logger.warning(
-                "Shed {} process(es) from tier {} to relieve memory pressure",
-                len(records),
-                tier,
-            )
-            append_shed_records(records)
-            all_records.extend(records)
-    return all_records
+    records = shed_processes(targets)
+    if records:
+        logger.warning("Shed {} process(es) to relieve memory pressure", len(records))
+        append_shed_records(records)
+    return records
 
 
 def _prune_recent_records(
