@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { humanizeKb, pausedSummary, shedItemDetail, tierLabel, totalPausedCount } from "./MemoryPressureBanner";
+import {
+  creatorLabel,
+  humanizeKb,
+  pausedSummary,
+  processName,
+  tierLabel,
+  totalPausedCount,
+} from "./MemoryPressureBanner";
 
 function item(
   label: string,
@@ -49,32 +56,25 @@ describe("paused count + summary", () => {
   });
 });
 
-describe("shedItemDetail", () => {
-  it("omits the multiplier for a single process", () => {
-    expect(shedItemDetail(item("python3", 8, 1, 3_817_068))).toEqual({
-      name: "python3",
-      meta: "Agent subprocess · 3.6 GB freed",
-    });
+describe("processName", () => {
+  it("shows the command alone for a single process", () => {
+    expect(processName(item("python3 hog.py", 8, 1, 3_131_972))).toBe("python3 hog.py");
   });
-  it("shows the multiplier and tier for several of one kind", () => {
-    expect(shedItemDetail(item("sleep", 8, 3, 3324))).toEqual({
-      name: "sleep ×3",
-      meta: "Agent subprocess · 3 MB freed",
-    });
+  it("appends a multiplier when several of one kind were paused", () => {
+    expect(processName(item("sleep", 8, 3, 3324))).toBe("sleep ×3");
   });
+});
 
-  it("attributes an agent subprocess to its owning agent", () => {
-    expect(shedItemDetail(item("python3 hog.py", 8, 1, 3_131_972, "alice"))).toEqual({
-      name: "python3 hog.py",
-      meta: "Agent subprocess from alice · 3.0 GB freed",
-    });
+describe("creatorLabel", () => {
+  it("names the owning agent for a subprocess", () => {
+    expect(creatorLabel(item("python3 hog.py", 8, 1, 3_131_972, "hogtest"))).toBe("hogtest");
   });
-
-  it("does not append 'from <agent>' for the agent's own process", () => {
-    // A tier-5 agent line is already named by its label; no redundant "from".
-    expect(shedItemDetail(item("alice", 5, 1, 90000, "alice"))).toEqual({
-      name: "alice",
-      meta: "Agent · 88 MB freed",
-    });
+  it("falls back to a friendly kind when a subprocess has no owner", () => {
+    expect(creatorLabel(item("python3", 8, 1, 1000))).toBe("Agent");
+  });
+  it("describes the kind for non-subprocess tiers", () => {
+    expect(creatorLabel(item("alice", 5, 1, 90000, "alice"))).toBe("Agent");
+    expect(creatorLabel(item("worker", 7, 1, 90000, "worker"))).toBe("Worker agent");
+    expect(creatorLabel(item("web", 6, 1, 90000))).toBe("Background service");
   });
 });

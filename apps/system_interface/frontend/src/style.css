@@ -116,33 +116,49 @@ body {
   transform: rotate(90deg);
 }
 
-.memory-pressure-banner__list {
-  list-style: none;
+/* Scroll container for the expanded details: capped so a long list scrolls
+   inside the banner rather than growing it without bound (which, combined with
+   min-h-0 on the workspace pane, keeps the chat input on screen). */
+.memory-pressure-banner__detail-panel {
   margin: 8px 0 2px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-width: 640px;
+  max-width: 720px;
+  max-height: 38vh;
+  overflow-y: auto;
 }
 
-.memory-pressure-banner__item {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 4px 8px;
-  border-radius: 4px;
+.memory-pressure-banner__table {
+  border-collapse: collapse;
+  width: 100%;
   font-size: 12.5px;
-  background: color-mix(in srgb, #d9a441 10%, transparent);
 }
 
-.memory-pressure-banner__item-name {
+.memory-pressure-banner__table th,
+.memory-pressure-banner__table td {
+  text-align: left;
+  padding: 4px 16px 4px 0;
+  white-space: nowrap;
+}
+
+.memory-pressure-banner__table th {
+  font-weight: 600;
+  opacity: 0.7;
+  border-bottom: 1px solid color-mix(in srgb, #d9a441 35%, transparent);
+}
+
+.memory-pressure-banner__table tbody tr + tr td {
+  border-top: 1px solid color-mix(in srgb, #d9a441 18%, transparent);
+}
+
+.memory-pressure-banner__cell-process {
+  font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
   font-weight: 500;
 }
 
-.memory-pressure-banner__item-meta {
-  opacity: 0.8;
-  white-space: nowrap;
+.memory-pressure-banner__col-freed {
+  text-align: right;
+  padding-right: 0;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
 }
 
 /* ── Title bar ── */

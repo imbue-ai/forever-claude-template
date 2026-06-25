@@ -74,22 +74,20 @@ export function pausedSummary(items: RecentShedItem[]): string | null {
   return `${total} background ${total === 1 ? "task" : "tasks"} paused`;
 }
 
-export interface ShedItemDetail {
-  name: string;
-  meta: string;
+// The "Process" cell: the command, with a multiplier when several of the same
+// kind were paused ("sleep ×3").
+export function processName(item: RecentShedItem): string {
+  return item.count > 1 ? `${item.label} ×${item.count}` : item.label;
 }
 
-export function shedItemDetail(item: RecentShedItem): ShedItemDetail {
-  const name = item.count > 1 ? `${item.label} ×${item.count}` : item.label;
-  // For an agent's subprocess, attribute it to that agent: "Agent subprocess
-  // from alice". The agent's own process (tier 5/7) is already named by its
-  // label, so we don't repeat "from <agent>" there.
-  const kind =
-    item.owning_agent_name && item.tier_rank === 8
-      ? `${tierLabel(item.tier_rank)} from ${item.owning_agent_name}`
-      : tierLabel(item.tier_rank);
-  const meta = `${kind} · ${humanizeKb(item.reclaimed_kb)} freed`;
-  return { name, meta };
+// The "Creator" cell: who the paused work belonged to. A subprocess is
+// attributed to its agent by name ("hogtest"); everything else falls back to a
+// friendly description of what kind of thing it was.
+export function creatorLabel(item: RecentShedItem): string {
+  if (item.tier_rank === 8) {
+    return item.owning_agent_name ?? "Agent";
+  }
+  return tierLabel(item.tier_rank);
 }
 
 export function MemoryPressureBanner(): m.Component {
@@ -150,20 +148,36 @@ export function MemoryPressureBanner(): m.Component {
             : null,
         ]),
         expanded && hasDetails
-          ? m("ul", { class: "memory-pressure-banner__list" }, [
-              ...items.map((item) => {
-                const detail = shedItemDetail(item);
-                return m("li", { class: "memory-pressure-banner__item" }, [
-                  m("span", { class: "memory-pressure-banner__item-name" }, detail.name),
-                  m("span", { class: "memory-pressure-banner__item-meta" }, detail.meta),
-                ]);
-              }),
-              ...blocked.map((service) =>
-                m("li", { class: "memory-pressure-banner__item" }, [
-                  m("span", { class: "memory-pressure-banner__item-name" }, service),
-                  m("span", { class: "memory-pressure-banner__item-meta" }, "Service paused"),
+          ? m("div", { class: "memory-pressure-banner__detail-panel" }, [
+              m("table", { class: "memory-pressure-banner__table" }, [
+                m("thead", [
+                  m("tr", [
+                    m("th", "Process"),
+                    m("th", "Creator"),
+                    m("th", { class: "memory-pressure-banner__col-freed" }, "Freed"),
+                  ]),
                 ]),
-              ),
+                m("tbody", [
+                  ...items.map((item) =>
+                    m("tr", [
+                      m("td", { class: "memory-pressure-banner__cell-process" }, processName(item)),
+                      m("td", creatorLabel(item)),
+                      m(
+                        "td",
+                        { class: "memory-pressure-banner__col-freed" },
+                        humanizeKb(item.reclaimed_kb),
+                      ),
+                    ]),
+                  ),
+                  ...blocked.map((service) =>
+                    m("tr", [
+                      m("td", { class: "memory-pressure-banner__cell-process" }, service),
+                      m("td", "System service"),
+                      m("td", { class: "memory-pressure-banner__col-freed" }, "—"),
+                    ]),
+                  ),
+                ]),
+              ]),
             ])
           : null,
       ]);
