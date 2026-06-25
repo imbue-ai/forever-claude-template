@@ -687,6 +687,90 @@ def test_await_times_out_when_report_never_appears(
     assert "timed out" in capsys.readouterr().err
 
 
+def _write_shed_ledger(ledger_path: Path, records: list[dict[str, Any]]) -> None:
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+
+def test_await_returns_shed_code_when_worker_agent_is_shed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A shed record naming the worker (after await started) stops the poll early
+    with the shed code and an actionable, revive-with-`--restart` message."""
+    report = tmp_path / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    ledger = tmp_path / "events" / "shed" / "events.jsonl"
+    _write_shed_ledger(
+        ledger,
+        [
+            {
+                "type": "process_shed",
+                "tier_rank": 7,
+                "label": "demo",
+                "agent_name": "demo",
+                "timestamp": "2026-01-01T00:00:10.000000000Z",
+            }
+        ],
+    )
+    out = io.StringIO()
+
+    rc = create_worker_mod.await_report(
+        report_path=report,
+        timeout_seconds=1800,
+        poll_interval_seconds=5,
+        sleeper=_no_sleep,
+        clock=lambda: 0.0,
+        out=out,
+        worker_name="demo",
+        shed_ledger_path=ledger,
+        now_iso=lambda: "2026-01-01T00:00:00.000000000Z",
+    )
+
+    assert rc == create_worker_mod._AWAIT_SHED_RC
+    assert out.getvalue() == ""
+    err = capsys.readouterr().err
+    assert "memory" in err
+    assert "mngr start demo --restart" in err
+
+
+def test_await_ignores_shed_record_from_before_it_started(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A shed record predating this await (e.g. a prior worker that reused the
+    name) is ignored, so await times out normally rather than crying shed."""
+    report = tmp_path / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    ledger = tmp_path / "events" / "shed" / "events.jsonl"
+    _write_shed_ledger(
+        ledger,
+        [
+            {
+                "type": "process_shed",
+                "tier_rank": 7,
+                "label": "demo",
+                "agent_name": "demo",
+                "timestamp": "2025-12-31T23:59:00.000000000Z",
+            }
+        ],
+    )
+    out = io.StringIO()
+
+    rc = create_worker_mod.await_report(
+        report_path=report,
+        timeout_seconds=30,
+        poll_interval_seconds=5,
+        sleeper=_no_sleep,
+        clock=_FakeClock(step=20),
+        out=out,
+        worker_name="demo",
+        shed_ledger_path=ledger,
+        now_iso=lambda: "2026-01-01T00:00:00.000000000Z",
+    )
+
+    assert rc == create_worker_mod._AWAIT_TIMEOUT_RC
+    assert "timed out" in capsys.readouterr().err
+
+
 def test_read_finish_report_path_returns_field(tmp_path: Path) -> None:
     """_read_finish_report_path pulls the path out of the task frontmatter."""
     task = tmp_path / "task.md"

@@ -10,7 +10,8 @@ Start a background poll for the report file with `create_worker.py await`. It
 reads `finish_report_path` from the task file's frontmatter, blocks until that
 file appears, prints its contents, and exits 0; on timeout it exits non-zero
 (code 124). Run it with Bash's `run_in_background: true` so it returns the
-instant the report lands.
+instant the report lands. Pass `--name <WORKER_NAME>` so the poll also watches
+the memory watchdog's shed ledger.
 
 `await` is a generic poll-until-file primitive; the gate cycle below is this
 flow's *use* of it. Non-interactive callers that launch a tightly-scoped agent
@@ -20,6 +21,7 @@ and wait for one finish report use the same `await` (or the synchronous
 ```bash
 # Run with Bash run_in_background: true
 uv run .agents/skills/launch-task/scripts/create_worker.py await \
+    --name <WORKER_NAME> \
     --task-file <TASK_FILE>
 ```
 
@@ -28,6 +30,13 @@ wait. The tool output is the report contents: YAML frontmatter (`type`, `name`)
 plus a body. If await exits non-zero (timeout) without printing a report, do
 *not* immediately treat it as a terminal failure -- see "Diagnose worker
 liveness" below.
+
+If await exits with code 75, the worker's own agent was **paused by the memory
+watchdog** to relieve memory pressure: it will not report until revived. This is
+not a worker bug -- revive it with `mngr start <WORKER_NAME> --restart` (a plain
+`mngr message` or `mngr start` does not relaunch a shed agent), then re-send its
+task. On restart the worker is told it was paused, so it can re-check state
+before continuing.
 
 ## Diagnose worker liveness before invoking failure flow
 

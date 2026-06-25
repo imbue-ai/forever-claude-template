@@ -100,6 +100,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, NamedTuple, Sequence, TextIO
 
@@ -114,6 +115,11 @@ _DEFAULT_POLL_INTERVAL = "5s"
 # matching coreutils ``timeout``'s convention so the prose's mental model
 # carries over.
 _AWAIT_TIMEOUT_RC = 124
+# Distinct exit code for an await that stopped early because the worker's own
+# agent was shed by the memory watchdog (so it will never report until revived).
+# Separate from the timeout code so the lead can tell "paused for memory" apart
+# from "still running, just slow".
+_AWAIT_SHED_RC = 75
 
 
 def _normalize_dir(value: str) -> str:
@@ -387,6 +393,59 @@ def launch(
     return 0
 
 
+def _utc_iso_now() -> str:
+    """Current UTC timestamp in the watchdog ledger's format (sortable as text)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
+
+
+def _resolve_shed_ledger_path() -> Path | None:
+    """Locate the memory watchdog's shed ledger via the watchdog's own path
+    module, so await resolves the exact file the watchdog writes and the revival
+    hook reads -- no second copy of the layout to drift. Returns None if the
+    watchdog package can't be imported, in which case the shed check is skipped
+    (await falls back to plain timeout behaviour).
+    """
+    try:
+        watchdog_src = (
+            Path(__file__).resolve().parents[4] / "libs" / "memory_watchdog" / "src"
+        )
+        if watchdog_src.is_dir() and str(watchdog_src) not in sys.path:
+            sys.path.insert(0, str(watchdog_src))
+        from memory_watchdog.paths import shed_ledger_path
+
+        return shed_ledger_path()
+    except ImportError:
+        return None
+
+
+def _worker_was_shed_after(ledger_path: Path, worker_name: str, after_iso: str) -> bool:
+    """Whether the worker's own agent process was shed after ``after_iso``.
+
+    Looks for a ``process_shed`` ledger record whose ``agent_name`` is the
+    worker (the watchdog stamps ``agent_name`` only when it sheds an agent's main
+    process -- tier 5/7 -- not a mere subprocess). Bounded by ``after_iso`` so a
+    stale record from a previous worker of the same name is ignored.
+    """
+    try:
+        text = ledger_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("type") != "process_shed":
+            continue
+        if record.get("agent_name") != worker_name:
+            continue
+        if str(record.get("timestamp", "")) > after_iso:
+            return True
+    return False
+
+
 def await_report(
     report_path: Path,
     timeout_seconds: float,
@@ -394,6 +453,9 @@ def await_report(
     sleeper: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     out: TextIO | None = None,
+    worker_name: str | None = None,
+    shed_ledger_path: Path | None = None,
+    now_iso: Callable[[], str] = _utc_iso_now,
 ) -> int:
     """Block until ``report_path`` exists, then print its contents.
 
@@ -402,16 +464,43 @@ def await_report(
     on stderr so the caller diagnoses worker liveness per lead-proxy.md rather
     than treating the timeout as a terminal failure.
 
-    ``sleeper``/``clock`` are injected so tests can drive the poll loop without
-    real time. The file is checked before the first sleep, so a report already
-    present returns immediately.
+    If ``worker_name`` and ``shed_ledger_path`` are supplied, each poll also
+    checks whether the worker's own agent was shed by the memory watchdog. A shed
+    worker will never report until it is revived, so rather than wait out the full
+    timeout we surface an actionable message and return ``_AWAIT_SHED_RC`` -- this
+    is what turns the lead's silent "poll died / timed out" into "your worker was
+    paused for memory; revive it". The report file is still checked first each
+    loop, so a report that landed before the shed (or a worker revived and
+    reporting) still wins.
+
+    ``sleeper``/``clock``/``now_iso`` are injected so tests can drive the poll
+    loop without real time. The file is checked before the first sleep, so a
+    report already present returns immediately.
     """
     stream: TextIO = sys.stdout if out is None else out
+    started_iso = now_iso()
     deadline = clock() + timeout_seconds
     while True:
         if report_path.is_file():
             stream.write(report_path.read_text(encoding="utf-8"))
             return 0
+        if (
+            worker_name is not None
+            and shed_ledger_path is not None
+            and _worker_was_shed_after(shed_ledger_path, worker_name, started_iso)
+        ):
+            print(
+                f"create_worker: worker '{worker_name}' was stopped by the memory "
+                "watchdog to relieve memory pressure -- its agent process was shed "
+                "and its background tasks (including its own report poll) were "
+                "cancelled, so it will NOT report until it is revived. Revive it "
+                f"with: mngr start {worker_name} --restart  (a plain `mngr message` "
+                "or `mngr start` will not relaunch a shed agent), then re-send its "
+                "task. On restart it is told it was paused, so it can re-check "
+                "state before continuing.",
+                file=sys.stderr,
+            )
+            return _AWAIT_SHED_RC
         if clock() >= deadline:
             print(
                 f"create_worker: timed out after {timeout_seconds:g}s waiting for "
@@ -606,10 +695,16 @@ def _run_await(args: argparse.Namespace) -> int:
     # file; let the ValueError raise for a full traceback rather than swallowing
     # it into a terse exit-2 message (matches ``launch``'s handling above).
     report_path = _read_finish_report_path(args.task_file)
+    # When the worker name is known, also watch the watchdog's shed ledger so a
+    # worker paused for memory pressure surfaces promptly (and actionably) instead
+    # of as a silent 30-minute timeout.
+    shed_ledger = _resolve_shed_ledger_path() if args.name else None
     return await_report(
         report_path=report_path,
         timeout_seconds=args.timeout,
         poll_interval_seconds=args.poll_interval,
+        worker_name=args.name,
+        shed_ledger_path=shed_ledger,
     )
 
 
@@ -681,6 +776,13 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
         type=Path,
         help="Same task file as launch; its frontmatter `finish_report_path` "
         "names the file to wait for.",
+    )
+    await_parser.add_argument(
+        "--name",
+        default=None,
+        help="Worker name. When given, await also watches the memory watchdog's "
+        "shed ledger so a worker paused for memory pressure is surfaced promptly "
+        "(and actionably) instead of as a silent timeout.",
     )
     await_parser.add_argument(
         "--timeout",
