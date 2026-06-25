@@ -393,6 +393,8 @@ Supervisord (launched by `bootstrap` after first-boot setup) supervises them; ea
 To add, change, or remove a service, edit `supervisord.conf` and run `supervisorctl reread && supervisorctl update` (and `supervisorctl restart <name>` to bounce one). Inspect with `supervisorctl status` / `supervisorctl tail -f <name> stderr`.
 See the `edit-services` skill for details.
 
+After building or editing any app or service, proactively check `/var/log/supervisor/` for errors -- a clean exit code does not mean the service is healthy. Use the `check-app-errors` skill to survey `supervisorctl status` and scan the relevant logs for tracebacks before considering the work done.
+
 # Git
 
 Commit your changes locally.
