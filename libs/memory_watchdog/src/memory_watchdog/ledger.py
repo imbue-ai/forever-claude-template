@@ -42,6 +42,7 @@ def append_shed_records(records: Sequence[ShedRecord]) -> None:
                 "pid": record.pid,
                 "resident_kb": record.resident_kb,
                 "agent_name": record.agent_name,
+                "owning_agent_name": record.owning_agent_name,
             }
         )
 

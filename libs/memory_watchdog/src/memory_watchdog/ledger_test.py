@@ -33,12 +33,13 @@ def test_append_shed_records_writes_one_jsonl_line_each() -> None:
         ),
         ShedRecord(
             timestamp="2026-06-12T10:00:01.000000000Z",
-            tier=Tier.WORKER_AGENT,
-            tier_rank=7,
-            label="worker7",
+            tier=Tier.AGENT_CHILD,
+            tier_rank=8,
+            label="python3 build.py",
             pid=43,
             resident_kb=250000,
-            agent_name="worker7",
+            agent_name=None,
+            owning_agent_name="worker7",
         ),
     ]
     append_shed_records(records)
@@ -48,8 +49,13 @@ def test_append_shed_records_writes_one_jsonl_line_each() -> None:
     assert first["type"] == "process_shed"
     assert first["label"] == "pytest"
     assert first["agent_name"] is None
+    # The owning agent is persisted so the durable ledger is not lossier than
+    # the live status file (a subprocess shed carries its owning agent even
+    # though agent_name -- which drives the revival notice -- stays None).
+    assert first["owning_agent_name"] is None
     second = json.loads(lines[1])
-    assert second["agent_name"] == "worker7"
+    assert second["agent_name"] is None
+    assert second["owning_agent_name"] == "worker7"
 
 
 def test_blocked_services_reflect_block_then_unblock() -> None:

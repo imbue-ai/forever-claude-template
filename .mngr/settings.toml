@@ -33,6 +33,18 @@ host_env__extend = [
     # subdirs too. /mngr/code/ is the container WORKDIR (set by the Dockerfile);
     # a /code -> /mngr/code symlink is kept in the image as a safety net.
     "TICKETS_DIR=/mngr/code/runtime/tickets",
+    # The memory watchdog writes its shed ledger + status file under runtime/
+    # (so they ride the runtime-backup branch). The watchdog (writer) and the
+    # system interface (status reader) run under the system-services agent,
+    # whose work dir IS /mngr/code, so they resolve the path correctly from the
+    # work-dir fallback. But the per-agent revival SessionStart hook resolves
+    # the same path relative to ITS agent's MNGR_AGENT_WORK_DIR -- which for a
+    # worker is its own worktree (/mngr/worktree/<name>), not /mngr/code. So a
+    # shed worker's hook read a nonexistent worktree-local ledger and never told
+    # the revived agent it had been paused. Pinning the absolute path here (same
+    # rationale as TICKETS_DIR above) makes the writer and every agent's reader
+    # resolve one shared ledger, regardless of work dir.
+    "MEMORY_WATCHDOG_RUNTIME_DIR=/mngr/code/runtime/memory_watchdog",
     # Workaround for an Apple M5 lima-VZ guest CPU mismatch: the Debian 12
     # guest kernel advertises SVE / SVE2 in /proc/cpuinfo, but lima-VZ on M5
     # traps the `cntb` SVE instruction emitted by OpenSSL's
