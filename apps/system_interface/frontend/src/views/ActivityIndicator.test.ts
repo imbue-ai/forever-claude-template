@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptEvent } from "../models/Response";
-import { isWorkingActivityState, labelForActivityState } from "./ActivityIndicator";
+import { activityIndicatorContent, isWorkingActivityState, labelForActivityState } from "./ActivityIndicator";
 
 function userMsg(ts: string): TranscriptEvent {
   return { timestamp: ts, type: "user_message", event_id: `u-${ts}`, source: "test", role: "user", content: "hi" };
@@ -53,6 +53,33 @@ describe("labelForActivityState — fixed-label states", () => {
 
   it("returns 'Thinking…' for THINKING", () => {
     expect(labelForActivityState("THINKING", [userMsg("2026-04-28T01:00:00Z")])).toBe("Thinking…");
+  });
+});
+
+describe("activityIndicatorContent — connection gating", () => {
+  it("shows 'Reconnecting…' while disconnected, ignoring any stale activity state", () => {
+    // A cached THINKING must not be rendered as activity once the socket is
+    // down -- the agent may have finished or been killed and we'd never hear.
+    expect(activityIndicatorContent(false, "THINKING", [])).toEqual({
+      label: "Reconnecting…",
+      dataState: "reconnecting",
+    });
+    expect(activityIndicatorContent(false, "IDLE", [])).toEqual({
+      label: "Reconnecting…",
+      dataState: "reconnecting",
+    });
+  });
+
+  it("collapses when connected and the agent is idle / untracked", () => {
+    expect(activityIndicatorContent(true, "IDLE", [])).toBe(null);
+    expect(activityIndicatorContent(true, null, [])).toBe(null);
+  });
+
+  it("shows the live activity label when connected and working", () => {
+    expect(activityIndicatorContent(true, "THINKING", [userMsg("2026-04-28T01:00:00Z")])).toEqual({
+      label: "Thinking…",
+      dataState: "THINKING",
+    });
   });
 });
 

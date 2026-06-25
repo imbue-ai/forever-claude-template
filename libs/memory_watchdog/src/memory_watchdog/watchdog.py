@@ -27,7 +27,6 @@ from loguru import logger
 from memory_watchdog.classifier import classify_processes
 from memory_watchdog.data_types import (
     ISO_TIMESTAMP_FORMAT,
-    SHEDDABLE_TIERS_IN_SHED_ORDER,
     MemoryPressure,
     MemoryStatus,
     ProcessClassification,
@@ -38,7 +37,11 @@ from memory_watchdog.ledger import (
     read_currently_blocked_services,
     write_status,
 )
-from memory_watchdog.shedder import shed_tier, summarize_recent_sheds
+from memory_watchdog.shedder import (
+    select_tiers_to_shed,
+    shed_tier,
+    summarize_recent_sheds,
+)
 from memory_watchdog.system_probe import (
     read_agent_label_sets,
     read_all_processes,
@@ -128,15 +131,28 @@ def _build_status(
 
 def _shed_until_relieved(
     classifications: Sequence[ProcessClassification],
+    pressure: MemoryPressure,
 ) -> list[ShedRecord]:
-    """Shed tiers from most expendable up, re-reading pressure between tiers.
+    """Shed tiers from most expendable up, stopping once the projected reclaim
+    is enough.
 
-    Stops as soon as usage drops below the relief threshold, so the user's own
-    agents (the last sheddable tier) are only killed when nothing cheaper frees
-    enough memory.
+    Which tiers to shed is decided up front by ``select_tiers_to_shed``, which
+    projects how much each tier would free from its processes' resident memory
+    instead of re-reading /proc between kills. That avoids the over-shed bug
+    where the kernel had not yet reclaimed a just-killed process's pages, so an
+    immediate re-read still showed high usage and the shedder escalated into the
+    user's own agents (the last sheddable tier) even though a cheaper tier had
+    already freed enough. The next poll re-reads real usage and sheds again if
+    the estimate fell short.
     """
+    tiers_to_shed = select_tiers_to_shed(
+        classifications,
+        pressure.available_kb,
+        pressure.total_kb,
+        SHED_RELIEF_THRESHOLD,
+    )
     all_records: list[ShedRecord] = []
-    for tier in SHEDDABLE_TIERS_IN_SHED_ORDER:
+    for tier in tiers_to_shed:
         records = shed_tier(classifications, tier)
         if records:
             logger.warning(
@@ -146,9 +162,6 @@ def _shed_until_relieved(
             )
             append_shed_records(records)
             all_records.extend(records)
-        pressure_after = read_memory_pressure()
-        if pressure_after.used_fraction < SHED_RELIEF_THRESHOLD:
-            break
     return all_records
 
 
@@ -219,7 +232,7 @@ def main() -> None:
                 pressure_over_threshold_since = now.timestamp()
             sustained_for = now.timestamp() - pressure_over_threshold_since
             if sustained_for >= SHED_SUSTAINED_SECONDS:
-                new_records = _shed_until_relieved(classifications)
+                new_records = _shed_until_relieved(classifications, pressure)
                 recent_records.extend(new_records)
                 pressure_over_threshold_since = None
         else:

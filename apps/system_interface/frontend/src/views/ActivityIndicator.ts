@@ -37,6 +37,7 @@
 import m from "mithril";
 import type { ToolCall, TranscriptEvent } from "../models/Response";
 import { getEffectiveActivityState } from "../models/PendingMessages";
+import { isConnected } from "../models/AgentManager";
 
 // Note: Agent / Task are intentionally NOT in this map. labelForToolCall
 // short-circuits with the "Delegating to sub-agent…" label for those tools
@@ -202,6 +203,34 @@ export function labelForActivityState(state: string | null | undefined, events: 
   return null;
 }
 
+/**
+ * What the activity strip should render, given the live connection status and
+ * the agent's server-derived activity state.
+ *
+ * The agent's ``activity_state`` arrives only over the agents-updated
+ * websocket. While that socket is disconnected we receive no updates, so a
+ * cached "Thinking…"/"Running tool…" is stale and untrustworthy -- e.g. the
+ * agent may have finished, or (as when the memory watchdog sheds it) been
+ * killed outright -- and would otherwise stay pinned indefinitely. So while
+ * disconnected we show a calm "Reconnecting…" instead of asserting activity.
+ * The server pushes a fresh state snapshot the instant the socket reconnects,
+ * so the true state is restored within one reconnect cycle.
+ *
+ * Returns null when the strip should collapse (connected + no active turn).
+ */
+export function activityIndicatorContent(
+  connected: boolean,
+  state: string | null | undefined,
+  events: TranscriptEvent[],
+): { label: string; dataState: string } | null {
+  if (!connected) {
+    return { label: "Reconnecting…", dataState: "reconnecting" };
+  }
+  const label = labelForActivityState(state, events);
+  if (label === null) return null;
+  return { label, dataState: state ?? "" };
+}
+
 interface ActivityIndicatorAttrs {
   agentId: string;
   events: TranscriptEvent[];
@@ -210,13 +239,20 @@ interface ActivityIndicatorAttrs {
 export function ActivityIndicator(): m.Component<ActivityIndicatorAttrs> {
   return {
     view(vnode) {
-      const state = getEffectiveActivityState(vnode.attrs.agentId);
-      const label = labelForActivityState(state, vnode.attrs.events);
-      if (label === null) return null;
-      return m("div.agent-activity-indicator", { "data-state": state, role: "status", "aria-live": "polite" }, [
-        m("span.agent-activity-indicator__dot"),
-        m("span.agent-activity-indicator__label", label),
-      ]);
+      const content = activityIndicatorContent(
+        isConnected(),
+        getEffectiveActivityState(vnode.attrs.agentId),
+        vnode.attrs.events,
+      );
+      if (content === null) return null;
+      return m(
+        "div.agent-activity-indicator",
+        { "data-state": content.dataState, role: "status", "aria-live": "polite" },
+        [
+          m("span.agent-activity-indicator__dot"),
+          m("span.agent-activity-indicator__label", content.label),
+        ],
+      );
     },
   };
 }

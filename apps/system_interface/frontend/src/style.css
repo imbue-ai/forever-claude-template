@@ -2242,6 +2242,19 @@ body {
   text-overflow: ellipsis;
 }
 
+/* "Reconnecting…" is a degraded, not-working state: mute the dot and stop the
+   activity pulse so it reads as "waiting to reconnect", not "agent is busy". */
+.agent-activity-indicator[data-state="reconnecting"] {
+  color: var(--color-text-secondary);
+  opacity: 0.8;
+}
+
+.agent-activity-indicator[data-state="reconnecting"] .agent-activity-indicator__dot {
+  background: var(--color-text-secondary);
+  animation: none;
+  opacity: 0.6;
+}
+
 .claude-login-overlay {
   position: absolute;
   inset: 0;

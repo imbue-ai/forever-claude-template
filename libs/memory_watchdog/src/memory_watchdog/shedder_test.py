@@ -3,9 +3,14 @@ import subprocess
 from memory_watchdog.data_types import ProcessClassification, ShedRecord, Tier
 from memory_watchdog.shedder import (
     select_shed_targets,
+    select_tiers_to_shed,
     shed_tier,
     summarize_recent_sheds,
 )
+
+# Relief at 80% used: the watchdog stops escalating once projected usage drops
+# below this. Matches watchdog.SHED_RELIEF_THRESHOLD.
+_RELIEF = 0.80
 
 
 def _classification(
@@ -14,6 +19,64 @@ def _classification(
     return ProcessClassification(
         pid=pid, resident_kb=resident_kb, tier=tier, label=label
     )
+
+
+def test_select_tiers_stops_at_first_tier_when_it_frees_enough() -> None:
+    # A 800MB agent-child hog under acute pressure (50MB available of 1000MB).
+    # Shedding tier 8 alone projects usage down to 15%, so the user's agent
+    # (tier 5) must NOT be selected -- this is the over-shed regression guard.
+    classifications = [
+        _classification(1, Tier.AGENT_CHILD, 800_000, "hog"),
+        _classification(2, Tier.USER_AGENT, 100_000, "claude"),
+    ]
+    chosen = select_tiers_to_shed(
+        classifications, available_kb=50_000, total_kb=1_000_000, relief_threshold=_RELIEF
+    )
+    assert chosen == [Tier.AGENT_CHILD]
+
+
+def test_select_tiers_escalates_when_cheap_tiers_do_not_free_enough() -> None:
+    # Tier 8 and 7 are small; only after shedding both does projected usage clear
+    # relief, so escalation reaches tier 7 but still stops before the user agent.
+    classifications = [
+        _classification(1, Tier.AGENT_CHILD, 100_000, "child"),
+        _classification(2, Tier.WORKER_AGENT, 120_000, "worker"),
+        _classification(3, Tier.USER_AGENT, 500_000, "claude"),
+    ]
+    chosen = select_tiers_to_shed(
+        classifications, available_kb=50_000, total_kb=1_000_000, relief_threshold=_RELIEF
+    )
+    assert chosen == [Tier.AGENT_CHILD, Tier.WORKER_AGENT]
+
+
+def test_select_tiers_skips_empty_tiers_but_keeps_escalating() -> None:
+    # No agent-child processes exist; the worker tier is the cheapest available.
+    classifications = [
+        _classification(1, Tier.WORKER_AGENT, 800_000, "worker"),
+        _classification(2, Tier.USER_AGENT, 100_000, "claude"),
+    ]
+    chosen = select_tiers_to_shed(
+        classifications, available_kb=50_000, total_kb=1_000_000, relief_threshold=_RELIEF
+    )
+    assert chosen == [Tier.WORKER_AGENT]
+
+
+def test_select_tiers_sheds_nothing_when_already_relieved() -> None:
+    classifications = [_classification(1, Tier.AGENT_CHILD, 10_000, "child")]
+    chosen = select_tiers_to_shed(
+        classifications, available_kb=300_000, total_kb=1_000_000, relief_threshold=_RELIEF
+    )
+    assert chosen == []
+
+
+def test_select_tiers_falls_back_to_user_agent_only_as_last_resort() -> None:
+    # Everything cheaper is absent and the user agent is the sole holder; it is
+    # selected only because nothing else can relieve the pressure.
+    classifications = [_classification(1, Tier.USER_AGENT, 800_000, "claude")]
+    chosen = select_tiers_to_shed(
+        classifications, available_kb=50_000, total_kb=1_000_000, relief_threshold=_RELIEF
+    )
+    assert chosen == [Tier.USER_AGENT]
 
 
 def test_select_shed_targets_filters_tier_largest_first() -> None:

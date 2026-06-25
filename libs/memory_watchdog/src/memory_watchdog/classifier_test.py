@@ -137,6 +137,29 @@ def test_services_are_tiered_by_supervisord_child_command() -> None:
     assert tier_by_pid[160] == Tier.AUXILIARY_SERVICE
 
 
+def test_services_tiered_when_supervisord_launched_via_interpreter() -> None:
+    # The container image launches supervisord as `python3 /usr/bin/supervisord`,
+    # so argv[0] is the interpreter rather than supervisord. Detection must still
+    # find it and tier the service children; otherwise every service falls
+    # through to the protected infrastructure tier and is never shed.
+    processes, panes = _build_standard_tree()
+    processes = [
+        p.model_copy(
+            update={
+                "command_line": "/usr/bin/python3 /usr/bin/supervisord -n -c supervisord.conf"
+            }
+        )
+        if p.pid == 102
+        else p
+        for p in processes
+    ]
+    tier_by_pid = _tier_by_pid(_classify(processes, panes))
+    assert tier_by_pid[102] == Tier.INFRASTRUCTURE
+    assert tier_by_pid[120] == Tier.AUXILIARY_SERVICE  # web
+    assert tier_by_pid[130] == Tier.RECOVERY  # memory-watchdog
+    assert tier_by_pid[111] == Tier.USER_INTERFACE  # system_interface
+
+
 def test_service_label_is_the_service_name_not_the_window() -> None:
     processes, panes = _build_standard_tree()
     label_by_pid = _label_by_pid(_classify(processes, panes))

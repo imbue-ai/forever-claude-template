@@ -48,7 +48,22 @@ def _command_basename(command_line: str) -> str:
 
 @pure
 def _is_supervisord(command_line: str) -> bool:
-    return _command_basename(command_line) == _SUPERVISORD_COMMAND_BASENAME
+    """Whether this process is supervisord (the root of the service subtree).
+
+    supervisord may be exec'd directly (argv[0] = ``.../supervisord``) or run
+    through the interpreter (``/usr/bin/python3 /usr/bin/supervisord ...``, which
+    is how the container's image launches it). So match when the basename of
+    either of the first two argv tokens is exactly ``supervisord``, rather than
+    only checking argv[0] -- otherwise the interpreter form is missed and every
+    service falls through to the protected infrastructure tier and is never shed.
+    Only the first two tokens are considered so a later argument or config/log
+    path (``supervisord.conf``) cannot be mistaken for the process itself.
+    """
+    tokens = command_line.split()
+    return any(
+        token.rsplit("/", 1)[-1] == _SUPERVISORD_COMMAND_BASENAME
+        for token in tokens[:2]
+    )
 
 
 @pure

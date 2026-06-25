@@ -7,6 +7,7 @@ from imbue.imbue_common.pure import pure
 from loguru import logger
 
 from memory_watchdog.data_types import (
+    SHEDDABLE_TIERS_IN_SHED_ORDER,
     TIER_RANK_BY_TIER,
     ProcessClassification,
     RecentShedSummary,
@@ -14,6 +15,49 @@ from memory_watchdog.data_types import (
     Tier,
     now_iso_timestamp,
 )
+
+
+@pure
+def _projected_used_fraction(available_kb: int, freed_kb: int, total_kb: int) -> float:
+    """Used fraction we expect once `freed_kb` of resident memory is reclaimed."""
+    if total_kb <= 0:
+        return 0.0
+    return 1.0 - ((available_kb + freed_kb) / total_kb)
+
+
+@pure
+def select_tiers_to_shed(
+    classifications: Sequence[ProcessClassification],
+    available_kb: int,
+    total_kb: int,
+    relief_threshold: float,
+) -> list[Tier]:
+    """Choose which tiers to shed, most-expendable first, stopping as soon as the
+    *projected* post-shed usage drops below the relief threshold.
+
+    The projection is based on the resident memory of the processes in each tier
+    -- what shedding them is expected to reclaim -- rather than re-reading
+    /proc/meminfo between kills. The kernel reclaims a SIGKILLed process's pages
+    asynchronously, so an immediate re-read still reports the pre-kill usage and
+    would make the shedder escalate into the protected tiers (e.g. kill a user's
+    agent) even though the cheap tier it just shed already freed enough. The next
+    poll re-reads real usage and sheds more if the estimate fell short.
+    """
+    resident_by_tier: dict[Tier, int] = defaultdict(int)
+    count_by_tier: dict[Tier, int] = defaultdict(int)
+    for classification in classifications:
+        resident_by_tier[classification.tier] += classification.resident_kb
+        count_by_tier[classification.tier] += 1
+    chosen: list[Tier] = []
+    freed_kb = 0
+    for tier in SHEDDABLE_TIERS_IN_SHED_ORDER:
+        if _projected_used_fraction(available_kb, freed_kb, total_kb) < relief_threshold:
+            break
+        if count_by_tier.get(tier, 0) == 0:
+            continue
+        chosen.append(tier)
+        freed_kb += resident_by_tier.get(tier, 0)
+    return chosen
 
 
 @pure
