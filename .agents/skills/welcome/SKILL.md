@@ -5,6 +5,10 @@ description: Greet the user with a short, friendly welcome message when a new pr
 
 # Welcome the user
 
+This skill has two parts: the opening greeting you always send first, and a list of suggestions you offer only if the user asks for ideas.
+
+## Opening message
+
 Output the following welcome message to the user, verbatim, as your entire response. Do NOT call any tools, do NOT look at the codebase, and do NOT add anything else:
 
 ---
@@ -22,4 +26,19 @@ I can take on tasks for you, build custom AI tools that are easy to edit, or jus
 
 ---
 
-That is the entire welcome message. Stop after printing it.
+That is the entire opening message. Stop after printing it.
+
+## If the user asks for suggestions
+
+After the opening message the user replies. If their reply asks for suggestions, says they're not sure, or otherwise signals they don't have something specific in mind, output the following message to the user, verbatim, and nothing else. (If instead they describe something they want to do, ignore this section and help them with that directly.)
+
+---
+
+Here are some popular ways people get started with Minds. Pick whichever fits, and we can build on it as a starting point.
+
+1. **Make a custom email & messaging hub:** Organize all your messages and emails in one place, make it easy to respond.
+2. **Make a custom view of your tasks:** Build a system to organize your tasks and help you get them done.
+3. **Make a custom team view:** Make a dashboard for anything you want to track and take action on — things in GitHub, Linear, Slack or email.
+4. **Make a custom report:** Stay up to date on the products, events, or news that you care about.
+
+---
