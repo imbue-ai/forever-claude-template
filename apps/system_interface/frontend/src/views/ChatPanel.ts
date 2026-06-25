@@ -25,7 +25,7 @@ import {
   MAX_HELD_EVENTS,
 } from "../models/Response";
 import { computeVisibleWindow } from "../models/virtualWindow";
-import { nextUserScrolledUp } from "../models/scrollFollow";
+import { isUserScrollUp, nextUserScrolledUp } from "../models/scrollFollow";
 import { createRowMeasurer, OVERSCAN_PX } from "./row-measurement";
 import { connectToStream, disconnectFromStream, loadSnapshotWithStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
@@ -112,6 +112,11 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   // Previous observed scroll position, for detecting scroll direction. Updated in
   // lockstep with scrollTop at every programmatic scroll site (see handleScrollEvent).
   let previousScrollTop = 0;
+  // Previous observed scrollHeight, kept in lockstep with previousScrollTop. A
+  // scrollTop *decrease* caused by the content shrinking (the browser clamps
+  // scrollTop to scrollHeight - clientHeight) is not a user scroll-up; comparing
+  // against this lets handleScrollEvent tell a real upward scroll from that clamp.
+  let previousScrollHeight = 0;
   const rowMeasurer = createRowMeasurer();
   let viewportResizeObserver: ResizeObserver | null = null;
   // Memoized turn-grouping output. buildSections walks the whole held
@@ -319,6 +324,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
     currentAgentId = agentId;
     scrollTop = 0;
     previousScrollTop = 0;
+    previousScrollHeight = 0;
     userScrolledUp = false;
     backfillInFlight = false;
     scrollHeightBeforePrepend = 0;
@@ -405,6 +411,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       element.scrollTop = phantomTopHeight;
       scrollTop = element.scrollTop;
       previousScrollTop = element.scrollTop;
+      previousScrollHeight = element.scrollHeight;
       return;
     }
 
@@ -432,6 +439,7 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
         element.scrollTop = Math.max(phantomTopHeight, element.scrollTop + delta);
         scrollTop = element.scrollTop;
         previousScrollTop = element.scrollTop;
+        previousScrollHeight = element.scrollHeight;
       }
     }
 
@@ -439,15 +447,28 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       scrollToBottom(element);
       scrollTop = element.scrollTop;
       previousScrollTop = element.scrollTop;
+      previousScrollHeight = element.scrollHeight;
     }
   }
 
   function handleScrollEvent(event: Event): void {
     const element = event.target as HTMLElement;
-    // applyScrollPosition keeps previousScrollTop in lockstep with its own
-    // programmatic re-pins, so only a genuine user scroll registers as movement.
-    const didScrollUp = element.scrollTop < previousScrollTop;
+    // applyScrollPosition keeps previousScrollTop/previousScrollHeight in lockstep
+    // with its own programmatic re-pins, so only a genuine user scroll registers as
+    // movement. A scrollTop decrease that the browser forced by clamping to a
+    // just-shrunk scrollHeight (async row measurement settling shorter than the
+    // estimate, while pinned to the bottom) is not a user scroll-up -- without this
+    // guard that clamp latches userScrolledUp and the transcript stops following the
+    // live tail, leaving new messages rendered outside the virtualized window.
+    const clampSuppressed = element.scrollHeight < previousScrollHeight && element.scrollTop < previousScrollTop;
+    const didScrollUp = isUserScrollUp({
+      scrollTop: element.scrollTop,
+      previousScrollTop,
+      scrollHeight: element.scrollHeight,
+      previousScrollHeight,
+    });
     previousScrollTop = element.scrollTop;
+    previousScrollHeight = element.scrollHeight;
     scrollTop = element.scrollTop;
 
     const wasScrolledUp = userScrolledUp;
@@ -457,11 +478,14 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
       hasMoreAfter: hasMoreAfter(currentAgentId ?? ""),
     });
     const scrollDiag = (globalThis as unknown as {
-      __chatScrollDiag?: { events: number; latchedUp: number; lastDidScrollUp: boolean };
+      __chatScrollDiag?: { events: number; latchedUp: number; clampsSuppressed: number; lastDidScrollUp: boolean };
     });
-    const d = scrollDiag.__chatScrollDiag ?? { events: 0, latchedUp: 0, lastDidScrollUp: false };
+    const d = scrollDiag.__chatScrollDiag ?? { events: 0, latchedUp: 0, clampsSuppressed: 0, lastDidScrollUp: false };
     d.events += 1;
     d.lastDidScrollUp = didScrollUp;
+    if (clampSuppressed) {
+      d.clampsSuppressed += 1;
+    }
     if (!wasScrolledUp && userScrolledUp) {
       d.latchedUp += 1;
     }
