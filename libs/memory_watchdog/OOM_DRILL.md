@@ -63,10 +63,11 @@ and runs in CI.
    usage subsides.
 
 5. **Observe the notice.** If you push the drill hard enough that a *worker
-   agent* (tier 7) gets shed, then message that agent (reviving it). Its first
-   turn should carry the injected notice that it was stopped for memory and its
-   background tasks were not restarted. Verify the ledger gained a
-   `notice_delivered` line for it.
+   agent* (tier 7) gets shed, revive it with `mngr start <worker> --restart` (a
+   shed agent needs `--restart`; a plain `mngr start`/`mngr message` will not
+   relaunch it), then message it. Its first turn should carry the injected notice
+   that it was stopped for memory and its background tasks were not restarted.
+   Verify the ledger gained a `notice_delivered` line for it.
 
 6. **Observe recovery.** supervisord owns liveness, including the watchdog's
    own -- the watchdog supervises nothing itself. Kill the watchdog process to

@@ -17,10 +17,10 @@ cat runtime/memory_watchdog/status.json   # is_under_pressure, used_fraction
 Revival guidelines when a worker was shed:
 
 - **If pressure is still elevated** (`is_under_pressure` is true, or `used_fraction` is near the threshold): do NOT revive. Surface the situation to the user and let them decide -- reviving now will likely just be shed again and deepen the crunch.
-- **If pressure has cleared**: revive at most once (the default restart below) and re-establish your report poll.
+- **If pressure has cleared**: revive at most once with `mngr start <worker> --restart`, then re-establish your report poll. A shed agent needs `--restart` -- a plain `mngr start` or `mngr message` will not relaunch it. On restart it is told it was paused, so it can re-check state before continuing; re-send its task.
 - **If the same worker has already been shed twice** (two `process_shed` lines naming it): stop. Do not keep reviving. Surface to the user with the ledger details -- something about this worker's footprint is incompatible with the current memory budget.
 
-If the worker was *not* in the ledger, it died for some other reason; proceed with the normal restart path below.
+If the worker was *not* in the ledger, it died for some other reason (e.g. a claude crash); proceed with the normal restart path below, where a plain `mngr start` suffices.
 
 ## Default: restart the worker and resume
 
