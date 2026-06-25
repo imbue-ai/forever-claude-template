@@ -8,6 +8,7 @@ dependencies = [
     "bootstrap",
     "cloudflare-tunnel",
     "app-watcher",
+    "scheduler",
     "web-server",
     "runtime-backup",
     "host-backup",
@@ -51,13 +52,14 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "libs/tk_command_parsing", "apps/system_interface"]
+members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/scheduler", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "libs/tk_command_parsing", "apps/system_interface"]
 
 [tool.uv.sources]
 telegram-bot = { workspace = true }
 bootstrap = { workspace = true }
 cloudflare-tunnel = { workspace = true }
 app-watcher = { workspace = true }
+scheduler = { workspace = true }
 web-server = { workspace = true }
 runtime-backup = { workspace = true }
 host-backup = { workspace = true }

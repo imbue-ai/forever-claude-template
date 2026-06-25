@@ -19,6 +19,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import tomlkit
 from host_backup.config import (
     BACKUP_TOML_PATH,
     RESTIC_ENV_PATH,
@@ -41,6 +42,15 @@ RUNTIME_DIR = Path("runtime")
 RUNTIME_PREEXISTING_DIR = Path("runtime.preexisting")
 RUNTIME_BACKUP_USER_NAME = "runtime-backup"
 RUNTIME_BACKUP_USER_EMAIL = "runtime-backup@mindsbackup.local"
+
+# Scheduler state lives under runtime/ so it rides the runtime-backup branch.
+# scheduled_tasks.toml is the shared, human/agent-editable schedule; the
+# scheduler service reads it (and writes state.toml) once a minute. We seed the
+# file with the nightly Caretaker task on first boot (iff absent) and create the
+# per-feature dirs the scheduler + Caretaker write into. See libs/scheduler/.
+SCHEDULED_TASKS_TOML = RUNTIME_DIR / "scheduled_tasks.toml"
+SCHEDULER_DIR = RUNTIME_DIR / "scheduler"
+CARETAKER_DIR = RUNTIME_DIR / "caretaker"
 
 # Signal file gating exactly-once creation of the initial chat agent. Lives
 # under runtime/ so the runtime-backup service replicates it to the
@@ -707,6 +717,73 @@ def _init_runtime_worktree() -> None:
         logger.info("No GH_TOKEN; skipping initial push")
 
 
+def _render_default_scheduled_tasks_toml() -> str:
+    """Render the default scheduled_tasks.toml with the single Caretaker task.
+
+    Built with tomlkit so the on-disk file is a clean, human/agent-editable
+    `[[task]]` table the user can re-time (change the cron) or disable. The
+    schema (name/schedule/command/enabled/catch_up/description) is the frozen
+    scheduler contract; the command wakes the nightly Caretaker agent.
+    """
+    task = tomlkit.table()
+    task["name"] = "caretaker"
+    task["schedule"] = "0 3 * * *"
+    task["command"] = "bash .agents/skills/caretaker/scripts/run_caretaker.sh"
+    task["enabled"] = True
+    task["catch_up"] = True
+    task["description"] = (
+        "Nightly Caretaker run: scans service logs and proposes fixes."
+    )
+    doc = tomlkit.document()
+    doc.add(tomlkit.comment("Scheduled tasks run by the scheduler service (see the"))
+    doc.add(
+        tomlkit.comment(
+            "manage-scheduled-tasks skill). Edit a task's schedule (5-field"
+        )
+    )
+    doc.add(
+        tomlkit.comment(
+            "cron) or set enabled = false to turn it off; changes apply within a"
+        )
+    )
+    doc.add(tomlkit.comment("minute, no restart needed."))
+    tasks = tomlkit.aot()
+    tasks.append(task)
+    doc["task"] = tasks
+    return tomlkit.dumps(doc)
+
+
+def _seed_scheduler_runtime() -> None:
+    """Seed the default schedule + create the scheduler/Caretaker runtime dirs.
+
+    First-boot setup for the scheduler service: write the default
+    scheduled_tasks.toml (containing the nightly Caretaker task) iff it does not
+    already exist -- so a user who has re-timed or removed the task on a prior
+    boot is never overwritten -- and create runtime/scheduler/ and
+    runtime/caretaker/ that the scheduler and Caretaker write into. Best-effort:
+    logs and returns rather than raising so a transient FS error here does not
+    block the supervisord launch.
+    """
+    try:
+        SCHEDULER_DIR.mkdir(parents=True, exist_ok=True)
+        CARETAKER_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("Failed to create scheduler runtime dirs: {}", e)
+    if SCHEDULED_TASKS_TOML.exists():
+        logger.debug(
+            "{} already present; not reseeding default schedule",
+            SCHEDULED_TASKS_TOML,
+        )
+        return
+    try:
+        SCHEDULED_TASKS_TOML.parent.mkdir(parents=True, exist_ok=True)
+        SCHEDULED_TASKS_TOML.write_text(_render_default_scheduled_tasks_toml())
+    except OSError as e:
+        logger.warning("Failed to seed {}: {}", SCHEDULED_TASKS_TOML, e)
+        return
+    logger.info("Seeded default schedule at {}", SCHEDULED_TASKS_TOML)
+
+
 def detect_snapshot_settings(
     *,
     trigger_dir: Path,
@@ -859,6 +936,12 @@ def main() -> None:
     _init_runtime_worktree()
 
     _bootstrap_init_chat_dir()
+
+    # Seed the default scheduled_tasks.toml (the nightly Caretaker task) iff
+    # absent and create runtime/scheduler/ + runtime/caretaker/. Runs after the
+    # runtime worktree is in place (so the file rides the backup branch) and
+    # before supervisord starts the scheduler service that reads it.
+    _seed_scheduler_runtime()
 
     # Detect the snapshot environment and write runtime/backup.toml +
     # runtime/secrets/restic.env so the host-backup service comes up with a
