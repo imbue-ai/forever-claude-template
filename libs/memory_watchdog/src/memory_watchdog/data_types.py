@@ -32,7 +32,8 @@ class Tier(UpperCaseStrEnum):
     # Tier 2: the user's window into the system -- the web UI, the tunnel that
     # carries it, and the terminal.
     USER_INTERFACE = auto()
-    # Tier 3: the recovery machinery -- the service manager and this watchdog.
+    # Tier 3: the recovery machinery -- this watchdog. (The service manager,
+    # supervisord, and the bootstrap launcher are tier-1 infrastructure.)
     RECOVERY = auto()
     # Tier 4: durability -- the runtime and host backup services.
     DURABILITY = auto()

@@ -40,7 +40,7 @@ this watchdog if it dies, and restarts any service the watchdog sheds.
 |---|---|---|---|
 | INFRASTRUCTURE | 1 | tmux server, sshd, entrypoint, pane shells, supervisord | never |
 | USER_INTERFACE | 2 | system_interface, cloudflared, ttyd | never |
-| RECOVERY | 3 | bootstrap, this watchdog | never |
+| RECOVERY | 3 | this watchdog | never |
 | DURABILITY | 4 | runtime-backup, host-backup | never |
 | USER_AGENT | 5 | user-created agents (and unlabeled agents) | last resort |
 | AUXILIARY_SERVICE | 6 | web, app-watcher, agent-added services | yes |
