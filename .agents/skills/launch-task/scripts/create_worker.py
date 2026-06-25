@@ -100,7 +100,6 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, NamedTuple, Sequence, TextIO
 
@@ -393,11 +392,6 @@ def launch(
     return 0
 
 
-def _utc_iso_now() -> str:
-    """Current UTC timestamp in the watchdog ledger's format (sortable as text)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f000Z")
-
-
 def _resolve_shed_ledger_path() -> Path | None:
     """Locate the memory watchdog's shed ledger via the watchdog's own path
     module, so await resolves the exact file the watchdog writes and the revival
@@ -418,18 +412,24 @@ def _resolve_shed_ledger_path() -> Path | None:
         return None
 
 
-def _worker_was_shed_after(ledger_path: Path, worker_name: str, after_iso: str) -> bool:
-    """Whether the worker's own agent process was shed after ``after_iso``.
+def _worker_has_pending_shed(ledger_path: Path, worker_name: str) -> bool:
+    """Whether the worker's own agent is currently shed and not yet revived.
 
-    Looks for a ``process_shed`` ledger record whose ``agent_name`` is the
-    worker (the watchdog stamps ``agent_name`` only when it sheds an agent's main
-    process -- tier 5/7 -- not a mere subprocess). Bounded by ``after_iso`` so a
-    stale record from a previous worker of the same name is ignored.
+    Uses the same "pending" notion as the revival hook: a ``process_shed`` record
+    whose ``agent_name`` is the worker (the watchdog stamps ``agent_name`` only
+    when it sheds an agent's main process -- tier 5/7 -- not a mere subprocess),
+    newer than the latest ``notice_delivered`` marker for that worker (which the
+    revival hook writes when the worker restarts). So a shed that has already been
+    followed by a revival does not count, while a shed not yet revived does --
+    regardless of whether this await was started before or after the shed (the
+    realistic case is a re-run poll started *after* the worker died).
     """
     try:
         text = ledger_path.read_text(encoding="utf-8")
     except OSError:
         return False
+    last_delivered = ""
+    shed_timestamps: list[str] = []
     for line in text.splitlines():
         if not line.strip():
             continue
@@ -437,13 +437,14 @@ def _worker_was_shed_after(ledger_path: Path, worker_name: str, after_iso: str) 
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if record.get("type") != "process_shed":
-            continue
         if record.get("agent_name") != worker_name:
             continue
-        if str(record.get("timestamp", "")) > after_iso:
-            return True
-    return False
+        record_type = record.get("type")
+        if record_type == "notice_delivered":
+            last_delivered = max(last_delivered, str(record.get("up_to_timestamp", "")))
+        elif record_type == "process_shed":
+            shed_timestamps.append(str(record.get("timestamp", "")))
+    return any(timestamp > last_delivered for timestamp in shed_timestamps)
 
 
 def await_report(
@@ -455,7 +456,6 @@ def await_report(
     out: TextIO | None = None,
     worker_name: str | None = None,
     shed_ledger_path: Path | None = None,
-    now_iso: Callable[[], str] = _utc_iso_now,
 ) -> int:
     """Block until ``report_path`` exists, then print its contents.
 
@@ -473,12 +473,11 @@ def await_report(
     loop, so a report that landed before the shed (or a worker revived and
     reporting) still wins.
 
-    ``sleeper``/``clock``/``now_iso`` are injected so tests can drive the poll
-    loop without real time. The file is checked before the first sleep, so a
-    report already present returns immediately.
+    ``sleeper``/``clock`` are injected so tests can drive the poll loop without
+    real time. The file is checked before the first sleep, so a report already
+    present returns immediately.
     """
     stream: TextIO = sys.stdout if out is None else out
-    started_iso = now_iso()
     deadline = clock() + timeout_seconds
     while True:
         if report_path.is_file():
@@ -487,7 +486,7 @@ def await_report(
         if (
             worker_name is not None
             and shed_ledger_path is not None
-            and _worker_was_shed_after(shed_ledger_path, worker_name, started_iso)
+            and _worker_has_pending_shed(shed_ledger_path, worker_name)
         ):
             print(
                 f"create_worker: worker '{worker_name}' was stopped by the memory "

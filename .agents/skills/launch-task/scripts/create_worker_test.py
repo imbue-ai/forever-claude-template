@@ -692,11 +692,12 @@ def _write_shed_ledger(ledger_path: Path, records: list[dict[str, Any]]) -> None
     ledger_path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
 
 
-def test_await_returns_shed_code_when_worker_agent_is_shed(
+def test_await_returns_shed_code_when_worker_has_pending_shed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A shed record naming the worker (after await started) stops the poll early
-    with the shed code and an actionable, revive-with-`--restart` message."""
+    """A worker shed not yet followed by a revival stops the poll early with the
+    shed code and an actionable, revive-with-`--restart` message -- even on a poll
+    re-run started after the shed (the realistic lead-recovery case)."""
     report = tmp_path / "reports" / "report.md"
     report.parent.mkdir(parents=True)
     ledger = tmp_path / "events" / "shed" / "events.jsonl"
@@ -723,7 +724,6 @@ def test_await_returns_shed_code_when_worker_agent_is_shed(
         out=out,
         worker_name="demo",
         shed_ledger_path=ledger,
-        now_iso=lambda: "2026-01-01T00:00:00.000000000Z",
     )
 
     assert rc == create_worker_mod._AWAIT_SHED_RC
@@ -733,11 +733,12 @@ def test_await_returns_shed_code_when_worker_agent_is_shed(
     assert "mngr start demo --restart" in err
 
 
-def test_await_ignores_shed_record_from_before_it_started(
+def test_await_ignores_a_shed_already_followed_by_a_revival(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A shed record predating this await (e.g. a prior worker that reused the
-    name) is ignored, so await times out normally rather than crying shed."""
+    """A shed that has already been delivered/revived (a notice_delivered marker
+    covers it) is not pending, so await waits normally rather than crying shed --
+    this is what stops a revived, healthy worker from looking paused."""
     report = tmp_path / "reports" / "report.md"
     report.parent.mkdir(parents=True)
     ledger = tmp_path / "events" / "shed" / "events.jsonl"
@@ -749,8 +750,13 @@ def test_await_ignores_shed_record_from_before_it_started(
                 "tier_rank": 7,
                 "label": "demo",
                 "agent_name": "demo",
-                "timestamp": "2025-12-31T23:59:00.000000000Z",
-            }
+                "timestamp": "2026-01-01T00:00:10.000000000Z",
+            },
+            {
+                "type": "notice_delivered",
+                "agent_name": "demo",
+                "up_to_timestamp": "2026-01-01T00:00:10.000000000Z",
+            },
         ],
     )
     out = io.StringIO()
@@ -764,7 +770,6 @@ def test_await_ignores_shed_record_from_before_it_started(
         out=out,
         worker_name="demo",
         shed_ledger_path=ledger,
-        now_iso=lambda: "2026-01-01T00:00:00.000000000Z",
     )
 
     assert rc == create_worker_mod._AWAIT_TIMEOUT_RC
