@@ -36,6 +36,10 @@ class _FakeWS:
             self.events.append(obj)
 
 
+# Real Chromium: cold-start + screencast/nav exceeds the global 10s pytest timeout in CI
+# (where Chromium is installed but the runner is slow), so give it room. If Chromium truly
+# can't launch, the body's except still pytest.skip()s well within this.
+@pytest.mark.timeout(120)
 def test_live_browser_streams_and_accepts_input(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROWSER_HEADLESS", "1")
 
@@ -263,6 +267,7 @@ def test_http_new_browser_blocked_until_chromium_installed(monkeypatch: pytest.M
     assert resp.status_code == 503
 
 
+@pytest.mark.timeout(120)
 def test_direct_control_state_click_is_keyless_real_chromium(monkeypatch: pytest.MonkeyPatch) -> None:
     # Direct control needs NO Anthropic key (the agent does its own reasoning; the
     # browser commands are deterministic). Drive a real page: navigate -> state ->
@@ -301,6 +306,7 @@ def test_direct_control_state_click_is_keyless_real_chromium(monkeypatch: pytest
     asyncio.run(go())
 
 
+@pytest.mark.timeout(120)
 def test_browser_crash_is_detected_and_reported_real_chromium(monkeypatch: pytest.MonkeyPatch) -> None:
     # Kill the live Chromium out from under the session (simulating an OS/OOM kill,
     # NOT our own close()), and confirm the daemon detects the crash and reports it
@@ -400,6 +406,7 @@ def test_close_browser_0_keeps_its_profile(monkeypatch: pytest.MonkeyPatch) -> N
 # --- persistence: the core promise, against real Chromium --------------------
 
 
+@pytest.mark.timeout(120)
 def test_profile_persists_across_manager_restart(monkeypatch: pytest.MonkeyPatch) -> None:
     # The whole point of persistence: a cookie set in one daemon "session" is still
     # there after a restart, because the persistent user_data_dir is used IN PLACE
