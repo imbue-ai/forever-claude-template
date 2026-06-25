@@ -153,15 +153,22 @@ _LEASE_IDLE_TTL = float(os.environ.get("BROWSER_LEASE_IDLE_TTL", "90"))
 # the full _LEASE_IDLE_TTL on a no-show.
 _CLAIM_WINDOW = float(os.environ.get("BROWSER_CLAIM_WINDOW", "12"))
 
-# Disable Chromium's in-process sandbox. Every minds modality already wraps the
-# workspace in an OUTER boundary -- gVisor (runsc) under docker/cloud/AWS, the VM under
-# Lima/Vultr-without-gVisor -- so Chromium's own sandbox is redundant there, and on a
-# plain-Linux runtime running as root it *refuses* to start with the sandbox on. Off by
-# default (the sandbox works fine under gVisor, which docker/cloud use); set
-# BROWSER_NO_SANDBOX=1 to force it off. As a safety net, a first launch that fails for a
-# sandbox reason auto-retries with it off (see LiveBrowser.start), so the feature comes
-# up unattended on Lima and non-gVisor VPSes too.
+# Chromium's in-process sandbox cannot run as root: it exits with "Running as root
+# without --no-sandbox is not supported" (crbug 638180), and browser-use swallows that
+# into a ~30s launch hang. Every minds workspace runs this daemon as ROOT inside an OUTER
+# boundary -- gVisor (runsc) under docker/cloud/AWS, the VM under Lima/Vultr -- so the
+# inner sandbox is both unusable-as-root and redundant. We therefore disable it whenever
+# we're root (the reliable signal; browser-use's own IN_DOCKER check misses the bare-VM
+# Lima case, since Lima is a VM, not a container), and keep it for a non-root runtime
+# (e.g. local dev) where it works and there may be no outer boundary. BROWSER_NO_SANDBOX=1
+# forces it off regardless.
 _NO_SANDBOX = os.environ.get("BROWSER_NO_SANDBOX", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _should_disable_sandbox() -> bool:
+    """Whether to launch Chromium with its sandbox off: forced via BROWSER_NO_SANDBOX, or
+    running as root (where Chromium refuses to start the sandbox). See _NO_SANDBOX."""
+    return _NO_SANDBOX or os.geteuid() == 0
 
 
 def _repo_root() -> Path:
@@ -227,15 +234,6 @@ def _clear_stale_singleton(profile_dir: Path) -> None:
             (profile_dir / name).unlink(missing_ok=True)
         except OSError as e:
             logger.debug("could not clear {} in {} ({})", name, profile_dir, e)
-
-
-def _is_sandbox_launch_error(exc: BaseException) -> bool:
-    """Whether a Chromium launch failure looks sandbox-related -- the runtime can't give
-    Chromium a usable namespace sandbox, or it's running as root with the sandbox on.
-    Chromium emits ``No usable sandbox!`` / ``Running as root without --no-sandbox is not
-    supported``; both contain ``sandbox``, and Playwright surfaces the browser stderr in
-    the error. Used to auto-retry with the sandbox off (see LiveBrowser.start)."""
-    return "sandbox" in str(exc).lower()
 
 
 def _is_restorable_url(url: str | None) -> bool:
@@ -437,17 +435,18 @@ class LiveBrowser(MutableModel):
         )
 
     async def _start_bu_session(self, profile_dir: Path, chromium_path: str) -> BrowserSession:
-        """Launch the browser-use session, retrying ONCE without the Chromium sandbox if
-        the first launch fails for a sandbox reason. Some runtimes can't give Chromium a
-        usable sandbox -- a plain-Linux VM (Lima), or a VPS without gVisor -- and Chromium
-        refuses to start as root with the sandbox on. minds' outer boundary (gVisor or the
-        VM) already contains the browser, so the retry is safe; it's skipped when the
-        sandbox is already off (``_NO_SANDBOX``) or the failure isn't sandbox-related."""
-        session = self._build_bu_session(profile_dir, chromium_path, chromium_sandbox=not _NO_SANDBOX)
+        """Launch the browser-use session. The Chromium sandbox is disabled up front when
+        we run as root or BROWSER_NO_SANDBOX is set (see _should_disable_sandbox) -- so on
+        the bare-VM Lima case we never make the doomed sandboxed attempt that browser-use
+        turns into a 30s hang. As a backstop, if a *sandboxed* launch still fails we retry
+        once with the sandbox off (the only thing the retry changes), covering any non-root
+        runtime that also can't sandbox."""
+        disable_sandbox = _should_disable_sandbox()
+        session = self._build_bu_session(profile_dir, chromium_path, chromium_sandbox=not disable_sandbox)
         try:
             await session.start()
         except (BrowserStartupError, *_BROWSER_ERRORS) as e:
-            if _NO_SANDBOX or not _is_sandbox_launch_error(e):
+            if disable_sandbox:  # sandbox was already off -> the failure is something else
                 raise
             logger.warning(
                 "browser {} failed to launch ({}); retrying without the Chromium sandbox", self.browser_id, e
@@ -1555,6 +1554,11 @@ class BrowserSessionManager(MutableModel):
         """Non-crashed sessions, by id -- the set worth persisting/restoring."""
         return [self._browsers[i] for i in sorted(self._browsers) if not self._browsers[i]._crashed]
 
+    def capacity(self) -> tuple[int, int]:
+        """(live browser count, cap). Live = non-crashed, mirroring create()'s cap check,
+        so the UI can gate the 'New browser' button on the same condition create() enforces."""
+        return len(self.live_browsers()), _MAX_SESSIONS
+
     def _entry_for(self, browser: LiveBrowser) -> fleet_manifest.ManifestEntry:
         """A manifest entry for a live browser: its tab URLs + active tab. Topology
         ONLY -- never ownership/queues (process-scoped) or profile bytes. Uses the
@@ -1637,7 +1641,10 @@ class BrowserSessionManager(MutableModel):
         """Bring the fleet back on daemon startup: relaunch saved browsers EAGER-
         SEQUENTIALLY (one at a time -- no cold-boot memory spike; the lock is released
         between launches so read-only routes aren't blocked), seed browser 0 on a fresh
-        workspace, then reconcile the manifest and sweep TRUE orphan profiles.
+        workspace, then reconcile the manifest and sweep TRUE orphan profiles. The init
+        gate stays closed until this returns, so a "New browser" during startup is cleanly
+        refused (503) rather than piling a concurrent launch onto the relaunching fleet --
+        the UI gates the button on readiness so the user sees that, not an error.
 
         Durability rule: a browser that merely flakes on relaunch is NOT forgotten --
         its profile is kept and its manifest entry preserved so it retries next boot.

@@ -144,10 +144,23 @@ browsers, each with an atomic ownership state machine, plus an
   surfaced/focused. The skill instructs agents to use it (and to NOT attempt CAPTCHAs
   themselves). Exit code `2` (preempted), so the agent stops and ends its turn.
 
-- Browser-sandbox portability across minds modalities. Chromium's in-process sandbox is
-  redundant inside minds' outer boundary (gVisor under docker/cloud/AWS, the VM under
-  Lima / a non-gVisor VPS) and *refuses* to start on a plain-Linux runtime running as
-  root. The daemon now launches with the sandbox on by default (it works under gVisor)
-  but auto-retries once with it off if a first launch fails for a sandbox reason -- so
-  the fleet comes up unattended on Lima and non-gVisor VPSes too. `BROWSER_NO_SANDBOX=1`
-  forces it off explicitly. No provider sniffing; the feature stays provider-agnostic.
+- Browser-sandbox portability across minds modalities. Chromium's in-process sandbox
+  cannot start as root on a plain-Linux runtime ("Running as root without --no-sandbox
+  is not supported"), and browser-use turns that into a ~30s launch hang -- which was
+  surfacing as "Failed to create a browser: HTTP 504" on Lima (a bare Debian VM, where
+  the daemon runs as root and there's no gVisor). Since every minds workspace runs the
+  daemon as ROOT inside an OUTER boundary (gVisor under docker/cloud/AWS, the VM under
+  Lima/Vultr) that already contains the browser, the daemon now disables Chromium's inner
+  sandbox whenever it runs as root (the reliable signal -- browser-use's own IN_DOCKER
+  check misses the bare-VM case), and keeps it for a non-root runtime where it works.
+  `BROWSER_NO_SANDBOX=1` forces it off regardless; a sandboxed launch that still fails
+  retries once without it. No provider sniffing. (Verified on a live Lima workspace:
+  browsers launch with `--no-sandbox` and `POST /browsers` returns 200.)
+
+- "New browser" is gated on fleet readiness so the startup/restore race is handled
+  gracefully. `GET /browsers` now reports `can_create` / `create_reason` / count / max,
+  mirroring exactly what a create would do: it's false (with a reason) while the fleet is
+  still starting up or restoring saved browsers, or when at the cap. The init gate already
+  refuses a create during restore (so a "New browser" can never pile a concurrent launch
+  onto a fleet relaunching browser 0 / multiple saved browsers); this just surfaces the
+  reason instead of a bare 503.

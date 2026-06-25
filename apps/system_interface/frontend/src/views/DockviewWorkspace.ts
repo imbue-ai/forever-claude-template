@@ -377,8 +377,16 @@ interface BrowserInfo {
 // dropdown item per active browser.
 let browserFleet: BrowserInfo[] = [];
 
-/** Fetch the live browser fleet + key status. ``onUpdate`` runs after the
- *  cache is refreshed so an already-open dropdown can re-render with the
+// Whether the daemon can start a new browser right now (it's past startup/restore and
+// under the fleet cap), refreshed alongside the fleet. Drives the "New browser" item:
+// disabled with the reason in parentheses while not ready, so the user never fires a
+// create that 503s (still starting up) / 409s (full) or piles a launch onto a restore.
+// Defaults to ready so a failed readiness fetch doesn't wrongly lock the button (the
+// click still surfaces any real error).
+let browserCreateReadiness: { canCreate: boolean; reason: string } = { canCreate: true, reason: "" };
+
+/** Fetch the live browser fleet + key status + create-readiness. ``onUpdate`` runs
+ *  after the cache is refreshed so an already-open dropdown can re-render with the
  *  browsers that the (async) fetch just returned -- the dropdown is built
  *  synchronously from the cache, so without this callback a freshly-opened
  *  menu would show a stale fleet until the next open. */
@@ -387,9 +395,14 @@ function refreshBrowserFleet(onUpdate?: () => void): void {
     .then((r) => (r.ok ? r.json() : { browsers: [] }))
     .then((data) => {
       browserFleet = Array.isArray(data.browsers) ? (data.browsers as BrowserInfo[]) : [];
+      browserCreateReadiness = {
+        canCreate: data.can_create !== false,
+        reason: typeof data.create_reason === "string" ? data.create_reason : "",
+      };
     })
     .catch(() => {
       browserFleet = [];
+      browserCreateReadiness = { canCreate: true, reason: "" };
     })
     .finally(() => {
       onUpdate?.();
@@ -440,10 +453,12 @@ function createBrowserTab(targetGroup?: DockviewGroupPanel | null): void {
         return;
       }
       const detail = typeof data.error === "string" ? data.error : `HTTP ${r.status}`;
-      if (r.status === 503) {
-        alert(`Cannot create a browser yet: ${detail}. Chromium is still installing -- try again shortly.`);
-      } else if (r.status === 409) {
-        alert(`Cannot create a browser: ${detail}.`);
+      if (r.status === 503 || r.status === 409) {
+        // 503 = still starting up / installing; 409 = fleet full. The daemon's message is
+        // accurate, so surface it directly. The "New browser" item is normally gated to
+        // prevent this, but a race can still land here -- resolve it with a clear modal,
+        // not a scary failure.
+        alert(`Can't open a new browser yet: ${detail}`);
       } else {
         alert(`Failed to create a browser: ${detail}.`);
       }
@@ -455,8 +470,8 @@ function createBrowserTab(targetGroup?: DockviewGroupPanel | null): void {
 
 function buildDropdownItems(
   targetGroup?: DockviewGroupPanel,
-): Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean }> {
-  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean }> = [];
+): Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean; disabledReason?: string }> {
+  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean; disabledReason?: string }> = [];
   const openChatIds = getOpenChatAgentIds();
   const openAppNames = getOpenAppNames();
 
@@ -538,10 +553,20 @@ function buildDropdownItems(
     action: () => openIframeTab(buildTerminalUrl(), "terminal", "iframe", undefined, targetGroup),
   });
 
-  // Direct control is keyless -- the agent (and you) drive the browser by hand,
-  // so a browser can always be started. An Anthropic API key is only needed for
-  // the optional `task`/`extract` CLI verbs, which the daemon checks at call time.
-  items.push({ label: "New browser", action: () => createBrowserTab(targetGroup) });
+  // Direct control is keyless -- the agent (and you) drive the browser by hand. But the
+  // daemon can only start one when it's past startup/restore and under the fleet cap, so
+  // gate the item on that (``can_create`` from the fleet fetch): when not ready it's shown
+  // disabled with the reason in parentheses, and clicking it pops a modal with the reason
+  // rather than firing a create that would 503/409 or pile a launch onto a restore.
+  const canCreate = browserCreateReadiness.canCreate;
+  items.push({
+    label: canCreate ? "New browser" : `New browser (${browserCreateReadiness.reason})`,
+    disabled: !canCreate,
+    disabledReason: canCreate
+      ? undefined
+      : `Can't open a new browser yet -- ${browserCreateReadiness.reason}. Try again in a moment.`,
+    action: () => createBrowserTab(targetGroup),
+  });
 
   items.push({
     label: "New agent",
@@ -574,6 +599,13 @@ function renderDropdownItems(dropdown: HTMLElement, targetGroup?: DockviewGroupP
     menuItem.addEventListener("click", (clickEvent) => {
       clickEvent.stopPropagation();
       dropdown.style.display = "none";
+      // A disabled item doesn't run its action; if it has a reason, surface it (the
+      // "click pops a modal explaining why" path). Without this a disabled item would
+      // still fire -- only visually greyed.
+      if (item.disabled) {
+        if (item.disabledReason) alert(item.disabledReason);
+        return;
+      }
       item.action();
     });
     dropdown.appendChild(menuItem);

@@ -200,9 +200,14 @@ def key_status() -> dict[str, object]:
 
 @app.get("/browsers")
 async def list_browsers() -> JSONResponse:
-    """List the fleet. Best-effort ensures browser 0 exists so the default is always shown."""
+    """List the fleet. Best-effort ensures browser 0 exists so the default is always shown.
+
+    Also reports whether 'New browser' can run right now (``can_create`` + ``create_reason``
+    + count/max) so the UI can gate its button -- mirroring exactly what ``create_browser``
+    would do, so the user never fires a create that returns 503 (still starting / installing)
+    or 409 (fleet full), and the fleet never gets a concurrent launch piled onto a restore."""
     available, _ = anthropic_key_status()
-    ready, _ = deferred_install_ready()
+    ready, install_reason = deferred_install_ready()
     if ready:
         had_zero = manager.has_browser(0)
         try:
@@ -212,7 +217,25 @@ async def list_browsers() -> JSONResponse:
         else:
             if not had_zero:  # lazily materialized 0 (e.g. after a degraded init) -- persist it
                 await manager._save_manifest()
-    return JSONResponse({"browsers": await manager.list_browsers(), "key_available": available})
+    count, cap = manager.capacity()
+    if not _init_done.is_set():
+        can_create, create_reason = False, "browsers are still starting up"
+    elif not ready:
+        can_create, create_reason = False, install_reason or "installing browser support"
+    elif count >= cap:
+        can_create, create_reason = False, f"{count}/{cap} open -- close one first"
+    else:
+        can_create, create_reason = True, ""
+    return JSONResponse(
+        {
+            "browsers": await manager.list_browsers(),
+            "key_available": available,
+            "can_create": can_create,
+            "create_reason": create_reason,
+            "browser_count": count,
+            "browser_max": cap,
+        }
+    )
 
 
 @app.post("/browsers")

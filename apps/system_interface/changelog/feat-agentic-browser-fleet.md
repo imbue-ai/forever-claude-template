@@ -23,3 +23,13 @@ Integrated the agentic browser fleet into the workspace UI.
   browser panes -- reloading the pane only reconnects the live view, which read
   as "restart the browser"; the browser viewer has its own in-page Reload button
   for the actual page.
+
+- "New browser" is now gated on the fleet being ready to start one. The "+" menu
+  reads `can_create` / `create_reason` from `GET /browsers`: while the fleet is
+  still starting up / restoring saved browsers, or is at its cap, the item is shown
+  disabled with the reason in parentheses (e.g. "New browser (browsers are still
+  starting up)" / "New browser (5/5 open -- close one first)"), and clicking it pops
+  a modal with the reason instead of firing a create that would fail. This prevents
+  a "New browser" click during startup from racing the fleet's restore (e.g. while
+  browser 0 or several saved browsers are still launching). Disabled "+" menu items
+  no longer run their action on click (previously they were only greyed out).

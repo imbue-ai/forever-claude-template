@@ -286,60 +286,63 @@ def test_handoff_is_a_noop_when_the_caller_does_not_hold_it() -> None:
     asyncio.run(go())
 
 
-def test_is_sandbox_launch_error_detects_chromium_sandbox_messages() -> None:
-    err = bsession.BrowserStartupError
-    assert bsession._is_sandbox_launch_error(err("No usable sandbox! Update your kernel"))
-    assert bsession._is_sandbox_launch_error(err("Running as root without --no-sandbox is not supported."))
-    assert not bsession._is_sandbox_launch_error(err("net::ERR_CONNECTION_REFUSED"))
+def test_should_disable_sandbox_when_running_as_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Chromium can't sandbox as root, so we disable it when euid==0 (the minds-workspace
+    # case) and keep it for a non-root runtime (local dev, where the sandbox works).
+    monkeypatch.setattr(bsession.os, "geteuid", lambda: 0)
+    assert bsession._should_disable_sandbox() is True
+    monkeypatch.setattr(bsession.os, "geteuid", lambda: 501)
+    assert bsession._should_disable_sandbox() is False
 
 
 class _FakeBuSession:
-    """A stand-in for browser-use's BrowserSession: its ``start`` fails with the given
-    message when the sandbox is on, so we can exercise the no-sandbox retry path."""
+    """A stand-in for browser-use's BrowserSession: its ``start`` fails when the sandbox
+    is on (mimicking a runtime that can't sandbox), so we can exercise the launch paths."""
 
-    def __init__(self, chromium_sandbox: bool, fail_message: str) -> None:
+    def __init__(self, chromium_sandbox: bool) -> None:
         self.chromium_sandbox = chromium_sandbox
-        self._fail_message = fail_message
 
     async def start(self) -> None:
         if self.chromium_sandbox:
-            raise bsession.BrowserStartupError(self._fail_message)
+            raise bsession.BrowserStartupError("Running as root without --no-sandbox is not supported.")
 
 
-def _patch_build(monkeypatch: pytest.MonkeyPatch, attempts: list[bool], fail_message: str) -> None:
+def _patch_build(monkeypatch: pytest.MonkeyPatch, attempts: list[bool]) -> None:
     def build(self: bsession.LiveBrowser, profile_dir: Path, chromium_path: str, *, chromium_sandbox: bool) -> Any:
         attempts.append(chromium_sandbox)
-        return _FakeBuSession(chromium_sandbox, fail_message)
+        return _FakeBuSession(chromium_sandbox)
 
     monkeypatch.setattr(bsession.LiveBrowser, "_build_bu_session", build)
 
 
-def test_start_bu_session_retries_without_sandbox_on_sandbox_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A sandbox-related first-launch failure (Lima / non-gVisor VPS) auto-retries ONCE
-    # with the sandbox off; the retry's session has chromium_sandbox=False and succeeds.
+def test_root_launches_with_sandbox_off_on_the_first_try(monkeypatch: pytest.MonkeyPatch) -> None:
+    # As root (Lima / any minds workspace) the sandbox is off from the start -- no doomed
+    # sandboxed attempt that browser-use would turn into a 30s hang (the 504 cause).
     attempts: list[bool] = []
-    _patch_build(monkeypatch, attempts, "No usable sandbox! Update your kernel ...")
+    _patch_build(monkeypatch, attempts)
+    monkeypatch.setattr(bsession.os, "geteuid", lambda: 0)
+    browser = bsession.LiveBrowser(browser_id=0)
+
+    async def go() -> None:
+        session = await browser._start_bu_session(Path("/tmp/x"), "/usr/bin/chromium")
+        assert attempts == [False]  # one attempt, sandbox already off
+        assert session.chromium_sandbox is False
+
+    asyncio.run(go())
+
+
+def test_nonroot_retries_without_sandbox_when_a_sandboxed_launch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A non-root runtime keeps the sandbox, but if that launch fails we retry once with it
+    # off (the only thing the retry changes) -- the backstop for a non-root no-sandbox env.
+    attempts: list[bool] = []
+    _patch_build(monkeypatch, attempts)
+    monkeypatch.setattr(bsession.os, "geteuid", lambda: 501)
     browser = bsession.LiveBrowser(browser_id=0)
 
     async def go() -> None:
         session = await browser._start_bu_session(Path("/tmp/x"), "/usr/bin/chromium")
         assert attempts == [True, False]  # sandbox on (fails) -> retried off (succeeds)
         assert session.chromium_sandbox is False
-
-    asyncio.run(go())
-
-
-def test_start_bu_session_does_not_retry_on_non_sandbox_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A non-sandbox failure surfaces immediately -- no silent retry that could mask a
-    # real problem or needlessly drop the sandbox.
-    attempts: list[bool] = []
-    _patch_build(monkeypatch, attempts, "net::ERR_CONNECTION_REFUSED")
-    browser = bsession.LiveBrowser(browser_id=0)
-
-    async def go() -> None:
-        with pytest.raises(bsession.BrowserStartupError, match="CONNECTION_REFUSED"):
-            await browser._start_bu_session(Path("/tmp/x"), "/usr/bin/chromium")
-        assert attempts == [True]  # tried once, did not retry
 
     asyncio.run(go())
 
