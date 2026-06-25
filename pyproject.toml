@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Template repo for a persistent Claude agent"
 requires-python = ">=3.11"
 dependencies = [
-    "telegram-bot",
     "bootstrap",
     "cloudflare-tunnel",
     "app-watcher",
@@ -43,7 +42,7 @@ dev = [
     "imbue-mngr-claude",
     # Shared validator that checks mngr CLI argvs against the live mngr command
     # tree; used by the per-feature contract tests (bootstrap's manager_test,
-    # telegram_bot's bot_test, launch-task's create_worker_test).
+    # launch-task's create_worker_test).
     "mngr-cli-contract",
 ]
 
@@ -51,10 +50,9 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "libs/tk_command_parsing", "apps/system_interface"]
+members = ["libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "libs/tk_command_parsing", "apps/system_interface"]
 
 [tool.uv.sources]
-telegram-bot = { workspace = true }
 bootstrap = { workspace = true }
 cloudflare-tunnel = { workspace = true }
 app-watcher = { workspace = true }

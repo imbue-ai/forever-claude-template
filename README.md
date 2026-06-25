@@ -1,15 +1,13 @@
 # forever-claude-template
 
-A self-contained template for running a persistent Claude agent that communicates via Telegram, delegates work to sub-agents, and can manage its own background services.
+A self-contained template for running a persistent Claude agent that delegates work to sub-agents and can manage its own background services.
 
 ## Usage
 
 ```bash
 mngr create my-workspace main -t local \
     --host-env MINDS_WORKSPACE_NAME=my-workspace \
-    --project ~/project/forever-claude-template \
-    --pass-env TELEGRAM_BOT_TOKEN \
-    --pass-env TELEGRAM_USER_NAME
+    --project ~/project/forever-claude-template
 ```
 
 ## Structure
@@ -17,11 +15,10 @@ mngr create my-workspace main -t local \
 - `CLAUDE.md` - Agent instructions
 - `parent.toml` - Upstream repo for pulling updates
 - `.mngr/settings.toml` - Agent types, create templates, command defaults
-- `skills/` - Agent skills (telegram, task delegation, services, self-update)
+- `skills/` - Agent skills (task delegation, services, self-update)
 - `scripts/` - Utility scripts (reviewer settings)
 - `event-processor/` - Pre-configured directory for creating persistent sub-agents
 - `supervisord.conf` - Supervisord config defining the background services
-- `libs/telegram_bot/` - Telegram bot, send CLI, and history viewer
 - `libs/bootstrap/` - First-boot setup, then launches supervisord to supervise the services
 - `vendor/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command
 - `vendor/tk/` - A vendored copy of the [tk](https://github.com/wedow/ticket) ticket tracker. The `ticket` script (also callable as `tk`) manages tickets stored as markdown. We point `TICKETS_DIR` at `runtime/tickets/` (set in `.mngr/settings.toml`'s `host_env`) so tickets are backed up alongside the rest of `runtime/` on the `mindsbackup/$MNGR_AGENT_ID` branch.

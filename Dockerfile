@@ -43,7 +43,6 @@ COPY libs/app_watcher/pyproject.toml /mngr/code/libs/app_watcher/pyproject.toml
 COPY libs/bootstrap/pyproject.toml /mngr/code/libs/bootstrap/pyproject.toml
 COPY libs/cloudflare_tunnel/pyproject.toml /mngr/code/libs/cloudflare_tunnel/pyproject.toml
 COPY libs/runtime_backup/pyproject.toml /mngr/code/libs/runtime_backup/pyproject.toml
-COPY libs/telegram_bot/pyproject.toml /mngr/code/libs/telegram_bot/pyproject.toml
 COPY libs/web_server/pyproject.toml /mngr/code/libs/web_server/pyproject.toml
 COPY apps/system_interface/pyproject.toml /mngr/code/apps/system_interface/pyproject.toml
 

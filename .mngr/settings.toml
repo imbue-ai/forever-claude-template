@@ -5,7 +5,7 @@
 type = "claude"
 connect = false
 ensure_clean = false
-pass_env__extend = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
+pass_env__extend = ["REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
 host_env__extend = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
@@ -191,9 +191,9 @@ type = "main"
 # chat agent) and then launches supervisord, which runs every background
 # service (system_interface, web, cloudflared, app-watcher, runtime-backup,
 # host-backup, terminal, and the one-shot deferred-install -- see
-# supervisord.conf). The old telegram + git_auth_setup windows are gone
-# (telegram is retired; the git config it performed now runs inside bootstrap),
-# and terminal is a supervisord service rather than its own window.
+# supervisord.conf). The old git_auth_setup window is gone (the git config it
+# performed now runs inside bootstrap), and terminal is a supervisord service
+# rather than its own window.
 extra_window = ["bootstrap='uv run bootstrap'"]
 # Write a sane default tmux config on every minds host. tuple-typed
 # `extra_provision_command` stacks across templates (see
