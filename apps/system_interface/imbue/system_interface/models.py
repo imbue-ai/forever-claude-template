@@ -120,6 +120,9 @@ class RecentShedItem(FrozenModel):
     tier_rank: int = Field(description="1..8 priority rank of the shed processes")
     count: int = Field(description="How many processes with this label were shed")
     reclaimed_kb: int = Field(description="Total resident memory reclaimed, in kibibytes")
+    owning_agent_name: str | None = Field(
+        default=None, description="Agent these processes belonged to, if any"
+    )
 
 
 class MemoryStatusResponse(FrozenModel):

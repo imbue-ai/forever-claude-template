@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { humanizeKb, pausedSummary, shedItemDetail, tierLabel, totalPausedCount } from "./MemoryPressureBanner";
 
-function item(label: string, tier_rank: number, count: number, reclaimed_kb: number) {
-  return { label, tier_rank, count, reclaimed_kb };
+function item(
+  label: string,
+  tier_rank: number,
+  count: number,
+  reclaimed_kb: number,
+  owning_agent_name: string | null = null,
+) {
+  return { label, tier_rank, count, reclaimed_kb, owning_agent_name };
 }
 
 describe("humanizeKb", () => {
@@ -54,6 +60,21 @@ describe("shedItemDetail", () => {
     expect(shedItemDetail(item("sleep", 8, 3, 3324))).toEqual({
       name: "sleep ×3",
       meta: "Agent subprocess · 3 MB freed",
+    });
+  });
+
+  it("attributes an agent subprocess to its owning agent", () => {
+    expect(shedItemDetail(item("python3 hog.py", 8, 1, 3_131_972, "alice"))).toEqual({
+      name: "python3 hog.py",
+      meta: "Agent subprocess from alice · 3.0 GB freed",
+    });
+  });
+
+  it("does not append 'from <agent>' for the agent's own process", () => {
+    // A tier-5 agent line is already named by its label; no redundant "from".
+    expect(shedItemDetail(item("alice", 5, 1, 90000, "alice"))).toEqual({
+      name: "alice",
+      meta: "Agent · 88 MB freed",
     });
   });
 });

@@ -18,6 +18,10 @@ def _label_by_pid(classifications) -> dict[int, str]:
     return {c.pid: c.label for c in classifications}
 
 
+def _owning_by_pid(classifications) -> dict[int, str | None]:
+    return {c.pid: c.owning_agent_name for c in classifications}
+
+
 def _build_standard_tree() -> tuple[list[ProcessInfo], list[TmuxPane]]:
     """A representative supervisord-era container.
 
@@ -190,6 +194,60 @@ def test_agents_and_their_children() -> None:
     assert tier_by_pid[203] == Tier.AGENT_CHILD
     # The worker agent is tier 7.
     assert tier_by_pid[301] == Tier.WORKER_AGENT
+
+
+def test_agent_subprocess_carries_owning_agent_and_specific_label() -> None:
+    processes, panes = _build_standard_tree()
+    classifications = _classify(processes, panes)
+    owning = _owning_by_pid(classifications)
+    label = _label_by_pid(classifications)
+    # An agent tool subprocess is attributed to its agent...
+    assert owning[203] == "alice"  # /usr/bin/pytest
+    assert label[203] == "pytest"
+    # ...and an interpreter command gets a label past the interpreter name.
+    assert label[202] == "bash pytest"  # was "bash -c pytest"
+    # The agent's own process (tier 5/7) is attributed too.
+    assert owning[201] == "alice"  # alice claude (tier 5)
+    assert owning[301] == "worker7"  # worker claude (tier 7)
+    # Services and infrastructure carry no owning agent.
+    assert owning[120] is None  # web service
+    assert owning[10] is None  # tmux
+
+
+def test_interpreter_subprocess_label_names_the_script() -> None:
+    # The exact scenario behind the request: a "python3 /tmp/hog.py" subprocess
+    # should read as "python3 hog.py", attributed to the agent that spawned it,
+    # not just "python3".
+    processes = [
+        ProcessInfo(pid=10, parent_pid=1, resident_kb=2000, command_line="tmux"),
+        ProcessInfo(pid=200, parent_pid=10, resident_kb=500, command_line="bash"),
+        ProcessInfo(
+            pid=201, parent_pid=200, resident_kb=300000, command_line="node claude"
+        ),
+        ProcessInfo(
+            pid=202, parent_pid=201, resident_kb=500, command_line="bash /tmp/runhog.sh"
+        ),
+        ProcessInfo(
+            pid=203,
+            parent_pid=202,
+            resident_kb=2400000,
+            command_line="python3 /tmp/hog.py",
+        ),
+    ]
+    panes = [TmuxPane(session_name="mngr-alice", window_name="0", pane_pid=200)]
+    classifications = classify_processes(
+        processes=processes,
+        panes=panes,
+        services_session_name=_SERVICES_SESSION,
+        mngr_prefix=_PREFIX,
+        user_created_agent_names=frozenset({"alice"}),
+        agent_created_agent_names=frozenset(),
+    )
+    label = _label_by_pid(classifications)
+    owning = _owning_by_pid(classifications)
+    assert _tier_by_pid(classifications)[203] == Tier.AGENT_CHILD
+    assert label[203] == "python3 hog.py"
+    assert owning[203] == "alice"
 
 
 def test_infrastructure_outside_any_pane() -> None:

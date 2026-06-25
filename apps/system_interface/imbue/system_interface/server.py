@@ -577,6 +577,11 @@ def _read_memory_status() -> MemoryStatusResponse:
             tier_rank=int(item.get("tier_rank", 0)),
             count=int(item.get("count", 0)),
             reclaimed_kb=int(item.get("reclaimed_kb", 0)),
+            owning_agent_name=(
+                str(item["owning_agent_name"])
+                if item.get("owning_agent_name") is not None
+                else None
+            ),
         )
         for item in raw.get("recently_shed", [])
         if isinstance(item, dict)

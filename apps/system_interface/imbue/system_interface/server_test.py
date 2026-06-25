@@ -482,7 +482,15 @@ def test_memory_status_reflects_pressure_file(
             {
                 "is_under_pressure": True,
                 "used_fraction": 0.93,
-                "recently_shed": [{"label": "pytest", "tier_rank": 8, "count": 2, "reclaimed_kb": 500000}],
+                "recently_shed": [
+                    {
+                        "label": "python3 hog.py",
+                        "tier_rank": 8,
+                        "count": 2,
+                        "reclaimed_kb": 500000,
+                        "owning_agent_name": "alice",
+                    }
+                ],
                 "blocked_services": ["web"],
             }
         )
@@ -491,7 +499,8 @@ def test_memory_status_reflects_pressure_file(
     assert response.status_code == 200
     data = response.get_json()
     assert data["is_under_pressure"] is True
-    assert data["recently_shed"][0]["label"] == "pytest"
+    assert data["recently_shed"][0]["label"] == "python3 hog.py"
+    assert data["recently_shed"][0]["owning_agent_name"] == "alice"
     assert data["blocked_services"] == ["web"]
 
 

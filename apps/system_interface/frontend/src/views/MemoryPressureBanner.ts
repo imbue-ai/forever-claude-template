@@ -12,6 +12,7 @@ interface RecentShedItem {
   tier_rank: number;
   count: number;
   reclaimed_kb: number;
+  owning_agent_name?: string | null;
 }
 
 interface MemoryStatus {
@@ -80,7 +81,14 @@ export interface ShedItemDetail {
 
 export function shedItemDetail(item: RecentShedItem): ShedItemDetail {
   const name = item.count > 1 ? `${item.label} ×${item.count}` : item.label;
-  const meta = `${tierLabel(item.tier_rank)} · ${humanizeKb(item.reclaimed_kb)} freed`;
+  // For an agent's subprocess, attribute it to that agent: "Agent subprocess
+  // from alice". The agent's own process (tier 5/7) is already named by its
+  // label, so we don't repeat "from <agent>" there.
+  const kind =
+    item.owning_agent_name && item.tier_rank === 8
+      ? `${tierLabel(item.tier_rank)} from ${item.owning_agent_name}`
+      : tierLabel(item.tier_rank);
+  const meta = `${kind} · ${humanizeKb(item.reclaimed_kb)} freed`;
   return { name, meta };
 }
 

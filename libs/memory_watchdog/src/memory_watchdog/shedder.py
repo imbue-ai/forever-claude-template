@@ -76,24 +76,28 @@ def select_shed_targets(
 
 @pure
 def summarize_recent_sheds(records: Sequence[ShedRecord]) -> list[RecentShedSummary]:
-    """Aggregate shed records by label for the UI banner."""
-    count_by_label: dict[str, int] = defaultdict(int)
-    reclaimed_by_label: dict[str, int] = defaultdict(int)
-    rank_by_label: dict[str, int] = {}
+    """Aggregate shed records for the UI banner.
+
+    Grouped by (label, owning agent) so the same command run by two different
+    agents stays on separate lines and each line can name its owning agent.
+    """
+    count_by_key: dict[tuple[str, str | None], int] = defaultdict(int)
+    reclaimed_by_key: dict[tuple[str, str | None], int] = defaultdict(int)
+    rank_by_key: dict[tuple[str, str | None], int] = {}
     for record in records:
-        count_by_label[record.label] = count_by_label[record.label] + 1
-        reclaimed_by_label[record.label] = (
-            reclaimed_by_label[record.label] + record.resident_kb
-        )
-        rank_by_label[record.label] = record.tier_rank
+        key = (record.label, record.owning_agent_name)
+        count_by_key[key] = count_by_key[key] + 1
+        reclaimed_by_key[key] = reclaimed_by_key[key] + record.resident_kb
+        rank_by_key[key] = record.tier_rank
     summaries = [
         RecentShedSummary(
             label=label,
-            tier_rank=rank_by_label[label],
+            tier_rank=rank_by_key[(label, owning_agent_name)],
             count=count,
-            reclaimed_kb=reclaimed_by_label[label],
+            reclaimed_kb=reclaimed_by_key[(label, owning_agent_name)],
+            owning_agent_name=owning_agent_name,
         )
-        for label, count in count_by_label.items()
+        for (label, owning_agent_name), count in count_by_key.items()
     ]
     return sorted(summaries, key=lambda s: s.reclaimed_kb, reverse=True)
 
@@ -150,6 +154,7 @@ def shed_tier(
                 pid=target.pid,
                 resident_kb=target.resident_kb,
                 agent_name=target.label if is_agent_process else None,
+                owning_agent_name=target.owning_agent_name,
             )
         )
     return records

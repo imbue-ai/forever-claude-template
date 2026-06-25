@@ -14,10 +14,18 @@ _RELIEF = 0.80
 
 
 def _classification(
-    pid: int, tier: Tier, resident_kb: int, label: str
+    pid: int,
+    tier: Tier,
+    resident_kb: int,
+    label: str,
+    owning_agent_name: str | None = None,
 ) -> ProcessClassification:
     return ProcessClassification(
-        pid=pid, resident_kb=resident_kb, tier=tier, label=label
+        pid=pid,
+        resident_kb=resident_kb,
+        tier=tier,
+        label=label,
+        owning_agent_name=owning_agent_name,
     )
 
 
@@ -127,6 +135,62 @@ def test_summarize_recent_sheds_aggregates_by_label() -> None:
     assert summary_by_label["worker"].count == 1
     # Largest reclaimer comes first.
     assert summaries[0].label == "pytest"
+
+
+def test_summarize_groups_by_owning_agent() -> None:
+    # The same command run by two agents must stay on separate lines so each can
+    # name its owning agent, rather than collapsing into one ambiguous "python3".
+    records = [
+        ShedRecord(
+            timestamp="t",
+            tier=Tier.AGENT_CHILD,
+            tier_rank=8,
+            label="python3 hog.py",
+            pid=1,
+            resident_kb=2000,
+            agent_name=None,
+            owning_agent_name="alice",
+        ),
+        ShedRecord(
+            timestamp="t",
+            tier=Tier.AGENT_CHILD,
+            tier_rank=8,
+            label="python3 hog.py",
+            pid=2,
+            resident_kb=1000,
+            agent_name=None,
+            owning_agent_name="bob",
+        ),
+    ]
+    summaries = summarize_recent_sheds(records)
+    assert len(summaries) == 2
+    by_agent = {s.owning_agent_name: s for s in summaries}
+    assert by_agent["alice"].count == 1
+    assert by_agent["alice"].label == "python3 hog.py"
+    assert by_agent["bob"].count == 1
+
+
+def test_shed_tier_records_owning_agent_for_subprocess() -> None:
+    # A shed subprocess is attributed to its agent (owning_agent_name) but is not
+    # itself an agent shed (agent_name stays None, so no revival notice fires).
+    victim = subprocess.Popen(["sleep", "98768"], start_new_session=True)
+    try:
+        records = shed_tier(
+            [
+                _classification(
+                    victim.pid, Tier.AGENT_CHILD, 1000, "python3 hog.py", "alice"
+                )
+            ],
+            Tier.AGENT_CHILD,
+        )
+        assert len(records) == 1
+        assert records[0].agent_name is None
+        assert records[0].owning_agent_name == "alice"
+        assert _wait_until_dead(victim, timeout_seconds=5.0)
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+        victim.wait(timeout=5)
 
 
 def _wait_until_dead(process: subprocess.Popen, timeout_seconds: float) -> bool:

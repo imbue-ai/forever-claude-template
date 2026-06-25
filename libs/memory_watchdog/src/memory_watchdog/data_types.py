@@ -118,6 +118,14 @@ class ProcessClassification(FrozenModel):
     # Human-readable label for what this process is (service name, agent name, or
     # a fallback). Used in the shed ledger so the user can see what was killed.
     label: str = Field(description="What this process is, for the ledger and banner")
+    # The agent whose session this process lives under, set for an agent's own
+    # process (tier 5/7) and for its subprocesses (tier 8) alike. Distinct from
+    # ShedRecord.agent_name (which only marks a shed *agent* main process, for the
+    # revival notice): this is for attribution/display -- "whose subprocess was
+    # this". None for services and infrastructure.
+    owning_agent_name: str | None = Field(
+        default=None, description="Agent whose session this process belongs to, if any"
+    )
 
 
 class MemoryPressure(FrozenModel):
@@ -149,6 +157,13 @@ class ShedRecord(FrozenModel):
     agent_name: str | None = Field(
         description="Agent whose main process this was, if any"
     )
+    # The agent this process belonged to, set for an agent's subprocesses
+    # (tier 8) as well as its main process -- for attribution in the banner
+    # ("a subprocess of <agent>"). Unlike agent_name, this does NOT imply the
+    # agent itself was shed, so it never triggers the revival notice.
+    owning_agent_name: str | None = Field(
+        default=None, description="Agent whose session this process belonged to, if any"
+    )
 
 
 class RecentShedSummary(FrozenModel):
@@ -161,6 +176,9 @@ class RecentShedSummary(FrozenModel):
     )
     reclaimed_kb: int = Field(
         description="Total resident memory reclaimed for this label"
+    )
+    owning_agent_name: str | None = Field(
+        default=None, description="Agent these processes belonged to, if any"
     )
 
 

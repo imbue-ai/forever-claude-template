@@ -73,6 +73,42 @@ def _short_command_label(command_line: str, fallback: str) -> str:
     return basename or fallback
 
 
+# Interpreters/launchers whose own name ("python3", "uv", "node") says little
+# about what is actually running -- for these we look past the launcher to the
+# first real target (a script path or subcommand) so the label is specific.
+_COMMAND_RUNNERS: Final[frozenset[str]] = frozenset(
+    {"python", "python3", "node", "nodejs", "bash", "sh", "uv", "uvx", "npx", "ruby", "perl", "env", "sudo"}
+)
+# Runner sub-tokens to skip while reaching for the real target (e.g. the "run"
+# in "uv run pytest", the "-m" in "python3 -m pytest").
+_RUNNER_SKIP_TOKENS: Final[frozenset[str]] = frozenset({"run", "exec", "-m"})
+
+
+@pure
+def _describe_command(command_line: str, fallback: str) -> str:
+    """A specific label for a subprocess, e.g. "python3 hog.py", "pytest".
+
+    A bare interpreter name ("python3") is uninformative, so when the command is
+    a known runner we append the basename of the first real target token (the
+    script or subcommand) -- "python3 /tmp/hog.py" -> "python3 hog.py",
+    "uv run pytest" -> "uv pytest", "python3 -m pytest" -> "python3 pytest". A
+    non-runner command keeps its own basename ("/usr/bin/pytest" -> "pytest").
+    """
+    tokens = command_line.split()
+    if not tokens:
+        return fallback or "process"
+    runner = tokens[0].rsplit("/", 1)[-1]
+    if runner not in _COMMAND_RUNNERS:
+        return runner or fallback or "process"
+    for token in tokens[1:]:
+        if token in _RUNNER_SKIP_TOKENS:
+            continue
+        if token.startswith("-"):
+            continue
+        return f"{runner} {token.rsplit('/', 1)[-1]}"
+    return runner
+
+
 @pure
 def _service_tier_and_label(command_line: str) -> tuple[Tier, str]:
     """Tier + label for one supervisord child, matched by its command line."""
@@ -234,6 +270,7 @@ def classify_processes(
             process = process_by_pid.get(pid)
             if process is None:
                 continue
+            owning_agent: str | None = None
             if is_services_session:
                 # The supervisord launch chain (shell, uv) and the services
                 # agent's own idle shell. Never shed: killing any of these tears
@@ -249,9 +286,10 @@ def classify_processes(
                 base_tier = _agent_tier(
                     agent_name, user_created_agent_names, agent_created_agent_names
                 )
+                owning_agent = agent_name
                 if depth >= _AGENT_CHILD_MIN_DEPTH:
                     tier = Tier.AGENT_CHILD
-                    label = _short_command_label(process.command_line, agent_name)
+                    label = _describe_command(process.command_line, agent_name)
                 else:
                     tier = base_tier
                     label = agent_name
@@ -262,7 +300,11 @@ def classify_processes(
             assigned_pids.add(pid)
             classifications.append(
                 ProcessClassification(
-                    pid=pid, resident_kb=process.resident_kb, tier=tier, label=label
+                    pid=pid,
+                    resident_kb=process.resident_kb,
+                    tier=tier,
+                    label=label,
+                    owning_agent_name=owning_agent,
                 )
             )
 
