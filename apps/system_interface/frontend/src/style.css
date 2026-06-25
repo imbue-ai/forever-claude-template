@@ -1036,22 +1036,26 @@ body {
 
 /* ── Choice cards ──
    Clickable cards substituted for a `minds-choices` marker block in an assistant
-   message (see views/choice-cards.ts). Each card prefills the composer with its
-   phrase on click. Styled as a vertical stack of selectable options. */
+   message (see views/choice-cards.ts). Clicking a card sends its message. Laid
+   out two across (wrapping) so a 2- or 4-option menu reads as a tidy grid; cards
+   drop to a single column when the message column gets too narrow. */
 .choice-cards {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 16px;
   margin-top: 0.75em;
   margin-bottom: 0.25em;
-  max-width: 560px;
 }
 
 .choice-card {
+  /* Two per row: each card takes half the width minus half the 16px gap. flex-grow
+     lets a lone odd card fill its row; min-width forces a single column when the
+     column is too narrow for two. */
+  flex: 1 1 calc(50% - 8px);
+  min-width: 220px;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  width: 100%;
   text-align: left;
   padding: 12px 14px;
   border: 1px solid var(--color-border);
