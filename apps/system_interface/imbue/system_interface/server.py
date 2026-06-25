@@ -2,6 +2,8 @@ import json
 import os
 import queue
 import socket
+import sys
+import threading
 import traceback
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -170,6 +172,15 @@ def _index() -> Response:
             html_content = _inject_plugin_script_tags(html_content, config.javascript_plugin_basenames, root_path)
         return _html_response(html_content)
     return _html_response(_FRONTEND_NOT_BUILT_HTML)
+
+
+def _diag_threads() -> Response:
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    sections: list[str] = []
+    for ident, frame in sys._current_frames().items():
+        stack = "".join(traceback.format_stack(frame))
+        sections.append(f"--- thread {names.get(ident, '?')} (id={ident}) ---\n{stack}")
+    return Response("\n".join(sections), mimetype="text/plain")
 
 
 def _index_catch_all(path: str) -> Response:
@@ -1001,6 +1012,7 @@ def create_application(
     sock = Sock(application)
 
     application.add_url_rule("/", view_func=_index, methods=["GET"])
+    application.add_url_rule("/diag/threads", view_func=_diag_threads, methods=["GET"])
     application.add_url_rule("/favicon.ico", view_func=_favicon, methods=["GET"])
     application.add_url_rule("/api/agents", view_func=_list_agents_endpoint, methods=["GET"])
     application.add_url_rule("/api/agents/create-worktree", view_func=_create_worktree_agent, methods=["POST"])
