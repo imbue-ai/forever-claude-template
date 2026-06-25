@@ -19,7 +19,7 @@ I'm an AI operating system built to extend *you* — so you can do your best wor
 
 I can take on tasks for you, build custom AI tools you can easily edit, connect to the tools you already use to pull in information, or just brainstorm ways to make your work better.
 
-**Let's start building**
+**Let's get to work**
 
 Already have something in mind? Tell me what you'd like to work on below. If not, I'm happy to suggest a few ways to get started.
 
