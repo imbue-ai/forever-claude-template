@@ -250,6 +250,74 @@ def test_interpreter_subprocess_label_names_the_script() -> None:
     assert owning[203] == "alice"
 
 
+def test_agent_coordination_and_observability_helpers_are_never_shed() -> None:
+    # An agent's mngr machinery -- the background-task loop, the transcript
+    # streamers it spawns, and a lead's worker-report poll -- shares the agent's
+    # subtree but must never be shed: doing so frees ~nothing yet blinds the UI or
+    # severs lead<->worker coordination. They are classified as infrastructure,
+    # while the agent's actual work subprocess stays an expendable agent child.
+    processes = [
+        ProcessInfo(pid=10, parent_pid=1, resident_kb=2000, command_line="tmux"),
+        ProcessInfo(pid=200, parent_pid=10, resident_kb=500, command_line="bash"),
+        ProcessInfo(
+            pid=201, parent_pid=200, resident_kb=300000, command_line="node claude"
+        ),
+        # Background-task loop (depth 1, sibling of claude) + the streamers it
+        # spawns (depth 2). All mngr observability machinery.
+        ProcessInfo(
+            pid=210,
+            parent_pid=200,
+            resident_kb=2700,
+            command_line="bash /mngr/agents/agent-x/commands/claude_background_tasks.sh mngr-alice agent",
+        ),
+        ProcessInfo(
+            pid=211,
+            parent_pid=210,
+            resident_kb=3400,
+            command_line="bash /mngr/agents/agent-x/commands/stream_transcript.sh",
+        ),
+        ProcessInfo(
+            pid=212,
+            parent_pid=210,
+            resident_kb=2400,
+            command_line="bash /mngr/agents/agent-x/commands/common_transcript.sh",
+        ),
+        # The lead's worker-report poll (depth 2, child of claude).
+        ProcessInfo(
+            pid=213,
+            parent_pid=201,
+            resident_kb=11000,
+            command_line="uv run .agents/skills/launch-task/scripts/create_worker.py await --name w",
+        ),
+        # An actual work subprocess (depth 2/3) -- expendable.
+        ProcessInfo(
+            pid=220, parent_pid=201, resident_kb=8000, command_line="bash -c pytest"
+        ),
+        ProcessInfo(
+            pid=221, parent_pid=220, resident_kb=500000, command_line="/usr/bin/pytest"
+        ),
+    ]
+    panes = [TmuxPane(session_name="mngr-alice", window_name="0", pane_pid=200)]
+    classifications = classify_processes(
+        processes=processes,
+        panes=panes,
+        services_session_name=_SERVICES_SESSION,
+        mngr_prefix=_PREFIX,
+        user_created_agent_names=frozenset({"alice"}),
+        agent_created_agent_names=frozenset(),
+    )
+    tier_by_pid = _tier_by_pid(classifications)
+    # The agent itself and its real work subprocesses keep their tiers.
+    assert tier_by_pid[201] == Tier.USER_AGENT
+    assert tier_by_pid[220] == Tier.AGENT_CHILD
+    assert tier_by_pid[221] == Tier.AGENT_CHILD
+    # The coordination/observability helpers are never-shed infrastructure.
+    assert tier_by_pid[210] == Tier.INFRASTRUCTURE  # background-task loop
+    assert tier_by_pid[211] == Tier.INFRASTRUCTURE  # transcript streamer
+    assert tier_by_pid[212] == Tier.INFRASTRUCTURE  # common transcript
+    assert tier_by_pid[213] == Tier.INFRASTRUCTURE  # lead's worker-report poll
+
+
 def test_infrastructure_outside_any_pane() -> None:
     processes, panes = _build_standard_tree()
     tier_by_pid = _tier_by_pid(_classify(processes, panes))

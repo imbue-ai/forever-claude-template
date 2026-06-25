@@ -39,6 +39,29 @@ _SUPERVISORD_COMMAND_BASENAME: Final[str] = "supervisord"
 # depth 1, and the tool subprocesses claude spawns are depth 2+.
 _AGENT_CHILD_MIN_DEPTH: Final[int] = 2
 
+# Per-agent coordination/observability helper processes that live inside an
+# agent's subtree but are NOT expendable work. mngr runs a background-task loop
+# for every agent, which spawns transcript streamers that feed the UI; a lead
+# additionally runs a worker-report poll (create_worker.py await). These are tiny
+# (KB-MB) yet load-bearing: shedding one frees nothing meaningful but blinds the
+# UI or severs lead<->worker coordination (the lead's poll is what tells it a
+# worker was paused). So they are classified as never-shed infrastructure rather
+# than as expendable agent children, regardless of their depth. Matched by a
+# distinctive token anywhere in the command line.
+_AGENT_INFRA_HELPER_TOKENS: Final[tuple[str, ...]] = (
+    "claude_background_tasks.sh",
+    "stream_transcript.sh",
+    "common_transcript.sh",
+    "create_worker.py",
+)
+
+
+@pure
+def _is_agent_infra_helper(command_line: str) -> bool:
+    """Whether a process inside an agent's subtree is mngr coordination/observability
+    machinery that must never be shed (see ``_AGENT_INFRA_HELPER_TOKENS``)."""
+    return any(token in command_line for token in _AGENT_INFRA_HELPER_TOKENS)
+
 
 @pure
 def _command_basename(command_line: str) -> str:
@@ -77,7 +100,21 @@ def _short_command_label(command_line: str, fallback: str) -> str:
 # about what is actually running -- for these we look past the launcher to the
 # first real target (a script path or subcommand) so the label is specific.
 _COMMAND_RUNNERS: Final[frozenset[str]] = frozenset(
-    {"python", "python3", "node", "nodejs", "bash", "sh", "uv", "uvx", "npx", "ruby", "perl", "env", "sudo"}
+    {
+        "python",
+        "python3",
+        "node",
+        "nodejs",
+        "bash",
+        "sh",
+        "uv",
+        "uvx",
+        "npx",
+        "ruby",
+        "perl",
+        "env",
+        "sudo",
+    }
 )
 # Runner sub-tokens to skip while reaching for the real target (e.g. the "run"
 # in "uv run pytest", the "-m" in "python3 -m pytest").
@@ -287,7 +324,16 @@ def classify_processes(
                     agent_name, user_created_agent_names, agent_created_agent_names
                 )
                 owning_agent = agent_name
-                if depth >= _AGENT_CHILD_MIN_DEPTH:
+                if _is_agent_infra_helper(process.command_line):
+                    # Per-agent coordination/observability machinery (the
+                    # background-task loop, transcript streamers, a lead's
+                    # worker-report poll). Never shed -- it frees ~nothing but
+                    # blinds the UI or severs lead<->worker coordination -- so it
+                    # rides with the protected infrastructure tier regardless of
+                    # its depth in the agent's subtree.
+                    tier = Tier.INFRASTRUCTURE
+                    label = _describe_command(process.command_line, agent_name)
+                elif depth >= _AGENT_CHILD_MIN_DEPTH:
                     tier = Tier.AGENT_CHILD
                     label = _describe_command(process.command_line, agent_name)
                 else:
