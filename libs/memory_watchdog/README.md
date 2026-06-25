@@ -71,13 +71,18 @@ programs) can repopulate the banner without re-plumbing.
 
 ## Paths
 
-`memory_watchdog.ledger.shed_ledger_path()` / `status_path()` are the single
-source of truth for the on-disk layout, imported by the system interface (status
-reader). The base resolves relative to `MNGR_AGENT_WORK_DIR` (the repo root) and
-is overridable via `MEMORY_WATCHDOG_RUNTIME_DIR`. The SessionStart notice hook
-(`scripts/claude_shed_notice_hook.py`) duplicates this layout because it runs in
-a plain claude environment that cannot import the package, but it honors the same
-work-dir base and override so it never resolves to a different file.
+`memory_watchdog.paths` is the single source of truth for the on-disk layout:
+`shed_ledger_path()` / `status_path()` (re-exported through
+`memory_watchdog.ledger` for existing callers, and imported by the system
+interface as the status reader). The base resolves relative to
+`MNGR_AGENT_WORK_DIR` (the repo root) and is overridable via
+`MEMORY_WATCHDOG_RUNTIME_DIR`. `paths` is deliberately dependency-free (stdlib
+only), so even the SessionStart notice hook
+(`scripts/claude_shed_notice_hook.py`) -- which runs in a plain claude
+environment that cannot import the package's heavier modules -- imports the same
+helper (by putting the package's `src` dir on `sys.path`) rather than
+duplicating the layout, so producer and every reader can never resolve a
+different file.
 
 ## CLI
 
