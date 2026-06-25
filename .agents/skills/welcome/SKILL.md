@@ -35,9 +35,9 @@ After the opening message the user replies. If their reply asks for suggestions,
 
 Here are some popular ways people get started with Minds. Pick whichever fits, and we can build on it as a starting point.
 
-1. **Make a custom email & messaging hub:** Organize all your messages and emails in one place, make it easy to respond.
-2. **Make a custom view of your tasks:** Build a system to organize your tasks and help you get them done.
-3. **Make a custom team view:** Make a dashboard for anything you want to track and take action on — things in GitHub, Linear, Slack or email.
-4. **Make a custom report:** Stay up to date on the products, events, or news that you care about.
+1. **Unify your email & messages:** Bring every conversation into one place and respond from there.
+2. **Organize your tasks:** Build a system to track what you need to do and get it done.
+3. **Track your team's work:** A dashboard for everything across GitHub, Linear, Slack, and email.
+4. **Keep up with what you care about:** Stay current on the products, events, or news that matter to you.
 
 ---
