@@ -131,12 +131,14 @@ let layoutLoaded = false;
 const OPEN_TAB_SPLIT_FRACTION = 0.6;
 
 // --- Auto-created agent tabs (e.g. the nightly Caretaker) ----------------
-// An agent carrying the ``auto_created`` / ``caretaker`` label gets its own
-// tab opened automatically the first time we ever see it, and that tab blinks
-// in the accent color until the user opens it. Both facts are remembered in
-// localStorage so that across reloads we neither re-open a tab the user closed
-// (``surfaced``) nor keep blinking a tab the user already opened (``seen``).
-const AUTO_SURFACED_STORAGE_KEY = "si.autoCreatedSurfaced.v1";
+// An agent carrying the ``auto_created`` / ``caretaker`` label gets its own tab
+// opened automatically -- and re-opened on every fresh run -- whenever it is not
+// already open, and that tab flashes in the workspace accent color until the
+// user opens it. A "fresh run" is the agent going active again (a rising edge of
+// its activity), so the tab re-appears each day the Caretaker runs, but is left
+// alone while the user already has it open. ``seen`` (which tab the user has
+// opened, so the flash stops) is remembered in localStorage; the per-run active
+// tracking is in-memory only.
 const AUTO_SEEN_STORAGE_KEY = "si.autoCreatedSeen.v1";
 
 function loadStoredIdSet(key: string): Set<string> {
@@ -154,8 +156,11 @@ function loadStoredIdSet(key: string): Set<string> {
   return new Set();
 }
 
-const surfacedAutoAgentIds = loadStoredIdSet(AUTO_SURFACED_STORAGE_KEY);
 const seenAutoAgentIds = loadStoredIdSet(AUTO_SEEN_STORAGE_KEY);
+
+// In-memory: auto-created agents currently observed as "active" (mid-run). Used
+// to detect the rising edge of a new run so we re-surface the tab once per run.
+const activeAutoAgentIds = new Set<string>();
 
 function persistIdSet(key: string, ids: Set<string>): void {
   try {
@@ -170,9 +175,17 @@ function isAutoCreatedAgent(agent: { labels?: Record<string, string> } | undefin
   return !!labels && (labels.auto_created === "true" || labels.caretaker === "true");
 }
 
-function markAutoSurfaced(agentId: string): void {
-  surfacedAutoAgentIds.add(agentId);
-  persistIdSet(AUTO_SURFACED_STORAGE_KEY, surfacedAutoAgentIds);
+// True when the agent is actively working a turn (a run is in progress).
+function isAgentActive(agent: { activity_state?: string | null }): boolean {
+  return agent.activity_state === "THINKING" || agent.activity_state === "TOOL_RUNNING";
+}
+
+// Reset the "seen" flag so a tab the user opened on a previous run flashes again
+// when it is re-surfaced for a fresh run.
+function clearAutoSeen(agentId: string): void {
+  if (!seenAutoAgentIds.has(agentId)) return;
+  seenAutoAgentIds.delete(agentId);
+  persistIdSet(AUTO_SEEN_STORAGE_KEY, seenAutoAgentIds);
 }
 
 function markAutoSeen(agentId: string): void {
@@ -582,18 +595,31 @@ function addChatPanel(
   });
 }
 
-/** Auto-open a tab for any newly-seen auto-created agent (e.g. the Caretaker),
- *  exactly once ever (tracked in localStorage, so a tab the user closes is not
- *  reopened on reload). The tab is added inactive so it does not steal focus;
- *  createCustomTab() makes it blink in the accent color until the user opens it. */
+/** Re-open a tab for an auto-created agent (e.g. the Caretaker) on each fresh
+ *  run, unless the user already has it open. A "fresh run" is the rising edge of
+ *  the agent's activity (idle -> active), so the tab re-appears every day the
+ *  Caretaker runs. The tab is added inactive so it does not steal focus;
+ *  createCustomTab() makes it flash in the workspace accent color until opened.
+ *  The flash is reset each run so a previously-seen tab flashes again. */
 function surfaceAutoCreatedAgents(): void {
   if (!dockview) return;
   const openChatIds = getOpenChatAgentIds();
   for (const agent of getAgents()) {
     if (!isAutoCreatedAgent(agent)) continue;
-    if (surfacedAutoAgentIds.has(agent.id)) continue;
-    markAutoSurfaced(agent.id);
-    if (!openChatIds.has(agent.id)) {
+
+    const active = isAgentActive(agent);
+    const wasActive = activeAutoAgentIds.has(agent.id);
+    if (active) {
+      activeAutoAgentIds.add(agent.id);
+    } else {
+      activeAutoAgentIds.delete(agent.id);
+    }
+
+    // Surface only on the rising edge of a fresh run, and only when the user
+    // does not already have the tab open. This re-opens (and re-flashes) the tab
+    // each day the Caretaker runs while leaving an already-open tab untouched.
+    if (active && !wasActive && !openChatIds.has(agent.id)) {
+      clearAutoSeen(agent.id);
       addChatPanel(agent.id, agent.name, null, { inactive: true });
     }
   }

@@ -25,10 +25,12 @@ set -euo pipefail
 CARETAKER_NAME="caretaker"
 CARETAKER_FILTER='labels.caretaker == "true"'
 
-# Sent on first creation: a fresh agent has no prior context to clear, so this
-# just triggers the skill, whose first-run path's entire chat output is the
-# pre-prepared welcome message.
-FIRST_RUN_MESSAGE="It's time for your *caretaking* run. Follow your caretaker skill (.agents/skills/caretaker/SKILL.md)."
+# Sent on first creation only: the very first thing the user ever sees from the
+# Caretaker should be its welcome, not the recurring "caretaking run" nudge (that
+# appears from the second day onward). A fresh agent has no prior context to
+# clear, so this just triggers the skill, whose first-run path's entire chat
+# output is the pre-prepared welcome message.
+FIRST_RUN_MESSAGE="Please introduce yourself to the user by following your caretaker skill (.agents/skills/caretaker/SKILL.md)."
 
 # Sent (after a "/clear") to re-wake an existing Caretaker for a fresh run.
 RUN_MESSAGE="It's time for your *caretaking* run. Follow your caretaker skill (.agents/skills/caretaker/SKILL.md)."
