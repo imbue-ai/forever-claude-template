@@ -67,7 +67,12 @@ export function isHiddenUserMessage(content: string): boolean {
   //      "Base directory for this skill: .../skills/welcome/..." and
   //      carries the SKILL.md body.
   // Hide both so the first visible turn is just the assistant's greeting.
-  if (content.trim() === "/welcome") {
+  //
+  // The Caretaker agent is seeded the same way, but with "/caretaker-welcome"
+  // (see run_caretaker.sh and the caretaker-welcome skill), so its trigger is
+  // hidden identically -- the user's first visible turn is the welcome itself,
+  // never the slash command that produced it.
+  if (content.trim() === "/welcome" || content.trim() === "/caretaker-welcome") {
     return true;
   }
   // Other skill expansions are folded into the corresponding "Tool: Skill"

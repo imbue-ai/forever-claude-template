@@ -1493,16 +1493,19 @@ body {
 
 /* Newly auto-created agent tab (e.g. the nightly Caretaker): flash in this
    workspace's accent color until the user opens it. createCustomTab() adds
-   .dv-tab-new on such tabs and removes it on the tab's first activation. Each
-   cycle snaps bright in the accent, then eases out to the normal idle tab look
-   before snapping bright again, so the indicator is hard to miss. The accent is
-   the per-workspace --workspace-accent, falling back to the default accent. */
-.dv-default-tab.dv-tab-new {
+   .dv-tab-new on the inner tab content element, and the flash is applied to the
+   enclosing .dv-tab wrapper (via :has) so the WHOLE clickable tab region lights
+   up, not just the inner label. createCustomTab removes .dv-tab-new on the tab's
+   first activation. Each cycle snaps bright in the accent, then eases out to the
+   normal idle tab look before snapping bright again, so the indicator is hard to
+   miss. The accent is the per-workspace --workspace-accent, falling back to the
+   default accent. */
+.dv-tab:has(.dv-tab-new) {
   animation: tab-new-flash 1.4s ease-out infinite;
   border-radius: 4px;
 }
 
-.dv-default-tab.dv-tab-new .dv-default-tab-content {
+.dv-tab:has(.dv-tab-new) .dv-default-tab-content {
   font-weight: 600;
 }
 
