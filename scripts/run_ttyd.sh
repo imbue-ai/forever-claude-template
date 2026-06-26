@@ -63,6 +63,27 @@ WORKDIR_SCRIPT
     fi
 fi
 
+# Serve the OSC 52-capable ttyd web client so a mouse-drag copy inside tmux
+# reaches the system clipboard. The tmux config (~/.tmux.conf, written by the
+# template's extra_provision_command) emits an OSC 52 escape on copy, but the
+# stock ttyd 1.7.7 client has no OSC 52 handler and silently drops it; the
+# patched client vendored with the mngr_ttyd plugin honors it. The mngr_ttyd
+# plugin is disabled here (the terminal is a supervised service, not an mngr
+# window), so we replicate its client install: decompress that vendored client
+# and serve it via `ttyd -I`, falling back to the stock client if the asset is
+# missing (so ttyd still starts).
+TTYD_INDEX_FLAGS=()
+TTYD_CLIENT_GZ="$REPO_ROOT/vendor/mngr/libs/mngr_ttyd/imbue/mngr_ttyd/resources/ttyd_index.html.gz"
+if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -f "$TTYD_CLIENT_GZ" ]; then
+    TTYD_INDEX_PATH="$MNGR_AGENT_STATE_DIR/commands/ttyd/index.html"
+    if gzip -dc "$TTYD_CLIENT_GZ" > "$TTYD_INDEX_PATH"; then
+        TTYD_INDEX_FLAGS=(-I "$TTYD_INDEX_PATH")
+    else
+        echo "warning: failed to decompress ttyd web client at $TTYD_CLIENT_GZ; using stock client" >&2
+        rm -f "$TTYD_INDEX_PATH"
+    fi
+fi
+
 # Register the terminal port before starting ttyd (port is known ahead of time)
 uv run python3 "$REPO_ROOT/scripts/forward_port.py" --name terminal --url "http://localhost:$TTYD_PORT"
 
@@ -79,4 +100,4 @@ if [ -n "${MNGR_AGENT_STATE_DIR:-}" ]; then
 fi
 
 # Start ttyd on the fixed port (exec replaces this shell for clean process management)
-exec ttyd -p "$TTYD_PORT" -a -t disableLeaveAlert=true -W bash -c "$DISPATCH_SCRIPT"
+exec ttyd -p "$TTYD_PORT" -a -t disableLeaveAlert=true "${TTYD_INDEX_FLAGS[@]}" -W bash -c "$DISPATCH_SCRIPT"
