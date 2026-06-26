@@ -356,13 +356,22 @@
     };
     castWs.onclose = (ev) => {
       hasFrame = false;
-      // 1008: the browser/session no longer exists (daemon restarted or closed).
-      // Terminal state -- show a clear message and stop reconnecting.
+      // 1008: the browser/session no longer exists (daemon restarted or closed, or the
+      // name is invalid). Terminal -- show a clear message and stop reconnecting.
       if (ev.code === 1008) {
         closedForGood = true;
         overlay.classList.remove("show");
         returnBar.classList.remove("show");
         showLoading("Browser closed — reopen it from the + menu.");
+        return;
+      }
+      // 1013 ("Try Again Later"): the name is valid but the browser hasn't registered
+      // YET -- this is the optimistic pane opened on accept, before the serialized
+      // launch finished. Show the "starting" banner and retry with backoff; it connects
+      // once the launch registers the name. NOT terminal.
+      if (ev.code === 1013) {
+        showLoading("Browser starting…");
+        scheduleReconnect();
         return;
       }
       placeholder.style.display = "block";
@@ -381,12 +390,15 @@
   }
 
   function boot() {
-    // Which browser to show comes from the URL (?session=<id>); default to the
-    // permanent browser 0, which the server lazily (re)creates on connect.
+    // Which browser to show comes from the URL (?session=<name>). Browsers are
+    // addressed by NAME (e.g. "alex-smith"), not a number, and there is no default
+    // browser -- the pane is always opened for a specific name. Pass the raw name
+    // straight through to connect(); the server 404s an unknown name (the viewer then
+    // shows the closed / retrying banner).
     const params = new URLSearchParams(location.search);
-    const raw = params.get("session");
-    const id = (raw !== null && /^\d+$/.test(raw)) ? parseInt(raw, 10) : 0;
-    connect(id);
+    const name = params.get("session");
+    if (!name) { showLoading("Open a browser from the + menu."); return; }
+    connect(name);
   }
   boot();
 })();

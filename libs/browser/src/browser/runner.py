@@ -3,18 +3,20 @@
 Reached through the system_interface proxy at ``/service/browser/``. Serves one
 self-contained viewer page (assets/index.html) that renders a streamed browser
 and an "Agent has control" overlay; the page talks back over one WebSocket,
-``/browsers/{id}/cast`` (screencast frames out; human input, tab control, and
-take/return-control in).
+``/browsers/{name}/cast`` (screencast frames out; human input, tab control, and
+take/return-control in). Browsers are addressed by NAME (a random ~2-word english
+name like ``alex-smith``), not a sequential int; there is no default browser.
 
 Agents drive the fleet over HTTP (see the ``agentic-browser-fleet`` CLI):
 
 * ``GET  /browsers``            -- list every browser, its owner, and its tabs.
-* ``POST /browsers``            -- start a new browser (409 when the fleet is full).
-* ``POST /browsers/{id}/task``  -- acquire-or-wait, run a browser-use task, stream
+* ``POST /browsers``            -- start a new browser (body ``{"name": ...}`` optional;
+  returns ``{"name": ...}``). 400 invalid name, 409 duplicate name or fleet full.
+* ``POST /browsers/{name}/task``  -- acquire-or-wait, run a browser-use task, stream
   the thinking/action trace as line-delimited JSON, release on completion.
-* ``POST /browsers/{id}/hold``  -- acquire-or-wait and hold the browser until the
+* ``POST /browsers/{name}/hold``  -- acquire-or-wait and hold the browser until the
   request disconnects (the ``lock`` verb); release on disconnect.
-* ``POST /browsers/{id}/release`` -- give a browser back (only its owner can).
+* ``POST /browsers/{name}/release`` -- give a browser back (only its owner can).
 
 For ``task`` and ``hold`` the request connection IS the lease: if it drops, the
 run is cancelled and the browser is released.
@@ -50,10 +52,13 @@ from playwright.async_api import Error as PlaywrightError
 from simple_websocket import ConnectionClosed
 
 from browser.loop_bridge import AsyncLoopBridge, cancel_task
+from browser.names import is_valid_browser_name
 from browser.session import (
     BrowserSessionManager,
     BrowserStartupError,
+    DuplicateBrowserNameError,
     FleetFullError,
+    InvalidBrowserNameError,
     LiveBrowser,
     anthropic_key_status,
     deferred_install_ready,
@@ -147,8 +152,8 @@ async def _startup() -> None:
     try:
         ready, reason = deferred_install_ready()
         if not ready:
-            # Chromium isn't installed yet; don't block. The lazy ensure_browser_0 path
-            # brings the fleet back on first access once the install marker appears.
+            # Chromium isn't installed yet; don't block. The fleet starts empty and the
+            # first create() (once the install marker appears) brings a browser up.
             _publish_init_status({"phase": "waiting_for_chromium", "reason": reason})
             return
         await manager.restore()
@@ -170,19 +175,17 @@ def _ndjson(event: dict[str, Any]) -> str:
     return json.dumps(event, default=str) + "\n"
 
 
-async def _resolve(browser_id: int) -> LiveBrowser:
-    """Return the browser, lazily (re)creating the default browser 0 on demand.
+async def _resolve(browser_id: str) -> LiveBrowser:
+    """Return the browser with this name, or raise KeyError (-> 404).
 
-    Browser 0 is the permanent default: ``ensure_browser_0`` is idempotent, so a
-    first access (or an access after a daemon restart) brings it back. Any other id
-    must already exist -- a closed id is gone (KeyError -> 404), never reused.
+    There is no default browser: every browser is created on demand via ``POST
+    /browsers`` and addressed by its name. A closed/unknown name is gone (KeyError ->
+    404), never reused.
     """
-    if browser_id == 0:
-        return await manager.ensure_browser_0()
     return manager.get(browser_id)
 
 
-def _resolve_sync(browser_id: int) -> "LiveBrowser | Response":
+def _resolve_sync(browser_id: str) -> "LiveBrowser | Response":
     """Resolve a browser on the loop, turning KeyError into 404 / startup errors into 503."""
     try:
         return bridge.run(_resolve(browser_id), timeout=_ROUTE_TIMEOUT)
@@ -222,30 +225,25 @@ def key_status() -> Response:
 
 
 def list_browsers() -> Response:
-    """List the fleet. Best-effort ensures browser 0 exists so the default is always shown.
+    """List the fleet (read-only; works during init). The fleet starts EMPTY -- there is
+    no default browser, so nothing is materialized here.
 
     Also reports whether 'New browser' can run right now (``can_create`` + ``create_reason``
-    + count/max) so the UI can gate its button -- mirroring exactly what ``create_browser``
-    would do, so the user never fires a create that returns 503 (still starting / installing)
-    or 409 (fleet full), and the fleet never gets a concurrent launch piled onto a restore."""
+    + count/max) so the UI can gate its button -- mirroring what ``create_browser`` enforces.
+    ``can_create`` is NOT gated on ``_init_done``: create works DURING restore (it queues
+    behind the serialized relaunches), so the button must stay enabled during init. Only
+    a missing Chromium install or the cap disables it."""
     available, _ = anthropic_key_status()
     ready, install_reason = deferred_install_ready()
-    if ready:
-        had_zero = manager.has_browser(0)
-        try:
-            bridge.run(manager.ensure_browser_0(), timeout=_ROUTE_TIMEOUT)
-        except _STARTUP_ERRORS as e:
-            logger.debug("ensure_browser_0 during list ignored ({})", e)
-        else:
-            if not had_zero:  # lazily materialized 0 (e.g. after a degraded init) -- persist it
-                bridge.run(manager._save_manifest(), timeout=_ROUTE_TIMEOUT)
-    count, cap = manager.capacity()
-    if not _init_done.is_set():
-        can_create, create_reason = False, "browsers are still starting up"
-    elif not ready:
+    # capacity() reads the manager's _browsers dict, which is mutated on the loop
+    # thread; reading it directly from this Flask worker thread can KeyError mid
+    # iteration. Route it through the bridge so the read runs ON the loop thread,
+    # like every other manager-state access here.
+    count, cap = bridge.run(manager.capacity_async(), timeout=_ROUTE_TIMEOUT)
+    if not ready:
         can_create, create_reason = False, install_reason or "installing browser support"
     elif count >= cap:
-        can_create, create_reason = False, f"{count}/{cap} open -- close one first"
+        can_create, create_reason = False, f"{count}/{cap} browsers open -- close one first"
     else:
         can_create, create_reason = True, ""
     return jsonify(
@@ -264,28 +262,40 @@ def list_browsers() -> Response:
 
 
 def create_browser() -> Response:
-    if (gate := _require_ready()) is not None:
-        return gate
+    """Start a new browser, optionally with a user-chosen name.
+
+    NOT init-gated: create works DURING restore (the locked "init must not block create"
+    decision). It contends on the same ``manager._lock`` as the serialized relaunches, so
+    a create arriving mid-restore is accepted and simply queues behind them -- at most one
+    Chromium launches at a time. The only hard pre-check is that Chromium is installed
+    (otherwise there is genuinely nothing to launch -> 503).
+
+    Body ``{"name": "<name>"}`` is optional; omitted -> a random name is generated.
+    Response ``{"name": <chosen-name>, "key_available": <bool>}``. Errors: 400 invalid
+    name, 409 duplicate name or fleet full, 503 Chromium installing / launch failed."""
     ready, reason = deferred_install_ready()
     if not ready:
         return _error({"error": reason}, 503)
     available, _ = anthropic_key_status()
+    name = _body().get("name")
     try:
-        session = bridge.run(manager.create(), timeout=_ROUTE_TIMEOUT)
-    except FleetFullError as e:
+        session = bridge.run(manager.create(name), timeout=_ROUTE_TIMEOUT)
+    except InvalidBrowserNameError as e:
+        return _error({"error": str(e)}, 400)
+    except (DuplicateBrowserNameError, FleetFullError) as e:
         return _error({"error": str(e)}, 409)
     except _STARTUP_ERRORS as e:
         logger.error("failed to create browser: {}", e)
         return _error({"error": f"Could not start browser: {e}"}, 503)
     bridge.run(manager._save_manifest(), timeout=_ROUTE_TIMEOUT)  # a new browser is a topology change
-    return jsonify({"id": session.browser_id, "key_available": available})
+    return jsonify({"name": session.browser_id, "key_available": available})
 
 
-def close_browser(browser_id: int) -> Response:
+def close_browser(browser_id: str) -> Response:
     if (gate := _require_ready()) is not None:
         return gate
     bridge.run(manager.close(browser_id), timeout=_ROUTE_TIMEOUT)
-    # Rewrite the manifest (id now gone) BEFORE deleting the profile, so a crash between
+    # Rewrite the manifest (name now gone) BEFORE deleting the profile, so a crash between
     # them leaves an orphan dir (swept next boot), never a manifest entry pointing at a
     # deleted profile. A manifest-write hiccup must not 500 the close or skip the
     # profile delete -- the periodic checkpoint will reconcile the manifest anyway.
@@ -293,15 +303,13 @@ def close_browser(browser_id: int) -> Response:
         bridge.run(manager._save_manifest(), timeout=_ROUTE_TIMEOUT)
     except (OSError, *_STARTUP_ERRORS) as e:
         logger.warning("manifest save during close of browser {} failed ({})", browser_id, e)
-    # Browser 0 is the permanent default and is recreated on demand, so closing it must
-    # NOT wipe its persistent profile (that would silently log the user out the next
-    # time 0 comes back). Only a retired (non-default) id forgets its profile.
-    if browser_id != 0:
-        manager.forget_profile_dir(browser_id)
+    # Every browser is created on demand (no permanent default), so closing one always
+    # forgets its persistent profile.
+    manager.forget_profile_dir(browser_id)
     return jsonify({"closed": True})
 
 
-def release_browser(browser_id: int) -> Response:
+def release_browser(browser_id: str) -> Response:
     if (gate := _require_ready()) is not None:
         return gate
     agent_id, _ = _agent_identity()
@@ -365,7 +373,7 @@ def _make_on_wait(gen_queue: "queue.Queue[dict[str, Any] | None]") -> Callable[[
     return on_wait
 
 
-def run_task(browser_id: int) -> Response:
+def run_task(browser_id: str) -> Response:
     """Acquire-or-wait, run a browser-use task, and stream the trace as line-delimited JSON.
 
     The connection is the lease: a periodic heartbeat write surfaces a dead agent
@@ -452,7 +460,7 @@ def run_task(browser_id: int) -> Response:
     return Response(stream(), mimetype="application/x-ndjson")
 
 
-def hold_browser(browser_id: int) -> Response:
+def hold_browser(browser_id: str) -> Response:
     """Acquire-or-wait and hold the browser until the request disconnects (the ``lock`` verb).
 
     Connection-bound, so a held lease always frees: when the holding client goes
@@ -513,7 +521,7 @@ def hold_browser(browser_id: int) -> Response:
 
 
 def _direct_target(
-    browser_id: int, gated: bool = True
+    browser_id: str, gated: bool = True
 ) -> "tuple[LiveBrowser, str, str | None] | Response":
     """Resolve (browser, agent_id, agent_name) for a direct command, or an error Response.
 
@@ -531,7 +539,7 @@ def _direct_target(
     return resolved, agent_id, agent_name
 
 
-def cmd_acquire(browser_id: int) -> Response:
+def cmd_acquire(browser_id: str) -> Response:
     """Explicitly reserve a browser across a run of commands (optional; the first
     command auto-acquires). ``--reclaim`` takes it back from a human who said 'keep going'."""
     target = _direct_target(browser_id)
@@ -557,7 +565,7 @@ def cmd_acquire(browser_id: int) -> Response:
     return jsonify({"ok": status == "acquired", "status": status, **session._control_state()})
 
 
-def cmd_handoff(browser_id: int) -> Response:
+def cmd_handoff(browser_id: str) -> Response:
     """Agent hands this browser to the human (e.g. a CAPTCHA it can't solve). The agent
     must currently hold it; it's put at the FRONT of the resume queue and control goes to
     the human, pinned, until they hand back -- then this agent resumes first."""
@@ -572,7 +580,7 @@ def cmd_handoff(browser_id: int) -> Response:
     return jsonify({"ok": handed, "status": status, **session._control_state()})
 
 
-def cmd_state(browser_id: int) -> Response:
+def cmd_state(browser_id: str) -> Response:
     # `state` is read-only -- allowed during init so the agent can look at the page
     # even before the whole fleet has finished restoring.
     target = _direct_target(browser_id, gated=False)
@@ -582,7 +590,7 @@ def cmd_state(browser_id: int) -> Response:
     return jsonify(bridge.run(session.act_state(agent_id, agent_name), timeout=_ROUTE_TIMEOUT))
 
 
-def cmd_navigate(browser_id: int) -> Response:
+def cmd_navigate(browser_id: str) -> Response:
     target = _direct_target(browser_id)
     if isinstance(target, Response):
         return target
@@ -594,7 +602,7 @@ def cmd_navigate(browser_id: int) -> Response:
     return jsonify(bridge.run(session.act_navigate(agent_id, agent_name, url), timeout=_ROUTE_TIMEOUT))
 
 
-def cmd_click(browser_id: int) -> Response:
+def cmd_click(browser_id: str) -> Response:
     target = _direct_target(browser_id)
     if isinstance(target, Response):
         return target
@@ -605,7 +613,7 @@ def cmd_click(browser_id: int) -> Response:
     )
 
 
-def cmd_input(browser_id: int) -> Response:
+def cmd_input(browser_id: str) -> Response:
     target = _direct_target(browser_id)
     if isinstance(target, Response):
         return target
@@ -619,7 +627,7 @@ def cmd_input(browser_id: int) -> Response:
     )
 
 
-def cmd_select(browser_id: int) -> Response:
+def cmd_select(browser_id: str) -> Response:
     target = _direct_target(browser_id)
     if isinstance(target, Response):
         return target
@@ -633,7 +641,7 @@ def cmd_select(browser_id: int) -> Response:
     )
 
 
-def cmd_scroll(browser_id: int) -> Response:
+def cmd_scroll(browser_id: str) -> Response:
     target = _direct_target(browser_id)
     if isinstance(target, Response):
         return target
@@ -647,7 +655,7 @@ def cmd_scroll(browser_id: int) -> Response:
     )
 
 
-def cmd_keys(browser_id: int) -> Response:
+def cmd_keys(browser_id: str) -> Response:
     target = _direct_target(browser_id)
     if isinstance(target, Response):
         return target
@@ -659,7 +667,7 @@ def cmd_keys(browser_id: int) -> Response:
     return jsonify(bridge.run(session.act_keys(agent_id, agent_name, str(keys)), timeout=_ROUTE_TIMEOUT))
 
 
-def cmd_screenshot(browser_id: int) -> Response:
+def cmd_screenshot(browser_id: str) -> Response:
     target = _direct_target(browser_id)
     if isinstance(target, Response):
         return target
@@ -667,7 +675,7 @@ def cmd_screenshot(browser_id: int) -> Response:
     return jsonify(bridge.run(session.act_screenshot(agent_id, agent_name), timeout=_ROUTE_TIMEOUT))
 
 
-def cmd_tab(browser_id: int) -> Response:
+def cmd_tab(browser_id: str) -> Response:
     target = _direct_target(browser_id)
     if isinstance(target, Response):
         return target
@@ -721,7 +729,7 @@ def _cast_inbound_pump(
         stop_event.set()
 
 
-def cast_socket(ws: Any, browser_id: int) -> None:
+def cast_socket(ws: Any, browser_id: str) -> None:
     """Bridge one cast WebSocket: outbound screencast frames + inbound input/control.
 
     Runs in its own Flask thread (thread-per-connection). The browser registers an
@@ -731,7 +739,18 @@ def cast_socket(ws: Any, browser_id: int) -> None:
     """
     resolved = _resolve_sync_for_ws(browser_id)
     if resolved is None:
-        ws.close(1008)  # viewer shows "browser closed -- reopen"
+        # Two cases, distinguished by the close code so the viewer can react correctly:
+        # - The name is syntactically valid but no browser is registered under it YET.
+        #   This is the OPTIMISTIC PANE opened on modal-accept BEFORE the serialized
+        #   launch finished registering the name -- a transient miss, not "gone". Close
+        #   1013 ("Try Again Later"); the viewer retries with backoff and connects once
+        #   the launch registers the name.
+        # - The name is invalid (could never exist). Close 1008 -- terminal, the viewer
+        #   shows "browser closed -- reopen" and stops reconnecting.
+        if is_valid_browser_name(browser_id):
+            ws.close(1013)  # not yet created -> retryable
+        else:
+            ws.close(1008)  # gone / never valid -> terminal
         return
     session = resolved
     # Register + seed the initial control/tabs sync atomically on the loop, so no
@@ -766,7 +785,7 @@ def cast_socket(ws: Any, browser_id: int) -> None:
         bridge.run(session.unregister_cast_queue(client_queue), timeout=_ROUTE_TIMEOUT)
 
 
-def _resolve_sync_for_ws(browser_id: int) -> "LiveBrowser | None":
+def _resolve_sync_for_ws(browser_id: str) -> "LiveBrowser | None":
     """Resolve a browser for the cast socket; None on any KeyError/startup error."""
     try:
         return bridge.run(_resolve(browser_id), timeout=_ROUTE_TIMEOUT)
@@ -784,22 +803,22 @@ def _register_routes() -> None:
     application.add_url_rule("/key-status", view_func=key_status, methods=["GET"])
     application.add_url_rule("/browsers", view_func=list_browsers, methods=["GET"])
     application.add_url_rule("/browsers", view_func=create_browser, methods=["POST"], endpoint="create_browser")
-    application.add_url_rule("/browsers/<int:browser_id>", view_func=close_browser, methods=["DELETE"])
-    application.add_url_rule("/browsers/<int:browser_id>/release", view_func=release_browser, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/task", view_func=run_task, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/hold", view_func=hold_browser, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/acquire", view_func=cmd_acquire, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/handoff", view_func=cmd_handoff, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/state", view_func=cmd_state, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/navigate", view_func=cmd_navigate, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/click", view_func=cmd_click, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/input", view_func=cmd_input, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/select", view_func=cmd_select, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/scroll", view_func=cmd_scroll, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/keys", view_func=cmd_keys, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/screenshot", view_func=cmd_screenshot, methods=["POST"])
-    application.add_url_rule("/browsers/<int:browser_id>/tab", view_func=cmd_tab, methods=["POST"])
-    sock.route("/browsers/<int:browser_id>/cast")(cast_socket)
+    application.add_url_rule("/browsers/<string:browser_id>", view_func=close_browser, methods=["DELETE"])
+    application.add_url_rule("/browsers/<string:browser_id>/release", view_func=release_browser, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/task", view_func=run_task, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/hold", view_func=hold_browser, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/acquire", view_func=cmd_acquire, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/handoff", view_func=cmd_handoff, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/state", view_func=cmd_state, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/navigate", view_func=cmd_navigate, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/click", view_func=cmd_click, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/input", view_func=cmd_input, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/select", view_func=cmd_select, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/scroll", view_func=cmd_scroll, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/keys", view_func=cmd_keys, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/screenshot", view_func=cmd_screenshot, methods=["POST"])
+    application.add_url_rule("/browsers/<string:browser_id>/tab", view_func=cmd_tab, methods=["POST"])
+    sock.route("/browsers/<string:browser_id>/cast")(cast_socket)
 
 
 _register_routes()

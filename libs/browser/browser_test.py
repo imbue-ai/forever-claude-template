@@ -88,7 +88,7 @@ class _FakeCDP:
 
 
 def test_acquire_release_is_compare_and_set() -> None:
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         assert await browser.acquire("A", "Alice") == "acquired"
@@ -107,7 +107,7 @@ def test_acquire_release_is_compare_and_set() -> None:
 
 
 def test_input_gating_follows_controller() -> None:
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
     cdp = _FakeCDP()
     browser._active_cdp = cdp  # type: ignore[assignment]
 
@@ -132,7 +132,7 @@ def test_input_gating_follows_controller() -> None:
 
 
 def test_take_control_preempts_pins_and_reclaim_resumes() -> None:
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")
@@ -160,7 +160,7 @@ def test_enqueue_on_busy_queues_for_resume_and_wakes_on_handback(monkeypatch: py
         woken.append(agent_name)
 
     monkeypatch.setattr(bsession.LiveBrowser, "_wake_agent", fake_wake)
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")
@@ -189,7 +189,7 @@ def test_agent_in_both_queues_is_not_re_granted_after_it_finishes(monkeypatch: p
         woken.append(agent_name)
 
     monkeypatch.setattr(bsession.LiveBrowser, "_wake_agent", fake_wake)
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")  # A holds it
@@ -217,7 +217,7 @@ def test_human_pin_is_sticky_with_no_idle_yield(monkeypatch: pytest.MonkeyPatch)
     # with no grace/idle yield -- even with an agent queued to resume. (A human can walk
     # away mid-CAPTCHA and the browser is never moved out from under them.)
     monkeypatch.setattr(bsession.LiveBrowser, "_wake_agent", _noop_wake)
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")
@@ -239,7 +239,7 @@ def test_human_pin_is_sticky_with_no_idle_yield(monkeypatch: pytest.MonkeyPatch)
 def test_resting_human_is_free_for_the_next_agent() -> None:
     # A *resting* human (controller=human, not pinned -- a fresh browser, or one an
     # agent's idle-lease released) is free: the next agent's command just takes it.
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         assert browser._state_tuple() == ("human", None, False)  # fresh = resting/free
@@ -262,7 +262,7 @@ def test_handoff_to_human_fronts_resume_queue_and_announces(monkeypatch: pytest.
         casts.append(message)
 
     monkeypatch.setattr(bsession.LiveBrowser, "_broadcast", fake_broadcast)
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")
@@ -285,7 +285,7 @@ def test_handoff_to_human_fronts_resume_queue_and_announces(monkeypatch: pytest.
 
 def test_handoff_is_a_noop_when_the_caller_does_not_hold_it() -> None:
     # Only the current owner can hand off; a stale/wrong caller changes nothing.
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")
@@ -333,7 +333,7 @@ def test_root_launches_with_sandbox_off_on_the_first_try(monkeypatch: pytest.Mon
     attempts: list[bool] = []
     _patch_build(monkeypatch, attempts)
     monkeypatch.setattr(bsession.os, "geteuid", lambda: 0)
-    browser = bsession.LiveBrowser(browser_id=0)
+    browser = bsession.LiveBrowser(browser_id="b0")
 
     async def go() -> None:
         session = await browser._start_bu_session(Path("/tmp/x"), "/usr/bin/chromium")
@@ -349,7 +349,7 @@ def test_nonroot_retries_without_sandbox_when_a_sandboxed_launch_fails(monkeypat
     attempts: list[bool] = []
     _patch_build(monkeypatch, attempts)
     monkeypatch.setattr(bsession.os, "geteuid", lambda: 501)
-    browser = bsession.LiveBrowser(browser_id=0)
+    browser = bsession.LiveBrowser(browser_id="b0")
 
     async def go() -> None:
         session = await browser._start_bu_session(Path("/tmp/x"), "/usr/bin/chromium")
@@ -364,7 +364,7 @@ def test_unclaimed_grant_passes_to_next_waiter(monkeypatch: pytest.MonkeyPatch) 
     # command (interrupted/killed) has its grant revoked after the claim window, so
     # the browser doesn't sit idle on a no-show.
     monkeypatch.setattr(bsession.LiveBrowser, "_wake_agent", _noop_wake)
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")
@@ -385,7 +385,7 @@ def test_unclaimed_grant_passes_to_next_waiter(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_return_to_agents_only_unpins_a_pinned_human() -> None:
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         # No-op when an agent owns it (can't yank a browser from an agent this way).
@@ -406,7 +406,7 @@ def test_return_to_agents_only_unpins_a_pinned_human() -> None:
 def test_take_control_cancels_the_running_task_without_deadlock() -> None:
     # The displaced run's finally re-enters the state machine; the cancel happens
     # OUTSIDE the control lock, so there is no lock cycle (the audit's worst case).
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
 
     async def go() -> None:
         await browser.acquire("A")
@@ -432,7 +432,7 @@ def test_take_control_cancels_the_running_task_without_deadlock() -> None:
 
 
 def test_monitor_and_wait_hands_off_in_fifo_order() -> None:
-    browser = bsession.LiveBrowser(browser_id=2)
+    browser = bsession.LiveBrowser(browser_id="b2")
     order: list[tuple[str, str]] = []
 
     async def go() -> None:
@@ -459,7 +459,7 @@ def test_monitor_and_wait_hands_off_in_fifo_order() -> None:
 
 
 def test_wait_times_out_and_dequeues() -> None:
-    browser = bsession.LiveBrowser(browser_id=3)
+    browser = bsession.LiveBrowser(browser_id="b3")
 
     async def go() -> None:
         await browser.acquire("A")
@@ -470,7 +470,7 @@ def test_wait_times_out_and_dequeues() -> None:
 
 
 def test_take_control_evicts_waiters() -> None:
-    browser = bsession.LiveBrowser(browser_id=4)
+    browser = bsession.LiveBrowser(browser_id="b4")
 
     async def go() -> None:
         await browser.acquire("A")
@@ -493,7 +493,7 @@ def test_take_control_evicts_waiters() -> None:
 def test_crashed_browser_reports_crashed_to_agent_and_viewer() -> None:
     # When Chromium dies, the browser reports "crashed" to the agent's next command
     # (it doesn't try to drive a corpse), surfaces it to viewers, and shows in describe().
-    browser = bsession.LiveBrowser(browser_id=3)
+    browser = bsession.LiveBrowser(browser_id="b3")
 
     async def go() -> None:
         browser._on_disconnected(None)  # simulate Playwright's disconnected event
@@ -511,7 +511,7 @@ def test_crashed_browser_reports_crashed_to_agent_and_viewer() -> None:
 def test_intentional_close_is_not_reported_as_a_crash() -> None:
     # close() tears down the observer (which also fires `disconnected`); that's
     # expected teardown, not a crash, so _crashed must stay False.
-    browser = bsession.LiveBrowser(browser_id=3)
+    browser = bsession.LiveBrowser(browser_id="b3")
 
     async def go() -> None:
         browser._closed = True  # close() sets this before tearing down the observer
@@ -526,48 +526,51 @@ def test_crashed_browsers_do_not_count_toward_the_fleet_cap(monkeypatch: pytest.
     # browser, so the cap counts only live browsers.
     monkeypatch.setattr(bsession, "_MAX_SESSIONS", 2)
     mgr = bsession.BrowserSessionManager()
-    live = bsession.LiveBrowser(browser_id=1)
-    dead = bsession.LiveBrowser(browser_id=2)
+    live = bsession.LiveBrowser(browser_id="alex-smith")
+    dead = bsession.LiveBrowser(browser_id="riley-jones")
     dead._crashed = True
-    mgr._browsers[1] = live
-    mgr._browsers[2] = dead
-    mgr._next_id = 3  # ids 1 and 2 were already handed out
+    mgr._browsers["alex-smith"] = live
+    mgr._browsers["riley-jones"] = dead
 
     async def go() -> None:
         # 1 live + 1 crashed, cap 2 -> a new browser is still allowed (the crash is
-        # not counted). We can't launch real Chromium here, so just assert the cap
-        # check passes by confirming it does NOT raise FleetFullError before launch.
-        # Stub the launch to avoid starting Chromium.
-        async def fake_start_and_register(self: bsession.BrowserSessionManager, browser_id: int) -> object:
-            obj = bsession.LiveBrowser(browser_id=browser_id)
-            self._browsers[browser_id] = obj
+        # not counted). Stub the launch to avoid starting real Chromium.
+        async def fake_start_and_register(
+            self: bsession.BrowserSessionManager, name: str, restore_tabs: Any = None, active_tab: int = 0
+        ) -> object:
+            obj = bsession.LiveBrowser(browser_id=name)
+            self._browsers[name] = obj
             return obj
 
         monkeypatch.setattr(
             bsession.BrowserSessionManager, "_start_and_register_locked", fake_start_and_register
         )
-        result = await mgr.create()
-        assert result.browser_id == 3  # allowed despite 2 entries (one crashed)
+        result = await mgr.create("morgan-lee")
+        assert result.browser_id == "morgan-lee"  # allowed despite 2 entries (one crashed)
+        assert mgr.has_browser("morgan-lee")
 
     asyncio.run(go())
 
 
 def test_create_rejects_when_fleet_full(monkeypatch: pytest.MonkeyPatch) -> None:
     # The cap must reject before launching Chromium, so a small compute can't be OOM-ed.
-    monkeypatch.setattr(bsession, "_MAX_SESSIONS", 2)
+    monkeypatch.setattr(bsession, "_MAX_SESSIONS", 3)
     mgr = bsession.BrowserSessionManager()
-    mgr._browsers[1] = object()  # type: ignore[assignment]
-    mgr._browsers[2] = object()  # type: ignore[assignment]
+    mgr._browsers["a-one"] = object()  # type: ignore[assignment]
+    mgr._browsers["b-two"] = object()  # type: ignore[assignment]
+    mgr._browsers["c-three"] = object()  # type: ignore[assignment]
 
     async def go() -> None:
-        with pytest.raises(bsession.FleetFullError, match="Too many open browsers"):
+        # The cap message surfaces the exact locked copy "3/3 browsers open -- close one first."
+        with pytest.raises(bsession.FleetFullError, match=r"3/3 browsers open -- close one first\."):
             await mgr.create()
 
     asyncio.run(go())
 
 
-def test_ids_are_monotonic_and_never_reused(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Stub the Chromium launch so we exercise pure id-allocation logic.
+def test_create_generates_unique_names_and_regenerates_on_collision(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two create()s with no name yield two DISTINCT registered names; a generator that
+    # returns a duplicate first is retried (regenerate-on-collision under the lock).
     async def fake_start(
         self: bsession.LiveBrowser, _playwright: Any, restore_tabs: list[str] | None = None, active_tab: int = 0
     ) -> None:
@@ -577,34 +580,88 @@ def test_ids_are_monotonic_and_never_reused(monkeypatch: pytest.MonkeyPatch) -> 
     mgr = bsession.BrowserSessionManager()
     mgr._playwright = object()  # type: ignore[assignment]  # skip async_playwright().start()
 
+    # Inject a deterministic generator: returns "alex-smith", then "alex-smith" AGAIN
+    # (a collision the manager must reject), then "riley-jones".
+    scripted = iter(["alex-smith", "alex-smith", "riley-jones"])
+    monkeypatch.setattr(bsession, "generate_browser_name", lambda: next(scripted))
+
     async def go() -> None:
-        assert (await mgr.ensure_browser_0()).browser_id == 0
-        assert (await mgr.ensure_browser_0()).browser_id == 0  # idempotent
-        assert (await mgr.create()).browser_id == 1
-        assert (await mgr.create()).browser_id == 2
-        await mgr.close(1)
-        # id 1 is gone for good -- the next create gets 3, and `task 1` would 404.
-        assert (await mgr.create()).browser_id == 3
-        with pytest.raises(KeyError):
-            mgr.get(1)
+        first = await mgr.create()
+        second = await mgr.create()
+        assert {first.browser_id, second.browser_id} == {"alex-smith", "riley-jones"}
+        assert set(mgr._browsers) == {"alex-smith", "riley-jones"}
 
     asyncio.run(go())
+
+
+def test_create_rejects_invalid_and_duplicate_user_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_start(
+        self: bsession.LiveBrowser, _playwright: Any, restore_tabs: list[str] | None = None, active_tab: int = 0
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(bsession.LiveBrowser, "start", fake_start)
+    mgr = bsession.BrowserSessionManager()
+    mgr._playwright = object()  # type: ignore[assignment]
+
+    async def go() -> None:
+        created = await mgr.create("alex-smith")
+        assert created.browser_id == "alex-smith"
+        # A second create with the same typed name is rejected (409 at the HTTP layer).
+        with pytest.raises(bsession.DuplicateBrowserNameError, match="already in use"):
+            await mgr.create("alex-smith")
+        # A syntactically invalid name is rejected (400 at the HTTP layer).
+        with pytest.raises(bsession.InvalidBrowserNameError):
+            await mgr.create("Bad Name")
+        # A closed name frees up: re-creating it succeeds.
+        await mgr.close("alex-smith")
+        assert (await mgr.create("alex-smith")).browser_id == "alex-smith"
+
+    asyncio.run(go())
+
+
+def test_names_are_never_reused_after_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_start(
+        self: bsession.LiveBrowser, _playwright: Any, restore_tabs: list[str] | None = None, active_tab: int = 0
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(bsession.LiveBrowser, "start", fake_start)
+    mgr = bsession.BrowserSessionManager()
+    mgr._playwright = object()  # type: ignore[assignment]
+
+    async def go() -> None:
+        a = await mgr.create("alex-smith")
+        assert a.browser_id == "alex-smith"
+        await mgr.close("alex-smith")
+        # The closed name is gone -- a command on it would 404.
+        with pytest.raises(KeyError):
+            mgr.get("alex-smith")
+
+    asyncio.run(go())
+
+
+def test_profile_dir_round_trips_the_name() -> None:
+    # The load-bearing prefix is preserved and the suffix is exactly the name.
+    path = bsession._profile_dir("alex-smith")
+    assert path.name == "browser-use-user-data-dir-alex-smith"
+    assert "browser-use-user-data-dir-" in path.name
 
 
 # --- persistence: restore + manifest (stubbed Chromium) ----------------------
 # The autouse conftest fixture redirects the profile root + manifest path to tmp.
 
 
-def _stub_start(monkeypatch: pytest.MonkeyPatch, fail_ids: set[int] | None = None) -> list[tuple[int, Any]]:
-    """Replace LiveBrowser.start with a no-op that records (id, restore_tabs); ids in
-    ``fail_ids`` raise BrowserStartupError (to test resilient restore)."""
-    calls: list[tuple[int, Any]] = []
+def _stub_start(monkeypatch: pytest.MonkeyPatch, fail_names: set[str] | None = None) -> list[tuple[str, Any]]:
+    """Replace LiveBrowser.start with a no-op that records (name, restore_tabs); names in
+    ``fail_names`` raise BrowserStartupError (to test resilient restore)."""
+    calls: list[tuple[str, Any]] = []
 
     async def fake_start(
         self: bsession.LiveBrowser, _playwright: Any, restore_tabs: list[str] | None = None, active_tab: int = 0
     ) -> None:
         calls.append((self.browser_id, restore_tabs))
-        if fail_ids and self.browser_id in fail_ids:
+        if fail_names and self.browser_id in fail_names:
             raise bsession.BrowserStartupError(f"boom {self.browser_id}")
 
     monkeypatch.setattr(bsession.LiveBrowser, "start", fake_start)
@@ -617,28 +674,25 @@ def _manager() -> bsession.BrowserSessionManager:
     return mgr
 
 
-def test_restore_sets_next_id_high_water_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_restore_relaunches_saved_browsers_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_start(monkeypatch)
-    # next_id is stale (1) but a browser with id 5 exists -> next_id must jump past it,
-    # so a retired id is never re-handed-out.
     manifest.write_manifest(
-        manifest.Manifest(next_id=1, browsers=[manifest.ManifestEntry(id=5, tabs=["https://x"])])
+        manifest.Manifest(browsers=[manifest.ManifestEntry(id="alex-smith", tabs=["https://x"])])
     )
     mgr = _manager()
     asyncio.run(mgr.restore())
-    assert mgr._next_id == 6
-    assert mgr.has_browser(5) and mgr.has_browser(0)  # restored 5, seeded the default 0
+    assert mgr.has_browser("alex-smith")  # restored by name
 
 
 def test_restore_passes_saved_tabs_and_comes_up_resting(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_start(monkeypatch)
     manifest.write_manifest(
-        manifest.Manifest(next_id=3, browsers=[manifest.ManifestEntry(id=2, tabs=["https://x", "https://y"])])
+        manifest.Manifest(browsers=[manifest.ManifestEntry(id="riley-jones", tabs=["https://x", "https://y"])])
     )
     mgr = _manager()
     asyncio.run(mgr.restore())
-    assert (2, ["https://x", "https://y"]) in calls  # saved tabs forwarded to start()
-    restored = mgr.get(2)
+    assert ("riley-jones", ["https://x", "https://y"]) in calls  # saved tabs forwarded to start()
+    restored = mgr.get("riley-jones")
     # Ownership/queues are NOT persisted: a restored browser is resting.
     assert restored._state_tuple() == ("human", None, False)
     assert restored._resume_queue == [] and restored._wait_queue == []
@@ -646,103 +700,107 @@ def test_restore_passes_saved_tabs_and_comes_up_resting(monkeypatch: pytest.Monk
 
 def test_snapshot_excludes_crashed_and_persists_only_topology() -> None:
     mgr = bsession.BrowserSessionManager()
-    healthy = bsession.LiveBrowser(browser_id=0)
+    healthy = bsession.LiveBrowser(browser_id="alex-smith")
     healthy.controller = "agent"  # ownership state that must NOT be persisted
     healthy.owner_agent_id = "x"
     healthy.human_pinned = True
-    crashed = bsession.LiveBrowser(browser_id=1)
+    crashed = bsession.LiveBrowser(browser_id="riley-jones")
     crashed._crashed = True
-    mgr._browsers[0] = healthy
-    mgr._browsers[1] = crashed
+    mgr._browsers["alex-smith"] = healthy
+    mgr._browsers["riley-jones"] = crashed
 
     async def go() -> bsession.fleet_manifest.Manifest:
         async with mgr._lock:
             return mgr._snapshot_manifest_locked()
 
     snap = asyncio.run(go())
-    assert [e.id for e in snap.browsers] == [0]  # crashed browser 1 excluded
+    assert [e.id for e in snap.browsers] == ["alex-smith"]  # crashed browser excluded
     assert set(snap.browsers[0].model_dump().keys()) == {"id", "tabs", "active_tab"}
 
 
-def test_first_boot_seeds_browser_0_at_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _stub_start(monkeypatch)  # no manifest, no profiles on disk
-    mgr = _manager()
-    asyncio.run(mgr.restore())
-    assert calls == [(0, None)]  # only the default browser, at the home page
-    assert manifest.read_manifest() is not None  # manifest written so the systems agree
-
-
-def test_manifest_loss_with_surviving_profiles_relaunches_them(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No manifest, but a profile dir survived on the volume -> relaunch it (tabs unknown),
-    # rather than treating this as a first boot and wiping the saved login.
-    (bsession._PROFILE_ROOT / "browser-use-user-data-dir-2").mkdir(parents=True)
+def test_fresh_workspace_restores_to_an_empty_fleet(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No manifest, no profiles on disk -> NO default browser, an EMPTY fleet. Nothing
+    # is launched (no browser-0 seed); the first create() opens a browser later.
     calls = _stub_start(monkeypatch)
     mgr = _manager()
     asyncio.run(mgr.restore())
-    assert (2, None) in calls and mgr.has_browser(2)
-    assert mgr.has_browser(0)
+    assert calls == []  # nothing launched on a fresh workspace
+    assert mgr._browsers == {}
+
+
+def test_manifest_loss_with_surviving_profiles_relaunches_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No manifest, but a name-valid profile dir survived on the volume -> relaunch it
+    # (tabs unknown), rather than treating this as a first boot and wiping the saved login.
+    (bsession._PROFILE_ROOT / "browser-use-user-data-dir-alex-smith").mkdir(parents=True)
+    calls = _stub_start(monkeypatch)
+    mgr = _manager()
+    asyncio.run(mgr.restore())
+    assert ("alex-smith", None) in calls and mgr.has_browser("alex-smith")
+
+
+def test_legacy_numeric_profile_dirs_are_not_resurrected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An upgraded workspace may have old numeric profile dirs (browser-use-user-data-dir-0).
+    # is_valid_browser_name rejects pure-numeric suffixes, so they are NOT relaunched as
+    # bogus "0" named browsers -- they fall through to the orphan sweep instead.
+    root = bsession._PROFILE_ROOT
+    (root / "browser-use-user-data-dir-0").mkdir(parents=True)
+    (root / "browser-use-user-data-dir-2").mkdir(parents=True)
+    calls = _stub_start(monkeypatch)
+    mgr = _manager()
+    asyncio.run(mgr.restore())
+    assert calls == []  # no numeric dir relaunched
+    assert mgr._browsers == {}
+    # And they are swept (not kept around forever as stale numeric profiles).
+    assert not (root / "browser-use-user-data-dir-0").exists()
+    assert not (root / "browser-use-user-data-dir-2").exists()
 
 
 def test_restore_keeps_a_flaked_browser_for_next_boot(monkeypatch: pytest.MonkeyPatch) -> None:
     # A transient relaunch failure must NOT lose the saved browser: it stays in the
-    # manifest (for a next-boot retry) and its profile is NOT swept. (Durability fix.)
-    (bsession._PROFILE_ROOT / "browser-use-user-data-dir-2").mkdir(parents=True)
-    _stub_start(monkeypatch, fail_ids={2})
+    # manifest (for a next-boot retry) and its profile is NOT swept. (Durability.)
+    (bsession._PROFILE_ROOT / "browser-use-user-data-dir-riley-jones").mkdir(parents=True)
+    _stub_start(monkeypatch, fail_names={"riley-jones"})
     manifest.write_manifest(
         manifest.Manifest(
-            next_id=4,
             browsers=[
-                manifest.ManifestEntry(id=0),
-                manifest.ManifestEntry(id=2, tabs=["https://x"]),
-                manifest.ManifestEntry(id=3),
+                manifest.ManifestEntry(id="alex-smith"),
+                manifest.ManifestEntry(id="riley-jones", tabs=["https://x"]),
+                manifest.ManifestEntry(id="morgan-lee"),
             ],
         )
     )
     mgr = _manager()
     asyncio.run(mgr.restore())
-    assert mgr.has_browser(0) and mgr.has_browser(3) and not mgr.has_browser(2)  # 2 flaked, not live
+    assert mgr.has_browser("alex-smith") and mgr.has_browser("morgan-lee")
+    assert not mgr.has_browser("riley-jones")  # flaked, not live
     reconciled = manifest.read_manifest()
     assert reconciled is not None
-    entry2 = next((e for e in reconciled.browsers if e.id == 2), None)
-    assert entry2 is not None and entry2.tabs == ["https://x"]  # preserved for retry
-    assert (bsession._PROFILE_ROOT / "browser-use-user-data-dir-2").exists()  # profile NOT deleted
+    entry = next((e for e in reconciled.browsers if e.id == "riley-jones"), None)
+    assert entry is not None and entry.tabs == ["https://x"]  # preserved for retry
+    assert (bsession._PROFILE_ROOT / "browser-use-user-data-dir-riley-jones").exists()  # NOT deleted
 
 
 def test_restore_sweeps_orphan_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
     root = bsession._PROFILE_ROOT
-    for n in (0, 2, 9):
-        (root / f"browser-use-user-data-dir-{n}").mkdir(parents=True)
+    for name in ("alex-smith", "riley-jones", "orphan-gone"):
+        (root / f"browser-use-user-data-dir-{name}").mkdir(parents=True)
     _stub_start(monkeypatch)
     manifest.write_manifest(
-        manifest.Manifest(next_id=3, browsers=[manifest.ManifestEntry(id=0), manifest.ManifestEntry(id=2)])
+        manifest.Manifest(
+            browsers=[manifest.ManifestEntry(id="alex-smith"), manifest.ManifestEntry(id="riley-jones")]
+        )
     )
     mgr = _manager()
     asyncio.run(mgr.restore())
-    assert not (root / "browser-use-user-data-dir-9").exists()  # orphan (no live browser) swept
-    assert (root / "browser-use-user-data-dir-0").exists() and (root / "browser-use-user-data-dir-2").exists()
-
-
-def test_ensure_browser_0_recovers_a_crashed_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The default browser 0 must come back on access even after it crashed -- not return
-    # the dead shell forever.
-    calls = _stub_start(monkeypatch)
-    mgr = _manager()
-
-    async def go() -> None:
-        first = await mgr.ensure_browser_0()
-        first._crashed = True  # simulate an OOM/crash of the default browser
-        again = await mgr.ensure_browser_0()
-        assert again is not first and again._crashed is False  # a fresh, healthy 0
-        assert mgr.get(0) is again
-
-    asyncio.run(go())
-    assert calls.count((0, None)) == 2  # created, then recreated after the crash
+    assert not (root / "browser-use-user-data-dir-orphan-gone").exists()  # orphan swept
+    assert (root / "browser-use-user-data-dir-alex-smith").exists()
+    assert (root / "browser-use-user-data-dir-riley-jones").exists()
 
 
 def test_state_on_busy_browser_does_not_enqueue_the_agent() -> None:
     # A passive `state` peek at a browser another agent holds must NOT enrol the
     # caller as a waiter (only state-changing commands queue for resume).
-    browser = bsession.LiveBrowser(browser_id=0)
+    browser = bsession.LiveBrowser(browser_id="b0")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")  # agent A holds it
@@ -756,11 +814,11 @@ def test_state_on_busy_browser_does_not_enqueue_the_agent() -> None:
 # --- direct control: sticky lease + per-command CAS --------------------------
 
 
-def _direct_ready(browser_id: int = 1) -> bsession.LiveBrowser:
+def _direct_ready(name: str = "alex-smith") -> bsession.LiveBrowser:
     # A LiveBrowser wired enough to run run_action without a real Chromium: a
     # non-None _context passes the "closed" guard, and a pre-set _action_handler
     # skips constructing a real ActionHandler (the fake action ignores it).
-    browser = bsession.LiveBrowser(browser_id=browser_id)
+    browser = bsession.LiveBrowser(browser_id=name)
     browser._context = object()  # type: ignore[assignment]
     browser._action_handler = object()  # type: ignore[assignment]
     return browser
@@ -793,7 +851,7 @@ def test_run_action_per_command_cas_catches_mid_sequence_takeover(monkeypatch: p
     # The critical guard: even if acquire reports success, the per-command CAS
     # re-checks ownership right before acting -- so a take-control that landed in
     # between makes the command a clean no-op instead of touching the human's browser.
-    browser = _direct_ready(2)
+    browser = _direct_ready("riley-jones")
 
     async def fake_acquire(*_args: Any, **_kwargs: Any) -> str:
         return "acquired"  # pretend we got it, but DON'T flip control state
@@ -811,7 +869,7 @@ def test_run_action_per_command_cas_catches_mid_sequence_takeover(monkeypatch: p
 
 
 def test_idle_lease_sweep_releases_only_a_quiet_lease() -> None:
-    browser = _direct_ready(3)
+    browser = _direct_ready("morgan-lee")
 
     async def go() -> None:
         await browser.acquire("A", "Alice")
@@ -836,7 +894,7 @@ def test_idle_lease_sweep_releases_only_a_quiet_lease() -> None:
 def test_register_cast_queue_seeds_initial_control_and_tabs() -> None:
     # A freshly-registered cast queue is seeded with the current control + tabs sync
     # BEFORE any live frame, so the viewer's first messages are deterministic.
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
     browser._context = None  # _tab_list returns [] with no context
 
     async def go() -> None:
@@ -852,7 +910,7 @@ def test_register_cast_queue_seeds_initial_control_and_tabs() -> None:
 
 
 def test_broadcast_fans_out_to_registered_queues_and_unregister_removes() -> None:
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
     browser._context = None
 
     async def go() -> None:
@@ -876,7 +934,7 @@ def test_broadcast_drops_oldest_frame_when_a_slow_client_queue_is_full(monkeypat
     # A client that falls behind must not block the loop: _broadcast drops the OLDEST
     # buffered frame and enqueues the newest (only the latest frame matters).
     monkeypatch.setattr(bsession, "_CAST_QUEUE_MAX_SIZE", 2)
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
     browser._context = None
 
     async def go() -> None:

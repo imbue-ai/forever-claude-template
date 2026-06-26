@@ -67,6 +67,7 @@ from playwright.async_api import Error as PlaywrightError
 from pydantic import PrivateAttr
 
 from browser import manifest as fleet_manifest
+from browser.names import generate_browser_name, is_valid_browser_name
 
 # browser-use phones home anonymized telemetry by default; disable it (the
 # compute has no business making that call, and it spams connection-error logs
@@ -126,7 +127,7 @@ _CAST_QUEUE_MAX_SIZE = 16
 
 # Each live session = a headless Chromium + a Playwright observer; cap the concurrent
 # count so a small compute (e.g. 4 GB) can't be OOM-ed. Override via BROWSER_MAX_SESSIONS.
-_MAX_SESSIONS = int(os.environ.get("BROWSER_MAX_SESSIONS", "5"))
+_MAX_SESSIONS = int(os.environ.get("BROWSER_MAX_SESSIONS", "3"))
 
 # Hard ceilings on a single browser-use task so a hung or non-cancel-safe run can
 # never pin a browser forever (the connection-disconnect path is the primary
@@ -213,8 +214,8 @@ _MANIFEST_CHECKPOINT_SECONDS = float(os.environ.get("BROWSER_CHECKPOINT_SECONDS"
 _SINGLETON_LOCK_NAMES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 
 
-def _profile_dir(browser_id: int) -> Path:
-    """The persistent Chromium ``user_data_dir`` for a browser id.
+def _profile_dir(browser_id: str) -> Path:
+    """The persistent Chromium ``user_data_dir`` for a browser name.
 
     The ``browser-use-user-data-dir-`` prefix in the final path component is
     LOAD-BEARING, not cosmetic: browser_use's ``BrowserProfile._copy_profile()``
@@ -223,7 +224,8 @@ def _profile_dir(browser_id: int) -> Path:
     is_chrome check is True) -- which would silently defeat persistence and recopy
     50-500MB on every launch. A path containing this substring hits its early-return
     and is used in place. Pinned by browser-use==0.13.1 and guarded by an integration
-    test; do not rename without updating that test.
+    test; do not rename without updating that test. Only the suffix changed from an
+    int to the name string (validated filesystem-safe by names.is_valid_browser_name).
     """
     return _PROFILE_ROOT / f"browser-use-user-data-dir-{browser_id}"
 
@@ -331,6 +333,18 @@ class FleetFullError(BrowserStartupError):
     """Raised when the fleet is already at ``_MAX_SESSIONS`` (maps to HTTP 409)."""
 
 
+class InvalidBrowserNameError(BrowserStartupError):
+    """Raised when a user-typed browser name is syntactically invalid (maps to HTTP 400)."""
+
+
+class DuplicateBrowserNameError(BrowserStartupError):
+    """Raised when a user-typed name collides with a live browser (maps to HTTP 409).
+
+    A crashed-but-not-closed browser still holds its name, so a duplicate can mean a
+    dead shell is reserving it -- close that one to free the name (see the CLI/SKILL).
+    """
+
+
 class _AcquireWaiter:
     """One agent parked in a browser's FIFO wait-queue (monitor-and-wait).
 
@@ -351,9 +365,11 @@ class LiveBrowser(MutableModel):
 
     model_config = {"arbitrary_types_allowed": True, "extra": "forbid", "frozen": False}
 
-    # The integer the user/agent sees (0 is the permanent default browser). Stable
-    # and never reused: a closed id is gone, so a cached id is the same browser or a 404.
-    browser_id: int
+    # The random ~2-word english NAME the user/agent sees (e.g. "alex-smith"). The
+    # addressing key everywhere (CLI arg, cast WS path, manifest id, profile dir).
+    # Stable and never reused: a closed name is gone, so a cached name is the same
+    # browser or a 404. There is no default browser -- every name is created on demand.
+    browser_id: str
     controller: ControlOwner = "human"
     owner_agent_id: str | None = None
     owner_agent_name: str | None = None
@@ -411,8 +427,8 @@ class LiveBrowser(MutableModel):
     # Set once Chromium dies unexpectedly (OS/OOM kill, segfault) -- detected via the
     # Playwright observer's `disconnected` event, or lazily when an action finds the
     # connection gone. A crashed browser reports "crashed" to agents and the viewer
-    # rather than silently freezing; its id is never reused (a new browser gets a new
-    # number), so the dead one stays clearly labeled.
+    # rather than silently freezing; its name is never reused (a new browser gets a new
+    # random name), so the dead one stays clearly labeled until it is closed.
     _crashed: bool = PrivateAttr(default=False)
     # Set by the manager: a no-arg hook that checkpoints the fleet manifest. Fired on
     # crash so a browser that died is dropped from the manifest promptly (not only on
@@ -471,7 +487,7 @@ class LiveBrowser(MutableModel):
     ) -> None:
         """Launch the headless Chromium (browser-use) and attach the Playwright observer.
 
-        Uses a persistent ``user_data_dir`` per browser id so cookies/logins/history
+        Uses a persistent ``user_data_dir`` per browser name so cookies/logins/history
         survive a restart (Chromium's own persistence; we serialize none of it). When
         ``restore_tabs`` is given (a list of URLs from the manifest), reopen those tabs
         in order instead of the single default home page (and re-focus ``active_tab``);
@@ -554,6 +570,12 @@ class LiveBrowser(MutableModel):
                 return  # torn down -- close() raced a queued nav re-attach
             if self._active_cdp is not None:
                 await self._stop_screencast()
+            # Re-check after the await above: close() doesn't take _lock, so it can
+            # null self._context while _stop_screencast() yields. Without this guard
+            # new_cdp_session(page) would dereference None and the orphaned task's
+            # AttributeError surfaces as "Task exception was never retrieved".
+            if self._context is None:
+                return  # torn down mid-teardown -- nothing to (re)attach to
             self._active_page = page
             try:
                 cdp = await self._context.new_cdp_session(page)
@@ -1551,15 +1573,26 @@ class BrowserSessionManager(MutableModel):
 
     The fleet is shared per workspace: every agent in a mind reaches this one
     manager, so ``ls`` shows one fleet and ownership arbitrates between agents.
-    Browser ids are monotonic and never reused (``_next_id`` only increases);
-    id 0 is the permanent default, re-createable via :meth:`ensure_browser_0`.
+    Every browser is created on demand with a random ~2-word english NAME -- there
+    is no default browser and the fleet starts EMPTY. Names are unique within the
+    live fleet (generated under :attr:`_lock`, regenerated on collision) and never
+    reused: a closed name is gone.
+
+    SERIALIZATION INVARIANT (the OOM guard): NO code may construct + ``start()`` a
+    :class:`LiveBrowser` except inside :meth:`_start_and_register_locked` while
+    holding :attr:`_lock`. Every launch path (create + restore) funnels through it,
+    so at most one Chromium launches at a time, and the lock is held across the WHOLE
+    (multi-second) launch -- a flood of creates serializes into back-to-back boots,
+    never parallel ones. Do NOT "optimize" by reserving a name and releasing the lock
+    before the launch completes: that would reintroduce both the OOM race and a
+    name-collision TOCTOU (the check-and-register is only atomic because the lock is
+    held across the entire launch).
     """
 
     model_config = {"arbitrary_types_allowed": True, "extra": "forbid", "frozen": False}
 
-    _browsers: dict[int, LiveBrowser] = PrivateAttr(default_factory=dict)
+    _browsers: dict[str, LiveBrowser] = PrivateAttr(default_factory=dict)
     _playwright: Playwright | None = PrivateAttr(default=None)
-    _next_id: int = PrivateAttr(default=1)  # 0 is reserved for the default browser
     _lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     # Last manifest JSON written, so the periodic checkpoint is a no-op when nothing
     # changed (idle workspaces produce zero backup-branch churn).
@@ -1569,14 +1602,20 @@ class BrowserSessionManager(MutableModel):
     _bg_save_tasks: set[Any] = PrivateAttr(default_factory=set)  # strong refs for _spawn_save
 
     async def _start_and_register_locked(
-        self, browser_id: int, restore_tabs: list[str] | None = None, active_tab: int = 0
+        self, name: str, restore_tabs: list[str] | None = None, active_tab: int = 0
     ) -> LiveBrowser:
-        """Launch + register one browser. Caller must hold ``self._lock`` for the whole
-        call so a concurrent create can't observe a stale count (no cap overshoot) or
-        race the id assignment. ``restore_tabs`` (manifest URLs) reopens prior tabs."""
+        """Launch + register one browser by name. Caller must hold ``self._lock`` for the
+        WHOLE call (the OOM-guard / single-launch serializer -- see the class docstring),
+        so a concurrent create can't observe a stale count (no cap overshoot) or register
+        a duplicate name. ``restore_tabs`` (manifest URLs) reopens prior tabs.
+
+        Playwright is started lazily here under the lock. On an empty-fleet fresh
+        workspace this means Playwright is first started by the FIRST create (restore
+        launches nothing), not pre-warmed by restore -- harmless (same loop, no
+        deadlock), just noted so the timing isn't surprising."""
         if self._playwright is None:
             self._playwright = await async_playwright().start()
-        session = LiveBrowser(browser_id=browser_id)
+        session = LiveBrowser(browser_id=name)
         session._crash_save_hook = self._spawn_save  # checkpoint promptly if it crashes
         started = False
         try:
@@ -1585,47 +1624,68 @@ class BrowserSessionManager(MutableModel):
         finally:
             if not started:
                 await session.close()  # start() failed partway -- don't leak a Chromium
-        self._browsers[browser_id] = session
+        self._browsers[name] = session
         return session
 
-    async def create(self) -> LiveBrowser:
-        """Start a new browser with the next monotonic id ('New browser' / fleet ``new``)."""
+    async def create(self, name: str | None = None) -> LiveBrowser:
+        """Start a new browser ('New browser' / fleet ``new``), optionally with a chosen name.
+
+        Under ``self._lock`` (held across the whole launch -- the serializer): enforce
+        the cap FIRST, then resolve the name. A ``None`` name is generated and
+        regenerated-on-collision against the LIVE fleet (the uniqueness guarantee -- a
+        crashed shell still holds its name). A provided name is validated
+        (:class:`InvalidBrowserNameError`) and rejected if it collides with a live
+        browser (:class:`DuplicateBrowserNameError`). Then the launch + register.
+        """
         async with self._lock:
             # Crashed browsers are dead shells kept only to report "crashed"; they
             # don't count toward the cap, so a crash never blocks opening a new one.
             live = sum(1 for browser in self._browsers.values() if not getattr(browser, "_crashed", False))
             if live >= _MAX_SESSIONS:
-                raise FleetFullError(
-                    f"Too many open browsers ({live}/{_MAX_SESSIONS}). "
-                    "Close one before opening another."
-                )
-            browser_id = self._next_id
-            self._next_id += 1
-            return await self._start_and_register_locked(browser_id)
+                raise FleetFullError(f"{live}/{_MAX_SESSIONS} browsers open -- close one first.")
+            if name is None:
+                name = self._fresh_name_locked()
+            else:
+                if not is_valid_browser_name(name):
+                    raise InvalidBrowserNameError(
+                        f"'{name}' is not a valid browser name -- use lowercase letters, digits, and "
+                        "single dashes (e.g. 'alex-smith'), 1-40 characters, no leading/trailing dash."
+                    )
+                if name in self._browsers:
+                    raise DuplicateBrowserNameError(
+                        f"the name '{name}' is already in use -- pick another, or close that browser first "
+                        "(a crashed browser still holds its name until you close it)."
+                    )
+            return await self._start_and_register_locked(name)
 
-    async def ensure_browser_0(self) -> LiveBrowser:
-        """Return the default browser (id 0), creating it if absent OR if the existing
-        one is a crashed shell. Browser 0 is the permanent default -- a first access
-        after it died (OOM/crash) must bring it back, not return a dead shell forever.
-        Recreating reuses id 0's persistent profile, so it comes back logged in.
-        Idempotent under the lock."""
-        async with self._lock:
-            existing = self._browsers.get(0)
-            if existing is not None and not existing._crashed:
-                return existing
-            return await self._start_and_register_locked(0)
+    def _fresh_name_locked(self) -> str:
+        """A generated name not currently in the live fleet. Caller holds ``self._lock``,
+        so the check is against an unchanging ``_browsers`` -- this is the random-name
+        uniqueness guarantee. Bounded so a pathological generator can't spin forever
+        while holding the global launch lock (which would wedge the whole fleet): after
+        a few dozen attempts, fall back to appending a short random suffix."""
+        for _ in range(50):
+            candidate = generate_browser_name()
+            if candidate not in self._browsers:
+                return candidate
+        # Extremely unlikely (cap is 3); a defensive escape so we never loop unbounded.
+        base = generate_browser_name()
+        suffix = 1
+        while f"{base}-{suffix}" in self._browsers:
+            suffix += 1
+        return f"{base}-{suffix}"
 
-    def get(self, browser_id: int) -> LiveBrowser:
-        # Dict access raises KeyError for a missing/closed id; callers turn it into a 404.
+    def get(self, browser_id: str) -> LiveBrowser:
+        # Dict access raises KeyError for a missing/closed name; callers turn it into a 404.
         return self._browsers[browser_id]
 
-    def has_browser(self, browser_id: int) -> bool:
+    def has_browser(self, browser_id: str) -> bool:
         return browser_id in self._browsers
 
     async def list_browsers(self) -> list[dict[str, Any]]:
-        return [await self._browsers[bid].describe() for bid in sorted(self._browsers)]
+        return [await self._browsers[name].describe() for name in sorted(self._browsers)]
 
-    async def close(self, browser_id: int) -> None:
+    async def close(self, browser_id: str) -> None:
         session = self._browsers.pop(browser_id, None)
         if session is not None:
             await session.close()
@@ -1633,13 +1693,25 @@ class BrowserSessionManager(MutableModel):
     # --- persistence: profiles (Tier A) + manifest (Tier B) -------------------
 
     def live_browsers(self) -> list[LiveBrowser]:
-        """Non-crashed sessions, by id -- the set worth persisting/restoring."""
-        return [self._browsers[i] for i in sorted(self._browsers) if not self._browsers[i]._crashed]
+        """Non-crashed sessions, by name -- the set worth persisting/restoring.
+
+        Snapshots ``_browsers`` with ``list(...)`` up front so iteration can't
+        KeyError if the dict is mutated concurrently (e.g. a close on the loop
+        thread popping a name): we sort and filter the snapshot, not the live dict."""
+        snapshot = sorted(self._browsers.items())
+        return [browser for _, browser in snapshot if not browser._crashed]
 
     def capacity(self) -> tuple[int, int]:
         """(live browser count, cap). Live = non-crashed, mirroring create()'s cap check,
         so the UI can gate the 'New browser' button on the same condition create() enforces."""
         return len(self.live_browsers()), _MAX_SESSIONS
+
+    async def capacity_async(self) -> tuple[int, int]:
+        """``capacity()`` for callers on a Flask worker thread to reach via
+        ``bridge.run`` -- running the ``_browsers`` read ON the loop thread (where
+        every mutation also happens) is what actually makes it race-free; the
+        ``list(...)`` snapshot in ``live_browsers`` is belt-and-suspenders."""
+        return self.capacity()
 
     def _entry_for(self, browser: LiveBrowser) -> fleet_manifest.ManifestEntry:
         """A manifest entry for a live browser: its tab URLs + active tab. Topology
@@ -1651,7 +1723,7 @@ class BrowserSessionManager(MutableModel):
     def _snapshot_manifest_locked(self) -> fleet_manifest.Manifest:
         """Build the durable manifest from the live fleet. Caller holds ``_lock``."""
         entries = [self._entry_for(browser) for browser in self.live_browsers()]
-        return fleet_manifest.Manifest(next_id=self._next_id, browsers=entries)
+        return fleet_manifest.Manifest(browsers=entries)
 
     def _spawn_save(self) -> None:
         """Schedule a manifest checkpoint (fire-and-forget, strong-ref'd). For sync
@@ -1679,110 +1751,120 @@ class BrowserSessionManager(MutableModel):
         fleet_manifest.write_manifest(snapshot)
         self._last_manifest_json = blob
 
-    def _scan_profile_ids(self) -> list[int]:
-        """Browser ids that have a persistent profile dir on disk (sorted)."""
+    def _scan_profile_names(self) -> list[str]:
+        """Browser names that have a persistent profile dir on disk (sorted).
+
+        Only profile suffixes that pass :func:`is_valid_browser_name` are returned.
+        That rejects pure-numeric suffixes, so an upgraded workspace's old
+        ``browser-use-user-data-dir-0`` / ``-1`` / ``-2`` dirs (from the pre-name
+        build) are NOT relaunched as bogus "0"/"1"/"2" named browsers; they fall
+        through to the orphan sweep instead."""
         prefix = "browser-use-user-data-dir-"
-        ids: list[int] = []
+        names: list[str] = []
         if _PROFILE_ROOT.exists():
             for child in _PROFILE_ROOT.iterdir():
+                if not (child.is_dir() and child.name.startswith(prefix)):
+                    continue
                 suffix = child.name[len(prefix):]
-                if child.is_dir() and child.name.startswith(prefix) and suffix.isdigit():
-                    ids.append(int(suffix))
-        return sorted(ids)
+                if is_valid_browser_name(suffix):
+                    names.append(suffix)
+        return sorted(names)
 
-    def _sweep_orphan_profiles(self, live_ids: set[int]) -> None:
-        """Delete profile dirs not backing a live browser, to bound Tier-A disk."""
-        for pid in self._scan_profile_ids():
-            if pid not in live_ids:
-                shutil.rmtree(_profile_dir(pid), ignore_errors=True)
+    def _sweep_orphan_profiles(self, live_names: set[str]) -> None:
+        """Delete profile dirs not backing a live browser, to bound Tier-A disk.
 
-    def forget_profile_dir(self, browser_id: int) -> None:
+        Sweeps both name-valid dirs we no longer want AND legacy numeric dirs from a
+        pre-name build (which ``_scan_profile_names`` skips), so an upgrade doesn't
+        leave stale numeric profiles around forever."""
+        prefix = "browser-use-user-data-dir-"
+        if not _PROFILE_ROOT.exists():
+            return
+        for child in _PROFILE_ROOT.iterdir():
+            if not (child.is_dir() and child.name.startswith(prefix)):
+                continue
+            suffix = child.name[len(prefix):]
+            if suffix not in live_names:
+                shutil.rmtree(child, ignore_errors=True)
+
+    def forget_profile_dir(self, browser_id: str) -> None:
         """Delete a browser's persistent profile (called on explicit `close`)."""
         shutil.rmtree(_profile_dir(browser_id), ignore_errors=True)
 
-    async def _launch_one_restore(self, browser_id: int, restore_tabs: list[str] | None, active_tab: int) -> bool:
+    async def _launch_one_restore(self, name: str, restore_tabs: list[str] | None, active_tab: int) -> bool:
         """Relaunch one browser under a BRIEF lock hold (released between browsers, so a
-        sequential restore of N browsers never blocks read-only ensure_browser_0/list for
-        the whole duration). Returns True if it came up, False if it flaked (left for a
-        next-boot retry). Idempotent vs a concurrent ensure_browser_0."""
+        sequential restore of N browsers never blocks read-only list/create for the whole
+        duration -- a create arriving mid-restore simply waits its turn on ``_lock``).
+        Returns True if it came up, False if it flaked (left for a next-boot retry).
+        Idempotent vs a concurrent create that already brought this name up."""
         async with self._lock:
-            if browser_id in self._browsers:
-                return True  # a concurrent ensure already brought it up
+            if name in self._browsers:
+                return True  # a concurrent create already brought it up
             live = sum(1 for b in self._browsers.values() if not b._crashed)
             if live >= _MAX_SESSIONS:
-                logger.warning("restore hit the fleet cap; deferring browser {}", browser_id)
+                logger.warning("restore hit the fleet cap; deferring browser {}", name)
                 return False
             try:
-                await self._start_and_register_locked(browser_id, restore_tabs=restore_tabs, active_tab=active_tab)
+                await self._start_and_register_locked(name, restore_tabs=restore_tabs, active_tab=active_tab)
                 return True
             except (BrowserStartupError, *_BROWSER_ERRORS) as e:
-                logger.warning("could not restore browser {} ({}); will retry next boot", browser_id, e)
+                logger.warning("could not restore browser {} ({}); will retry next boot", name, e)
                 return False
 
     async def restore(self) -> None:
         """Bring the fleet back on daemon startup: relaunch saved browsers EAGER-
         SEQUENTIALLY (one at a time -- no cold-boot memory spike; the lock is released
-        between launches so read-only routes aren't blocked), seed browser 0 on a fresh
-        workspace, then reconcile the manifest and sweep TRUE orphan profiles. The init
-        gate stays closed until this returns, so a "New browser" during startup is cleanly
-        refused (503) rather than piling a concurrent launch onto the relaunching fleet --
-        the UI gates the button on readiness so the user sees that, not an error.
+        between launches so read-only routes and ``create`` aren't blocked for the whole
+        duration), then reconcile the manifest and sweep TRUE orphan profiles. There is
+        NO default browser: a fresh workspace restores to an EMPTY fleet (nothing saved ->
+        nothing launched). Read-only routes (ls/state) and ``create`` work during this
+        restore -- a create just queues behind the serialized relaunches on ``_lock``.
 
         Durability rule: a browser that merely flakes on relaunch is NOT forgotten --
         its profile is kept and its manifest entry preserved so it retries next boot.
-        Only profiles for ids we no longer want are swept.
+        Only profiles for names we no longer want are swept.
         """
         saved = fleet_manifest.read_manifest()
-        saved_by_id = {e.id: e for e in saved.browsers} if saved is not None else {}
-        wanted_ids: set[int] = set()
+        saved_by_name = {e.id: e for e in saved.browsers} if saved is not None else {}
+        wanted_names: set[str] = set()
 
         if saved is not None:
-            # Set the id high-water mark BEFORE relaunching so nothing re-hands a retired
-            # id, and a later create() continues past the restored max.
-            async with self._lock:
-                self._next_id = max(saved.next_id, max(saved_by_id, default=0) + 1, 1)
             for entry in sorted(saved.browsers, key=lambda e: e.id):
-                wanted_ids.add(entry.id)
+                wanted_names.add(entry.id)
                 await self._launch_one_restore(entry.id, entry.tabs or None, entry.active_tab)
         else:
-            # No manifest. If profiles survived on the volume, relaunch them (tabs
-            # unknown -> home) rather than wiping the saved logins as a "first boot".
-            profile_ids = self._scan_profile_ids()
-            if profile_ids:
-                async with self._lock:
-                    self._next_id = max(profile_ids, default=0) + 1
-                for pid in profile_ids:
-                    wanted_ids.add(pid)
-                    await self._launch_one_restore(pid, None, 0)
-
-        # Always ensure the default browser exists (true first boot seeds it at home).
-        wanted_ids.add(0)
-        if not self.has_browser(0):
-            await self._launch_one_restore(0, None, 0)
+            # No (current-version) manifest. If name-valid profiles survived on the
+            # volume, relaunch them (tabs unknown -> home) rather than wiping the saved
+            # logins as a "first boot". Legacy numeric profile dirs are skipped by
+            # _scan_profile_names and swept below.
+            for profile_name in self._scan_profile_names():
+                wanted_names.add(profile_name)
+                await self._launch_one_restore(profile_name, None, 0)
 
         # Reconcile the manifest: fresh snapshots of live browsers + the saved entries
-        # for wanted ids that FAILED to relaunch (kept so they retry next boot), then
-        # sweep only profiles that are neither live nor wanted (true orphans).
-        await self._reconcile_manifest_after_restore(saved_by_id, wanted_ids)
+        # for wanted names that FAILED to relaunch (kept so they retry next boot), then
+        # sweep only profiles that are neither live nor wanted (true orphans + legacy
+        # numeric dirs). A browser created mid-restore is in the live snapshot here (it
+        # registered under the same _lock), so it is kept, not dropped.
+        await self._reconcile_manifest_after_restore(saved_by_name, wanted_names)
 
     async def _reconcile_manifest_after_restore(
-        self, saved_by_id: dict[int, fleet_manifest.ManifestEntry], wanted_ids: set[int]
+        self, saved_by_name: dict[str, fleet_manifest.ManifestEntry], wanted_names: set[str]
     ) -> None:
         async with self._lock:
-            live_ids = {b.browser_id for b in self.live_browsers()}
+            live_names = {b.browser_id for b in self.live_browsers()}
             entries = [self._entry_for(b) for b in self.live_browsers()]
             # Preserve saved entries for wanted browsers that didn't relaunch this boot.
-            for bid in sorted(wanted_ids - live_ids):
-                if bid in saved_by_id:
-                    entries.append(saved_by_id[bid])
+            for name in sorted(wanted_names - live_names):
+                if name in saved_by_name:
+                    entries.append(saved_by_name[name])
             entries.sort(key=lambda e: e.id)
-            manifest = fleet_manifest.Manifest(next_id=self._next_id, browsers=entries)
-            keep_ids = live_ids | wanted_ids
+            manifest = fleet_manifest.Manifest(browsers=entries)
+            keep_names = live_names | wanted_names
         blob = manifest.model_dump_json()
         if blob != self._last_manifest_json:
             fleet_manifest.write_manifest(manifest)
             self._last_manifest_json = blob
-        self._sweep_orphan_profiles(keep_ids)
+        self._sweep_orphan_profiles(keep_names)
 
     def start_checkpointing(self) -> None:
         """Begin periodically re-checkpointing the manifest (catches tab-URL drift)."""

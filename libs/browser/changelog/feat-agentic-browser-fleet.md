@@ -1,3 +1,66 @@
+Follow-up fixes on the named-fleet work:
+
+- The `GET /browsers` route read the fleet's live count directly on the Flask
+  worker thread, which could race the loop thread mutating the fleet and
+  intermittently error mid-iteration; that read now runs on the loop thread like
+  every other fleet-state access, and the live-browser snapshot is iteration-safe.
+- A browser closing exactly while a tab re-attached its screencast no longer logs
+  a harmless "Task exception was never retrieved" traceback.
+- The library README was corrected to the named-fleet model (random ~2-word
+  names, empty startup fleet, no default browser) -- it had stale "integer id /
+  id 0 is the default" wording.
+
+----
+
+Browsers are now addressed by a random ~2-word english NAME (like a mngr agent
+name, e.g. `alex-smith`) instead of a sequential integer id, and the fleet starts
+EMPTY -- there is no default browser. Every browser is created on demand.
+
+- **Names, not numbers.** The name is the addressing key everywhere: the CLI
+  `<name>` argument, `service:browser?session=<name>`, the cast WebSocket path
+  `/browsers/<name>/cast`, the manifest, and the persistent profile dir
+  (`browser-use-user-data-dir-<name>`). `new` picks a random name (printed as
+  `started browser alex-smith`); pass `new <name>` to choose one. A user-typed name
+  must be lowercase letters/digits joined by single dashes (1-40 chars); an invalid
+  name is rejected (`POST /browsers` -> 400), and a duplicate of a live browser is
+  rejected (-> 409). Names are unique within the live fleet (regenerated on collision)
+  and never reused. Browsers CANNOT be renamed -- there is no rename verb.
+
+- **No default browser; empty fleet at startup.** The reserved browser-0 and the
+  monotonic id counter are gone. A fresh workspace restores to an empty fleet; run
+  `new` to open one. `GET /browsers` no longer materializes a default. The
+  daemon-internal `ensure_browser_0` path was removed.
+
+- **Cap is now 3 (was 5).** `new` past the cap is rejected (not queued) with the exact
+  message `3/3 browsers open -- close one first`. `BROWSER_MAX_SESSIONS` still overrides.
+
+- **Create works DURING restore.** The init gate no longer blocks `POST /browsers`:
+  a create issued while the fleet is still restoring is accepted and simply queues
+  behind the serialized relaunches (one Chromium launches at a time, on the shared
+  manager lock -- the OOM guard is preserved). Only the drive verbs (task/click/...)
+  still 503 "initializing" during restore; `ls`/`state` and `new` work throughout. The
+  "New browser" readiness no longer gates on init -- only on Chromium install + the cap.
+
+- **HTTP contract change:** `POST /browsers` accepts an optional body `{"name": "<name>"}`
+  and returns `{"name": <chosen-name>, "key_available": <bool>}` (was `{"id": ...}`).
+  All `/browsers/<id>/...` routes now take the name as a string path segment.
+
+- **Optimistic 'starting' pane support.** When the viewer opens a pane for a name whose
+  browser hasn't registered yet (the optimistic pane opened on modal-accept, before the
+  serialized launch finishes), the cast WS closes with code 1013 ("Try Again Later") for
+  a syntactically-valid-but-unknown name, and the viewer shows "Browser starting..." and
+  retries with backoff -- connecting once the launch registers the name. An invalid/gone
+  name still closes 1008 (terminal). The viewer addresses the pane by name (the old
+  numeric `?session=` parse that silently defaulted to browser 0 is gone).
+
+- **Manifest format v2.** Entry ids are strings and the `next_id` high-water mark is
+  removed. `read_manifest` now rejects any non-current version, so an upgrade across the
+  int->name change starts from an empty manifest and re-scans profiles; legacy numeric
+  profile dirs (`browser-use-user-data-dir-0`/`1`/`2`) are skipped on scan (not relaunched
+  as bogus named browsers) and swept.
+
+----
+
 Turned the single live-browser service into an agentic browser fleet that the
 agent drives directly: a per-workspace daemon managing many headless Chromium
 browsers, each with an atomic ownership state machine, plus an

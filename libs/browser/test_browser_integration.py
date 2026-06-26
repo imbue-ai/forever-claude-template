@@ -152,7 +152,7 @@ def test_run_agent_streams_thinking_and_action_then_done(monkeypatch: pytest.Mon
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(bsession, "Agent", _FinishingAgent)
     monkeypatch.setattr(bsession, "ChatAnthropic", lambda **_kwargs: object())
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
     browser._bu_session = object()  # type: ignore[assignment]
     events: list[dict[str, Any]] = []
 
@@ -175,7 +175,7 @@ def test_human_take_control_preempts_a_running_task(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(bsession, "Agent", _BlockingAgent)
     monkeypatch.setattr(bsession, "ChatAnthropic", lambda **_kwargs: object())
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
     browser._bu_session = object()  # type: ignore[assignment]
     events: list[dict[str, Any]] = []
 
@@ -209,7 +209,7 @@ def test_run_agent_aborts_if_control_lost_before_it_starts(monkeypatch: pytest.M
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(bsession, "Agent", _BlockingAgent)
     monkeypatch.setattr(bsession, "ChatAnthropic", lambda **_kwargs: object())
-    browser = bsession.LiveBrowser(browser_id=1)
+    browser = bsession.LiveBrowser(browser_id="b1")
     browser._bu_session = object()  # type: ignore[assignment]
     events: list[dict[str, Any]] = []
 
@@ -234,7 +234,7 @@ def test_run_agent_aborts_if_control_lost_before_it_starts(monkeypatch: pytest.M
 # --- HTTP layer (Flask test client; run_agent stubbed) -----------------------
 
 
-def _install_fake_browser(monkeypatch: pytest.MonkeyPatch, browser_id: int = 0) -> bsession.LiveBrowser:
+def _install_fake_browser(monkeypatch: pytest.MonkeyPatch, browser_id: str = "alex-smith") -> bsession.LiveBrowser:
     runner.manager._browsers.clear()
     fake = bsession.LiveBrowser(browser_id=browser_id)
     fake._bu_session = object()  # type: ignore[assignment]
@@ -260,7 +260,7 @@ def test_http_task_streams_trace_and_releases(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(bsession.LiveBrowser, "run_agent", fake_run_agent)
     client = runner.application.test_client()
     resp = client.post(
-        "/browsers/0/task",
+        "/browsers/alex-smith/task",
         json={"prompt": "do it"},
         headers={"X-Mngr-Agent-Id": "A", "X-Mngr-Agent-Name": "Alice"},
     )
@@ -275,7 +275,7 @@ def test_http_task_streams_trace_and_releases(monkeypatch: pytest.MonkeyPatch) -
 def test_http_task_without_agent_id_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_browser(monkeypatch)
     client = runner.application.test_client()
-    resp = client.post("/browsers/0/task", json={"prompt": "do it"})
+    resp = client.post("/browsers/alex-smith/task", json={"prompt": "do it"})
     assert resp.status_code == 400
 
 
@@ -289,7 +289,7 @@ def test_http_task_on_human_pinned_browser_reports_busy(monkeypatch: pytest.Monk
     asyncio.run(pin())
     client = runner.application.test_client()
     resp = client.post(
-        "/browsers/0/task",
+        "/browsers/alex-smith/task",
         json={"prompt": "do it", "wait": False},
         headers={"X-Mngr-Agent-Id": "A", "X-Mngr-Agent-Name": "Alice"},
     )
@@ -304,7 +304,7 @@ def test_http_list_browsers_shows_fleet(monkeypatch: pytest.MonkeyPatch) -> None
     resp = client.get("/browsers")
     assert resp.status_code == 200
     ids = [b["id"] for b in resp.get_json()["browsers"]]
-    assert 0 in ids
+    assert "alex-smith" in ids
 
 
 def test_http_release_requires_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -312,11 +312,11 @@ def test_http_release_requires_ownership(monkeypatch: pytest.MonkeyPatch) -> Non
     asyncio.run(fake.acquire("owner", "Owner"))
     client = runner.application.test_client()
     # A non-owner cannot free someone else's browser.
-    resp = client.post("/browsers/0/release", headers={"X-Mngr-Agent-Id": "intruder"})
+    resp = client.post("/browsers/alex-smith/release", headers={"X-Mngr-Agent-Id": "intruder"})
     assert resp.status_code == 200 and resp.get_json()["released"] is False
     assert fake._state_tuple() == ("agent", "owner", False)
     # The owner can.
-    resp = client.post("/browsers/0/release", headers={"X-Mngr-Agent-Id": "owner"})
+    resp = client.post("/browsers/alex-smith/release", headers={"X-Mngr-Agent-Id": "owner"})
     assert resp.get_json()["released"] is True
 
 
@@ -402,18 +402,33 @@ def test_browser_crash_is_detected_and_reported_real_chromium(monkeypatch: pytes
 # --- persistence: HTTP init gate + close-forgets-profile (fake browser) -------
 
 
-def test_init_gate_blocks_state_changing_routes(monkeypatch: pytest.MonkeyPatch) -> None:
-    # While the fleet is still restoring, state-changing routes return 503
-    # "initializing" but read-only routes stay open.
+def test_init_gate_blocks_drive_verbs_but_not_read_only_or_create(monkeypatch: pytest.MonkeyPatch) -> None:
+    # While the fleet is still restoring, the DRIVE verbs (click/task/...) return 503
+    # "initializing", but read-only routes (ls/state/health) AND create stay open --
+    # the locked "init must not block create" decision (a create queues behind the
+    # serialized restore on the manager lock).
     _install_fake_browser(monkeypatch)
     runner._init_done.clear()  # simulate "still restoring"
     client = runner.application.test_client()
-    create = client.post("/browsers")
-    assert create.status_code == 503 and create.get_json()["status"] == "initializing"
-    click = client.post("/browsers/0/click", json={"index": 0}, headers={"X-Mngr-Agent-Id": "A"})
+    # A drive verb on an existing browser is still gated during init.
+    click = client.post("/browsers/alex-smith/click", json={"index": 0}, headers={"X-Mngr-Agent-Id": "A"})
     assert click.status_code == 503 and click.get_json()["status"] == "initializing"
+    # Read-only routes stay open.
+    assert client.get("/browsers").status_code == 200
     assert client.get("/health").get_json()["initializing"] is True
     assert client.get("/init-status").status_code == 200
+    # Create is NOT init-gated: it reaches manager.create (stubbed here to avoid a real
+    # launch) and returns 200, NOT 503.
+    monkeypatch.setenv("BROWSER_SKIP_INSTALL_CHECK", "1")
+
+    async def fake_create(self: bsession.BrowserSessionManager, name: str | None = None) -> bsession.LiveBrowser:
+        created = bsession.LiveBrowser(browser_id=name or "morgan-lee")
+        self._browsers[created.browser_id] = created
+        return created
+
+    monkeypatch.setattr(bsession.BrowserSessionManager, "create", fake_create)
+    create = client.post("/browsers")
+    assert create.status_code == 200 and create.get_json()["name"] == "morgan-lee"
     # conftest re-sets _init_done on teardown.
 
 
@@ -431,9 +446,11 @@ def test_startup_opens_gate_even_if_restore_fails(monkeypatch: pytest.MonkeyPatc
 
 
 def test_close_endpoint_deletes_profile_and_drops_from_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
-    profile = bsession._profile_dir(2)
+    # Every browser is created on demand (no permanent default), so closing one ALWAYS
+    # forgets its persistent profile and drops it from the manifest.
+    profile = bsession._profile_dir("riley-jones")
     profile.mkdir(parents=True)
-    fake = _install_fake_browser(monkeypatch, browser_id=2)
+    fake = _install_fake_browser(monkeypatch, browser_id="riley-jones")
     fake._bu_session = object()  # type: ignore[assignment]
 
     async def fake_close(self: bsession.LiveBrowser) -> None:  # avoid real Chromium teardown
@@ -441,28 +458,11 @@ def test_close_endpoint_deletes_profile_and_drops_from_manifest(monkeypatch: pyt
 
     monkeypatch.setattr(bsession.LiveBrowser, "close", fake_close)
     client = runner.application.test_client()
-    resp = client.delete("/browsers/2")
+    resp = client.delete("/browsers/riley-jones")
     assert resp.status_code == 200
     assert not profile.exists()  # the persistent profile is forgotten on explicit close
     saved = manifest.read_manifest()
-    assert saved is not None and all(e.id != 2 for e in saved.browsers)
-
-
-def test_close_browser_0_keeps_its_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Browser 0 is the recreated-on-demand default; closing it must NOT wipe its
-    # persistent profile, or the user would be silently logged out when 0 comes back.
-    profile = bsession._profile_dir(0)
-    profile.mkdir(parents=True)
-    fake = _install_fake_browser(monkeypatch, browser_id=0)
-    fake._bu_session = object()  # type: ignore[assignment]
-
-    async def fake_close(self: bsession.LiveBrowser) -> None:
-        return None
-
-    monkeypatch.setattr(bsession.LiveBrowser, "close", fake_close)
-    client = runner.application.test_client()
-    assert client.delete("/browsers/0").status_code == 200
-    assert profile.exists()  # browser 0's profile (logins) is preserved across close
+    assert saved is not None and all(e.id != "riley-jones" for e in saved.browsers)
 
 
 # --- persistence: the core promise, against real Chromium --------------------
@@ -479,15 +479,17 @@ def test_profile_persists_across_manager_restart(monkeypatch: pytest.MonkeyPatch
 
     async def go() -> None:
         first = bsession.BrowserSessionManager()
+        await first.restore()  # fresh workspace -> EMPTY fleet (no default browser)
         try:
-            await first.restore()  # first boot seeds browser 0
-        except (bsession.BrowserStartupError, PlaywrightError, OSError) as e:
-            pytest.skip(f"Chromium unavailable in this environment: {e}")
-        try:
-            browser = first.get(0)
+            # Every browser is created on demand now; create one and remember its name.
+            try:
+                browser = await first.create()
+            except (bsession.BrowserStartupError, PlaywrightError, OSError) as e:
+                pytest.skip(f"Chromium unavailable in this environment: {e}")
+            name = browser.browser_id
             assert (await browser.act_navigate("A", "Alice", "https://example.com"))["ok"]
             # Anti-_copy_profile tripwire: the live profile is our persistent dir, NOT a temp copy.
-            assert str(_profile_dir_for(0)) == str(browser._bu_session.browser_profile.user_data_dir)
+            assert str(_profile_dir_for(name)) == str(browser._bu_session.browser_profile.user_data_dir)
             first_context = browser._context
             assert first_context is not None, "context should be live after a successful navigate"
             await first_context.add_cookies(
@@ -498,9 +500,9 @@ def test_profile_persists_across_manager_restart(monkeypatch: pytest.MonkeyPatch
             await first.shutdown()  # clean stop flushes the profile to disk
 
         second = bsession.BrowserSessionManager()
-        await second.restore()
+        await second.restore()  # the saved browser comes back by name
         try:
-            second_context = second.get(0)._context
+            second_context = second.get(name)._context
             assert second_context is not None, "context should be live after restore"
             cookies = await second_context.cookies("https://example.com")
             assert any(c.get("name") == "fleet_test" and c.get("value") == "persisted" for c in cookies)
@@ -510,7 +512,7 @@ def test_profile_persists_across_manager_restart(monkeypatch: pytest.MonkeyPatch
     asyncio.run(go())
 
 
-def _profile_dir_for(browser_id: int):
+def _profile_dir_for(browser_id: str):
     # Helper kept tiny so the tripwire reads clearly above.
     return bsession._profile_dir(browser_id)
 
@@ -576,10 +578,10 @@ def test_cast_ws_streams_control_and_take_control_flips_ownership(monkeypatch: p
     # The load-bearing WS inversion: the loop fans frames/control out onto the cast
     # queue and the Flask thread sends them; inbound take_control is read on a second
     # thread and dispatched to the loop. No real Chromium -- a fake session suffices.
-    fake = _install_fake_browser(monkeypatch, browser_id=0)
+    fake = _install_fake_browser(monkeypatch)
     fake._context = None  # _tab_list -> [] without Chromium
     with _BootedServer() as server:
-        ws = simple_websocket.Client(f"ws://127.0.0.1:{server.port}/browsers/0/cast")
+        ws = simple_websocket.Client(f"ws://127.0.0.1:{server.port}/browsers/alex-smith/cast")
         try:
             # The viewer's first messages are the deterministic initial sync.
             first = _ws_recv_json(ws, timeout=5)
@@ -607,12 +609,12 @@ def test_hold_releases_the_lease_when_the_client_socket_dies(monkeypatch: pytest
     # browser, then hard-close the socket. The heartbeat write fails -> the generator's
     # finally runs -> the lease is released. This is the contract the in-process test
     # client cannot exercise (it never fails a real socket write).
-    fake = _install_fake_browser(monkeypatch, browser_id=0)
+    fake = _install_fake_browser(monkeypatch)
     fake._context = None
     with _BootedServer() as server:
         conn = socket.create_connection(("127.0.0.1", server.port), timeout=5)
         request = (
-            "POST /browsers/0/hold HTTP/1.1\r\n"
+            "POST /browsers/alex-smith/hold HTTP/1.1\r\n"
             f"Host: 127.0.0.1:{server.port}\r\n"
             "X-Mngr-Agent-Id: A\r\n"
             "X-Mngr-Agent-Name: Alice\r\n"

@@ -1,9 +1,40 @@
 Integrated the agentic browser fleet into the workspace UI.
 
+- Fix: typing the name of a browser that already exists in the "New browser"
+  modal no longer closes that existing browser's healthy pane. The modal now
+  rejects a duplicate name inline ("A browser named <name> already exists")
+  before opening any pane or calling create; and as defense in depth, a failed
+  create only tears down the optimistic pane when this create actually opened a
+  new one (never when it focused a pane that was already showing that browser).
+
+
+- Browsers are now named, not numbered. Each browser in the fleet has a random
+  ~2-word name (e.g. `alex-smith`), and that name is the addressing key
+  everywhere (`service:browser?session=<name>`, the cast WebSocket, the pane
+  title). There is no default browser; the fleet starts empty and every browser
+  is created on demand.
+
+- "New browser" now opens a name modal, mirroring "New agent": a dialog
+  pre-filled with a random name (editable) where you can also type your own. On
+  accept the browser pane opens immediately showing "Browser starting…" (an
+  optimistic pane keyed by the chosen name) and connects once the browser is
+  ready -- the launch is serialized server-side, so it may take a moment,
+  especially while saved browsers are being restored. If the create is rejected
+  (an invalid name, a duplicate name, the 3-browser cap, or Chromium still
+  installing) the optimistic pane is closed and the daemon's exact message is
+  shown inline in the modal (e.g. "3/3 browsers open -- close one first.") so you
+  can fix the name and retry.
+
+- "New browser" is no longer disabled during startup/restore -- it stays
+  clickable at all times. A create issued while saved browsers are restoring is
+  accepted and queued behind the restore (it just takes a little longer), so the
+  earlier behavior that greyed out the item with a reason in parentheses while
+  the fleet was starting up has been removed. The cap and duplicate-name checks
+  now surface as inline modal errors instead of a pre-click gate.
+
 - The "+" menu now lists the currently-active browsers (from the browser
   daemon's `GET /browsers`) alongside "New browser". Clicking an already-open
-  browser focuses its existing pane instead of opening a duplicate; "New browser"
-  starts one and opens its pane, surfacing a clear error if the fleet is full.
+  browser focuses its existing pane instead of opening a duplicate.
 
 - The agent-driven layout system can address a specific browser as a pane
   (`service:browser?session=<id>`), so an agent can pull the exact browser it is

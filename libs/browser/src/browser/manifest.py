@@ -1,6 +1,6 @@
 """The browser-fleet persistence manifest: the one thing we serialize by hand.
 
-It records the durable *topology* of the fleet -- which browser ids exist and the
+It records the durable *topology* of the fleet -- which browser names exist and the
 tab URLs each had -- so the daemon can relaunch them on the next container start.
 It deliberately stores NO ownership/queue state (that is connection/process-scoped
 and dies with the old container) and NO Chromium profile bytes (cookies/logins/
@@ -24,22 +24,26 @@ from imbue.imbue_common.mutable_model import MutableModel
 
 # Relative to the daemon's cwd (= repo root). Override for tests / alternate layouts.
 _MANIFEST_PATH = Path(os.environ.get("BROWSER_MANIFEST_PATH", "runtime/browser-fleet.json"))
-_MANIFEST_VERSION = 1
+# v2: browser ids are now random NAME strings (not sequential ints), and the
+# ``next_id`` high-water mark is gone. ``read_manifest`` rejects any other version
+# (see below), so an older v1 (int-id) manifest is treated as missing rather than
+# silently coerced -- the fleet then re-scans the on-disk profiles instead.
+_MANIFEST_VERSION = 2
 
 
 class ManifestEntry(MutableModel):
-    """One persisted browser: its id and the tab URLs to reopen (active tab marked)."""
+    """One persisted browser: its name and the tab URLs to reopen (active tab marked)."""
 
-    id: int
+    id: str
     tabs: list[str] = []  # ordered tab URLs; blank/about:/chrome: are dropped before saving
     active_tab: int = 0
 
 
 class Manifest(MutableModel):
-    """The whole fleet's durable topology plus the monotonic id high-water mark."""
+    """The whole fleet's durable topology (names + tabs). No id high-water mark: ids
+    are random names, generated on demand and de-duplicated against the live fleet."""
 
     version: int = _MANIFEST_VERSION
-    next_id: int = 1
     browsers: list[ManifestEntry] = []
 
 
@@ -48,19 +52,35 @@ def manifest_path() -> Path:
 
 
 def read_manifest() -> Manifest | None:
-    """Load the manifest, or ``None`` if it's absent OR unreadable/corrupt.
+    """Load the manifest, or ``None`` if it's absent, unreadable/corrupt, or an OLD version.
 
     A corrupt manifest is treated as "missing" (and logged loudly) rather than
     crashing startup -- the caller then cross-checks the on-disk profiles to decide
-    first-boot vs manifest-loss (see ``session.py`` restore)."""
+    first-boot vs manifest-loss (see ``session.py`` restore).
+
+    The version is checked EXPLICITLY: a non-current version (e.g. a pre-name v1 file
+    whose int ids pydantic would otherwise happily coerce to strings) is treated as
+    missing, so an upgrade across the int->name change starts from an empty manifest
+    rather than resurrecting numeric ids. The profiles are still re-scanned, and
+    pure-numeric profile-dir suffixes are skipped (see session._scan_profile_names),
+    so old numeric browsers are not silently revived under string names."""
     path = _MANIFEST_PATH
     if not path.exists():
         return None
     try:
-        return Manifest.model_validate_json(path.read_text())
+        loaded = Manifest.model_validate_json(path.read_text())
     except (OSError, ValueError, ValidationError) as e:
         logger.warning("browser-fleet manifest at {} is unreadable ({}); ignoring it", path, e)
         return None
+    if loaded.version != _MANIFEST_VERSION:
+        logger.warning(
+            "browser-fleet manifest at {} is version {} (expected {}); ignoring it and re-scanning profiles",
+            path,
+            loaded.version,
+            _MANIFEST_VERSION,
+        )
+        return None
+    return loaded
 
 
 def write_manifest(manifest: Manifest) -> None:

@@ -17,6 +17,7 @@ import { AgentTerminalPanel } from "./AgentTerminalPanel";
 import { IframePanel, IFRAME_PANEL_PANEL_ID_ATTR, reloadIframesForService } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
+import { CreateBrowserModal } from "./CreateBrowserModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
 import { reloadInterface } from "../reload";
@@ -121,6 +122,7 @@ interface PanelParams {
 // Modal state
 let showNewChatModal = false;
 let showNewAgentModal = false;
+let showNewBrowserModal = false;
 
 // The dockview group whose header "+" button opened the New chat / New agent
 // modal. Captured at click time because those modals create their chat panel
@@ -363,9 +365,11 @@ function placementForGroup(
 
 // A single browser in the per-workspace fleet, as returned by
 // ``GET /service/browser/browsers``. Each is a separately-addressable pane
-// (viewer at ``/service/browser/?session=<id>``).
+// (viewer at ``/service/browser/?session=<name>``). The ``id`` is the
+// browser's NAME (a random ~2-word english name, or a user-chosen one) -- the
+// addressing key everywhere; there is no numeric id and no default browser.
 interface BrowserInfo {
-  id: number;
+  id: string;
   controller: "human" | "agent";
   owner_agent_id?: string | null;
   owner_name?: string | null;
@@ -375,19 +379,17 @@ interface BrowserInfo {
 // Cached snapshot of the browser fleet, refreshed each time the "+" dropdown
 // opens so it reflects browsers created since boot. The list drives one
 // dropdown item per active browser.
+//
+// Note: we no longer gate the "New browser" button on the daemon's
+// ``can_create``. A create is accepted even during startup/restore (it queues
+// behind the serialized restore on the daemon's shared launch lock) and the
+// fleet cap / duplicate-name rejections come back as inline errors in the
+// New-browser modal, so the button stays always clickable.
 let browserFleet: BrowserInfo[] = [];
 
-// Whether the daemon can start a new browser right now (it's past startup/restore and
-// under the fleet cap), refreshed alongside the fleet. Drives the "New browser" item:
-// disabled with the reason in parentheses while not ready, so the user never fires a
-// create that 503s (still starting up) / 409s (full) or piles a launch onto a restore.
-// Defaults to ready so a failed readiness fetch doesn't wrongly lock the button (the
-// click still surfaces any real error).
-let browserCreateReadiness: { canCreate: boolean; reason: string } = { canCreate: true, reason: "" };
-
-/** Fetch the live browser fleet + key status + create-readiness. ``onUpdate`` runs
- *  after the cache is refreshed so an already-open dropdown can re-render with the
- *  browsers that the (async) fetch just returned -- the dropdown is built
+/** Fetch the live browser fleet for the dropdown listing. ``onUpdate`` runs
+ *  after the cache is refreshed so an already-open dropdown can re-render with
+ *  the browsers that the (async) fetch just returned -- the dropdown is built
  *  synchronously from the cache, so without this callback a freshly-opened
  *  menu would show a stale fleet until the next open. */
 function refreshBrowserFleet(onUpdate?: () => void): void {
@@ -395,14 +397,9 @@ function refreshBrowserFleet(onUpdate?: () => void): void {
     .then((r) => (r.ok ? r.json() : { browsers: [] }))
     .then((data) => {
       browserFleet = Array.isArray(data.browsers) ? (data.browsers as BrowserInfo[]) : [];
-      browserCreateReadiness = {
-        canCreate: data.can_create !== false,
-        reason: typeof data.create_reason === "string" ? data.create_reason : "",
-      };
     })
     .catch(() => {
       browserFleet = [];
-      browserCreateReadiness = { canCreate: true, reason: "" };
     })
     .finally(() => {
       onUpdate?.();
@@ -423,55 +420,60 @@ function browserOwnerLabel(browser: BrowserInfo): string {
 }
 
 /** Open (or focus, via ``addPanelForRef`` dedup) the pane for browser
- *  ``id``. Routed through the same ``service:browser?session=<id>`` ref the
+ *  ``name``. Routed through the same ``service:browser?session=<name>`` ref the
  *  agent CLI uses so the two surfaces share dedup/focus and on-disk shape.
  *  If the pane is already open, ``addPanelForRef`` focuses it; opening a new
  *  pane activates it (the user explicitly asked for this browser from the
  *  "+" menu, so taking focus is the intended behavior, matching every other
- *  "+" menu action). Tabs into ``targetGroup`` when it's a live group. */
-function openBrowserSessionTab(id: number, targetGroup?: DockviewGroupPanel | null): void {
-  if (!dockview) return;
+ *  "+" menu action). Tabs into ``targetGroup`` when it's a live group.
+ *
+ *  This is also the optimistic 'starting' pane: when called right after the
+ *  user accepts a name in the New-browser modal (before the launch finishes),
+ *  the viewer shows "Browser starting…" and retries the cast connection until
+ *  the daemon registers the name.
+ *
+ *  Returns ``true`` when this call CREATED a new pane, ``false`` when it merely
+ *  deduped onto (focused) a pane that was already open for the same browser.
+ *  The optimistic-create flow uses this to decide whether a later failure may
+ *  close the pane: it must only tear down a pane THIS flow created, never one
+ *  that was already showing a healthy, pre-existing browser. */
+function openBrowserSessionTab(name: string, targetGroup?: DockviewGroupPanel | null): boolean {
+  if (!dockview) return false;
+  // Was a pane already open for this browser? If so, ``addPanelForRef`` will
+  // dedup/focus it rather than create a new one -- report that to the caller.
+  const alreadyOpen = findIframePanelIdForServiceRef(`browser?session=${name}`) !== null;
   const placement =
     targetGroup && dockview.groups.some((g) => g.id === targetGroup.id)
       ? { position: { referenceGroup: targetGroup.id } }
       : {};
-  addPanelForRef(`service:browser?session=${id}`, getPrimaryAgentId(), placement);
+  addPanelForRef(`service:browser?session=${name}`, getPrimaryAgentId(), placement);
+  return !alreadyOpen;
 }
 
-/** POST a new browser into the fleet, then open its pane. On 409 (fleet
- *  full) or 503 (Chromium still installing) surface the daemon's error
- *  message instead of failing silently. */
-function createBrowserTab(targetGroup?: DockviewGroupPanel | null): void {
-  fetch(getServiceUrl("browser") + "browsers", { method: "POST" })
-    .then(async (r) => {
-      const data = await r.json().catch(() => ({}) as Record<string, unknown>);
-      if (r.ok) {
-        const id = typeof data.id === "number" ? data.id : null;
-        if (id !== null) openBrowserSessionTab(id, targetGroup);
-        // Refresh so the next dropdown open lists the new browser.
-        refreshBrowserFleet();
-        return;
-      }
-      const detail = typeof data.error === "string" ? data.error : `HTTP ${r.status}`;
-      if (r.status === 503 || r.status === 409) {
-        // 503 = still starting up / installing; 409 = fleet full. The daemon's message is
-        // accurate, so surface it directly. The "New browser" item is normally gated to
-        // prevent this, but a race can still land here -- resolve it with a clear modal,
-        // not a scary failure.
-        alert(`Can't open a new browser yet: ${detail}`);
-      } else {
-        alert(`Failed to create a browser: ${detail}.`);
-      }
-    })
-    .catch((e) => {
-      alert(`Failed to create a browser: ${(e as Error).message}`);
-    });
+/** Close the (optimistic) pane for browser ``name`` if it is open. Used when a
+ *  create POST fails after the pane was opened on modal-accept: the launch
+ *  never registered the name, so the pane would otherwise sit on a stale
+ *  "Browser starting…" / "browser closed" banner forever. Dedup keys panes on
+ *  the resolved ``service:browser?session=<name>`` URL, so the lookup mirrors
+ *  ``openBrowserSessionTab``'s ref. */
+function closeBrowserSessionTab(name: string): void {
+  if (!dockview) return;
+  const panelId = findIframePanelIdForServiceRef(`browser?session=${name}`);
+  if (panelId === null) return;
+  const panel = dockview.panels.find((p) => p.id === panelId);
+  if (panel) dockview.removePanel(panel);
 }
 
 function buildDropdownItems(
   targetGroup?: DockviewGroupPanel,
 ): Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean; disabledReason?: string }> {
-  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean; disabledReason?: string }> = [];
+  const items: Array<{
+    label: string;
+    action: () => void;
+    dividerAfter?: boolean;
+    disabled?: boolean;
+    disabledReason?: string;
+  }> = [];
   const openChatIds = getOpenChatAgentIds();
   const openAppNames = getOpenAppNames();
 
@@ -553,19 +555,20 @@ function buildDropdownItems(
     action: () => openIframeTab(buildTerminalUrl(), "terminal", "iframe", undefined, targetGroup),
   });
 
-  // Direct control is keyless -- the agent (and you) drive the browser by hand. But the
-  // daemon can only start one when it's past startup/restore and under the fleet cap, so
-  // gate the item on that (``can_create`` from the fleet fetch): when not ready it's shown
-  // disabled with the reason in parentheses, and clicking it pops a modal with the reason
-  // rather than firing a create that would 503/409 or pile a launch onto a restore.
-  const canCreate = browserCreateReadiness.canCreate;
+  // Direct control is keyless -- the agent (and you) drive the browser by hand.
+  // The item stays ALWAYS clickable: a create is accepted even during
+  // startup/restore (it queues behind the serialized restore on the daemon's
+  // shared launch lock and just takes longer), so the button must not be
+  // gated on init. Cap (3) and duplicate names are enforced server-side and
+  // surfaced as inline errors in the New-browser modal. Clicking opens that
+  // modal pre-filled with a random name, mirroring "New agent".
   items.push({
-    label: canCreate ? "New browser" : `New browser (${browserCreateReadiness.reason})`,
-    disabled: !canCreate,
-    disabledReason: canCreate
-      ? undefined
-      : `Can't open a new browser yet -- ${browserCreateReadiness.reason}. Try again in a moment.`,
-    action: () => createBrowserTab(targetGroup),
+    label: "New browser",
+    action: () => {
+      newTabTargetGroup = targetGroup ?? null;
+      showNewBrowserModal = true;
+      m.redraw();
+    },
   });
 
   items.push({
@@ -2098,6 +2101,50 @@ export const DockviewWorkspace: m.Component = {
               },
               onCancel() {
                 showNewAgentModal = false;
+                newTabTargetGroup = null;
+              },
+            })
+          : null,
+
+        showNewBrowserModal
+          ? m(CreateBrowserModal, {
+              browserServiceUrl: getServiceUrl("browser"),
+              // Names of browsers already in the fleet, so the modal can
+              // pre-validate a typed name and reject a duplicate inline BEFORE
+              // opening a pane or calling create -- never optimistically
+              // touching the pane of the browser that already owns that name.
+              existingBrowserNames: browserFleet.map((b) => b.id),
+              // Fires the instant the user accepts a name, before the
+              // (serialized, possibly slow) launch finishes: open the
+              // optimistic 'starting' pane immediately so the tab appears
+              // showing "Browser starting…". We keep ``newTabTargetGroup``
+              // until the modal resolves so a later success/failure can still
+              // reference the same group. Returns whether THIS call created a
+              // new pane (vs deduped onto an existing one) so a later failure
+              // only tears down a pane this flow created.
+              onAccept(browserName: string): boolean {
+                return openBrowserSessionTab(browserName, newTabTargetGroup);
+              },
+              // Launch completed: the pane is already open, so just close the
+              // modal and refresh the fleet so the next dropdown lists it.
+              onCreated() {
+                showNewBrowserModal = false;
+                newTabTargetGroup = null;
+                refreshBrowserFleet();
+              },
+              // Create failed (invalid / duplicate / full / installing): tear
+              // down the optimistic pane ONLY if this flow created it
+              // (``createdPane``). If the open deduped onto a pre-existing
+              // browser's pane, leave that healthy pane untouched. The modal
+              // stays open with the daemon's error shown inline so the user
+              // can fix the name.
+              onFailed(browserName: string, createdPane: boolean) {
+                if (createdPane) {
+                  closeBrowserSessionTab(browserName);
+                }
+              },
+              onCancel() {
+                showNewBrowserModal = false;
                 newTabTargetGroup = null;
               },
             })
