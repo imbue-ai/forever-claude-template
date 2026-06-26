@@ -3,6 +3,7 @@ import os
 import queue
 import subprocess
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
@@ -13,18 +14,19 @@ from flask.testing import FlaskClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
-from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
-from imbue.minds.desktop_client.app import _build_mngr_host_state_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
 from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
+from imbue.minds.desktop_client.app import _is_discovery_fresh
+from imbue.minds.desktop_client.app import _provider_error_message_for_workspace
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.minds.desktop_client.app import _run_restart_sequence
+from imbue.minds.desktop_client.app import _should_emit_system_interface_status
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -41,6 +43,8 @@ from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
+from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -287,6 +291,32 @@ def test_post_login_redirects_to_login_when_unauthenticated(tmp_path: Path) -> N
     assert response.headers["location"] == "/login"
 
 
+def test_post_login_honors_safe_return_to(tmp_path: Path) -> None:
+    """A ``return_to`` (e.g. /create, from the remote-preset sign-in flow) wins."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", query_string={"return_to": "/create"}, follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/create"
+
+
+def test_post_login_ignores_unsafe_return_to(tmp_path: Path) -> None:
+    """An off-origin ``return_to`` is ignored and the default destination is used."""
+    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    client, auth_store = _create_test_desktop_client(
+        tmp_path=tmp_path, backend_resolver=backend_resolver, http_client=None
+    )
+    _authenticate_client(client=client, auth_store=auth_store)
+
+    response = client.get("/post-login", query_string={"return_to": "https://evil.com"}, follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+
+
 # -- Leased imbue_cloud host account-binding tests --
 
 
@@ -443,7 +473,7 @@ def test_landing_page_shows_create_form_after_discovery_finds_no_agents(tmp_path
 
     response = client.get("/")
     assert response.status_code == 200
-    assert "Create workspace" in response.text
+    assert "Where do you want to run your mind?" in response.text
     assert "git_url" in response.text
 
 
@@ -474,7 +504,9 @@ def test_create_page_shows_form(tmp_path: Path) -> None:
 
     response = client.get("/create")
     assert response.status_code == 200
-    assert "Create workspace" in response.text
+    assert "Where do you want to run your mind?" in response.text
+    assert 'data-preset="remote"' in response.text
+    assert 'data-preset="local"' in response.text
 
 
 def test_creation_status_returns_404_for_unknown_agent(tmp_path: Path) -> None:
@@ -628,6 +660,32 @@ def test_create_form_submit_passes_host_name(tmp_path: Path) -> None:
     agent_creator.wait_for_all()
 
 
+def test_create_form_submit_auto_names_next_mind(tmp_path: Path) -> None:
+    """POST /create with no host_name auto-generates the next free ``mind-N``.
+
+    The form no longer asks for a name. With ``mind-1`` already a known
+    workspace in the resolver, the create handler must gather existing names
+    across providers and resolve the new workspace to ``mind-2``.
+    """
+    existing_id = AgentId()
+    resolver = make_resolver_with_data(
+        make_agents_json(existing_id, labels={"workspace": "mind-1", "is_primary": "true"}),
+    )
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
+
+    response = client.post(
+        "/create",
+        data={"git_url": "file:///nonexistent-repo"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    creation_id = CreationId(response.headers["Location"].rsplit("/", 1)[-1])
+    info = agent_creator.get_creation_info(creation_id)
+    assert info is not None
+    assert info.host_name == "mind-2"
+    agent_creator.wait_for_all()
+
+
 def test_create_agent_api_passes_host_name(tmp_path: Path) -> None:
     """POST /api/create-agent passes host_name to the creator."""
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
@@ -724,67 +782,6 @@ def test_create_agent_api_rejects_empty_git_url(tmp_path: Path) -> None:
     assert response.status_code == 400
 
 
-def test_create_agent_api_accepts_onboarding_fields(tmp_path: Path) -> None:
-    """POST /api/create-agent accepts the optional onboarding fields without breaking.
-
-    Only ``user_data_preference`` is sent (a local-only side effect) so the
-    background apply thread doesn't spin on ``mngr message`` / ``mngr exec``.
-    """
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent",
-        json={"git_url": "file:///nonexistent-repo", "user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 200
-    assert "agent_id" in response.get_json()
-    agent_creator.wait_for_all()
-
-
-def test_onboarding_submit_returns_404_for_unknown_creation(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding returns 404 for an untracked creation."""
-    client, _, _ = _create_test_server_with_agent_creator(tmp_path)
-
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(CreationId()),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 404
-
-
-def test_onboarding_submit_accepts_answers_for_tracked_creation(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding accepts answers for a tracked creation."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    create_response = client.post("/api/create-agent", json={"git_url": "file:///nonexistent-repo"})
-    creation_id = create_response.get_json()["agent_id"]
-
-    # Only the data preference is submitted so the apply thread stays local.
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(creation_id),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 200
-    assert response.get_json()["status"] == "ok"
-    agent_creator.wait_for_all()
-
-
-def test_onboarding_submit_requires_authentication(tmp_path: Path) -> None:
-    """POST /api/create-agent/{id}/onboarding returns 403 without authentication."""
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
-    client, _ = _create_test_desktop_client(
-        tmp_path=tmp_path,
-        backend_resolver=backend_resolver,
-        http_client=None,
-    )
-
-    response = client.post(
-        "/api/create-agent/{}/onboarding".format(CreationId()),
-        json={"user_data_preference": "PRIVACY"},
-    )
-    assert response.status_code == 403
-
-
 def test_create_form_submit_rejects_invalid_host_name(tmp_path: Path) -> None:
     """POST /create with a host_name that fails HostName validation re-renders the form with an error."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
@@ -826,7 +823,11 @@ def test_create_agent_api_rejects_invalid_json(tmp_path: Path) -> None:
 
 
 def test_creating_page_shows_status(tmp_path: Path) -> None:
-    """GET /creating/{agent_id} shows the creating progress page."""
+    """GET /creating/{agent_id} shows the loading/progress page directly.
+
+    The page no longer interposes any onboarding questions before the
+    setting-up screen, so it goes straight to the loading view.
+    """
     client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
 
     agent_id = agent_creator.start_creation("file:///nonexistent-repo")
@@ -834,6 +835,10 @@ def test_creating_page_shows_status(tmp_path: Path) -> None:
     response = client.get("/creating/{}".format(agent_id))
     assert response.status_code == 200
     assert "Creating your project" in response.text
+    assert "Setting up your workspace" in response.text
+    # The onboarding question UI was removed, so none of its markers render.
+    assert "data-question" not in response.text
+    assert 'class="opt' not in response.text
     agent_creator.wait_for_all()
 
 
@@ -1165,42 +1170,45 @@ def test_create_form_does_not_show_env_file_checkbox(tmp_path: Path) -> None:
     assert "include_env_file" not in response.text
 
 
-def test_create_form_submit_rejects_imbue_cloud_compute_without_account(tmp_path: Path) -> None:
-    """Selecting IMBUE_CLOUD compute without an account is rejected with a clear message."""
+def test_create_form_submit_redirects_imbue_cloud_compute_without_account_to_signin(tmp_path: Path) -> None:
+    """IMBUE_CLOUD compute without any account routes into the sign-in/up flow.
+
+    With no signed-in account at all, the remote compute path is unusable, so
+    rather than re-rendering an error the server sends the user to sign up (with
+    a link back to the picker).
+    """
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "IMBUE_CLOUD",
             "ai_provider": "SUBSCRIPTION",
             "account_id": "",
         },
         follow_redirects=False,
     )
-    assert response.status_code == 400
-    assert "imbue_cloud requires an account" in response.text
+    assert response.status_code == 303
+    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
 
 
-def test_create_form_submit_rejects_imbue_cloud_ai_without_account(tmp_path: Path) -> None:
-    """Selecting IMBUE_CLOUD AI provider without an account is rejected."""
+def test_create_form_submit_redirects_imbue_cloud_ai_without_account_to_signin(tmp_path: Path) -> None:
+    """IMBUE_CLOUD AI provider without any account routes into the sign-in/up flow."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "DOCKER",
             "ai_provider": "IMBUE_CLOUD",
             "account_id": "",
         },
         follow_redirects=False,
     )
-    assert response.status_code == 400
-    assert "imbue_cloud requires an account" in response.text
+    assert response.status_code == 303
+    assert response.headers["location"] == "/auth/signup?return_to=%2Fcreate"
 
 
 def test_create_form_submit_rejects_api_key_provider_without_key(tmp_path: Path) -> None:
@@ -1311,14 +1319,16 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
     option as ``selected`` and must NOT show any other account as selected."""
     client, _, _ = _create_test_server_with_agent_creator(tmp_path)
 
-    # Trigger a validation error (IMBUE_CLOUD AI without an account).
+    # Trigger a re-rendering validation error: AI provider API_KEY with no key.
+    # (imbue_cloud-without-account now redirects to sign-in instead of
+    # re-rendering, so it no longer exercises this re-render path.)
     response = client.post(
         "/create",
         data={
             "git_url": "file:///nonexistent-repo",
-            "host_name": "my-agent",
             "launch_mode": "DOCKER",
-            "ai_provider": "IMBUE_CLOUD",
+            "ai_provider": "API_KEY",
+            "anthropic_api_key": "",
             "account_id": "",
         },
         follow_redirects=False,
@@ -1326,8 +1336,8 @@ def test_create_form_submit_preserves_account_id_on_validation_error(tmp_path: P
     assert response.status_code == 400
     # The "No account (private project)" option is selected when default_account_id is empty.
     assert 'value=""' in response.text and "No account" in response.text
-    # And the IMBUE_CLOUD warning should be present.
-    assert "imbue_cloud requires an account" in response.text
+    # And the API-key validation error should be present.
+    assert "Anthropic API key is required" in response.text
 
 
 def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
@@ -1407,6 +1417,65 @@ def test_chrome_events_sse_returns_workspaces_when_authenticated(tmp_path: Path)
     workspaces = _build_workspace_list(backend_resolver)
     assert len(workspaces) == 1
     assert workspaces[0]["id"] == str(agent_id)
+
+
+class _NoopRemediator(ProducerRemediator):
+    """A producer remediator whose remediations do nothing (the BLOCKED path never calls them)."""
+
+    def bounce(self) -> None:
+        pass
+
+    def restart(self) -> None:
+        pass
+
+
+def test_chrome_events_sse_emits_discovery_health_blocked_on_connect(tmp_path: Path) -> None:
+    """A BLOCKED watchdog makes the chrome SSE emit a discovery_health payload on connect.
+
+    The connect-time batch is emitted before the generator's wait loop, so
+    pre-setting the shutdown event lets the (otherwise infinite) stream finish
+    after that batch and keeps the test client from blocking.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    watchdog = DiscoveryHealthWatchdog(remediator=_NoopRemediator())
+    # Force the terminal BLOCKED tier so the connect-time batch surfaces it.
+    watchdog.record_consumer_death()
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        discovery_health_watchdog=watchdog,
+    )
+    # End the stream right after its connect-time batch so the client doesn't block.
+    get_state(app).shutdown_event.set()
+    client = app.test_client()
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/_chrome/events")
+
+    assert response.status_code == 200
+    assert '"type": "discovery_health"' in response.text
+    assert '"state": "blocked"' in response.text
+
+
+def test_chrome_events_sse_omits_discovery_health_when_healthy(tmp_path: Path) -> None:
+    """A HEALTHY watchdog surfaces nothing -- the RECONNECTING/healthy tiers are silent."""
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    watchdog = DiscoveryHealthWatchdog(remediator=_NoopRemediator())
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        discovery_health_watchdog=watchdog,
+    )
+    get_state(app).shutdown_event.set()
+    client = app.test_client()
+    _authenticate_client(client, auth_store)
+
+    response = client.get("/_chrome/events")
+
+    assert response.status_code == 200
+    assert "discovery_health" not in response.text
 
 
 def test_destroying_agent_ids_returns_ids_with_live_destroy(tmp_path: Path) -> None:
@@ -1635,6 +1704,39 @@ def test_auth_login_page_without_message_query_param(tmp_path: Path) -> None:
     assert "You need to sign in to Imbue" not in response.text
 
 
+def test_auth_page_with_return_to_shows_back_link_and_explainer(tmp_path: Path) -> None:
+    """GET /auth/signup?return_to=/create shows a back link + the remote explainer."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signup", query_string={"return_to": "/create"})
+    assert response.status_code == 200
+    # Back link to the picker.
+    assert "Back to mind setup" in response.text
+    assert 'href="/create"' in response.text
+    # Default explainer banner (no explicit message supplied).
+    assert "run your mind on Imbue Cloud" in response.text
+
+
+def test_auth_signin_modal_page_renders_overlay_with_auth_form(tmp_path: Path) -> None:
+    """GET /auth/signin-modal serves the overlay sign-in page (transparent
+    backdrop + the shared auth form) loaded into the shared modal view."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signin-modal")
+    assert response.status_code == 200
+    assert 'id="signin-modal-backdrop"' in response.text
+    assert 'id="signin-form"' in response.text
+    assert "run your mind on Imbue Cloud" in response.text
+
+
+def test_auth_page_ignores_unsafe_return_to(tmp_path: Path) -> None:
+    """An off-origin return_to is dropped: no back link to it, no explainer."""
+    client = _create_test_client_with_auth_routes(tmp_path)
+    response = client.get("/auth/signup", query_string={"return_to": "https://evil.com"})
+    assert response.status_code == 200
+    assert "Back to mind setup" not in response.text
+    assert "evil.com" not in response.text
+    assert "run your mind on Imbue Cloud" not in response.text
+
+
 def test_accounts_page_requires_auth(tmp_path: Path) -> None:
     """The /accounts page requires authentication."""
     client, _ = _create_test_client_with_stores(tmp_path)
@@ -1661,6 +1763,37 @@ def test_accounts_page_shows_logged_in_accounts(tmp_path: Path) -> None:
     response = client.get("/accounts")
     assert response.status_code == 200
     assert "test@example.com" in response.text
+
+
+def test_accounts_page_no_longer_hosts_error_reporting_toggles(tmp_path: Path) -> None:
+    """The error-reporting toggles moved off the manage-accounts page to the dedicated Settings page."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/accounts")
+    assert response.status_code == 200
+    assert "report-errors-toggle" not in response.text
+
+
+def test_settings_page_requires_auth(tmp_path: Path) -> None:
+    """The /settings page requires authentication."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/settings")
+    assert response.status_code == 403
+
+
+def test_settings_page_hosts_error_reporting_toggles(tmp_path: Path) -> None:
+    """The Settings page hosts the per-machine error-reporting toggles, seeded from config."""
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/settings")
+    assert response.status_code == 200
+    assert "Report unexpected errors" in response.text
+    report_input = response.text.split('id="report-errors-toggle"')[1].split(">")[0]
+    assert "checked" in report_input
+    # With reporting on, the include-logs row is revealed (not ``hidden``).
+    logs_row = response.text.split('id="include-logs-row"')[1].split(">")[0]
+    assert "hidden" not in logs_row
 
 
 def test_workspace_settings_page_requires_auth(tmp_path: Path) -> None:
@@ -2001,6 +2134,263 @@ def test_auto_open_toggle(tmp_path: Path) -> None:
     assert config.get_auto_open_requests_panel() is False
 
 
+# -- error-reporting consent + settings tests --
+
+
+def test_landing_shows_login_not_consent_when_unauthenticated(tmp_path: Path) -> None:
+    """The consent screen sits after login: an unauthenticated "/" shows the login prompt, not consent."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Help improve Minds" not in response.text
+    assert "Login" in response.text
+
+
+def test_landing_shows_consent_screen_after_login_when_unanswered(tmp_path: Path) -> None:
+    """Once authenticated, "/" shows the consent screen until it is answered."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Help improve Minds" in response.text
+    assert "Report unexpected errors" in response.text
+
+
+def test_welcome_continue_without_account_routes_through_consent(tmp_path: Path) -> None:
+    """ "Continue without an account" sends the user to "/" so the consent screen is offered.
+
+    Reporting is not gated behind an Imbue account: the account-less skip path lands on "/", whose
+    handler shows the "Help improve Minds" consent screen (when unanswered) before the create form.
+    """
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    welcome = client.get("/welcome")
+    assert welcome.status_code == 200
+    # Isolate the full opening <a> tag that carries the skip-account id, regardless of
+    # attribute order, and assert it links to "/" (the consent-bearing landing route)
+    # rather than straight to "/create".
+    before, after = welcome.text.split('id="skip-account-btn"', 1)
+    skip_tag = before.rsplit("<a", 1)[1] + after.split(">", 1)[0]
+    assert 'href="/"' in skip_tag
+    # Following that link while consent is unanswered shows the consent screen.
+    landing = client.get("/")
+    assert "Help improve Minds" in landing.text
+
+
+def test_consent_page_requires_auth(tmp_path: Path) -> None:
+    """GET /consent bounces an unauthenticated request to the login page."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/consent")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login"
+
+
+def test_consent_submit_requires_auth(tmp_path: Path) -> None:
+    """POST /consent rejects an unauthenticated request and persists nothing."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
+    assert response.status_code == 403
+    assert MindsConfig(data_dir=tmp_path).get_error_reporting_consent_given() is False
+
+
+def test_post_login_routes_to_landing_while_consent_unanswered(tmp_path: Path) -> None:
+    """While consent is unanswered, post-login routes to "/" (which shows consent), not /accounts."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-test-123", email="test@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+    response = client.get("/post-login", follow_redirects=False)
+    assert response.status_code == 302
+    assert response.headers["location"] == "/"
+
+
+def test_consent_submit_records_choices_and_unblocks_landing(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post("/consent", json={"report_unexpected_errors": True, "include_logs": True})
+    assert response.status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_error_reporting_consent_given() is True
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_include_error_logs() is True
+
+    # With consent answered, the authenticated "/" no longer shows the consent screen.
+    landing = client.get("/")
+    assert "Help improve Minds" not in landing.text
+
+
+def test_consent_submit_does_not_persist_logs_without_reporting(tmp_path: Path) -> None:
+    """ "Include logs" is only meaningful with reporting on, so it is not persisted otherwise."""
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+    response = client.post("/consent", json={"report_unexpected_errors": False, "include_logs": True})
+    assert response.status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_error_reporting_consent_given() is True
+    assert config.get_report_unexpected_errors() is False
+    assert config.get_include_error_logs() is False
+
+
+def test_error_reporting_settings_requires_auth(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True})
+    assert response.status_code == 403
+    # Nothing was persisted.
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is False
+
+
+def test_error_reporting_settings_persist_each_toggle(tmp_path: Path) -> None:
+    client, auth_store = _create_test_client_with_stores(tmp_path)
+    _authenticate_client(client, auth_store)
+
+    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": True}).status_code == 200
+    assert client.post("/_chrome/error-reporting", json={"include_logs": True}).status_code == 200
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is True
+    assert config.get_include_error_logs() is True
+
+    # A partial update touches only the named key.
+    assert client.post("/_chrome/error-reporting", json={"report_unexpected_errors": False}).status_code == 200
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_report_unexpected_errors() is False
+    assert config.get_include_error_logs() is True
+
+
+# -- get-help / report-a-bug tests --
+
+
+def test_help_page_renders_report_option(tmp_path: Path) -> None:
+    """The help page renders the report-a-bug flow; the agent-help option is present but disabled."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert "Report a bug to Imbue" in response.text
+    assert "Have an agent help fix the problem" in response.text
+    # The agent-help radio is disabled in this phase.
+    agent_radio = response.text.split('value="agent"')[1].split(">")[0]
+    assert "disabled" in agent_radio
+
+
+def test_help_page_hides_include_logs_checkbox_when_setting_on(tmp_path: Path) -> None:
+    """With the persistent include-logs setting on, logs are always attached and the checkbox is hidden."""
+    MindsConfig(data_dir=tmp_path).set_include_error_logs(True)
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert 'id="help-include-logs"' not in response.text
+
+
+def test_help_page_shows_include_logs_checkbox_when_setting_off(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert 'id="help-include-logs"' in response.text
+
+
+def test_help_page_shows_checkboxes_inline_and_report_id_affordance(tmp_path: Path) -> None:
+    """The diagnostics checkboxes are top-level (no Advanced disclosure) and the confirmation can show
+    a copyable report ID."""
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    # Checkboxes are rendered directly, not hidden behind an Advanced <details> disclosure.
+    assert "<details" not in response.text
+    assert 'id="help-app-diagnostics"' in response.text
+    assert 'id="help-remote-access"' in response.text
+    # The confirmation hosts a copyable report-ID slot populated from the response's event_id.
+    assert 'id="help-event-id"' in response.text
+    assert 'id="help-copy-id-btn"' in response.text
+
+
+def test_help_report_requires_description(tmp_path: Path) -> None:
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post("/help/report", json={"description": "  "})
+    assert response.status_code == 400
+
+
+def test_help_report_accepts_a_description(tmp_path: Path) -> None:
+    # Sentry is not initialized in tests, so the report is collected and the route returns ok with a
+    # null event_id (nothing was actually transmitted). This exercises the full collect path end to end.
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.post(
+        "/help/report",
+        json={"description": "the app froze", "include_app_diagnostics": True, "remote_access": True},
+    )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["event_id"] is None
+
+
+def test_served_page_omits_frontend_sentry_when_reporting_off(tmp_path: Path) -> None:
+    # Default shipped state: report_unexpected_errors is off, so a page served by the backend must
+    # not boot the frontend Sentry SDK. This is the unified gate -- the browser honors the same user
+    # setting as the backend rather than the old MINDS_SENTRY_ENABLED env var.
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert "minds-sentry-config" not in response.text
+    assert "sentry.browser.min.js" not in response.text
+
+
+def test_served_page_emits_frontend_sentry_when_reporting_on(tmp_path: Path) -> None:
+    # With the user's report_unexpected_errors setting on, a served page boots the frontend Sentry
+    # SDK. The setting is read live per render, so flipping it (as the consent screen / settings do)
+    # takes effect on the next page load without restarting the backend.
+    MindsConfig(data_dir=tmp_path).set_report_unexpected_errors(True)
+    client, _ = _create_test_client_with_stores(tmp_path)
+    response = client.get("/help")
+    assert response.status_code == 200
+    assert '<script type="application/json" id="minds-sentry-config">' in response.text
+    assert "sentry.browser.min.js" in response.text
+
+
+def _create_test_client_with_api_key(tmp_path: Path, api_key: str) -> FlaskClient:
+    """Build a client with the /api/v1 blueprint mounted and a known central API key."""
+    auth_store = FileAuthStore(data_directory=tmp_path / "auth")
+    session_store = make_session_store_for_test(tmp_path)
+    minds_config = MindsConfig(data_dir=tmp_path)
+    app = create_desktop_client(
+        auth_store=auth_store,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        http_client=None,
+        session_store=session_store,
+        minds_config=minds_config,
+        paths=WorkspacePaths(data_dir=tmp_path),
+        minds_api_key=api_key,
+    )
+    return app.test_client()
+
+
+def test_api_v1_bug_report_requires_bearer_token(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(f"/api/v1/agents/{AgentId()}/report", json={"description": "boom"})
+    assert response.status_code == 401
+
+
+def test_api_v1_bug_report_accepts_authorized_request(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(
+        f"/api/v1/agents/{AgentId()}/report",
+        json={"description": "agent saw an error"},
+        headers={"Authorization": "Bearer secret-key"},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+
+
+def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
+    client = _create_test_client_with_api_key(tmp_path, api_key="secret-key")
+    response = client.post(
+        f"/api/v1/agents/{AgentId()}/report",
+        json={"description": ""},
+        headers={"Authorization": "Bearer secret-key"},
+    )
+    assert response.status_code == 400
+
+
 # -- system-interface restart + recovery tests --
 
 
@@ -2023,103 +2413,137 @@ def test_build_mngr_start_argv_targets_the_agent() -> None:
     assert argv[:3] == ["/usr/local/bin/mngr", "start", str(aid)]
 
 
-def test_build_mngr_host_state_argv_scopes_to_workspace_and_continues_on_error() -> None:
-    """The host-state probe filters to just this workspace's agents and
-    tolerates per-host failures so a broken sibling host doesn't blank
-    out the diagnostic."""
-    agent = AgentId.generate()
-    services = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, None)
-    assert argv[:5] == ["/usr/local/bin/mngr", "list", "--format", "json", "--quiet"]
-    # CEL include matches both the chat agent and the system-services agent.
-    assert "--include" in argv
-    include_value = argv[argv.index("--include") + 1]
-    assert f'id == "{agent}"' in include_value
-    assert f'id == "{services}"' in include_value
-    # --on-error continue is required so one broken host does not abort the
-    # listing for the rest.
-    assert argv[argv.index("--on-error") + 1] == "continue"
-    # No provider known -> discovery is not scoped to a provider.
-    assert "--provider" not in argv
+def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider() -> None:
+    """The provider error message is attributed by exact provider name.
 
-
-def test_build_mngr_host_state_argv_omits_services_id_when_unresolved() -> None:
-    """When the services-agent id is unknown, the filter degenerates to just
-    the chat agent's id -- the listing is still scoped, just with one term."""
-    agent = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, None, None)
-    include_value = argv[argv.index("--include") + 1]
-    assert include_value == f'id == "{agent}"'
-
-
-def test_build_mngr_host_state_argv_scopes_discovery_to_provider_when_known() -> None:
-    """When the workspace's provider is known, the probe passes ``--provider`` so
-    discovery only queries that provider.
-
-    ``--provider`` is a discovery fan-out control (unlike the post-discovery CEL
-    ``--include``), so an unrelated provider being unreachable can no longer make
-    this listing exit nonzero and blank out the workspace's own host state.
+    This is the per-provider keying that keeps a docker mind's recovery from
+    being misclassified during a simultaneous imbue_cloud outage: only an error
+    whose provider name matches this workspace's is used.
     """
-    agent = AgentId.generate()
-    services = AgentId.generate()
-    argv = _build_mngr_host_state_argv("/usr/local/bin/mngr", agent, services, "docker")
-    assert argv[argv.index("--provider") + 1] == "docker"
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="could not reach Imbue Cloud",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    matched = _provider_error_message_for_workspace(errors, "imbue_cloud_acme")
+    assert matched == "could not reach Imbue Cloud"
 
 
-def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
-    """Legacy-shape wrapper around the probe-list response.
+def test_provider_error_message_for_workspace_ignores_other_providers() -> None:
+    """An error for a different provider is never blamed on this workspace."""
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="down",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    assert _provider_error_message_for_workspace(errors, "docker") is None
 
-    Projects the new "container running?" probe + dispatch_tier classification
-    back onto the prior ``{"reachable": ..., "host_offline": ...}`` contract
-    so the existing host-state classification cases stay covered.
+
+def test_provider_error_message_for_workspace_is_none_when_provider_unknown() -> None:
+    """Pre-discovery (provider unknown), we cannot attribute any error to this workspace."""
+    errors = {
+        ProviderInstanceName("imbue_cloud_acme"): DiscoveryError(
+            type_name="ProviderUnavailableError",
+            message="down",
+            provider_name=ProviderInstanceName("imbue_cloud_acme"),
+        ),
+    }
+    assert _provider_error_message_for_workspace(errors, None) is None
+
+
+def test_is_discovery_fresh_distinguishes_recent_from_stale_and_missing() -> None:
+    """Freshness gates the recovery redirect: only a recent snapshot is trustworthy."""
+    now = datetime.now(timezone.utc)
+    assert _is_discovery_fresh(now) is True
+    # A snapshot well past the freshness window (a stalled pipeline) is stale.
+    assert _is_discovery_fresh(now - timedelta(minutes=5)) is False
+    # No snapshot at all (e.g. before initial discovery) cannot be trusted.
+    assert _is_discovery_fresh(None) is False
+
+
+def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> datetime:
+    """Drive ``agent_id`` to STUCK via the real probe path and return its onset.
+
+    A zero stuck-threshold makes the first probe failure stick immediately, so the
+    outage onset is recorded deterministically without sleeping.
     """
-    response = _recovery_probe.build_host_health_response(
-        list_json=list_json,
-        agent_id=agent_id,
-        services_agent_id=None,
-        in_container_stdout=None,
-        plugin_resolver_services={},
+    tracker.record_failure(agent_id)
+    tracker.record_probe_failure(agent_id)
+    assert tracker.get_health(agent_id) == AgentHealth.STUCK
+    onset = tracker.get_failure_run_started_wall_at(agent_id)
+    assert onset is not None
+    return onset
+
+
+def test_should_emit_system_interface_status_gates_stuck_on_post_onset_snapshot() -> None:
+    """The recovery redirect waits for a discovery snapshot taken *after* the outage began.
+
+    STUCK is the only status the chrome redirects on. A snapshot that predates the
+    outage still carries the pre-outage host state (a just-stopped container still
+    reads RUNNING), so it must not promote the redirect -- only a snapshot at or
+    after the outage onset does. Other statuses never gate the redirect.
+    """
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    agent_id = AgentId.generate()
+
+    # Non-STUCK statuses do not drive the redirect, so they are never gated --
+    # even with no discovery snapshot and no recorded onset.
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.RESTARTING) is True
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.RESTART_FAILED) is True
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.HEALTHY) is True
+
+    onset = _drive_to_stuck_with_onset(tracker, agent_id)
+
+    # A recent snapshot that nonetheless predates the outage is the exact bug case:
+    # it is well within the absolute freshness window but still shows the pre-outage
+    # host state, so it must stay suppressed.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset - timedelta(seconds=1)
     )
-    for probe in response.probes:
-        if "container running" in probe.question:
-            return {
-                "reachable": probe.answer == _recovery_probe.ProbeAnswer.YES,
-                "host_offline": probe.answer == _recovery_probe.ProbeAnswer.NO,
-            }
-    return {"reachable": False, "host_offline": False}
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+
+    # A snapshot taken after the outage began reflects it; promote the redirect.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=onset + timedelta(seconds=1)
+    )
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
 
 
-def test_classify_host_health_running_host_is_reachable() -> None:
-    """A RUNNING host classifies as reachable -- the surgical restart applies."""
-    aid = AgentId.generate()
-    list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": "RUNNING"}}]})
-    assert _classify_host_health_compat(list_json, aid) == {"reachable": True, "host_offline": False}
+def test_should_emit_system_interface_status_without_onset_falls_back_to_age() -> None:
+    """Without a recorded onset, STUCK gating falls back to the absolute-age freshness check.
 
-
-def test_classify_host_health_stopped_host_is_offline() -> None:
-    """A STOPPED (or crashed) host classifies as offline -- safe to auto host-restart."""
-    aid = AgentId.generate()
-    for state in ("STOPPED", "CRASHED", "FAILED", "STOPPING"):
-        list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": state}}]})
-        assert _classify_host_health_compat(list_json, aid) == {"reachable": False, "host_offline": True}, state
-
-
-def test_classify_host_health_ambiguous_state_is_neither() -> None:
-    """An ambiguous host state (or a missing agent / bad output) is neither.
-
-    The recovery page then falls back to a confirmed manual restart rather
-    than auto-dispatching a potentially destructive host restart.
+    Only the force-``mark_stuck`` path (used in tests) reaches STUCK without a
+    probe-failure run, so there is no onset to compare against; the gate then
+    behaves as before -- cold start suppresses, a recent snapshot promotes. A
+    missing tracker entirely is treated the same way.
     """
-    aid = AgentId.generate()
-    # An ambiguous lifecycle state (host may still be running agents).
-    starting = json.dumps({"agents": [{"id": str(aid), "host": {"state": "STARTING"}}]})
-    assert _classify_host_health_compat(starting, aid) == {"reachable": False, "host_offline": False}
-    # The probed agent is absent from the listing.
-    other = json.dumps({"agents": [{"id": "agent-other", "host": {"state": "STOPPED"}}]})
-    assert _classify_host_health_compat(other, aid) == {"reachable": False, "host_offline": False}
-    # mngr produced no usable output at all.
-    assert _classify_host_health_compat(None, aid) == {"reachable": False, "host_offline": False}
-    assert _classify_host_health_compat("not json", aid) == {"reachable": False, "host_offline": False}
+    resolver = MngrCliBackendResolver()
+    tracker = SystemInterfaceHealthTracker()
+    agent_id = AgentId.generate()
+    tracker.mark_stuck(agent_id)
+    assert tracker.get_failure_run_started_wall_at(agent_id) is None
+
+    # Cold start, no snapshot yet: suppressed.
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+    # A recent snapshot promotes via the age fallback.
+    resolver.update_providers(
+        providers=(), error_by_provider_name={}, last_full_snapshot_at=datetime.now(timezone.utc)
+    )
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is True
+    # A stale snapshot (a stalled pipeline) suppresses it again.
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={},
+        last_full_snapshot_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    assert _should_emit_system_interface_status(resolver, tracker, agent_id, AgentHealth.STUCK) is False
+    # No tracker at all behaves identically to a missing onset.
+    assert _should_emit_system_interface_status(resolver, None, agent_id, AgentHealth.STUCK) is False
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
@@ -2150,6 +2574,10 @@ def test_recovery_page_renders_for_authenticated_user(tmp_path: Path) -> None:
     # reports the container reachable.
     assert "Restart workspace" in response.text
     assert "restart-system-interface" in response.text
+    # The recovery page offers an in-page report button that opens the get-help modal
+    # via the ``minds:open-help`` relay message.
+    assert 'id="recovery-report-btn"' in response.text
+    assert "minds:open-help" in response.text
 
 
 def test_recovery_page_drops_open_redirect_return_to(tmp_path: Path) -> None:
