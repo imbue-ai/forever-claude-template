@@ -11,6 +11,15 @@
  * and duplicates / a full fleet (409), and this modal surfaces the daemon's
  * error verbatim inline rather than alerting.
  *
+ * Name validation (two layers, like the duplicate guard below). This modal
+ * pre-validates the typed name against the SAME rule the daemon enforces
+ * (``names.is_valid_browser_name``): lowercase alphanumeric words joined by
+ * single dashes, 1..40 chars, no leading/trailing/double dash, not all-digits.
+ * An invalid name shows an inline error and never opens a pane or POSTs, so the
+ * user learns the rule immediately rather than watching an optimistic pane
+ * appear then vanish. The daemon still validates authoritatively (its 400 is
+ * re-surfaced via the re-opened modal below); this is just a fast, local guard.
+ *
  * Duplicate-name guard (two layers): a typed name that already names a live
  * browser must NOT reach the optimistic-open path, because opening the pane for
  * an existing name would dedup onto that browser's pane and a subsequent 409
@@ -33,13 +42,49 @@
  *   - on success it calls ``onCreated(finalName)`` (the user always typed/accepted
  *     a name here, so it matches the already-open pane) to refresh the fleet list;
  *   - on failure (400 invalid / 409 duplicate-or-full / 503 installing / network)
- *     it calls ``onFailed(name)`` so the parent tears down the optimistic pane
- *     (only when this flow created it). Because the modal is already closed, the
- *     failure surfaces by the pane disappearing rather than an inline message.
+ *     it calls ``onFailed(name, createdPane, reason)`` so the parent (1) tears down
+ *     the optimistic pane (only when this flow created it) and (2) RE-OPENS this
+ *     modal pre-filled with the typed name and the daemon's ``reason`` shown inline.
+ *     The user must always learn WHY a browser didn't open -- a silently vanishing
+ *     pane is not acceptable -- so the reason is carried out of the background POST
+ *     and surfaced verbatim. ``reason`` is the daemon's ``{"error": ...}`` body for a
+ *     400/409/503, or a generic network message when the POST never reached the
+ *     daemon.
+ *
+ * Re-open pre-fill: the parent re-mounts the modal with ``initialName`` (the name
+ * the user typed) and ``initialError`` (the daemon's reason). When ``initialName``
+ * is set the modal does NOT fetch a fresh random name -- it keeps what the user
+ * typed so they can edit just the offending part and retry.
  */
 
 import m from "mithril";
 import { apiUrl } from "../base-path";
+
+// Mirrors the daemon's ``names.is_valid_browser_name``: lowercase alphanumeric
+// words joined by single dashes, 1..40 chars, no leading/trailing/double dash.
+// Kept here (not the regex inline) so the rule reads the same as the Python one.
+const BROWSER_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const MAX_BROWSER_NAME_LEN = 40;
+
+// Validate a typed name against the daemon's rule. Returns ``null`` when valid,
+// or a short inline error message explaining what is wrong. Pure-numeric names
+// are rejected (the daemon rejects them too, so an upgraded workspace's old
+// numeric profile dirs never resurrect as named browsers).
+export function validateBrowserName(name: string): string | null {
+  if (!name) {
+    return "Enter a browser name.";
+  }
+  if (name.length > MAX_BROWSER_NAME_LEN) {
+    return `Name must be at most ${MAX_BROWSER_NAME_LEN} characters.`;
+  }
+  if (/^[0-9]+$/.test(name)) {
+    return "Name cannot be only digits.";
+  }
+  if (!BROWSER_NAME_RE.test(name)) {
+    return "Use lowercase letters, numbers, and single dashes (e.g. alex-smith).";
+  }
+  return null;
+}
 
 interface CreateBrowserModalAttrs {
   // Service base URL for the browser daemon (``/service/browser/``). Passed in
@@ -49,6 +94,13 @@ interface CreateBrowserModalAttrs {
   // "active browser" dropdown). Used to pre-validate a typed name: a duplicate
   // is rejected inline before any pane is opened or any create is attempted.
   existingBrowserNames: string[];
+  // When set, the modal is being RE-OPENED after a background create failed: it
+  // pre-fills the input with this name (the one the user typed) instead of
+  // fetching a fresh random name, so the user can fix and retry.
+  initialName?: string;
+  // The daemon's failure reason (or a network message) to show inline when the
+  // modal is re-opened after a failed create. Paired with ``initialName``.
+  initialError?: string | null;
   // Fired the instant the user accepts a non-empty name, BEFORE the POST
   // resolves, so the parent can open the optimistic 'starting' pane keyed by
   // this name. Returns ``true`` when a NEW pane was created, ``false`` when the
@@ -60,9 +112,12 @@ interface CreateBrowserModalAttrs {
   // the user always supplies one here).
   onCreated: (browserName: string) => void;
   // Fired when the create POST fails (400 invalid / 409 duplicate-or-full /
-  // 503 still installing). ``createdPane`` echoes the ``onAccept`` return so the
-  // parent only closes the optimistic pane when this flow actually created it.
-  onFailed: (browserName: string, createdPane: boolean) => void;
+  // 503 still installing / network). ``createdPane`` echoes the ``onAccept``
+  // return so the parent only closes the optimistic pane when this flow actually
+  // created it. ``reason`` is the daemon's error text (or a network message) so
+  // the parent can re-open the modal pre-filled and surface WHY the create
+  // failed -- the user must never be left with a pane that silently vanished.
+  onFailed: (browserName: string, createdPane: boolean, reason: string) => void;
   onCancel: () => void;
 }
 
@@ -102,6 +157,18 @@ export function CreateBrowserModal(): m.Component<CreateBrowserModalAttrs> {
       return;
     }
 
+    // Pre-validate the NAME SYNTAX against the daemon's own rule, before opening a
+    // pane or calling create. A bad name shows the inline error and stops here, so
+    // the user learns the rule immediately rather than watching an optimistic pane
+    // flash up and vanish on the daemon's 400. (The daemon still validates
+    // authoritatively; its 400 is re-surfaced via onFailed if anything slips past.)
+    const nameError = validateBrowserName(chosen);
+    if (nameError !== null) {
+      error = nameError;
+      m.redraw();
+      return;
+    }
+
     loading = true;
     error = null;
 
@@ -114,7 +181,8 @@ export function CreateBrowserModal(): m.Component<CreateBrowserModalAttrs> {
 
     // Background POST: registers the browser server-side (returns fast) and kicks off
     // the serialized launch. The modal is already gone, so success just refreshes the
-    // fleet list and failure tears the optimistic pane back down.
+    // fleet list; failure tears the optimistic pane back down AND re-opens this modal
+    // pre-filled with the daemon's reason, so the user always learns why it failed.
     void (async () => {
       let response: globalThis.Response;
       try {
@@ -124,7 +192,11 @@ export function CreateBrowserModal(): m.Component<CreateBrowserModalAttrs> {
           body: JSON.stringify({ name: chosen }),
         });
       } catch {
-        attrs.onFailed(chosen, createdPane);
+        attrs.onFailed(
+          chosen,
+          createdPane,
+          "Could not reach the browser service. Check your connection and try again.",
+        );
         return;
       }
       const data = (await response.json().catch(() => ({}))) as { name?: string; error?: string };
@@ -133,14 +205,25 @@ export function CreateBrowserModal(): m.Component<CreateBrowserModalAttrs> {
         return;
       }
       // 400 invalid / 409 duplicate-or-full / 503 installing: the registration was
-      // rejected, so tear down the optimistic pane (only if this flow created it).
-      attrs.onFailed(chosen, createdPane);
+      // rejected, so tear down the optimistic pane (only if this flow created it) and
+      // surface the daemon's reason verbatim (fallback to a generic line if absent).
+      const reason =
+        typeof data.error === "string" && data.error.trim() ? data.error : "The browser could not be created.";
+      attrs.onFailed(chosen, createdPane, reason);
     })();
   }
 
   return {
-    oninit() {
-      fetchRandomName();
+    oninit(vnode) {
+      // Re-opened after a failed create: keep the name the user typed and show the
+      // daemon's reason inline, so they can fix and retry. Only fetch a fresh random
+      // name on a clean open (no ``initialName``).
+      if (typeof vnode.attrs.initialName === "string" && vnode.attrs.initialName) {
+        name = vnode.attrs.initialName;
+        error = vnode.attrs.initialError ?? null;
+      } else {
+        fetchRandomName();
+      }
     },
 
     view(vnode) {

@@ -47,6 +47,7 @@ import os
 import queue
 import shutil
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine
 from pathlib import Path
 from typing import Any, Literal
@@ -136,6 +137,13 @@ _CAST_QUEUE_MAX_SIZE = 16
 # Each live session = a headless Chromium + a Playwright observer; cap the concurrent
 # count so a small compute (e.g. 4 GB) can't be OOM-ed. Override via BROWSER_MAX_SESSIONS.
 _MAX_SESSIONS = int(os.environ.get("BROWSER_MAX_SESSIONS", "3"))
+
+# Names whose background launch FAILED are remembered briefly so a late/retrying optimistic
+# viewer (still in 1013 reconnect-backoff when the launch failed, so it never registered a
+# cast queue and missed the launch_failed broadcast) is closed terminally (1008) instead of
+# told "try again" forever. A small ring is plenty: the cap is 3, and an entry only needs to
+# outlive a viewer's reconnect backoff (a few seconds). See BrowserSessionManager.
+_FAILED_LAUNCH_MEMORY = int(os.environ.get("BROWSER_FAILED_LAUNCH_MEMORY", "32"))
 
 # Hard ceilings on a single browser-use task so a hung or non-cancel-safe run can
 # never pin a browser forever (the connection-disconnect path is the primary
@@ -760,6 +768,33 @@ class LiveBrowser(MutableModel):
         finally:
             self._send_in_flight = False
 
+    async def _capture_one_frame(self) -> str | None:
+        """Grab a single screencast-shaped JPEG (base64) of the active tab on demand and
+        cache it as ``_latest_frame``.
+
+        The CDP screencast only emits a frame on a REPAINT, so a browser that flipped to
+        ``running`` and then sat on a static page has ``_latest_frame is None`` until it
+        next changes -- a fresh viewer connecting in that window would see a black canvas
+        (finding [6]). ``Page.captureScreenshot`` forces a one-off capture at the same
+        format/quality the screencast uses, so the replayed frame is indistinguishable
+        from a live one. Best-effort: returns None (and changes nothing) if there's no
+        active CDP session or the capture fails."""
+        cdp = self._active_cdp
+        if cdp is None:
+            return None
+        try:
+            shot = await cdp.send(
+                "Page.captureScreenshot",
+                {"format": _SCREENCAST_FORMAT, "quality": _SCREENCAST_QUALITY},
+            )
+        except _BROWSER_ERRORS as e:
+            logger.debug("one-off frame capture ignored ({})", e)
+            return None
+        data = shot.get("data")
+        if data:
+            self._latest_frame = data
+        return data
+
     async def _broadcast_tabs(self) -> None:
         # Stays async: it awaits _tab_list() (a CDP round-trip). The fan-out itself
         # (_broadcast) is now synchronous.
@@ -1016,6 +1051,36 @@ class LiveBrowser(MutableModel):
             "human_pinned": self.human_pinned,
         }
 
+    async def acquire_with_state(
+        self,
+        agent_id: str,
+        agent_name: str | None = None,
+        *,
+        reclaim: bool = False,
+        wait: bool = True,
+        max_wait: float | None = None,
+        enqueue_on_busy: bool = False,
+    ) -> dict[str, Any]:
+        """:meth:`acquire`, then snapshot the control state -- both ON the loop so the
+        snapshot reflects the post-acquire ownership atomically.
+
+        The runner's ``cmd_acquire`` reads ``_control_state()`` after acquiring; reading
+        it on the Flask thread would observe loop-mutated fields without going through the
+        bridge (a torn/stale view). Returning ``{ok, status, **control_state}`` from one
+        coroutine keeps that read on the loop thread where every mutation also happens."""
+        status = await self.acquire(
+            agent_id, agent_name, reclaim=reclaim, wait=wait, max_wait=max_wait, enqueue_on_busy=enqueue_on_busy
+        )
+        return {"ok": status == "acquired", "status": status, **self._control_state()}
+
+    async def handoff_with_state(self, agent_id: str, agent_name: str | None, reason: str) -> dict[str, Any]:
+        """:meth:`handoff`, then snapshot the control state -- both ON the loop (see
+        :meth:`acquire_with_state`), so the runner's ``cmd_handoff`` never reads
+        loop-mutated ownership fields off the Flask thread."""
+        handed = await self.handoff(agent_id, agent_name, reason)
+        status = "handed_off" if handed else "not_owner"
+        return {"ok": handed, "status": status, **self._control_state()}
+
     def _enqueue_resume_locked(self, agent_id: str, agent_name: str | None) -> None:
         """Add an agent to the resume queue (deduped by id). Caller holds _control_lock."""
         if not any(aid == agent_id for (aid, _) in self._resume_queue):
@@ -1268,7 +1333,16 @@ class LiveBrowser(MutableModel):
         state machine without deadlocking. The pin is sticky -- it holds until the human
         explicitly hands back via :meth:`return_to_agents`, with no idle/grace yield (a
         human who took control keeps it even if they step away).
+
+        Gated on lifecycle (like :meth:`acquire` / :meth:`run_action`): ownership only
+        applies once the browser is ``running``. Taking control of an ``init`` browser
+        would pin it before Chromium is even up, so it would come up locked to the human
+        and block every agent; a ``crashed`` browser is gone. In both cases this no-ops
+        (returns False) -- the human can take control once it's live. Returns True when
+        the pin landed.
         """
+        if not self._is_running:
+            return False
         return await self._transition(to="human", pinned=True, preempt=True)
 
     async def handoff(self, agent_id: str, agent_name: str | None, reason: str) -> bool:
@@ -1583,13 +1657,20 @@ class LiveBrowser(MutableModel):
         fan-out list, so the viewer's first messages are deterministic -- no live
         frame can interleave ahead of the control/tabs the viewer needs first.
 
-        We also replay the LAST screencast frame (``_latest_frame``) to the new
-        client when one exists. The CDP screencast only emits a frame on a repaint,
-        so a client connecting mid-stream to a browser sitting on a static/blank
-        page would otherwise see a black canvas (and the viewer's "Starting
-        browser…" banner would never clear) until the page next changed. Replaying
-        the cached frame makes a fresh client see the live page at once. Skipped
-        when crashed -- a dead browser shows the crash state, not a stale frame.
+        We also replay a screencast frame (``_latest_frame``) to a new client of a
+        RUNNING browser. The CDP screencast only emits a frame on a repaint, so a client
+        connecting to a browser sitting on a static/blank page would otherwise see a
+        black canvas (and the viewer's "Starting browser…" banner would never clear)
+        until the page next changed. If no frame has been cached yet (the common case for
+        a browser that just flipped ``init`` -> ``running`` and hasn't repainted --
+        finding [6]), we force a one-off capture so even the very first viewer sees the
+        live page at once. Skipped when crashed -- a dead browser shows the crash state,
+        not a stale frame.
+
+        The seed is at most four messages onto a fresh, empty queue whose maxsize
+        (``_CAST_QUEUE_MAX_SIZE`` = 16) is far larger, so the ``put_nowait``s here can
+        never raise ``queue.Full`` -- but the late-frame push goes through the same
+        Full-safe ``_broadcast``-style path for symmetry (finding [8]).
 
         Runs on the loop (the runner calls it via ``bridge.run``), so the list
         mutation is single-threaded with respect to :meth:`_broadcast`.
@@ -1602,13 +1683,27 @@ class LiveBrowser(MutableModel):
         client_queue.put_nowait(json.dumps({"type": "tabs", "tabs": await self._tab_list()}, default=str))
         if self._crashed:  # a viewer opening a crashed browser sees the crash state at once
             client_queue.put_nowait(json.dumps({"type": "crashed", "browser_id": self.browser_id}, default=str))
-        elif self._is_running and self._latest_frame is not None:
-            # Replay the live page so a new client isn't stuck on black. Only when
-            # running: an ``init`` browser has no frame yet (the overlay covers it), and a
-            # crashed one shows the crash state, not a stale frame.
-            client_queue.put_nowait(json.dumps({"type": "frame", "data": self._latest_frame}, default=str))
+        elif self._is_running:
+            # Replay the live page so a new client isn't stuck on black. Capture one on
+            # demand if nothing has been cached yet (just flipped to running, no repaint).
+            frame = self._latest_frame if self._latest_frame is not None else await self._capture_one_frame()
+            if frame is not None:
+                client_queue.put_nowait(json.dumps({"type": "frame", "data": frame}, default=str))
         self._cast_queues.append(client_queue)
         return client_queue
+
+    async def register_cast_queue_with_lifecycle(self) -> "tuple[queue.Queue[str | None], Lifecycle]":
+        """:meth:`register_cast_queue`, returning the new queue AND the browser's lifecycle
+        captured ON the loop in the same step.
+
+        The runner uses the lifecycle to decide whether to push the fleet-level
+        ``initializing`` banner: a viewer that joins an already-``running`` browser must
+        NOT be told it's initializing (finding [3-runner]), even while the whole fleet is
+        still restoring -- the seeded ``control`` already carries ``lifecycle=running`` and
+        the live page is right there. Reading the lifecycle here (not on the Flask thread)
+        keeps it consistent with the seed that was just built."""
+        client_queue = await self.register_cast_queue()
+        return client_queue, self._lifecycle
 
     async def unregister_cast_queue(self, client_queue: "queue.Queue[str | None]") -> None:
         """Remove a cast queue from the fan-out. Async so it runs ON the loop (via
@@ -1761,6 +1856,13 @@ class BrowserSessionManager(MutableModel):
     _closed: bool = PrivateAttr(default=False)
     _checkpoint_task: "asyncio.Task[None] | None" = PrivateAttr(default=None)
     _bg_save_tasks: set[Any] = PrivateAttr(default_factory=set)  # strong refs for _spawn_save
+    # Bounded ring of names whose background launch FAILED (finding [7]). A late/retrying
+    # optimistic viewer that was in 1013 reconnect-backoff when the launch failed never
+    # registered a cast queue, so it missed the launch_failed broadcast; the cast handler
+    # consults this so such a name is closed 1008 (terminal) instead of looping on 1013.
+    # ``deque(maxlen=...)`` auto-evicts the oldest, so this can't grow unbounded; mutated
+    # only on the loop thread (the launch task + the cast resolve), so it needs no lock.
+    _failed_launch_names: "deque[str]" = PrivateAttr(default_factory=lambda: deque(maxlen=_FAILED_LAUNCH_MEMORY))
 
     def _register_init_locked(self, name: str) -> LiveBrowser:
         """Construct a LiveBrowser in ``init`` and add it to the registry. Caller must
@@ -1770,7 +1872,31 @@ class BrowserSessionManager(MutableModel):
         session = LiveBrowser(browser_id=name)
         session._crash_save_hook = self._spawn_save  # checkpoint promptly if it crashes
         self._browsers[name] = session
+        # A fresh registration supersedes any earlier launch-failure for this name (the
+        # user re-created it, or restore is retrying it), so it's no longer terminal for a
+        # viewer -- drop it from the failed ring so the cast handler stops 1008-ing it.
+        self._clear_failed_launch(name)
         return session
+
+    def _clear_failed_launch(self, name: str) -> None:
+        """Forget a name's prior launch failure (it's being (re)launched). Mutated only on
+        the loop thread, so no lock is needed."""
+        if name in self._failed_launch_names:
+            self._failed_launch_names = deque(
+                (n for n in self._failed_launch_names if n != name), maxlen=_FAILED_LAUNCH_MEMORY
+            )
+
+    def recently_failed_launch(self, name: str) -> bool:
+        """Whether ``name``'s last background launch failed (and it has not since been
+        re-registered). The cast handler uses this to close a stale optimistic viewer
+        terminally (1008) rather than telling it to retry (1013) forever (finding [7])."""
+        return name in self._failed_launch_names
+
+    async def recently_failed_launch_async(self, name: str) -> bool:
+        """``recently_failed_launch`` for the cast handler to reach via ``bridge.run`` --
+        running the ``_failed_launch_names`` read ON the loop thread (where the launch task
+        mutates it) is what makes it race-free, like ``capacity_async``."""
+        return self.recently_failed_launch(name)
 
     async def _launch(
         self, session: LiveBrowser, restore_tabs: list[str] | None = None, active_tab: int = 0, persist: bool = True
@@ -1806,6 +1932,11 @@ class BrowserSessionManager(MutableModel):
             except (BrowserStartupError, *_BROWSER_ERRORS) as e:
                 logger.warning("browser {} failed to launch ({}); removing it", session.browser_id, e)
                 self._browsers.pop(session.browser_id, None)
+                # Remember the name as launch-failed (finding [7]) so a late/retrying
+                # optimistic viewer -- one still in 1013 reconnect-backoff when this failed,
+                # which never registered a cast queue and so missed the launch_failed
+                # broadcast below -- is closed terminally (1008) instead of looping on 1013.
+                self._failed_launch_names.append(session.browser_id)
                 # Tell any viewer waiting on the optimistic pane that this name is gone
                 # (terminal) BEFORE close() pushes the shutdown sentinel onto the cast
                 # queues -- so the viewer sees the launch_failed message and then the
@@ -1868,6 +1999,12 @@ class BrowserSessionManager(MutableModel):
                         "(a crashed browser still holds its name until you close it)."
                     )
             session = self._register_init_locked(name)
+        # Persist the manifest NOW, while the browser is still ``init`` (finding [5]):
+        # the Chromium launch is multi-second, and a daemon crash in that window would
+        # otherwise lose a browser the user just asked for. The init entry has no tabs
+        # (it restores to home); the launch's own post-running save then captures its
+        # real tabs. Fire-and-forget so create still returns immediately.
+        self._spawn_save()
         self._spawn_launch(session)
         return session
 
@@ -1931,10 +2068,12 @@ class BrowserSessionManager(MutableModel):
         return [browser for _, browser in snapshot if not browser._crashed]
 
     def running_browsers(self) -> list[LiveBrowser]:
-        """Only ``running`` sessions, by name -- the set worth PERSISTING/restoring. An
-        ``init`` browser whose Chromium isn't up yet is deliberately NOT persisted: it has
-        no tabs to save, and if the daemon is killed mid-launch we don't want to restore a
-        phantom that never actually came up (it would strand a cap slot next boot)."""
+        """Only ``running`` sessions, by name -- the set that came up THIS boot with real
+        tabs to read. Used by the post-restore reconcile to build fresh entries from
+        browsers that actually launched (distinct from the saved-but-not-yet-relaunched
+        entries it preserves separately). NOTE: this is no longer the persistence set --
+        the durable manifest now snapshots ``live_browsers`` (init + running) so a just-
+        created ``init`` browser survives a crash before Chromium is up (finding [5])."""
         snapshot = sorted(self._browsers.items())
         return [browser for _, browser in snapshot if browser._is_running]
 
@@ -1959,9 +2098,18 @@ class BrowserSessionManager(MutableModel):
         return fleet_manifest.ManifestEntry(id=browser.browser_id, tabs=urls, active_tab=active_tab)
 
     def _snapshot_manifest_locked(self) -> fleet_manifest.Manifest:
-        """Build the durable manifest from the RUNNING fleet (init browsers aren't
-        persisted -- they have no tabs and may never come up). Caller holds ``_lock``."""
-        entries = [self._entry_for(browser) for browser in self.running_browsers()]
+        """Build the durable manifest from the LIVE fleet (init + running). Caller holds
+        ``_lock``.
+
+        Init browsers ARE persisted now (finding [5]): a browser the user just created is
+        registered ``init`` and its Chromium launch is multi-second, so a daemon crash in
+        that window would otherwise lose the browser entirely. Persisting it the moment it
+        registers means it is restored next boot (an ``init`` browser has no tabs yet, so
+        it restores to the home page -- the same as a fresh create). A persisted entry that
+        fails to relaunch is preserved-for-retry by restore's flaked-browser path, not
+        stranded; only an explicit ``close`` forgets it. Crashed shells are still excluded
+        (they're dead, kept only to report ``crashed`` until the user closes them)."""
+        entries = [self._entry_for(browser) for browser in self.live_browsers()]
         return fleet_manifest.Manifest(browsers=entries)
 
     def _spawn_save(self) -> None:

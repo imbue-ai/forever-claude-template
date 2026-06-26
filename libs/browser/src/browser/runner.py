@@ -76,6 +76,20 @@ _STARTUP_ERRORS = (BrowserStartupError, PlaywrightError, RuntimeError, OSError, 
 # legitimately block until granted/disconnected and pass timeout=None instead.
 _ROUTE_TIMEOUT = float(os.environ.get("BROWSER_ROUTE_TIMEOUT", "120"))
 
+# Direct-control browser ACTIONS (navigate/click/input/.../tab) can legitimately run long
+# on a heavy page -- a navigation to a slow site can easily exceed the 120s _ROUTE_TIMEOUT,
+# and the old FastAPI path had NO server-side timeout at all (finding [9]). Cancelling such
+# an action mid-flight would surface a spurious 500 for a request that was about to succeed,
+# so direct actions get their own generous timeout. A timeout cancellation is still SAFE for
+# the ownership state machine: run_action sets the lease (and clears the claim window) BEFORE
+# the action and runs the action under _lock, so a cancellation only unwinds the in-flight
+# action + the _lock frame -- the lease stays held and no ownership field is left half-written
+# (control mutations are atomic under _control_lock, which the action body never holds). The
+# backstop against a truly-wedged action is still the idle-lease sweep. Env-tunable; set to 0
+# for no timeout (the action then runs to completion or until the agent's own client drops).
+_DIRECT_ACTION_TIMEOUT_RAW = float(os.environ.get("BROWSER_DIRECT_ACTION_TIMEOUT", "600"))
+_DIRECT_ACTION_TIMEOUT: float | None = _DIRECT_ACTION_TIMEOUT_RAW if _DIRECT_ACTION_TIMEOUT_RAW > 0 else None
+
 # Outbound-drain / inbound-poll cadence for the cast handler and the NDJSON
 # generators. The 0.5s NDJSON poll both flushes a heartbeat (so a dead client
 # surfaces as a write failure in bounded time) and re-checks the run's state.
@@ -338,11 +352,24 @@ def _stream_acquire(
     a client disconnect mid-wait the generator's outer ``finally`` cancels the task
     (its existing CancelledError handler removes the waiter from ``_wait_queue`` on
     the loop) and records ``"disconnected"``.
+
+    A parked acquire emits no events after the first ``waiting`` line, so without a
+    heartbeat the WSGI server never writes again and a client that drops mid-wait is
+    never noticed -- the waiter would hold its FIFO slot for the holder's whole lease
+    (up to ~15 min) and block everyone behind it. So on each idle poll we yield a
+    ``ping``: the forced socket write fails on a dead client, raising the
+    ``GeneratorExit`` whose ``finally`` cancels the acquire (its CancelledError handler
+    removes the waiter on the loop). This mirrors the run/hold loops' heartbeat -- the
+    only disconnect signal available on a sync Flask/WSGI stream (there is no
+    ``request.is_disconnected()``).
     """
     while not acquire_task.done():
         try:
             event = gen_queue.get(timeout=_NDJSON_POLL_SECONDS)
         except queue.Empty:
+            # Heartbeat: force a write so a client that dropped while parked in the
+            # wait queue surfaces as a broken-pipe GeneratorExit in bounded time.
+            yield _ndjson({"type": "ping"})
             continue
         if event is not None:
             yield _ndjson(event)
@@ -415,9 +442,15 @@ def run_task(browser_id: str) -> Response:
         try:
             yield from _stream_acquire(gen_queue, acquire_task, status_out)
         except GeneratorExit:
-            # Client dropped while still waiting in the acquire queue: cancel the
-            # acquire so its CancelledError handler removes the waiter on the loop.
+            # Client dropped during the acquire phase: cancel the acquire (its
+            # CancelledError handler removes the waiter on the loop), then release.
+            # release is a CAS no-op UNLESS a grant landed on the loop in the same poll
+            # window the client dropped -- the wakeup beats the cancel, so acquire runs
+            # to "acquired" and the cancel hits an already-done task. Without this that
+            # just-granted lease is orphaned (no run task, dead connection) until the 90s
+            # idle sweep, blocking everyone queued behind it. Mirrors the run finally.
             cancel_task(bridge.loop, acquire_task)
+            bridge.run(session.release(agent_id), timeout=_ROUTE_TIMEOUT)
             raise
         status = status_out[0]
         if status != "acquired":
@@ -497,7 +530,10 @@ def hold_browser(browser_id: str) -> Response:
         try:
             yield from _stream_acquire(gen_queue, acquire_task, status_out)
         except GeneratorExit:
+            # See run_task: release after cancel so a grant that landed in the drop
+            # window isn't orphaned. CAS no-op when no grant landed.
             cancel_task(bridge.loop, acquire_task)
+            bridge.run(session.release(agent_id), timeout=_ROUTE_TIMEOUT)
             raise
         status = status_out[0]
         if status != "acquired":
@@ -551,22 +587,25 @@ def cmd_acquire(browser_id: str) -> Response:
         return target
     session, agent_id, agent_name = target
     body = _body()
-    status = bridge.run(
-        session.acquire(
+    # acquire AND read the control-state snapshot in ONE on-loop coroutine: the snapshot
+    # reads loop-mutated ownership fields, so it must run on the loop (via the bridge),
+    # not directly on this Flask thread (finding [4]).
+    result = bridge.run(
+        session.acquire_with_state(
             agent_id, agent_name,
             reclaim=bool(body.get("reclaim", False)),
-            wait=bool(body.get("wait", False)),
-            max_wait=body.get("max_wait"),
-            # An explicit `acquire` that finds the browser busy queues the agent to be
-            # woken when it frees -- matching what the CLI tells the agent ("you're
-            # queued ... messaged when it frees"). Without this the promise is a lie.
+            # `acquire` is the fast reserve-or-queue verb: it never blocks. A busy browser
+            # enqueues the agent (woken when it frees) and returns immediately -- matching
+            # what the CLI tells the agent ("you're queued ... messaged when it frees").
+            # Blocking-wait lives in task/hold, which heartbeat and so detect a dropped
+            # client; honoring wait=True on this non-streaming POST would pin a Flask
+            # worker thread + a queue slot forever on a caller that walked away.
+            wait=False,
             enqueue_on_busy=True,
         ),
-        # wait may be True -> the acquire can park until granted/timeout; do not let a
-        # finite route timeout cancel a legitimately-waiting acquire.
-        timeout=None,
+        timeout=_ROUTE_TIMEOUT,
     )
-    return jsonify({"ok": status == "acquired", "status": status, **session._control_state()})
+    return jsonify(result)
 
 
 def cmd_handoff(browser_id: str) -> Response:
@@ -579,9 +618,10 @@ def cmd_handoff(browser_id: str) -> Response:
     session, agent_id, agent_name = target
     body = _body()
     reason = str(body.get("reason", "")).strip() or "human verification needed"
-    handed = bridge.run(session.handoff(agent_id, agent_name, reason), timeout=_ROUTE_TIMEOUT)
-    status = "handed_off" if handed else "not_owner"
-    return jsonify({"ok": handed, "status": status, **session._control_state()})
+    # handoff AND its control-state snapshot in ONE on-loop coroutine (finding [4]): the
+    # snapshot reads loop-mutated ownership fields, so it must not run on the Flask thread.
+    result = bridge.run(session.handoff_with_state(agent_id, agent_name, reason), timeout=_ROUTE_TIMEOUT)
+    return jsonify(result)
 
 
 def cmd_state(browser_id: str) -> Response:
@@ -591,7 +631,9 @@ def cmd_state(browser_id: str) -> Response:
     if isinstance(target, Response):
         return target
     session, agent_id, agent_name = target
-    return jsonify(bridge.run(session.act_state(agent_id, agent_name), timeout=_ROUTE_TIMEOUT))
+    # `state` does a CDP round-trip (get_state); use the generous direct-action timeout so a
+    # heavy page isn't cancelled mid-read (finding [9]).
+    return jsonify(bridge.run(session.act_state(agent_id, agent_name), timeout=_DIRECT_ACTION_TIMEOUT))
 
 
 def cmd_navigate(browser_id: str) -> Response:
@@ -603,7 +645,7 @@ def cmd_navigate(browser_id: str) -> Response:
     url = body.get("url")
     if not url:
         return _error({"error": "url is required"}, 400)
-    return jsonify(bridge.run(session.act_navigate(agent_id, agent_name, url), timeout=_ROUTE_TIMEOUT))
+    return jsonify(bridge.run(session.act_navigate(agent_id, agent_name, url), timeout=_DIRECT_ACTION_TIMEOUT))
 
 
 def cmd_click(browser_id: str) -> Response:
@@ -613,7 +655,7 @@ def cmd_click(browser_id: str) -> Response:
     session, agent_id, agent_name = target
     body = _body()
     return jsonify(
-        bridge.run(session.act_click(agent_id, agent_name, int(body.get("index", -1))), timeout=_ROUTE_TIMEOUT)
+        bridge.run(session.act_click(agent_id, agent_name, int(body.get("index", -1))), timeout=_DIRECT_ACTION_TIMEOUT)
     )
 
 
@@ -626,7 +668,7 @@ def cmd_input(browser_id: str) -> Response:
     return jsonify(
         bridge.run(
             session.act_input(agent_id, agent_name, int(body.get("index", -1)), str(body.get("text", ""))),
-            timeout=_ROUTE_TIMEOUT,
+            timeout=_DIRECT_ACTION_TIMEOUT,
         )
     )
 
@@ -640,7 +682,7 @@ def cmd_select(browser_id: str) -> Response:
     return jsonify(
         bridge.run(
             session.act_select(agent_id, agent_name, int(body.get("index", -1)), str(body.get("value", ""))),
-            timeout=_ROUTE_TIMEOUT,
+            timeout=_DIRECT_ACTION_TIMEOUT,
         )
     )
 
@@ -654,7 +696,7 @@ def cmd_scroll(browser_id: str) -> Response:
     return jsonify(
         bridge.run(
             session.act_scroll(agent_id, agent_name, str(body.get("direction", "down")), int(body.get("amount", 500))),
-            timeout=_ROUTE_TIMEOUT,
+            timeout=_DIRECT_ACTION_TIMEOUT,
         )
     )
 
@@ -668,7 +710,7 @@ def cmd_keys(browser_id: str) -> Response:
     keys = body.get("keys")
     if not keys:
         return _error({"error": "keys is required"}, 400)
-    return jsonify(bridge.run(session.act_keys(agent_id, agent_name, str(keys)), timeout=_ROUTE_TIMEOUT))
+    return jsonify(bridge.run(session.act_keys(agent_id, agent_name, str(keys)), timeout=_DIRECT_ACTION_TIMEOUT))
 
 
 def cmd_screenshot(browser_id: str) -> Response:
@@ -676,7 +718,7 @@ def cmd_screenshot(browser_id: str) -> Response:
     if isinstance(target, Response):
         return target
     session, agent_id, agent_name = target
-    return jsonify(bridge.run(session.act_screenshot(agent_id, agent_name), timeout=_ROUTE_TIMEOUT))
+    return jsonify(bridge.run(session.act_screenshot(agent_id, agent_name), timeout=_DIRECT_ACTION_TIMEOUT))
 
 
 def cmd_tab(browser_id: str) -> Response:
@@ -688,7 +730,7 @@ def cmd_tab(browser_id: str) -> Response:
     return jsonify(
         bridge.run(
             session.act_tab(agent_id, agent_name, str(body.get("action", "list")), body.get("index"), body.get("url")),
-            timeout=_ROUTE_TIMEOUT,
+            timeout=_DIRECT_ACTION_TIMEOUT,
         )
     )
 
@@ -743,7 +785,11 @@ def cast_socket(ws: Any, browser_id: str) -> None:
     """
     resolved = _resolve_sync_for_ws(browser_id)
     if resolved is None:
-        # Two cases, distinguished by the close code so the viewer can react correctly:
+        # Three cases, distinguished by the close code so the viewer can react correctly:
+        # - The name's background launch FAILED (finding [7]). A late/retrying optimistic
+        #   viewer that was in 1013 backoff when it failed never registered a cast queue,
+        #   so it missed the launch_failed broadcast and would otherwise retry forever.
+        #   Close 1008 -- terminal, so the pane stops retrying and shows the failed state.
         # - The name is syntactically valid but no browser is registered under it YET.
         #   This is the OPTIMISTIC PANE opened on modal-accept BEFORE the serialized
         #   launch finished registering the name -- a transient miss, not "gone". Close
@@ -751,18 +797,27 @@ def cast_socket(ws: Any, browser_id: str) -> None:
         #   the launch registers the name.
         # - The name is invalid (could never exist). Close 1008 -- terminal, the viewer
         #   shows "browser closed -- reopen" and stops reconnecting.
-        if is_valid_browser_name(browser_id):
+        if bridge.run(manager.recently_failed_launch_async(browser_id), timeout=_ROUTE_TIMEOUT):
+            ws.close(1008)  # launch failed -> terminal (stop retrying)
+        elif is_valid_browser_name(browser_id):
             ws.close(1013)  # not yet created -> retryable
         else:
             ws.close(1008)  # gone / never valid -> terminal
         return
     session = resolved
     # Register + seed the initial control/tabs sync atomically on the loop, so no
-    # live frame can interleave ahead of the state the viewer needs first.
-    client_queue = bridge.run(session.register_cast_queue(), timeout=_ROUTE_TIMEOUT)
-    if not _init_done.is_set():
-        # Tell the viewer the fleet is still restoring; it shows a banner and clears it
-        # on the first live frame/control once this browser is up.
+    # live frame can interleave ahead of the state the viewer needs first. The lifecycle
+    # is captured in the same on-loop step so the initializing banner below is consistent
+    # with the seed.
+    client_queue, lifecycle = bridge.run(session.register_cast_queue_with_lifecycle(), timeout=_ROUTE_TIMEOUT)
+    if not _init_done.is_set() and lifecycle != "running":
+        # The fleet is still restoring AND this browser isn't up yet: tell the viewer, so
+        # it shows a banner and clears it on the first live frame/control once this browser
+        # is up. A viewer joining an already-running browser is NOT told initializing
+        # (finding [3-runner]) -- its seed already carries lifecycle=running and the live
+        # page is streaming, so an initializing banner would be a false "still starting".
+        # put_nowait is safe: the queue is fresh with at most a few seed messages and its
+        # maxsize is far larger (finding [8]).
         client_queue.put_nowait(json.dumps({"type": "initializing"}))
     stop_event = threading.Event()
     inbound = threading.Thread(

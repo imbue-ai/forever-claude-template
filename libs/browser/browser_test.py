@@ -2,6 +2,7 @@ import asyncio
 import json
 import queue
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,32 @@ def test_take_control_preempts_pins_and_reclaim_resumes() -> None:
         # Only an explicit reclaim (the human told the agent to resume) takes it back.
         assert await browser.acquire("B", "Bob", reclaim=True) == "acquired"
         assert browser._state_tuple() == ("agent", "B", False)
+
+    asyncio.run(go())
+
+
+def test_take_control_is_gated_on_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A human take-control on a browser whose Chromium isn't up (init) or is gone
+    # (crashed) must NOT pin it (finding [2]): pinning an init browser before it's
+    # running would bring it up locked to the human and lock every agent out. It no-ops
+    # (returns False, no transition) until the browser is running; once running, the
+    # take lands normally.
+    casts: list[dict[str, Any]] = []
+    monkeypatch.setattr(bsession.LiveBrowser, "_broadcast", lambda self, message: casts.append(message))
+    browser = bsession.LiveBrowser(browser_id="b1")  # init by default
+
+    async def go() -> None:
+        assert browser._lifecycle == "init"
+        assert await browser.take_control() is False  # init -> ignored
+        assert browser._state_tuple() == ("human", None, False)  # NOT pinned
+        assert not any(m.get("human_pinned") for m in casts), "init take_control must not broadcast a pin"
+        # A crashed browser is gone -- also a no-op.
+        browser._lifecycle = "crashed"
+        assert await browser.take_control() is False
+        # Once running, take_control works as before (pins).
+        browser._lifecycle = "running"
+        assert await browser.take_control() is True
+        assert browser._state_tuple() == ("human", None, True)
 
     asyncio.run(go())
 
@@ -593,6 +620,71 @@ def test_launch_failure_removes_the_browser_and_announces(monkeypatch: pytest.Mo
     asyncio.run(go())
 
 
+def test_create_persists_the_init_browser_before_it_is_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A browser the user just created must survive a daemon crash before its Chromium is up
+    # (finding [5]): create() persists the manifest the moment the browser is registered in
+    # `init`, not only after it reaches `running`. We stub the launch so it never comes up,
+    # then assert the init browser is already in the on-disk manifest.
+    monkeypatch.setattr(bsession.BrowserSessionManager, "_spawn_launch", lambda self, session, **k: None)
+    mgr = bsession.BrowserSessionManager()
+
+    async def go() -> None:
+        session = await mgr.create("alex-smith")
+        assert session._lifecycle == "init"
+        # The create-time _spawn_save is fire-and-forget; let it run.
+        await asyncio.gather(*list(mgr._bg_save_tasks))
+        saved = manifest.read_manifest()
+        assert saved is not None
+        assert [e.id for e in saved.browsers] == ["alex-smith"]  # the init browser is persisted
+        assert saved.browsers[0].tabs == []  # no tabs yet -> restores to home
+
+    asyncio.run(go())
+
+
+def test_failed_launch_name_is_remembered_and_cleared_on_recreate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A name whose background launch FAILED is remembered (finding [7]) so the cast handler
+    # can close a late/retrying optimistic viewer terminally (1008) instead of telling it to
+    # retry forever. Re-registering the same name (a re-create, or a restore retry) clears
+    # the memory so it stops being treated as terminally-failed.
+    monkeypatch.setattr(bsession.LiveBrowser, "_broadcast", lambda self, message: None)
+
+    async def boom_start(
+        self: bsession.LiveBrowser, _playwright: Any, restore_tabs: list[str] | None = None, active_tab: int = 0
+    ) -> None:
+        raise bsession.BrowserStartupError("no CDP endpoint")
+
+    monkeypatch.setattr(bsession.LiveBrowser, "start", boom_start)
+    mgr = bsession.BrowserSessionManager()
+    mgr._playwright = object()  # type: ignore[assignment]
+
+    async def go() -> None:
+        assert mgr.recently_failed_launch("alex-smith") is False
+        await mgr.create("alex-smith")
+        await asyncio.gather(*list(mgr._launch_tasks))  # launch runs + fails
+        assert not mgr.has_browser("alex-smith")
+        assert mgr.recently_failed_launch("alex-smith") is True  # remembered as terminal
+        # Re-registering the same name supersedes the failure (no longer terminal).
+        mgr._register_init_locked("alex-smith")
+        assert mgr.recently_failed_launch("alex-smith") is False
+
+    asyncio.run(go())
+
+
+def test_failed_launch_memory_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The failed-name ring auto-evicts the oldest so it can't grow unbounded.
+    monkeypatch.setattr(bsession, "_FAILED_LAUNCH_MEMORY", 2)
+    mgr = bsession.BrowserSessionManager()
+    # Re-create the deque so it picks up the patched maxlen (the default_factory captured the
+    # old value at construction).
+    mgr._failed_launch_names = deque(maxlen=2)
+    mgr._failed_launch_names.append("a")
+    mgr._failed_launch_names.append("b")
+    mgr._failed_launch_names.append("c")  # evicts "a"
+    assert mgr.recently_failed_launch("a") is False
+    assert mgr.recently_failed_launch("b") is True
+    assert mgr.recently_failed_launch("c") is True
+
+
 class _KillableBuSession:
     """Stand-in for browser-use's BrowserSession that records whether it was killed, so a
     test can assert no Chromium handle is leaked when a launch is aborted."""
@@ -849,15 +941,22 @@ def test_restore_passes_saved_tabs_and_comes_up_resting(monkeypatch: pytest.Monk
     assert restored._resume_queue == [] and restored._wait_queue == []
 
 
-def test_snapshot_excludes_crashed_and_persists_only_topology() -> None:
+def test_snapshot_persists_init_and_running_excludes_crashed_topology_only() -> None:
+    # The durable manifest snapshots the LIVE fleet -- init AND running (finding [5]: an
+    # init browser the user just created must survive a daemon crash before its Chromium
+    # is up). Crashed shells are excluded (dead, kept only to report `crashed`). Only
+    # topology (id/tabs/active_tab) is persisted -- never ownership/queues.
     mgr = bsession.BrowserSessionManager()
-    healthy = _running_browser("alex-smith")  # only RUNNING browsers are persisted
+    healthy = _running_browser("alex-smith")
     healthy.controller = "agent"  # ownership state that must NOT be persisted
     healthy.owner_agent_id = "x"
     healthy.human_pinned = True
+    starting = bsession.LiveBrowser(browser_id="morgan-lee")  # init -- launch not finished
+    assert starting._lifecycle == "init"
     crashed = bsession.LiveBrowser(browser_id="riley-jones")
     crashed._crashed = True
     mgr._browsers["alex-smith"] = healthy
+    mgr._browsers["morgan-lee"] = starting
     mgr._browsers["riley-jones"] = crashed
 
     async def go() -> bsession.fleet_manifest.Manifest:
@@ -865,7 +964,8 @@ def test_snapshot_excludes_crashed_and_persists_only_topology() -> None:
             return mgr._snapshot_manifest_locked()
 
     snap = asyncio.run(go())
-    assert [e.id for e in snap.browsers] == ["alex-smith"]  # crashed browser excluded
+    # init + running persisted (sorted by name); crashed excluded.
+    assert [e.id for e in snap.browsers] == ["alex-smith", "morgan-lee"]
     assert set(snap.browsers[0].model_dump().keys()) == {"id", "tabs", "active_tab"}
 
 
@@ -1097,6 +1197,65 @@ def test_register_cast_queue_replays_no_frame_when_crashed() -> None:
         assert _pop_json(q)["type"] == "tabs"
         assert _pop_json(q)["type"] == "crashed"
         assert q.empty()  # crashed -> the cached frame is NOT replayed
+
+    asyncio.run(go())
+
+
+class _ScreenshotCDP:
+    """Fake CDP session whose ``Page.captureScreenshot`` returns a base64 frame, so the
+    on-demand one-off frame capture can be exercised without real Chromium."""
+
+    def __init__(self, data: str = "captured-jpeg-b64") -> None:
+        self.data = data
+        self.sends: list[str] = []
+
+    async def send(self, method: str, params: Any = None) -> dict[str, Any]:
+        self.sends.append(method)
+        if method == "Page.captureScreenshot":
+            return {"data": self.data}
+        return {}
+
+
+def test_register_cast_queue_captures_a_one_off_frame_when_running_without_a_cached_one() -> None:
+    # A browser that just flipped init -> running and hasn't repainted has _latest_frame
+    # is None, so there's no cached frame to replay -- a fresh viewer would sit black
+    # (finding [6]). register_cast_queue forces a one-off Page.captureScreenshot so even
+    # the very first viewer of a static page sees the live page, and caches it for the next.
+    browser = _running_browser(browser_id="b1")
+    browser._context = None
+    assert browser._latest_frame is None
+    cdp = _ScreenshotCDP()
+    browser._active_cdp = cdp  # type: ignore[assignment]
+
+    async def go() -> None:
+        q = await browser.register_cast_queue()
+        assert _pop_json(q)["type"] == "control"
+        assert _pop_json(q)["type"] == "tabs"
+        frame = _pop_json(q)
+        assert frame == {"type": "frame", "data": "captured-jpeg-b64"}  # the on-demand capture
+        assert q.empty()
+        assert "Page.captureScreenshot" in cdp.sends
+        # Cached for the next client (which then takes the cheap replay path, no capture).
+        assert browser._latest_frame == "captured-jpeg-b64"
+
+    asyncio.run(go())
+
+
+def test_register_cast_queue_with_lifecycle_returns_the_browsers_lifecycle() -> None:
+    # The runner reads the lifecycle alongside the new queue (same on-loop step) so it can
+    # decide whether to push the fleet-level `initializing` banner: a viewer joining an
+    # already-running browser must NOT be told it's initializing (finding [3-runner]).
+    running = _running_browser(browser_id="b1")
+    running._context = None
+    running._latest_frame = "f"  # avoid an on-demand capture (no real CDP here)
+    starting = bsession.LiveBrowser(browser_id="b2")  # init
+    starting._context = None
+
+    async def go() -> None:
+        _q, lifecycle = await running.register_cast_queue_with_lifecycle()
+        assert lifecycle == "running"
+        _q2, lifecycle2 = await starting.register_cast_queue_with_lifecycle()
+        assert lifecycle2 == "init"
 
     asyncio.run(go())
 

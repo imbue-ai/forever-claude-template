@@ -78,3 +78,13 @@ lifecycle state over the cast socket, not by guessing from the first frame. The
 create request runs in the background; if it fails (invalid/duplicate name, fleet full,
 or installing) the optimistic pane is torn back down. The duplicate-name pre-validation
 and the createdPane teardown defense from the prior fix are unchanged.
+
+----
+
+Create failures are now surfaced instead of silently tearing the optimistic pane down.
+When a background create fails (400 invalid name, 409 duplicate / fleet full, 503 still
+installing, or a network error), the "New browser" modal re-opens pre-filled with the name
+you typed and the daemon's reason shown inline, so you learn why it didn't open and can
+fix-and-retry. Names are also validated client-side before any pane opens or request is
+sent (same rule as the daemon: lowercase letters/digits in dash-separated words, max 40,
+not all-digits), so an invalid name shows its reason immediately rather than round-tripping.

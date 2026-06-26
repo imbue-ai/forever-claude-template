@@ -315,3 +315,66 @@ Hardened the new background-launch path against teardown races:
   a shutdown sentinel onto each connected cast queue (the launch_failed message is sent
   first), so the server-side cast thread exits on its next drain instead of waiting for the
   client to disconnect.
+
+Code-review fixes to the daemon (runner.py / session.py):
+
+- A client parked in the acquire FIFO wait-queue that disconnects is now detected
+  promptly. The wait-phase NDJSON stream emits a heartbeat `ping` on each idle poll (like
+  the run/hold loops already did), so a dropped waiter surfaces as a broken-pipe within a
+  poll interval and its acquire is cancelled and the waiter removed -- instead of a dead
+  waiter holding its slot for the holder's whole lease (up to ~15 min) and blocking
+  everyone behind it.
+
+- A human "take control" is now gated on lifecycle: it no-ops on an `init` browser
+  (Chromium not up yet) or a `crashed` one, and only pins once the browser is `running`.
+  Previously taking control of a still-launching browser pinned it before it came up, so
+  it booted locked to the human and blocked every agent.
+
+- The `acquire` and `handoff` direct-control responses now read their owner-state snapshot
+  ON the background loop (in the same coroutine as the mutation) rather than off the Flask
+  thread, so the returned status and the embedded `controller`/`owner`/`lifecycle` fields
+  are always a single consistent view.
+
+- A newly-created browser is now persisted to the manifest the moment it is registered
+  (`init`), not only after it reaches `running`. A daemon crash during the multi-second
+  Chromium launch no longer loses a browser the user just asked for; it is restored next
+  boot (an `init` browser has no tabs yet, so it restores to the home page). The durable
+  manifest now snapshots the live fleet (init + running); crashed shells are still
+  excluded. (This supersedes the earlier "only running browsers are persisted" note.)
+
+- A fresh viewer of a `running` browser that has not repainted (so no screencast frame has
+  been cached yet) now gets a one-off captured frame on connect, so the live page shows
+  immediately instead of a black canvas until the next repaint.
+
+- A viewer that joins an already-`running` browser is no longer told the fleet is
+  "initializing" while the rest of the fleet is still restoring -- the initializing banner
+  is now lifecycle-aware (its seed already carries `lifecycle=running` and the live page is
+  streaming).
+
+- A browser whose background launch FAILED is remembered briefly, so a late/retrying
+  optimistic viewer (one still in 1013 reconnect-backoff when the launch failed, which
+  never registered a cast queue and so missed the `launch_failed` broadcast) is now closed
+  terminally (1008) instead of retrying forever.
+
+- Direct-control browser actions (navigate/click/input/.../tab/state/screenshot) now run
+  under a generous dedicated timeout (default 600s, env `BROWSER_DIRECT_ACTION_TIMEOUT`,
+  0 = no timeout) instead of the 120s route timeout, so a slow-but-legitimate action on a
+  heavy page is not cancelled mid-flight. A timeout cancellation is still safe for the
+  ownership state machine: the lease is set before the action and stays held, and no
+  ownership field is left half-written.
+
+Two follow-up fixes from the adversarial re-review of the above:
+
+- The acquire wait-phase disconnect path now releases as well as cancels. If a client drops
+  in the same poll window a grant lands on the loop, the wakeup beats the cancel (the
+  acquire runs straight through to "acquired"), so the cancel hits an already-done task and
+  the just-granted lease would otherwise sit orphaned -- no run task, dead connection --
+  until the 90s idle sweep, blocking everyone queued behind it. The disconnect path now also
+  calls `release`, a CAS no-op unless that orphaned-grant case actually occurred. Mirrors the
+  run/hold finally.
+
+- The `acquire` verb is now strictly non-blocking. It is the fast reserve-or-queue verb (a
+  busy browser enqueues the agent to be woken when it frees and returns immediately);
+  blocking-wait lives in `task`/`hold`, which heartbeat and so detect a dropped client.
+  Honoring `wait=true` on this non-streaming endpoint could have pinned a worker thread and a
+  queue slot indefinitely on a caller that walked away.

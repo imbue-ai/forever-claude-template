@@ -249,6 +249,10 @@ def test_run_agent_aborts_if_control_lost_before_it_starts(monkeypatch: pytest.M
 # --- HTTP layer (Flask test client; run_agent stubbed) -----------------------
 
 
+async def _noop_wake_method(self: bsession.LiveBrowser, agent_id: str, agent_name: str | None) -> None:
+    """Stand-in for ``_wake_agent``: skip the real ``mngr message`` subprocess in tests."""
+
+
 def _install_fake_browser(monkeypatch: pytest.MonkeyPatch, browser_id: str = "alex-smith") -> bsession.LiveBrowser:
     runner.manager._browsers.clear()
     fake = bsession.LiveBrowser(browser_id=browser_id)
@@ -263,6 +267,79 @@ def _stream_events(text: str) -> list[dict[str, Any]]:
     # idle so a dead client surfaces as a broken-pipe write; they aren't trace events.
     events = [json.loads(line) for line in text.splitlines() if line.strip()]
     return [e for e in events if e.get("type") != "ping"]
+
+
+def test_stream_acquire_heartbeats_while_parked_in_the_wait_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A client parked in the acquire FIFO wait-queue used to emit nothing after the first
+    # `waiting` line, so the WSGI server never wrote again and a client that dropped while
+    # waiting was never noticed -- its dead waiter held a slot for the holder's whole lease
+    # (finding [1]). Now _stream_acquire yields a `ping` on each idle poll: the forced write
+    # is what surfaces a dead client (as a broken-pipe GeneratorExit) in bounded time.
+    monkeypatch.setattr(runner, "_NDJSON_POLL_SECONDS", 0.02)
+    gen_queue: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
+    status_out: list[str] = []
+    release = threading.Event()
+
+    async def parked_acquire() -> str:
+        # Model an acquire parked in the wait queue: it does not resolve until the test
+        # releases it (mirroring the holder finally releasing the browser).
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return "acquired"
+
+    acquire_task = runner.bridge.submit(parked_acquire())
+    gen = runner._stream_acquire(gen_queue, acquire_task, status_out)
+    pings = 0
+    lines: list[dict[str, Any]] = []
+    # Pull a few lines while the acquire is still parked -- each idle poll must yield a ping.
+    for _ in range(4):
+        line = json.loads(next(gen))
+        lines.append(line)
+        if line.get("type") == "ping":
+            pings += 1
+    assert pings >= 1, "a parked acquire must heartbeat so a dropped waiter is detected"
+    # Let the acquire resolve and drain the generator; the final status is recorded.
+    release.set()
+    for _ in gen:
+        pass
+    assert status_out == ["acquired"]
+
+
+def test_acquire_phase_disconnect_releases_a_just_landed_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression for the leak fix [1]'s heartbeat could introduce: if a client drops in the
+    # same ~0.5s poll window a grant lands on the loop, the GeneratorExit cancel hits an
+    # already-done acquire task (the wakeup beat the cancel), so the just-granted lease would
+    # be orphaned -- held until the 90s idle sweep, blocking everyone queued behind it --
+    # unless the acquire-phase disconnect path ALSO releases. Drive hold_browser's stream,
+    # drop the client while parked in the acquire phase, and assert release ran.
+    monkeypatch.setattr(runner, "_NDJSON_POLL_SECONDS", 0.02)
+    _install_fake_browser(monkeypatch)
+    park = threading.Event()
+    released: list[str] = []
+
+    async def parked_acquire(self: bsession.LiveBrowser, agent_id: str, agent_name: str | None, **_kw: Any) -> str:
+        while not park.is_set():  # park like a FIFO waiter; the client drops before it resolves
+            await asyncio.sleep(0.01)
+        return "acquired"
+
+    async def recording_release(self: bsession.LiveBrowser, agent_id: str) -> bool:
+        released.append(agent_id)
+        return True
+
+    monkeypatch.setattr(bsession.LiveBrowser, "acquire", parked_acquire)
+    monkeypatch.setattr(bsession.LiveBrowser, "release", recording_release)
+
+    with runner.application.test_request_context(
+        "/browsers/alex-smith/lock", method="POST", json={},
+        headers={"X-Mngr-Agent-Id": "A", "X-Mngr-Agent-Name": "Alice"},
+    ):
+        resp = runner.hold_browser("alex-smith")
+        stream = resp.response  # the WSGI generator; pull a couple of pings, then drop it
+        for _ in range(3):
+            next(stream)
+        stream.close()  # raises GeneratorExit inside stream() -> the acquire-phase except path
+
+    assert released == ["A"], "a client drop during the acquire phase must release the lease (CAS-safe no-op otherwise)"
 
 
 def test_http_task_streams_trace_and_releases(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,6 +419,79 @@ def test_http_new_browser_blocked_until_chromium_installed(monkeypatch: pytest.M
     client = runner.application.test_client()
     resp = client.post("/browsers")
     assert resp.status_code == 503
+
+
+def test_http_acquire_returns_a_consistent_on_loop_control_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    # cmd_acquire must read the control-state snapshot ON the loop (via the bridge), not
+    # off the Flask thread (finding [4]). The acquire + snapshot run as ONE coroutine, so
+    # the returned status and the embedded owner fields agree.
+    _install_fake_browser(monkeypatch)
+    client = runner.application.test_client()
+    resp = client.post("/browsers/alex-smith/acquire", json={}, headers={"X-Mngr-Agent-Id": "A", "X-Mngr-Agent-Name": "Alice"})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True and body["status"] == "acquired"
+    # The owner snapshot reflects the just-applied acquire (read on the loop, consistent
+    # with the status), and carries the lifecycle.
+    assert body["controller"] == "agent" and body["owner_agent_id"] == "A"
+    assert body["lifecycle"] == "running"
+
+
+def test_http_handoff_returns_a_consistent_on_loop_control_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    # cmd_handoff likewise reads its snapshot on the loop (finding [4]). A successful handoff
+    # flips control to a pinned human; the returned snapshot reflects that atomically.
+    monkeypatch.setattr(bsession.LiveBrowser, "_wake_agent", _noop_wake_method)
+    fake = _install_fake_browser(monkeypatch)
+    asyncio.run(fake.acquire("A", "Alice"))  # the agent holds it so handoff succeeds
+    client = runner.application.test_client()
+    resp = client.post("/browsers/alex-smith/handoff", json={"reason": "captcha"}, headers={"X-Mngr-Agent-Id": "A", "X-Mngr-Agent-Name": "Alice"})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True and body["status"] == "handed_off"
+    assert body["controller"] == "human" and body["human_pinned"] is True
+    assert body["lifecycle"] == "running"
+
+
+def test_http_cast_closes_a_failed_launch_name_terminally(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A name whose background launch FAILED is closed 1008 (terminal) by the cast handler,
+    # so a late/retrying optimistic viewer stops looping on 1013 (finding [7]). We boot a
+    # real server because the close CODE is only observable over a real socket.
+    runner.manager._browsers.clear()
+    runner.manager._failed_launch_names.append("alex-smith")  # valid name, but launch failed
+    with _BootedServer() as server:
+        ws = simple_websocket.Client(f"ws://127.0.0.1:{server.port}/browsers/alex-smith/cast")
+        # The handler closes the socket terminally; the client sees it close (no messages).
+        assert _wait_until(lambda: not ws.connected)
+        # 1008 is terminal; a still-launching (not failed) valid name would have been 1013.
+        assert ws.close_reason == 1008
+    runner.manager._failed_launch_names.clear()
+
+
+def test_http_cast_does_not_tell_a_running_browser_viewer_it_is_initializing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A viewer joining an already-running browser must NOT receive the fleet-level
+    # `initializing` banner, even while the whole fleet is still restoring (finding
+    # [3-runner]) -- its seed already says lifecycle=running and the live page is there.
+    fake = _install_fake_browser(monkeypatch)  # lifecycle=running
+    fake._context = None
+    fake._latest_frame = "f"  # avoid an on-demand capture (no real CDP)
+    runner._init_done.clear()  # the fleet is still restoring
+    try:
+        with _BootedServer() as server:
+            ws = simple_websocket.Client(f"ws://127.0.0.1:{server.port}/browsers/alex-smith/cast")
+            try:
+                # Drain a handful of seed/early messages; none may be `initializing`.
+                seen: list[dict[str, Any]] = []
+                for _ in range(5):
+                    try:
+                        seen.append(_ws_recv_json(ws, timeout=1))
+                    except (AssertionError, OSError):
+                        break
+                assert seen and seen[0]["type"] == "control" and seen[0]["lifecycle"] == "running"
+                assert not any(m.get("type") == "initializing" for m in seen)
+            finally:
+                ws.close()
+    finally:
+        runner._init_done.set()
 
 
 @_SKIP_REAL_CHROMIUM_IN_GH_CI

@@ -476,7 +476,7 @@ def cmd_tab(args: argparse.Namespace) -> int:
 
 
 def cmd_acquire(args: argparse.Namespace) -> int:
-    status, payload = _request("POST", f"/browsers/{args.name}/acquire", {"reclaim": args.reclaim})
+    _, payload = _request("POST", f"/browsers/{args.name}/acquire", {"reclaim": args.reclaim})
     if payload.get("ok"):
         _pull_in_pane(args.name)
         _out(f"acquired browser {args.name}")

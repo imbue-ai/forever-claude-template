@@ -123,6 +123,12 @@ interface PanelParams {
 let showNewChatModal = false;
 let showNewAgentModal = false;
 let showNewBrowserModal = false;
+// When a background create POST fails, the New-browser modal is re-opened
+// pre-filled with the name the user typed and the daemon's reason, so the user
+// always learns WHY the browser didn't open (rather than the optimistic pane
+// silently vanishing). Both are cleared on a clean open / cancel.
+let newBrowserPrefillName: string | null = null;
+let newBrowserError: string | null = null;
 
 // The dockview group whose header "+" button opened the New chat / New agent
 // modal. Captured at click time because those modals create their chat panel
@@ -566,6 +572,10 @@ function buildDropdownItems(
     label: "New browser",
     action: () => {
       newTabTargetGroup = targetGroup ?? null;
+      // Clean open: drop any leftover failure pre-fill so the modal fetches a
+      // fresh random name and shows no error.
+      newBrowserPrefillName = null;
+      newBrowserError = null;
       showNewBrowserModal = true;
       m.redraw();
     },
@@ -2108,12 +2118,23 @@ export const DockviewWorkspace: m.Component = {
 
         showNewBrowserModal
           ? m(CreateBrowserModal, {
+              // Re-mount the modal whenever the failure pre-fill changes (a new
+              // background failure re-opens it). The closure component reads
+              // initialName/initialError in oninit, which only runs on a fresh
+              // mount; keying on the pre-filled name forces that remount so the
+              // re-opened modal shows the typed name + the daemon's reason.
+              key: newBrowserPrefillName ?? "new",
               browserServiceUrl: getServiceUrl("browser"),
               // Names of browsers already in the fleet, so the modal can
               // pre-validate a typed name and reject a duplicate inline BEFORE
               // opening a pane or calling create -- never optimistically
               // touching the pane of the browser that already owns that name.
               existingBrowserNames: browserFleet.map((b) => b.id),
+              // Set only when re-opened after a background create failed: the
+              // modal pre-fills the input with this name and shows the error
+              // inline (instead of fetching a fresh random name).
+              initialName: newBrowserPrefillName ?? undefined,
+              initialError: newBrowserError,
               // Fires the instant the user accepts a name: open the optimistic
               // 'starting' pane (which shows the full "Starting browser…" overlay
               // and flips to the live page on its own when the daemon broadcasts
@@ -2127,6 +2148,10 @@ export const DockviewWorkspace: m.Component = {
                 const createdPane = openBrowserSessionTab(browserName, newTabTargetGroup);
                 showNewBrowserModal = false;
                 newTabTargetGroup = null;
+                // The accept succeeded optimistically; clear any leftover failure
+                // pre-fill so a subsequent clean open starts fresh.
+                newBrowserPrefillName = null;
+                newBrowserError = null;
                 return createdPane;
               },
               // The background create POST succeeded: the modal is already closed
@@ -2135,20 +2160,28 @@ export const DockviewWorkspace: m.Component = {
               onCreated() {
                 refreshBrowserFleet();
               },
-              // Create failed (invalid / duplicate / full / installing): tear
-              // down the optimistic pane ONLY if this flow created it
-              // (``createdPane``). If the open deduped onto a pre-existing
-              // browser's pane, leave that healthy pane untouched. The modal
-              // stays open with the daemon's error shown inline so the user
-              // can fix the name.
-              onFailed(browserName: string, createdPane: boolean) {
+              // Create failed (400 invalid / 409 duplicate-or-full / 503
+              // installing / network). Two things must happen so the user always
+              // learns WHY the browser didn't open: (1) tear down the optimistic
+              // pane ONLY if this flow created it (``createdPane``) -- if the open
+              // deduped onto a pre-existing browser's healthy pane, leave it
+              // alone; and (2) RE-OPEN this modal pre-filled with the typed name
+              // and the daemon's ``reason`` shown inline, so the failure is
+              // surfaced rather than the pane silently vanishing.
+              onFailed(browserName: string, createdPane: boolean, reason: string) {
                 if (createdPane) {
                   closeBrowserSessionTab(browserName);
                 }
+                newBrowserPrefillName = browserName;
+                newBrowserError = reason;
+                showNewBrowserModal = true;
+                m.redraw();
               },
               onCancel() {
                 showNewBrowserModal = false;
                 newTabTargetGroup = null;
+                newBrowserPrefillName = null;
+                newBrowserError = null;
               },
             })
           : null,

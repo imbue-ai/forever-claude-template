@@ -419,7 +419,14 @@
         initOverlay.classList.remove("show");
         showLoading("Browser failed to start — open a new one from the + menu.");
       }
-      else if (m.type === "initializing") setLifecycle("init");  // fleet still restoring -> still starting
+      else if (m.type === "initializing") {
+        // GLOBAL "fleet still restoring" signal -- NOT this browser's own lifecycle.
+        // The per-browser {type:"control"} lifecycle is authoritative: once THIS
+        // browser has reached running, never downgrade it back to init (that would
+        // re-show the full "Starting browser…" overlay over a live page until reload).
+        // Only show the starting overlay when this browser hasn't reached running yet.
+        if (lifecycle !== "running") setLifecycle("init");
+      }
       else if (m.type === "control") { setLifecycle(m.lifecycle); setControl(m); }  // explicit lifecycle drives the overlays
       else if (m.type === "frame") { if (lifecycle === "running") drawFrame(m.data); }  // only paint once running
       else if (m.type === "handoff_request") {

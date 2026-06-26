@@ -46,13 +46,19 @@ function findByTagAndClass(tree: unknown, tag: string, classFragment: string): V
 interface Calls {
   accepted: string[];
   created: string[];
-  // Each failure records the name and the ``createdPane`` flag the modal
-  // forwarded, so a test can assert the parent only tears down panes it made.
-  failed: Array<{ name: string; createdPane: boolean }>;
+  // Each failure records the name, the ``createdPane`` flag, and the daemon's
+  // reason the modal forwarded, so a test can assert the parent only tears down
+  // panes it made AND that the failure reason is surfaced (not swallowed).
+  failed: Array<{ name: string; createdPane: boolean; reason: string }>;
   cancelled: number;
 }
 
-function makeModal(opts?: { existingBrowserNames?: string[]; acceptCreatesPane?: boolean }): {
+function makeModal(opts?: {
+  existingBrowserNames?: string[];
+  acceptCreatesPane?: boolean;
+  initialName?: string;
+  initialError?: string | null;
+}): {
   render: () => unknown;
   calls: Calls;
   attrs: Parameters<ReturnType<typeof CreateBrowserModal>["view"]>[0]["attrs"];
@@ -65,6 +71,8 @@ function makeModal(opts?: { existingBrowserNames?: string[]; acceptCreatesPane?:
   const attrs = {
     browserServiceUrl: "/service/browser/",
     existingBrowserNames: opts?.existingBrowserNames ?? [],
+    initialName: opts?.initialName,
+    initialError: opts?.initialError ?? null,
     onAccept: (name: string): boolean => {
       calls.accepted.push(name);
       return acceptCreatesPane;
@@ -72,15 +80,22 @@ function makeModal(opts?: { existingBrowserNames?: string[]; acceptCreatesPane?:
     onCreated: (name: string): void => {
       calls.created.push(name);
     },
-    onFailed: (name: string, createdPane: boolean): void => {
-      calls.failed.push({ name, createdPane });
+    onFailed: (name: string, createdPane: boolean, reason: string): void => {
+      calls.failed.push({ name, createdPane, reason });
     },
     onCancel: (): void => {
       calls.cancelled += 1;
     },
   };
-  // The view reads closure state; a minimal vnode stand-in is sufficient.
+  // The view reads closure state; a minimal vnode stand-in is sufficient. When a
+  // pre-fill is supplied (the re-open-after-failure case) drive oninit so the
+  // component seeds the typed name + the daemon's error -- that path does NOT hit
+  // the network. The clean-open case is left as before (the random-name prefill
+  // fetch is irrelevant to these assertions and the name is set via typeName).
   const vnode = { attrs };
+  if (opts?.initialName !== undefined && component.oninit) {
+    component.oninit(vnode as unknown as Parameters<NonNullable<typeof component.oninit>>[0]);
+  }
   return {
     render: () => component.view(vnode as unknown as Parameters<typeof component.view>[0]),
     calls,
@@ -158,9 +173,14 @@ describe("CreateBrowserModal", () => {
 
     // The modal closes IMMEDIATELY on accept (it does not wait for the POST): the
     // pane opens optimistically and the background POST runs. onCreated is never
-    // called; when the POST 409s, onFailed tears the optimistic pane back down.
+    // called; when the POST 409s, onFailed tears the optimistic pane back down AND
+    // forwards the daemon's reason so the parent can re-surface it to the user.
     expect(modal.calls.accepted).toEqual(["my-browser"]);
-    await vi.waitFor(() => expect(modal.calls.failed).toEqual([{ name: "my-browser", createdPane: true }]));
+    await vi.waitFor(() =>
+      expect(modal.calls.failed).toEqual([
+        { name: "my-browser", createdPane: true, reason: "3/3 browsers open -- close one first." },
+      ]),
+    );
     expect(modal.calls.created).toEqual([]);
   });
 
@@ -209,6 +229,116 @@ describe("CreateBrowserModal", () => {
     clickCreate(modal);
 
     expect(modal.calls.accepted).toEqual(["my-browser"]);
-    await vi.waitFor(() => expect(modal.calls.failed).toEqual([{ name: "my-browser", createdPane: false }]));
+    await vi.waitFor(() =>
+      expect(modal.calls.failed).toEqual([
+        { name: "my-browser", createdPane: false, reason: "a browser named my-browser already exists" },
+      ]),
+    );
+  });
+
+  it("rejects an invalid name inline (mirrors is_valid_browser_name) without opening a pane or posting", () => {
+    // Layer one of name validation: the daemon's rule is lowercase alnum words
+    // joined by single dashes, 1..40 chars, no leading/trailing/double dash, not
+    // all-digits. A bad name must show the inline error and never open a pane or
+    // POST -- the user learns the rule immediately instead of seeing an optimistic
+    // pane flash up and vanish on the daemon's 400.
+    const invalidNames = [
+      "Has-Caps",
+      "has_underscore",
+      "has space",
+      "-leading",
+      "trailing-",
+      "double--dash",
+      "tr" + "a".repeat(40), // 42 chars: over the 40-char limit
+      "123",
+      "name!",
+    ];
+    for (const bad of invalidNames) {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      const modal = makeModal();
+      typeName(modal, bad);
+      clickCreate(modal);
+
+      expect(modal.calls.accepted).toEqual([]);
+      expect(modal.calls.failed).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      // Some inline error text is rendered (the specific message depends on which
+      // rule the name broke).
+      const tree = JSON.stringify(modal.render());
+      expect(tree).toMatch(/lowercase|digits|characters|Enter a browser name/);
+    }
+  });
+
+  it("accepts a valid name with digits and dashes", async () => {
+    // A name that is NOT all-digits but contains digits/dashes is valid and must
+    // reach the optimistic-open + POST path.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ name: "browser-2", key_available: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const modal = makeModal();
+    typeName(modal, "browser-2");
+    clickCreate(modal);
+
+    expect(modal.calls.accepted).toEqual(["browser-2"]);
+    await vi.waitFor(() => expect(modal.calls.created).toEqual(["browser-2"]));
+  });
+
+  it("surfaces a generic reason on a network error so the failure is never silent", async () => {
+    // The POST never reaches the daemon (fetch rejects). The modal must still call
+    // onFailed with a human-readable reason so the parent can re-surface it.
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("network down"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const modal = makeModal();
+    typeName(modal, "my-browser");
+    clickCreate(modal);
+
+    expect(modal.calls.accepted).toEqual(["my-browser"]);
+    await vi.waitFor(() => expect(modal.calls.failed.length).toBe(1));
+    expect(modal.calls.failed[0].name).toBe("my-browser");
+    expect(modal.calls.failed[0].createdPane).toBe(true);
+    expect(modal.calls.failed[0].reason).toMatch(/Could not reach the browser service/);
+  });
+
+  it("falls back to a generic reason when the daemon error body is missing", async () => {
+    // A 503 with no usable ``error`` field still yields a non-empty reason, so the
+    // re-opened modal never shows a blank failure message.
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const modal = makeModal();
+    typeName(modal, "my-browser");
+    clickCreate(modal);
+
+    await vi.waitFor(() => expect(modal.calls.failed.length).toBe(1));
+    expect(modal.calls.failed[0].reason).toBe("The browser could not be created.");
+  });
+
+  it("re-opens pre-filled with the typed name and the daemon's reason after a failure", () => {
+    // When the parent re-opens the modal with initialName/initialError (after a
+    // background failure), the input is pre-filled with the typed name and the
+    // daemon's reason is shown inline -- so the user always learns WHY it failed
+    // and can fix-and-retry. No random-name fetch happens in this path.
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const modal = makeModal({
+      initialName: "alex-smith",
+      initialError: "3/3 browsers open -- close one first.",
+    });
+
+    const tree = JSON.stringify(modal.render());
+    expect(tree).toContain("3/3 browsers open -- close one first.");
+    // The random-name prefill fetch (m.request) is skipped on re-open; the input
+    // keeps the typed name.
+    const input = findByTagAndClass(modal.render(), "input", "custom-url-dialog-input");
+    expect(input?.attrs?.value).toBe("alex-smith");
   });
 });
