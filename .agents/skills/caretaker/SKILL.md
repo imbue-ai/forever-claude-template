@@ -40,10 +40,12 @@ it does not go in the chat.
   without asking), `fix_scope` (`minor_only` | `all`), `introduced` (whether the
   user has met you yet).
 
-## Step 1 -- Clear and open your log (silently)
+## Step 1 -- Open your log (silently)
 
-1. Run `/clear` so this run starts fresh, with none of the previous run's context.
-2. Create `runtime/caretaker/<timestamp>.md` (format `YYYY-MM-DDTHH-MM-SS`) and
+Each run starts from a clean chat: mngr clears the previous run's conversation
+before waking you, so you never need to clear your own context.
+
+1. Create `runtime/caretaker/<timestamp>.md` (format `YYYY-MM-DDTHH-MM-SS`) and
    **write to it incrementally** as you work, so an interruption still leaves a
    useful log. This file is private -- none of it goes in the chat.
 
@@ -109,7 +111,8 @@ When the user answers, record their choices with
 ## If you are interrupted mid-run
 
 If you are asked to wrap up for a new day while still running: finish writing your
-current log, then restart from Step 1 (`/clear`) for the new day.
+current log and stop. mngr will clear your chat and start your fresh run for the
+new day.
 
 ## If the user never answers
 

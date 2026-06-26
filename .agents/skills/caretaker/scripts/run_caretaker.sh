@@ -9,20 +9,40 @@
 #
 # The Caretaker is a singleton, identified by its `caretaker=true` label.
 # Three branches:
-#   - none exists          -> `mngr create` it (so it first appears on day 2)
-#   - exists, idle          -> message it to start a fresh nightly run
-#   - exists, busy (RUNNING) -> ask it to finish its log and restart itself
+#   - none exists           -> `mngr create` it (so it first appears on day 2)
+#   - exists, idle          -> clear its chat, then message it to run
+#   - exists, busy (RUNNING) -> ask it to finish its log, then clear + run
 #
-# The nightly routine itself lives in SKILL.md and always begins with /clear,
-# so a fresh run never inherits the previous run's context.
+# mngr -- not the agent -- drives the clear. An agent that writes "/clear" in
+# its own response only emits text; the slash command only fires when it is
+# sent to the agent's stdin (exactly as a user typing "/clear" would). So each
+# re-wake first sends "/clear" via mngr to wipe the prior conversation, then
+# sends the run trigger, so every night starts from a clean chat. A freshly
+# created Caretaker has nothing to clear, so creation skips the /clear and the
+# first thing the user ever sees is the Caretaker's welcome message.
 set -euo pipefail
 
 CARETAKER_NAME="caretaker"
 CARETAKER_FILTER='labels.caretaker == "true"'
 
-ROUTINE_MESSAGE="It is time for your nightly run. Follow your caretaker skill now: begin by running /clear, then carry out the routine documented in .agents/skills/caretaker/SKILL.md."
+# Sent on first creation: a fresh agent has no prior context to clear, so this
+# just triggers the skill, whose first-run path's entire chat output is the
+# pre-prepared welcome message.
+FIRST_RUN_MESSAGE="It's time for your *caretaking* run. Follow your caretaker skill (.agents/skills/caretaker/SKILL.md)."
 
-WRAPUP_MESSAGE="A new day's nightly run is due while you are still mid-run. Please finish writing your current run log now, then restart yourself for the new day by following your caretaker skill from the top (begin with /clear)."
+# Sent (after a "/clear") to re-wake an existing Caretaker for a fresh run.
+RUN_MESSAGE="It's time for your *caretaking* run. Follow your caretaker skill (.agents/skills/caretaker/SKILL.md)."
+
+# Sent to a busy Caretaker so it finishes gracefully; the actual clear + run for
+# the new day is then driven by mngr (clear_and_run below) on the next branch.
+WRAPUP_MESSAGE="A new day's caretaking run is due while you are still mid-run. Please finish writing your current run log now and stop; I will start your fresh run for the new day."
+
+# Short pause between the "/clear" send and the run send. send_message already
+# blocks until the TUI is ready before each paste, so the run message cannot be
+# pasted until the agent is idle again after processing "/clear"; this sleep is
+# belt-and-suspenders, since "/clear" is a near-instant local operation that may
+# leave the readiness gate satisfied within the same frame.
+CLEAR_SETTLE_SECONDS=2
 
 log() { printf '%s run_caretaker: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
@@ -81,7 +101,19 @@ create_caretaker() {
     --label caretaker=true \
     --label auto_created=true \
     "${label_args[@]}" \
-    --message "$ROUTINE_MESSAGE"
+    --message "$FIRST_RUN_MESSAGE"
+}
+
+# Re-wake an existing Caretaker: mngr sends "/clear" to wipe the prior chat,
+# then (after a short settle) sends the run trigger. `--start` ensures a stopped
+# agent is started before each send.
+clear_and_run() {
+  local agent_id="$1"
+  log "clearing Caretaker ${agent_id}'s chat"
+  uv run mngr message "$agent_id" --start --message "/clear"
+  sleep "$CLEAR_SETTLE_SECONDS"
+  log "sending fresh caretaking run message to ${agent_id}"
+  uv run mngr message "$agent_id" --start --message "$RUN_MESSAGE"
 }
 
 main() {
@@ -98,12 +130,11 @@ main() {
   running="$(running_caretaker_ids)"
 
   if printf '%s\n' "$running" | grep -qxF "$first_id"; then
-    log "Caretaker ${first_id} is mid-run; sending wrap-up + self-restart message"
+    log "Caretaker ${first_id} is mid-run; sending graceful wrap-up before restarting"
     uv run mngr message "$first_id" --message "$WRAPUP_MESSAGE"
-  else
-    log "Caretaker ${first_id} is idle; sending a fresh nightly run message"
-    uv run mngr message "$first_id" --start --message "$ROUTINE_MESSAGE"
   fi
+
+  clear_and_run "$first_id"
 }
 
 main "$@"
