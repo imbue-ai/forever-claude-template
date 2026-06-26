@@ -1491,11 +1491,14 @@ body {
   color: var(--color-text-secondary);
 }
 
-/* Newly auto-created agent tab (e.g. the nightly Caretaker): blink in the
-   accent color until the user opens it. createCustomTab() adds .dv-tab-new on
-   such tabs and removes it on the tab's first activation. */
+/* Newly auto-created agent tab (e.g. the nightly Caretaker): flash in this
+   workspace's accent color until the user opens it. createCustomTab() adds
+   .dv-tab-new on such tabs and removes it on the tab's first activation. Each
+   cycle snaps bright in the accent, then eases out to the normal idle tab look
+   before snapping bright again, so the indicator is hard to miss. The accent is
+   the per-workspace --workspace-accent, falling back to the default accent. */
 .dv-default-tab.dv-tab-new {
-  animation: tab-new-pulse 1.3s ease-in-out infinite;
+  animation: tab-new-flash 1.4s ease-out infinite;
   border-radius: 4px;
 }
 
@@ -1503,13 +1506,13 @@ body {
   font-weight: 600;
 }
 
-@keyframes tab-new-pulse {
-  0%,
-  100% {
-    background-color: var(--color-accent-light);
-    color: var(--color-accent);
+@keyframes tab-new-flash {
+  0% {
+    background-color: var(--workspace-accent, var(--color-accent));
+    color: #ffffff;
   }
-  50% {
+  70%,
+  100% {
     background-color: transparent;
     color: var(--color-text-secondary);
   }
