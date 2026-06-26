@@ -1430,3 +1430,57 @@ def test_body_cache_capacity_respected_while_paging_full_history(tmp_path: Path)
 
     # Despite eviction, paging recovered the entire transcript in order.
     assert seen == all_ids
+
+
+def _build_cleared_agent(tmp_path: Path) -> tuple[Path, Path]:
+    """Write an agent whose history records a ``/clear``: an old session then a new
+    ``clear``-sourced one, mirroring what mngr's SessionStart hook appends. Returns
+    (agent_state_dir, claude_config_dir)."""
+    agent_state_dir = tmp_path / "agent_state"
+    agent_state_dir.mkdir()
+    claude_config_dir = tmp_path / "claude_config"
+    projects_dir = claude_config_dir / "projects"
+
+    _write_session_file(projects_dir, "old-session", [_assistant_line(0), _assistant_line(1)])
+    _write_session_file(projects_dir, "new-session", [_assistant_line(2)])
+    # Append-only history: the old session (startup), then the /clear-sourced one.
+    (agent_state_dir / "claude_session_id_history").write_text("old-session startup\nnew-session clear\n")
+    return agent_state_dir, claude_config_dir
+
+
+def test_clear_hides_pre_clear_sessions_from_main_view(tmp_path: Path) -> None:
+    """After a /clear, the main view renders only the post-clear session.
+
+    mngr records /clear as a new ``clear``-sourced history line while keeping the old
+    one, so without pruning the rendered chat would still show the pre-clear transcript
+    with the new session merely appended. The cleared chat must read as empty-then-new,
+    not old-then-new.
+    """
+    agent_state_dir, claude_config_dir = _build_cleared_agent(tmp_path)
+    watcher = _make_oracle_watcher(agent_state_dir, claude_config_dir, capacity=10_000)
+
+    events = watcher.get_all_events()
+    sessions = {e["session_id"] for e in events}
+    assert sessions == {"new-session"}
+    assert _ids(events) == ["a0000002-assistant"]
+    # The pre-clear session's live events are no longer treated as main, so the SSE
+    # main stream drops them too.
+    assert watcher.is_main_session_event({"session_id": "new-session"}) is True
+    assert watcher.is_main_session_event({"session_id": "old-session"}) is False
+
+
+def test_no_clear_renders_all_resumed_sessions(tmp_path: Path) -> None:
+    """Without a /clear, every resumed session still renders (compact/resume continue
+    the conversation rather than reset it)."""
+    agent_state_dir = tmp_path / "agent_state"
+    agent_state_dir.mkdir()
+    claude_config_dir = tmp_path / "claude_config"
+    projects_dir = claude_config_dir / "projects"
+    _write_session_file(projects_dir, "session-a", [_assistant_line(0)])
+    _write_session_file(projects_dir, "session-b", [_assistant_line(1)])
+    # A compact (auto-compaction mid-turn) is a continuation, not a reset.
+    (agent_state_dir / "claude_session_id_history").write_text("session-a startup\nsession-b compact\n")
+    watcher = _make_oracle_watcher(agent_state_dir, claude_config_dir, capacity=10_000)
+
+    events = watcher.get_all_events()
+    assert {e["session_id"] for e in events} == {"session-a", "session-b"}

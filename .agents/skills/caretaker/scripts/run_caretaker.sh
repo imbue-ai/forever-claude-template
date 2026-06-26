@@ -8,51 +8,39 @@
 # MNGR_AGENT_ID, ... are inherited).
 #
 # The Caretaker is a singleton, identified by its `caretaker=true` label, and is
-# recreated fresh on every run: mngr destroys the previous Caretaker agent and
-# creates a new one. A brand-new agent always starts from an empty chat, which
-# is the only reliable way to clear the conversation -- an in-session "/clear"
-# starts a new Claude session id that the system interface is not watching, so
-# it does not actually clear the rendered chat.
+# PERSISTENT: it is created once and then kept alive across every run -- never
+# destroyed and recreated. Each run clears its chat and re-triggers its routine
+# in place:
+#   - No Caretaker yet (first run ever) -> create one whose first message is
+#     `/caretaker`. The caretaker skill is idempotent: on an empty chat it
+#     self-detects the first run and delivers the welcome.
+#   - Caretaker already exists -> bump its run key (so the minds UI re-surfaces
+#     and re-flashes the tab if the user had closed it), send `/clear` to wipe
+#     the rendered chat, then send `/caretaker` to run the routine again. The
+#     skill self-detects that this is a later run and runs the routine rather
+#     than the welcome.
 #
-# Two branches, gated on the persistent `introduced` preference (set true once,
-# right after the very first welcome is delivered, so the welcome never reappears
-# even if the agent is later destroyed and recreated):
-#   - introduced == false -> first ever run: create with /caretaker-welcome (the
-#                            fixed, pre-prepared greeting), then mark introduced.
-#   - introduced == true  -> retire the old Caretaker and create a fresh one that
-#                            just runs the caretaker skill, informed by the
-#                            preferences the user gave in response to the welcome.
+# `/clear` actually clears the rendered chat: the system interface renders only
+# the sessions at or after the most recent `/clear` boundary in the agent's
+# session history, so a clear makes the previous run's transcript disappear and
+# the new run starts from an empty chat.
 set -euo pipefail
 
 CARETAKER_NAME="caretaker"
 CARETAKER_FILTER='labels.caretaker == "true"'
-PREFERENCES_SCRIPT=".agents/skills/caretaker/scripts/preferences.py"
 
-# Sent on the very first run only. Mirrors how the initial chat is created
-# (mngr create ... --message /welcome): the Caretaker's first message is the
-# /caretaker-welcome slash command, which emits a fixed, pre-prepared welcome
-# verbatim and runs no routine -- so the very first thing the user sees is the
-# welcome, delivered the same way as the main chat's, not an agent-improvised run.
-WELCOME_COMMAND="/caretaker-welcome"
-
-# Sent to a freshly-created Caretaker on every later run: the /caretaker slash
-# command invokes the caretaker skill (which greets the user, then runs the
-# routine against their saved preferences). Like /caretaker-welcome it is hidden
-# in the chat UI, so the user's first visible message is the Caretaker's own
-# hello, not the trigger.
+# The single trigger, sent on EVERY run (first and later). The caretaker skill is
+# idempotent and self-detecting: on an empty/first-run chat it delivers the
+# welcome, otherwise it runs the nightly routine. Like /welcome it is hidden in
+# the chat UI, so the user's first visible message is always the Caretaker's own
+# output, never the slash command that produced it.
 RUN_MESSAGE="/caretaker"
 
-# Sent to a still-running Caretaker so it finishes its run log gracefully before
-# we retire it for the new day.
-WRAPUP_MESSAGE="A new day's caretaking run is due while you are still mid-run. Please finish writing your current run log now and stop; I will start your fresh run for the new day."
-
-# How long (seconds) to let a mid-run Caretaker finish its log after the wrap-up
-# nudge before we destroy it anyway.
-WRAPUP_GRACE_SECONDS=60
+# Settle time (seconds) between sending /clear and sending /caretaker, so the
+# clear lands (and the new session boundary is recorded) before the run starts.
+CLEAR_SETTLE_SECONDS=2
 
 log() { printf '%s run_caretaker: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-
-preference() { uv run python "$PREFERENCES_SCRIPT" "$@"; }
 
 # Resolve the workspace label so the Caretaker tab groups with the user's other
 # agents in the minds UI (mirrors libs/bootstrap's create-chat workspace logic:
@@ -88,22 +76,16 @@ caretaker_ids() {
   uv run mngr list --active --include "$CARETAKER_FILTER" --ids --on-error continue 2>/dev/null || true
 }
 
-# Ids of Caretaker agents currently RUNNING (mid-turn). `--running` is mngr's
-# alias for `--include 'state == "RUNNING"'`, so we never parse state strings.
-running_caretaker_ids() {
-  uv run mngr list --active --running --include "$CARETAKER_FILTER" --ids --on-error continue 2>/dev/null || true
-}
-
-# Create a fresh Caretaker whose first message is "$1" (the welcome command on
-# the first run, the run nudge thereafter). A brand-new agent starts from an
-# empty chat, so this is what clears the conversation for each run.
+# Create the persistent Caretaker whose first message is `/caretaker`. A
+# brand-new agent starts from an empty chat, so the idempotent skill delivers
+# the welcome on this first run.
 create_caretaker() {
-  local initial_message="$1" workspace label_args=()
+  local workspace label_args=()
   workspace="$(resolve_workspace)"
   if [ -n "$workspace" ]; then
     label_args=(--label "workspace=${workspace}")
   fi
-  log "creating a fresh Caretaker (first message: ${initial_message})"
+  log "creating the persistent Caretaker (first message: ${RUN_MESSAGE})"
   uv run mngr create "$CARETAKER_NAME" \
     --transfer none \
     --template caretaker \
@@ -113,62 +95,39 @@ create_caretaker() {
     --label auto_created=true \
     --label "caretaker_run=$(date +%s)" \
     "${label_args[@]}" \
-    --message "$initial_message"
-}
-
-# Retire every existing Caretaker so the next create starts from a clean slate.
-# A running Caretaker is first asked to finish its log (bounded wait), then every
-# Caretaker is destroyed (``--force`` stops any still running). Best-effort: a
-# destroy failure self-heals on the next run, since the singleton filter would
-# pick up the straggler and retire it then.
-retire_caretakers() {
-  local ids="$1" id running waited
-  running="$(running_caretaker_ids)"
-  if [ -n "${running//[[:space:]]/}" ]; then
-    while IFS= read -r id; do
-      [ -n "$id" ] || continue
-      log "Caretaker ${id} is mid-run; asking it to finish its log"
-      uv run mngr message "$id" --message "$WRAPUP_MESSAGE" 2>/dev/null || true
-    done <<<"$running"
-    waited=0
-    while [ "$waited" -lt "$WRAPUP_GRACE_SECONDS" ]; do
-      running="$(running_caretaker_ids)"
-      [ -z "${running//[[:space:]]/}" ] && break
-      sleep 3
-      waited=$((waited + 3))
-    done
-  fi
-  while IFS= read -r id; do
-    [ -n "$id" ] || continue
-    log "retiring old Caretaker ${id}"
-    uv run mngr destroy "$id" --force 2>/dev/null || log "could not destroy ${id} (will retry next run)"
-  done <<<"$ids"
+    --message "$RUN_MESSAGE"
 }
 
 main() {
-  local introduced ids
-  introduced="$(preference get introduced 2>/dev/null || echo false)"
+  local ids id
   ids="$(caretaker_ids)"
 
-  if [ "$introduced" != "true" ]; then
-    # Very first run ever: deliver the welcome. Clear out any stray Caretaker
-    # first so we start from a single, fresh agent.
-    if [ -n "${ids//[[:space:]]/}" ]; then
-      retire_caretakers "$ids"
-    fi
-    create_caretaker "$WELCOME_COMMAND"
-    preference set introduced true
-    log "first-run welcome delivered; introduced=true"
+  if [ -z "${ids//[[:space:]]/}" ]; then
+    # First run ever: no Caretaker exists, so create the persistent one.
+    create_caretaker
+    log "persistent Caretaker created; first run started"
     return 0
   fi
 
-  # Every later run: replace the old Caretaker with a fresh one (clean chat) that
-  # just runs the skill.
-  if [ -n "${ids//[[:space:]]/}" ]; then
-    retire_caretakers "$ids"
-  fi
-  create_caretaker "$RUN_MESSAGE"
-  log "fresh Caretaker created for this run"
+  # Caretaker already exists: keep it, clear its chat, and re-trigger in place.
+  # Preserve the singleton invariant by operating on the first id if (unexpectedly)
+  # more than one exists.
+  id="$(printf '%s\n' "$ids" | head -n 1)"
+
+  # Bump the run key so the minds UI re-surfaces and re-flashes the tab if the
+  # user had closed it.
+  uv run mngr label "$id" -l "caretaker_run=$(date +%s)" 2>/dev/null || true
+
+  # Clear the rendered chat so this run starts from an empty conversation.
+  log "clearing Caretaker ${id} for a fresh run"
+  uv run mngr message "$id" --start --message "/clear"
+
+  # Let the clear land (new session boundary recorded) before triggering the run.
+  sleep "$CLEAR_SETTLE_SECONDS"
+
+  # Re-trigger the (idempotent) caretaker routine in the now-empty chat.
+  log "triggering Caretaker ${id} run"
+  uv run mngr message "$id" --start --message "$RUN_MESSAGE"
 }
 
 main "$@"

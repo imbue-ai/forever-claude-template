@@ -936,6 +936,17 @@ class AgentSessionWatcher:
 
         A missing or unreadable history file is a no-op (already-known sessions keep being
         watched); subagent discovery in ``_discover_sessions`` runs either way.
+
+        ``/clear`` is the user's "start a fresh conversation" command. mngr records it
+        in the history as a new session line whose source is ``clear`` (the
+        SessionStart hook appends ``<session_id> clear``), while keeping every earlier
+        line -- the history is append-only. So the rendered main view must not be the
+        union of every session ever seen, or a cleared chat would still show the old
+        transcript with the new session merely appended after it. We therefore render
+        only the sessions from the most recent ``clear`` boundary onward (see
+        ``_prune_main_sessions_to_clear_boundary_locked``). ``compact``/``resume``/
+        ``startup`` sources are continuations, not resets, so they never move the
+        boundary.
         """
         history_file = self._agent_state_dir / "claude_session_id_history"
         if not history_file.exists():
@@ -947,11 +958,16 @@ class AgentSessionWatcher:
             logger.debug("Failed to read session history file {}: {}", history_file, e)
             return
 
+        # (session_id, source) per history line, in file order. ``source`` is the
+        # second whitespace field ("" when the line predates source tracking).
+        history_entries: list[tuple[str, str]] = []
         for line in lines:
             parts = line.strip().split()
             if not parts:
                 continue
-            session_id = parts[0]
+            history_entries.append((parts[0], parts[1] if len(parts) > 1 else ""))
+
+        for session_id, _source in history_entries:
             with self._lock:
                 already_known = session_id in self._session_states
             if already_known:
@@ -980,6 +996,43 @@ class AgentSessionWatcher:
                     self._observer.schedule(WakeOnChangeHandler(self._wake_event), parent_dir, recursive=False)
                 except OSError as e:
                     logger.debug("Failed to schedule watchdog for {}: {}", parent_dir, e)
+
+        with self._lock:
+            self._prune_main_sessions_to_clear_boundary_locked(history_entries)
+
+    def _prune_main_sessions_to_clear_boundary_locked(self, history_entries: list[tuple[str, str]]) -> None:
+        """Drop pre-``/clear`` sessions from the rendered main view (lock held).
+
+        After a ``/clear`` the history holds both the old session(s) and the new
+        ``clear``-sourced one. Without pruning, the main timeline would keep rendering
+        the pre-clear transcript (the REST tail merges every main session, and
+        ``is_main_session_event`` would keep streaming the old session's live events),
+        so the chat would never appear cleared. We restrict ``_main_session_ids`` to the
+        sessions at or after the most recent ``clear`` boundary, preserving their
+        relative order. ``_session_states`` is left intact so the files stay watched and
+        a backfill that reaches across the boundary can still resolve their bodies; only
+        what the main view renders changes.
+        """
+        boundary_session_id: str | None = None
+        for session_id, source in history_entries:
+            if source == "clear":
+                boundary_session_id = session_id
+        if boundary_session_id is None:
+            return
+
+        # History order of the sessions we render, from the boundary onward.
+        kept_after_boundary: list[str] = []
+        seen_boundary = False
+        for session_id, _source in history_entries:
+            if session_id == boundary_session_id:
+                seen_boundary = True
+            if seen_boundary:
+                kept_after_boundary.append(session_id)
+        kept = set(kept_after_boundary)
+
+        # Preserve the existing _main_session_ids ordering (it tracks the order files
+        # were discovered, which the timeline relies on), keeping only kept sessions.
+        self._main_session_ids = [sid for sid in self._main_session_ids if sid in kept]
 
     def _discover_subagent_sessions(self, parent_session_id: str, parent_file_path: Path) -> None:
         """Discover subagent session files under <session_id>/subagents/.
