@@ -5,10 +5,14 @@ description: The Caretaker's first-night greeting. Invoked as the Caretaker agen
 
 # Caretaker welcome
 
-Output the following welcome message to the user, verbatim (including the
-markdown formatting), as your entire response. Do NOT call any tools, do NOT
-scan logs, do NOT run the caretaker routine, do NOT look at the codebase, and do
-NOT add anything else:
+Your entire response is the welcome message below, reproduced exactly as written
+(including the markdown formatting). Begin your reply with its first line and end
+with its last.
+
+Write **nothing of your own** around it: no preamble, no "here is the message",
+no "I was asked to output the following", no explanation, no sign-off. Do NOT
+call any tools, scan logs, run the caretaker routine, or look at the codebase.
+Just the message itself, verbatim:
 
 ---
 

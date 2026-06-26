@@ -35,9 +35,12 @@ PREFERENCES_SCRIPT=".agents/skills/caretaker/scripts/preferences.py"
 # welcome, delivered the same way as the main chat's, not an agent-improvised run.
 WELCOME_COMMAND="/caretaker-welcome"
 
-# Sent to a freshly-created Caretaker on every later run: just run the skill,
-# which reads the user's recorded preferences and acts accordingly.
-RUN_MESSAGE="It's time for your *caretaking* run. Follow your caretaker skill (.agents/skills/caretaker/SKILL.md)."
+# Sent to a freshly-created Caretaker on every later run: the /caretaker slash
+# command invokes the caretaker skill (which greets the user, then runs the
+# routine against their saved preferences). Like /caretaker-welcome it is hidden
+# in the chat UI, so the user's first visible message is the Caretaker's own
+# hello, not the trigger.
+RUN_MESSAGE="/caretaker"
 
 # Sent to a still-running Caretaker so it finishes its run log gracefully before
 # we retire it for the new day.
