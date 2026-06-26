@@ -687,8 +687,14 @@ async def _create_workspace_and_first_message(
     """
     await win.goto(origin + "/create")
     await win.wait_for_selector("#create-form", timeout=10_000)
-    await win.click("#configure-toggle")
-    await win.wait_for_selector("#configure-panel:not(.hidden)", timeout=5_000)
+    # Signed out (no Imbue account): pick the "local" preset first so the AI /
+    # backup providers are the non-cloud set. Otherwise the form defaults to the
+    # Imbue Cloud providers, and submitting a cloud provider with no account
+    # opens the sign-in modal instead of creating. The explicit launch_mode /
+    # ai_provider selections below override the preset's compute / AI choices.
+    await win.click('[data-preset="local"]')
+    await win.click("#toggle-advanced")
+    await win.wait_for_selector("#advanced-view:not(.hidden)", timeout=5_000)
     await win.select_option("#launch_mode", value="LIMA")
     await win.select_option("#ai_provider", value=ai_provider)
     if ai_provider == "API_KEY":
@@ -1187,6 +1193,16 @@ async def amain() -> int:
                     chat_now = await find_chat_window(ctx)
                     if chat_now is not None:
                         win = chat_now
+                    # Scroll the transcript to the live tail before reading it, as a
+                    # user reading the latest reply would. The chat virtualizes
+                    # off-screen rows, so a reply rendered below the fold (e.g. the
+                    # view was not pinned to the bottom when it arrived) is absent
+                    # from document.body.innerText until the viewport is at the tail.
+                    with contextlib.suppress(Exception):
+                        await win.evaluate(
+                            "() => { for (const el of document.querySelectorAll('.app-content')) "
+                            "{ el.scrollTop = el.scrollHeight; } }"
+                        )
                     # Check for canned body in chat (PASS).
                     body = await win.evaluate("document.body.innerText")
                     if CANNED_BODY.lower() in body.lower() and approval_stage >= 3:
