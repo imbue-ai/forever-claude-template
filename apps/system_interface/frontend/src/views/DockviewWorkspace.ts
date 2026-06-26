@@ -164,6 +164,13 @@ const seenAutoAgentIds = loadStoredIdSet(AUTO_SEEN_STORAGE_KEY);
 // reload also re-surfaces a tab the user had closed.
 const lastSurfacedRunKeyByAgent = new Map<string, string>();
 
+// In-memory: auto-created agents we have observed present at least once. Used to
+// detect when one is destroyed -- the nightly Caretaker is retired and replaced
+// by a fresh agent on every run, so its now-dead tab must be closed. Scoped to
+// auto-created agents so a transient snapshot that briefly omits one of the
+// user's own agents can never close their chat.
+const knownAutoCreatedAgentIds = new Set<string>();
+
 function persistIdSet(key: string, ids: Set<string>): void {
   try {
     window.localStorage.setItem(key, JSON.stringify([...ids]));
@@ -622,6 +629,40 @@ function surfaceAutoCreatedAgents(): void {
       clearAutoSeen(agent.id);
       addChatPanel(agent.id, agent.name, null, { inactive: true });
     }
+  }
+}
+
+/** Close any chat tab(s) pointing at ``agentId``. Used to drop a dead tab whose
+ *  agent has been destroyed. */
+function closeChatTabsForAgent(agentId: string): void {
+  if (!dockview) return;
+  for (const panel of dockview.panels.slice()) {
+    const pp = panelParams.get(panel.id);
+    if (pp?.panelType !== "chat") continue;
+    if ((pp.chatAgentId ?? pp.agentId) === agentId) {
+      dockview.removePanel(panel);
+    }
+  }
+}
+
+/** Close the dead tab of an auto-created agent (the Caretaker) once it is
+ *  destroyed. The Caretaker is retired and recreated as a fresh agent on every
+ *  run -- the only reliable way to clear its chat -- so without this the old,
+ *  now-dead tab would linger beside each run's new one. Scoped to auto-created
+ *  agents we have actually seen present, so a user's own chat tab is never at
+ *  risk from a transient snapshot. */
+function pruneDestroyedAutoCreatedTabs(): void {
+  if (!dockview) return;
+  const present = new Set(getAgents().map((agent) => agent.id));
+  for (const agent of getAgents()) {
+    if (isAutoCreatedAgent(agent)) knownAutoCreatedAgentIds.add(agent.id);
+  }
+  for (const agentId of [...knownAutoCreatedAgentIds]) {
+    if (present.has(agentId)) continue;
+    closeChatTabsForAgent(agentId);
+    knownAutoCreatedAgentIds.delete(agentId);
+    // Allow a future agent (a fresh run) to re-surface and re-flash cleanly.
+    lastSurfacedRunKeyByAgent.delete(agentId);
   }
 }
 
@@ -1911,6 +1952,7 @@ function initializeDockview(parentElement: HTMLElement): void {
       updateEmptyState();
     }
     if (layoutLoaded) {
+      pruneDestroyedAutoCreatedTabs();
       surfaceAutoCreatedAgents();
     }
   };

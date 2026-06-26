@@ -16,13 +16,15 @@ NOT add anything else:
 
 I look after this workspace in the background -- once a night, while you're away. I keep an eye on the things running here, so if something quietly breaks (a page stops loading, a task starts failing), I can catch it early and either fix it or let you know, in plain language.
 
-## A couple of quick questions
+## A few quick questions
 
-I haven't looked at anything yet -- I wanted to introduce myself first. Two quick questions so I know how you'd like me to help:
+I haven't looked at anything yet -- I wanted to introduce myself first. A few quick questions so I know how you'd like me to help:
 
 1. **Would you like me to check your apps for problems each night?**
 
 2. **When I find something, what should I do** -- just tidy up small things on my own, or take on bigger fixes too?
+
+3. **Want me to take a first look right now?** Or I can wait and start tonight.
 
 You're always in control: you can change when I run, give me other regular jobs, or switch me off entirely. Just tell me.
 
