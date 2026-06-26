@@ -887,11 +887,12 @@ class AgentManager:
         """Handle a full discovery snapshot."""
         new_agents: dict[str, AgentStateItem] = {}
         for agent in event.agents:
-            new_agents[str(agent.agent_id)] = AgentStateItem(
-                id=str(agent.agent_id),
+            agent_id = str(agent.agent_id)
+            new_agents[agent_id] = AgentStateItem(
+                id=agent_id,
                 name=str(agent.agent_name),
                 state="RUNNING",
-                labels=dict(agent.labels),
+                labels=dict(agent.labels) or self._local_agent_labels(agent_id),
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
             )
 
@@ -923,7 +924,7 @@ class AgentManager:
             id=agent_id,
             name=str(agent.agent_name),
             state="RUNNING",
-            labels=dict(agent.labels),
+            labels=dict(agent.labels) or self._local_agent_labels(agent_id),
             work_dir=str(agent.work_dir) if agent.work_dir else None,
         )
 
@@ -1019,6 +1020,28 @@ class AgentManager:
         the activity tracker agree on the same path.
         """
         return self._host_dir / "agents" / agent_id
+
+    def _local_agent_labels(self, agent_id: str) -> dict[str, str]:
+        """Read an agent's labels from its local ``data.json``.
+
+        ``mngr observe --discovery-only`` events carry no labels (the discovery
+        ``certified_data`` omits them), so the observe-driven snapshot handlers
+        would otherwise replace the label-bearing entries from the initial
+        ``list_agents`` discovery with label-less ones. The web UI needs labels
+        to hide the ``is_primary`` services agent and to surface auto-created
+        (Caretaker) tabs, so we re-read them from the agent's local state dir,
+        which ``mngr`` writes on create. Returns an empty dict for agents with
+        no local ``data.json`` (e.g. ones tracked on a remote host).
+        """
+        data_path = self._get_agent_state_dir(agent_id) / "data.json"
+        try:
+            raw = json.loads(data_path.read_text())
+        except (OSError, ValueError):
+            return {}
+        labels = raw.get("labels")
+        if not isinstance(labels, dict):
+            return {}
+        return {str(key): str(value) for key, value in labels.items()}
 
     def _ensure_activity_tracking(self, agent_id: str) -> None:
         """Start activity tracking for ``agent_id`` if its local state dir exists.

@@ -307,6 +307,59 @@ def test_handle_agent_discovered(agent_manager: AgentManager, broadcaster: WebSo
     assert msg["type"] == "agents_updated"
 
 
+def test_discovered_agent_labels_read_from_local_data_json(
+    agent_manager: AgentManager, tmp_path: Path
+) -> None:
+    """Labels missing from a discovery event are read from the agent's local data.json.
+
+    ``mngr observe --discovery-only`` events carry no labels, so without this
+    fallback the web UI would never see ``caretaker`` / ``is_primary`` labels
+    and could not surface the auto-created Caretaker tab or hide the services
+    agent. mngr writes the labels to the agent's local state dir on create.
+    """
+    agent_id = MngrAgentId()
+    # The discovery event carries no labels (certified_data has no "labels" key),
+    # exactly as `mngr observe --discovery-only` emits them.
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=agent_id,
+        agent_name=MngrAgentName("caretaker"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"work_dir": "/tmp/work"},
+    )
+    data_dir = tmp_path / "agents" / str(agent_id)
+    data_dir.mkdir(parents=True)
+    (data_dir / "data.json").write_text(
+        json.dumps({"labels": {"caretaker": "true", "auto_created": "true"}})
+    )
+
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].labels == {"caretaker": "true", "auto_created": "true"}
+
+
+def test_discovered_agent_without_local_data_json_has_empty_labels(
+    agent_manager: AgentManager,
+) -> None:
+    """An agent with no local data.json (e.g. tracked on a remote host) keeps
+    empty labels rather than erroring."""
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("remote-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"work_dir": None},
+    )
+
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].labels == {}
+
+
 def test_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """Destroying an agent removes it from the tracked list and broadcasts."""
     test_agent_id = MngrAgentId()
