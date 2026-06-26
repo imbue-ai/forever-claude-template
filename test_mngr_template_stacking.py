@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+import pytest
 import tomlkit
 from click.core import ParameterSource
 from imbue.mngr.cli.common_opts import apply_create_template
@@ -64,6 +65,7 @@ def _apply(
         "start_arg": (),
         "setting": (),
         "agent_args": (),
+        "post_host_create_command": (),
         # scalar-typed CLI options that templates may set
         "type": None,
         "provider": None,
@@ -127,12 +129,20 @@ def test_main_extra_provision_command_present_for_docker_mode() -> None:
     assert any(_TMUX_MARKER in cmd for cmd in commands)
 
 
-def test_docker_template_hardens_start_args_and_drops_sys_ptrace() -> None:
-    """`main` + `docker`: hardened for untrusted agents -- blocks privilege
-    escalation and no longer grants the SYS_PTRACE capability. (The gVisor
+def test_main_extra_provision_command_present_for_docker_nixos_mode() -> None:
+    """`main` + `docker-nixos`: the Nix Docker path also preserves main's shared setup."""
+    result = _apply(("main", "docker-nixos"))
+    commands = result["extra_provision_command"]
+    assert any(_TMUX_MARKER in cmd for cmd in commands)
+
+
+@pytest.mark.parametrize("template_name", ["docker", "docker-nixos"])
+def test_docker_templates_harden_start_args_and_drop_sys_ptrace(template_name: str) -> None:
+    """Docker templates are hardened for untrusted agents -- block privilege
+    escalation and no longer grant the SYS_PTRACE capability. (The gVisor
     runtime itself is selected via `docker_runtime` in the [providers.docker]
     block, not a create-template setting, so it's not asserted here.)"""
-    result = _apply(("main", "docker"))
+    result = _apply(("main", template_name))
     # no-new-privileges hardening rides on start_arg (a `docker run` flag).
     assert "--security-opt=no-new-privileges" in result["start_arg"]
     # The SYS_PTRACE capability grant was removed (gVisor is the boundary now).
@@ -145,3 +155,16 @@ def test_scalar_template_options_override_rather_than_stack() -> None:
     result = _apply(("main", "docker"))
     assert result["provider"] == "docker"
     assert result["target_path"] == "/mngr/code/"
+
+
+def test_docker_nixos_template_uses_nix_dockerfile_as_separate_path() -> None:
+    """`main` + `docker-nixos` uses the Nix Dockerfile without inheriting docker's build args."""
+    result = _apply(("main", "docker-nixos"))
+    assert result["provider"] == "docker"
+    assert result["target_path"] == "/mngr/code/"
+    assert result["idle_mode"] == "disabled"
+    assert result["build_arg"] == ("--file=nix/Dockerfile", ".")
+    assert result["post_host_create_command"] == ("/usr/local/bin/fct-seed",)
+    assert "ANTHROPIC_API_KEY" in result["pass_host_env"]
+    assert "ANTHROPIC_BASE_URL" in result["pass_host_env"]
+    assert "GH_TOKEN" in result["pass_host_env"]

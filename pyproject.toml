@@ -94,6 +94,11 @@ norecursedirs = [
     "{arch}",
 ]
 timeout_func_only = true
+markers = [
+    "acceptance: opt-in tests that exercise external resources or heavyweight flows",
+    "docker: tests that invoke the Docker CLI or daemon",
+    "xdist_group(name): group tests when pytest-xdist is installed",
+]
 addopts = [
     "--timeout=10",
     "--ignore=vendor/mngr",

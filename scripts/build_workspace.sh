@@ -10,6 +10,12 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/root/.local/bin:$PATH"
+if [ -f /etc/profile.d/fct_path.sh ]; then
+    # nix/Dockerfile writes the Nix profile paths here instead of baking them
+    # into Dockerfile-level ENV declarations.
+    # shellcheck source=/dev/null
+    . /etc/profile.d/fct_path.sh
+fi
 
 # Disable OpenSSL CPU-cap detection. lima-VZ on Apple M5 advertises SVE in
 # /proc/cpuinfo but traps the `cntb` SVE instruction OpenSSL emits during

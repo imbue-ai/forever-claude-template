@@ -9,6 +9,12 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/root/.local/bin:$PATH"
+if [ -f /etc/profile.d/fct_path.sh ]; then
+    # nix/Dockerfile writes the Nix profile paths here instead of baking them
+    # into Dockerfile-level ENV declarations.
+    # shellcheck source=/dev/null
+    . /etc/profile.d/fct_path.sh
+fi
 
 # Pin uv to a Python that satisfies the lockfile (>=3.12). The Docker base ships
 # 3.12; on other bases setup_system.sh fetched a uv-managed 3.12, so point uv at
