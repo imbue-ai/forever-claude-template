@@ -21,7 +21,9 @@ class FakeCurl(NamedTuple):
     """A routing stand-in for ``github._curl``.
 
     ``routes`` maps a substring of the request URL to the raw response bytes the
-    transport should return for it; the first matching route wins. A request
+    transport should return for it; the route with the longest matching needle
+    wins, so routing is independent of declaration order even when one needle is
+    a prefix of another (e.g. ``/pulls/7`` vs ``/pulls/7/reviews``). A request
     whose URL matches no route raises -- so a test fails loudly if the code under
     test makes an unexpected call. ``calls`` records every argument list passed,
     so write tests can assert on the exact HTTP method, path, and JSON payload.
@@ -38,15 +40,12 @@ class FakeCurl(NamedTuple):
     def __call__(self, args: list[str]) -> bytes:
         self.calls.append(list(args))
         url = args[-1]
-        body = b""
-        matched = False
-        for needle, response in self.routes:
-            if needle in url:
-                body = response
-                matched = True
-                break
-        if not matched:
+        matches = [(needle, response) for needle, response in self.routes if needle in url]
+        if not matches:
             raise AssertionError(f"FakeCurl: no route matched URL {url!r}")
+        # Longest matching needle wins, so routing does not depend on the order
+        # routes were declared in (one needle may be a prefix of another).
+        body = max(matches, key=lambda item: len(item[0]))[1]
         if "-X" in args:
             return body + (github._STATUS_MARKER + str(self.status)).encode()
         return body
