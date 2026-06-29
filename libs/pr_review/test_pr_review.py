@@ -62,6 +62,18 @@ def test_edit_pr_requires_fields(client: FlaskClient) -> None:
     assert resp.status_code == 400
 
 
+def test_set_state_rejects_invalid_state(client: FlaskClient) -> None:
+    resp = client.post(f"/api/pr/{_REPO}/1/state", json={"state": "merged"})
+    assert resp.status_code == 400
+    assert "state" in resp.get_json()["error"]
+
+
+def test_merge_rejects_invalid_method(client: FlaskClient) -> None:
+    resp = client.post(f"/api/pr/{_REPO}/1/merge", json={"method": "fast-forward"})
+    assert resp.status_code == 400
+    assert "method" in resp.get_json()["error"]
+
+
 def test_create_review_requires_commit_id(client: FlaskClient) -> None:
     resp = client.post(f"/api/pr/{_REPO}/1/review", json={"body": "ok"})
     assert resp.status_code == 400

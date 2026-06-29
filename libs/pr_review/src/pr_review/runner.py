@@ -122,6 +122,30 @@ def api_edit_pr(owner: str, repo: str, number: int) -> Response:
         return _err(str(exc))
 
 
+@app.route("/api/pr/<owner>/<repo>/<int:number>/state", methods=["POST"])
+def api_set_state(owner: str, repo: str, number: int) -> Response:
+    """Close or reopen a PR."""
+    state = (request.get_json(silent=True) or {}).get("state", "")
+    if state not in ("open", "closed"):
+        return _err("state must be 'open' or 'closed'", status=400)
+    try:
+        return jsonify(github.set_pr_state(f"{owner}/{repo}", number, state))
+    except github.GitHubError as exc:
+        return _err(str(exc))
+
+
+@app.route("/api/pr/<owner>/<repo>/<int:number>/merge", methods=["POST"])
+def api_merge(owner: str, repo: str, number: int) -> Response:
+    """Merge a PR with the given method (merge / squash / rebase)."""
+    method = (request.get_json(silent=True) or {}).get("method", "merge")
+    if method not in ("merge", "squash", "rebase"):
+        return _err("method must be 'merge', 'squash', or 'rebase'", status=400)
+    try:
+        return jsonify(github.merge_pr(f"{owner}/{repo}", number, method))
+    except github.GitHubError as exc:
+        return _err(str(exc))
+
+
 @app.route("/api/pr/<owner>/<repo>/<int:number>/review", methods=["POST"])
 def api_create_review(owner: str, repo: str, number: int) -> Response:
     payload = request.get_json(silent=True) or {}

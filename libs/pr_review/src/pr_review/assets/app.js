@@ -78,9 +78,28 @@ async function pool(items, limit, worker) {
 // ===================================================================
 // LIST VIEW
 // ===================================================================
-let CURRENT_FILTER = "all";
 let LIST_DATA = null;
 let STATUS_CACHE = {};   // "repo#num" -> status object
+
+// ---- view state ----
+// filter/group/sort persist across reloads; search resets each load.
+const PREFS_KEY = "prr.view";
+function loadPrefs() {
+  const defaults = { filter: "all", group: "repo", sort: "updated" };
+  try { return { ...defaults, ...JSON.parse(localStorage.getItem(PREFS_KEY) || "{}") }; }
+  catch (_e) { return defaults; }
+}
+const _prefs = loadPrefs();
+let CURRENT_FILTER = _prefs.filter;   // all | attention | ready | draft
+let CURRENT_GROUP = _prefs.group;     // repo | none
+let CURRENT_SORT = _prefs.sort;       // updated | newest | oldest | active | attention
+let SEARCH = "";
+const COLLAPSED = new Set();          // collapsed repo groups (in-memory)
+
+function savePrefs() {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify({ filter: CURRENT_FILTER, group: CURRENT_GROUP, sort: CURRENT_SORT })); }
+  catch (_e) { /* storage unavailable -- choices just won't persist */ }
+}
 
 function keyFor(repo, num) { return repo + "#" + num; }
 
@@ -107,7 +126,7 @@ function rowHTML(pr) {
   }
   return `
   <div class="row" data-key="${attr(k)}" data-repo="${attr(pr.repo)}" data-num="${pr.number}">
-    <div class="spine ${sp}"></div>
+    <div class="spine ${sp}" title="${attr(spineReason(pr))}"></div>
     <div class="row-main">
       <div class="row-title">
         <span class="t">${esc(pr.title)}</span>
@@ -127,47 +146,356 @@ function rowHTML(pr) {
   </div>`;
 }
 
+function needsAttention(st) {
+  return !!(st && (st.has_conflicts || st.ci?.verdict === "failing" || st.review_decision === "changes requested"));
+}
+
+// Plain-English meaning of a row's status spine -- used as the hover tooltip so
+// the color is never a mystery.
+function spineReason(pr) {
+  const st = STATUS_CACHE[keyFor(pr.repo, pr.number)];
+  if (!st) return "Checking status…";
+  const why = [];
+  if (st.has_conflicts) why.push("merge conflicts");
+  if (st.ci?.verdict === "failing") why.push("CI failing");
+  if (st.review_decision === "changes requested") why.push("changes requested");
+  if (why.length) return "Needs attention: " + why.join(", ");
+  if (st.ci?.verdict === "pending") return "CI running";
+  if (st.state === "draft") return "Draft";
+  return "Ready";
+}
+
 function passesFilter(pr) {
   const st = STATUS_CACHE[keyFor(pr.repo, pr.number)];
   const state = st ? st.state : pr.state;
   if (CURRENT_FILTER === "all") return true;
   if (CURRENT_FILTER === "draft") return state === "draft";
   if (CURRENT_FILTER === "ready") return state === "ready";
-  if (CURRENT_FILTER === "attention") return st && (st.has_conflicts || st.ci?.verdict === "failing" || st.review_decision === "changes requested");
+  if (CURRENT_FILTER === "attention") return needsAttention(st);
   return true;
 }
 
+// Live tallies for the triage filter strip. Status loads in lazily, so these
+// are recomputed as each PR's status arrives.
+function countByFilter() {
+  const all = [...LIST_DATA.authored, ...LIST_DATA.review_requested];
+  const c = { all: all.length, attention: 0, ready: 0, draft: 0 };
+  for (const pr of all) {
+    const st = STATUS_CACHE[keyFor(pr.repo, pr.number)];
+    const state = st ? st.state : pr.state;
+    if (state === "draft") c.draft++;
+    if (state === "ready") c.ready++;
+    if (needsAttention(st)) c.attention++;
+  }
+  return c;
+}
+
+function updateChipCounts() {
+  if (!LIST_DATA) return;
+  const c = countByFilter();
+  document.querySelectorAll(".chip").forEach((ch) => {
+    const span = ch.querySelector(".cnt");
+    if (span) span.textContent = c[ch.dataset.filter];
+    if (ch.dataset.filter === "attention") ch.classList.toggle("has-items", c.attention > 0);
+  });
+}
+
+// ---- view transforms: search -> filter -> sort -> group ----
+function matchesSearch(pr) {
+  if (!SEARCH) return true;
+  const q = SEARCH.toLowerCase();
+  return pr.title.toLowerCase().includes(q) || pr.repo.toLowerCase().includes(q);
+}
+function prTime(pr, field) { return new Date(pr[field] || 0).getTime(); }
+function sortPRs(list) {
+  const arr = list.slice();
+  if (CURRENT_SORT === "newest") arr.sort((a, b) => prTime(b, "created_at") - prTime(a, "created_at"));
+  else if (CURRENT_SORT === "oldest") arr.sort((a, b) => prTime(a, "created_at") - prTime(b, "created_at"));
+  else if (CURRENT_SORT === "active") arr.sort((a, b) => (b.comments || 0) - (a.comments || 0) || prTime(b, "updated_at") - prTime(a, "updated_at"));
+  else if (CURRENT_SORT === "attention") {
+    const rank = pr => (needsAttention(STATUS_CACHE[keyFor(pr.repo, pr.number)]) ? 0 : 1);
+    arr.sort((a, b) => rank(a) - rank(b) || prTime(b, "updated_at") - prTime(a, "updated_at"));
+  } else arr.sort((a, b) => prTime(b, "updated_at") - prTime(a, "updated_at"));
+  return arr;
+}
+function groupByRepo(prs) {
+  const m = new Map();
+  for (const pr of prs) { if (!m.has(pr.repo)) m.set(pr.repo, []); m.get(pr.repo).push(pr); }
+  return [...m.entries()].map(([repo, list]) => ({ repo, prs: list }));
+}
+function applyView(list) {
+  return sortPRs(list.filter(pr => passesFilter(pr) && matchesSearch(pr)));
+}
+function bucketHTML(prs) {
+  if (CURRENT_GROUP !== "repo") return prs.map(rowHTML).join("");
+  return groupByRepo(prs).map(g => `
+    <div class="repo-group ${COLLAPSED.has(g.repo) ? "collapsed" : ""}">
+      <div class="repo-head" data-repo-toggle="${attr(g.repo)}">
+        <span class="caret" aria-hidden="true">&#9656;</span>
+        <span class="repo-name">${esc(g.repo)}</span>
+        <span class="repo-n">${g.prs.length}</span>
+      </div>
+      <div class="repo-rows">${g.prs.map(rowHTML).join("")}</div>
+    </div>`).join("");
+}
+
+// The toolbar is rendered once and left in place; only #results is rebuilt as
+// the view changes, so the search box keeps focus while you type.
 function renderList() {
   if (!LIST_DATA) return;
-  const mine = LIST_DATA.authored.filter(passesFilter);
-  const reqs = LIST_DATA.review_requested.filter(passesFilter);
   const el = document.getElementById("list");
+  const counts = countByFilter();
+  const chipLabel = { all: "All", attention: "Needs attention", ready: "Ready", draft: "Drafts" };
+  const sortLabel = { updated: "Recently updated", newest: "Newest", oldest: "Oldest", active: "Most active", attention: "Needs attention first" };
   el.innerHTML = `
     <div class="controls">
-      <div class="chips">
-        ${["all", "attention", "ready", "draft"].map(f =>
-          `<button class="chip ${f === CURRENT_FILTER ? "on" : ""}" data-filter="${f}">${
-            { all: "All", attention: "Needs attention", ready: "Ready", draft: "Drafts" }[f]}</button>`).join("")}
+      <div class="search">
+        <span class="si" aria-hidden="true">&#9906;</span>
+        <input id="prSearch" type="search" placeholder="Search title or repo…" value="${attr(SEARCH)}" autocomplete="off" />
       </div>
+      <div class="chips">
+        ${["all", "attention", "ready", "draft"].map(f => {
+          const extra = f === "attention" && counts.attention > 0 ? " has-items" : "";
+          return `<button class="chip ${f} ${f === CURRENT_FILTER ? "on" : ""}${extra}" data-filter="${f}">${chipLabel[f]}<span class="cnt">${counts[f]}</span></button>`;
+        }).join("")}
+      </div>
+      <div class="seg" id="groupSeg">
+        ${["repo", "none"].map(g => `<button class="segbtn ${g === CURRENT_GROUP ? "on" : ""}" data-group="${g}">${g === "repo" ? "By repo" : "Flat"}</button>`).join("")}
+      </div>
+      <label class="sortwrap">Sort
+        <select id="sortSel">${Object.keys(sortLabel).map(s => `<option value="${s}" ${s === CURRENT_SORT ? "selected" : ""}>${sortLabel[s]}</option>`).join("")}</select>
+      </label>
     </div>
+    <div class="legend" title="The colored strip on the left of each pull request shows its status at a glance.">
+      <span class="lkey">Status</span>
+      <span class="litem"><i class="sw red"></i>Needs attention</span>
+      <span class="litem"><i class="sw amber"></i>CI running</span>
+      <span class="litem"><i class="sw green"></i>Ready</span>
+      <span class="litem"><i class="sw gray"></i>Draft</span>
+    </div>
+    <div id="results"></div>`;
+  const search = el.querySelector("#prSearch");
+  search.addEventListener("input", () => { SEARCH = search.value.trim(); renderResults(); });
+  el.querySelectorAll(".chip").forEach(c => c.addEventListener("click", () => {
+    CURRENT_FILTER = c.dataset.filter; savePrefs();
+    el.querySelectorAll(".chip").forEach(x => x.classList.toggle("on", x === c));
+    renderResults();
+  }));
+  el.querySelectorAll(".segbtn").forEach(s => s.addEventListener("click", () => {
+    CURRENT_GROUP = s.dataset.group; savePrefs();
+    el.querySelectorAll(".segbtn").forEach(x => x.classList.toggle("on", x === s));
+    renderResults();
+  }));
+  el.querySelector("#sortSel").addEventListener("change", (e) => { CURRENT_SORT = e.target.value; savePrefs(); renderResults(); });
+  renderResults();
+}
+
+function renderResults() {
+  const results = document.getElementById("results");
+  if (!results) return;
+  const mine = applyView(LIST_DATA.authored);
+  const reqs = applyView(LIST_DATA.review_requested);
+  const mineEmpty = SEARCH ? "No pull requests match your search." : "Nothing matches this filter.";
+  results.innerHTML = `
     <section class="section">
-      <div class="section-head"><h2>Created by you</h2><span class="n">${LIST_DATA.authored.length}</span><div class="line"></div></div>
-      <div id="mine-rows">${mine.map(rowHTML).join("") || '<div class="empty"><div class="small">Nothing matches this filter.</div></div>'}</div>
+      <div class="section-head"><h2>Created by you</h2><span class="n">${mine.length}/${LIST_DATA.authored.length}</span><div class="line"></div></div>
+      <div id="mine-rows">${mine.length ? bucketHTML(mine) : `<div class="empty"><div class="small">${mineEmpty}</div></div>`}</div>
     </section>
     <section class="section">
-      <div class="section-head"><h2>Awaiting your review</h2><span class="n">${LIST_DATA.review_requested.length}</span><div class="line"></div></div>
-      ${reqs.length ? `<div id="req-rows">${reqs.map(rowHTML).join("")}</div>`
-        : '<div class="empty"><div class="big">Nothing waiting on you</div><div class="small">PRs where your review is requested will appear here.</div></div>'}
+      <div class="section-head"><h2>Awaiting your review</h2><span class="n">${reqs.length}/${LIST_DATA.review_requested.length}</span><div class="line"></div></div>
+      ${reqs.length ? `<div id="req-rows">${bucketHTML(reqs)}</div>`
+        : `<div class="empty"><div class="big">Nothing waiting on you</div><div class="small">${SEARCH ? "No matches in PRs awaiting your review." : "PRs where your review is requested will appear here."}</div></div>`}
     </section>`;
-  el.querySelectorAll(".chip").forEach(c => c.addEventListener("click", () => { CURRENT_FILTER = c.dataset.filter; renderList(); }));
-  el.querySelectorAll(".row").forEach(r => r.addEventListener("click", () => openDetail(r.dataset.repo, +r.dataset.num)));
+  results.querySelectorAll(".repo-head").forEach(h => h.addEventListener("click", () => {
+    const repo = h.dataset.repoToggle;
+    if (COLLAPSED.has(repo)) COLLAPSED.delete(repo); else COLLAPSED.add(repo);
+    h.closest(".repo-group").classList.toggle("collapsed");
+  }));
+  results.querySelectorAll(".row").forEach(bindRow);
+}
+
+// When the active view depends on lazily-loaded status (attention filter/sort),
+// settle the ordering once status arrives -- coalesced so it runs at most a few times.
+let _reflowPending = false;
+function scheduleStatusReflow() {
+  if (CURRENT_FILTER !== "attention" && CURRENT_SORT !== "attention") return;
+  if (_reflowPending) return;
+  _reflowPending = true;
+  setTimeout(() => { _reflowPending = false; renderResults(); }, 300);
 }
 
 function cssEsc(s) { return s.replace(/[#.:/]/g, "\\$&"); }
+function bindRow(r) {
+  r.addEventListener("click", () => openDetail(r.dataset.repo, +r.dataset.num));
+  r.addEventListener("contextmenu", (e) => { e.preventDefault(); openRowMenu(e, r.dataset.repo, +r.dataset.num); });
+}
 function rebindRow(pr) {
   const rowEl = document.querySelector(`.row[data-key="${cssEsc(keyFor(pr.repo, pr.number))}"]`);
-  if (rowEl) rowEl.addEventListener("click", () => openDetail(pr.repo, pr.number));
+  if (rowEl) bindRow(rowEl);
 }
+
+// ===================================================================
+// PR ACTIONS -- close / reopen / merge, shared by the detail page and the
+// home-page right-click menu. Drafts can't be flipped to "ready for review"
+// here: GitHub exposes that only via its GraphQL API, which this tool's
+// credentialed access (REST + git) does not include.
+// ===================================================================
+function actionStatus(repo, number) { return STATUS_CACHE[keyFor(repo, number)] || null; }
+function findPR(repo, number) {
+  if (!LIST_DATA) return null;
+  return [...LIST_DATA.authored, ...LIST_DATA.review_requested].find(p => p.repo === repo && p.number === number) || null;
+}
+function mergeBlockedReason(s) {
+  if (!s) return null;
+  if (s.state === "draft") return "This PR is a draft.";
+  if (s.has_conflicts || s.mergeable_state === "dirty") return "This PR has merge conflicts.";
+  return null;
+}
+
+// Drop a PR from the in-memory list after it's closed/merged, returning enough
+// to restore it (used by the close "Undo").
+function removeFromList(repo, number) {
+  if (!LIST_DATA) return null;
+  for (const bucket of ["authored", "review_requested"]) {
+    const i = LIST_DATA[bucket].findIndex(p => p.repo === repo && p.number === number);
+    if (i >= 0) { const [pr] = LIST_DATA[bucket].splice(i, 1); renderResults(); updateChipCounts(); return { pr, bucket }; }
+  }
+  return null;
+}
+function addToList(pr, bucket) {
+  if (!LIST_DATA || !pr) return;
+  LIST_DATA[bucket].push(pr);
+  renderResults();
+  updateChipCounts();
+}
+
+// A small modal returning a Promise: resolves to the chosen value (or `true`),
+// or `null` if cancelled. ``extraHTML`` may contain one [data-modal-input].
+function confirmDialog({ title, message, confirmLabel, danger, extraHTML }) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-label="${attr(title)}">
+        <div class="modal-title">${esc(title)}</div>
+        <div class="modal-body">${message}</div>
+        ${extraHTML || ""}
+        <div class="modal-actions">
+          <button class="btn ghost" data-act="cancel">Cancel</button>
+          <button class="btn ${danger ? "danger" : "primary"}" data-act="ok">${esc(confirmLabel)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const input = () => { const el = ov.querySelector("[data-modal-input]"); return el ? el.value : true; };
+    const done = (v) => { ov.remove(); document.removeEventListener("keydown", onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === "Escape") done(null); else if (e.key === "Enter") done(input()); };
+    ov.addEventListener("mousedown", (e) => { if (e.target === ov) done(null); });
+    ov.querySelector('[data-act="cancel"]').onclick = () => done(null);
+    ov.querySelector('[data-act="ok"]').onclick = () => done(input());
+    document.addEventListener("keydown", onKey);
+    ov.querySelector('[data-act="ok"]').focus();
+  });
+}
+
+async function actionMerge(repo, number, ctx) {
+  const s = ctx || actionStatus(repo, number);
+  const blocked = mergeBlockedReason(s);
+  if (blocked) { flashNote(blocked + " It can't be merged here."); return false; }
+  const head = (s && s.head) || "this branch", base = (s && s.base) || "the base branch";
+  const method = await confirmDialog({
+    title: `Merge #${number}?`,
+    message: `Merge <code>${esc(head)}</code> into <code>${esc(base)}</code> on GitHub. This can't be undone.`,
+    confirmLabel: "Merge",
+    extraHTML: `<label class="modal-field">Method
+      <select data-modal-input>
+        <option value="merge">Create a merge commit</option>
+        <option value="squash">Squash and merge</option>
+        <option value="rebase">Rebase and merge</option>
+      </select></label>`,
+  });
+  if (!method) return false;
+  try {
+    await api2(`api/pr/${repo}/${number}/merge`, { method });
+    removeFromList(repo, number);
+    flashNote(`Merged #${number}`);
+    return true;
+  } catch (e) { flashNote("Couldn't merge: " + e.message); return false; }
+}
+
+async function actionClose(repo, number) {
+  const ok = await confirmDialog({
+    title: `Close #${number}?`,
+    message: "This closes the pull request on GitHub without merging. You can reopen it afterward.",
+    confirmLabel: "Close pull request",
+    danger: true,
+  });
+  if (!ok) return false;
+  try {
+    await api2(`api/pr/${repo}/${number}/state`, { state: "closed" });
+    const removed = removeFromList(repo, number);
+    flashAction(`Closed #${number}`, "Undo", async () => {
+      try {
+        await api2(`api/pr/${repo}/${number}/state`, { state: "open" });
+        if (removed) addToList(removed.pr, removed.bucket);
+        flashNote(`Reopened #${number}`);
+      } catch (e) { flashNote("Couldn't reopen: " + e.message); }
+    });
+    return true;
+  } catch (e) { flashNote("Couldn't close: " + e.message); return false; }
+}
+
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => flashNote("Link copied"), () => flashNote("Couldn't copy link"));
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text; document.body.appendChild(ta); ta.select();
+  try { document.execCommand("copy"); flashNote("Link copied"); } catch (_e) { flashNote("Couldn't copy link"); }
+  ta.remove();
+}
+
+// ---- home-page right-click menu ----
+function closeRowMenu() { const m = document.getElementById("ctxMenu"); if (m) m.remove(); }
+function openRowMenu(e, repo, number) {
+  closeRowMenu();
+  const st = actionStatus(repo, number);
+  const pr = findPR(repo, number);
+  const url = (pr && pr.url) || `https://github.com/${repo}/pull/${number}`;
+  const isDraft = (st ? st.state : (pr && pr.state)) === "draft";
+  const items = [{ label: "Open", fn: () => openDetail(repo, number) }];
+  if (!isDraft) {
+    const blocked = mergeBlockedReason(st);
+    items.push({ label: "Merge…", disabled: !!blocked, title: blocked || "", fn: () => actionMerge(repo, number, st) });
+  }
+  items.push({ label: "Close…", danger: true, fn: () => actionClose(repo, number) });
+  items.push({ sep: true });
+  items.push({ label: "Copy link", fn: () => copyText(url) });
+  items.push({ label: "Open on GitHub", fn: () => window.open(url, "_blank", "noopener") });
+
+  const menu = document.createElement("div");
+  menu.className = "ctx-menu";
+  menu.id = "ctxMenu";
+  menu.innerHTML = items.map((it, i) => it.sep
+    ? '<div class="ctx-sep"></div>'
+    : `<button class="ctx-item ${it.danger ? "danger" : ""}" data-i="${i}"${it.disabled ? ` disabled title="${attr(it.title)}"` : ""}>${esc(it.label)}</button>`).join("");
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  let x = e.clientX, y = e.clientY;
+  if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+  if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+  menu.style.left = Math.max(8, x) + "px";
+  menu.style.top = Math.max(8, y) + "px";
+  menu.querySelectorAll(".ctx-item").forEach(b => b.addEventListener("click", () => {
+    const it = items[+b.dataset.i];
+    closeRowMenu();
+    if (!it.disabled) it.fn();
+  }));
+}
+document.addEventListener("click", closeRowMenu);
+document.addEventListener("scroll", closeRowMenu, true);
+window.addEventListener("blur", closeRowMenu);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeRowMenu(); });
 
 // ===================================================================
 // DETAIL VIEW (Monaco)
@@ -179,7 +507,7 @@ function loadMonaco() {
       require(["vs/editor/editor.main"], () => {
         monaco.editor.defineTheme("cockpit", {
           base: "vs-dark", inherit: true, rules: [],
-          colors: { "editor.background": "#0E1116", "editorGutter.background": "#0E1116", "diffEditor.insertedTextBackground": "#1b332688", "diffEditor.removedTextBackground": "#3a1d1f88" },
+          colors: { "editor.background": "#0A0D13", "editorGutter.background": "#0A0D13", "diffEditor.insertedTextBackground": "#15331f88", "diffEditor.removedTextBackground": "#3a1d1f88" },
         });
         // Type-aware hover for Python (Jedi), on head-content models only.
         monaco.languages.registerHoverProvider("python", {
@@ -206,6 +534,30 @@ let DETAIL = null;        // { pr, files }
 let diffEditor = null, plainEditor = null;
 let activeFile = null;    // changed-file path currently shown
 
+// Line wrapping in the code view -- off by default (diffs read better unwrapped),
+// toggled from the editor bar and remembered across sessions.
+let WORD_WRAP = (() => { try { return localStorage.getItem("prr.wrap") === "1"; } catch (_e) { return false; } })();
+function wrapValue() { return WORD_WRAP ? "on" : "off"; }
+function wrapBtnHTML() {
+  return `<button class="btn ghost sm wrap-btn ${WORD_WRAP ? "on" : ""}" id="wrapBtn" title="Toggle line wrapping">Wrap</button>`;
+}
+function applyWrap() {
+  const opts = { wordWrap: wrapValue() };
+  if (diffEditor) { diffEditor.getModifiedEditor().updateOptions(opts); diffEditor.getOriginalEditor().updateOptions(opts); }
+  if (plainEditor) plainEditor.updateOptions(opts);
+  const btn = document.getElementById("wrapBtn");
+  if (btn) btn.classList.toggle("on", WORD_WRAP);
+}
+function toggleWrap() {
+  WORD_WRAP = !WORD_WRAP;
+  try { localStorage.setItem("prr.wrap", WORD_WRAP ? "1" : "0"); } catch (_e) { /* not persisted */ }
+  applyWrap();
+}
+function bindWrapBtn() {
+  const btn = document.getElementById("wrapBtn");
+  if (btn) btn.addEventListener("click", toggleWrap);
+}
+
 // Track Monaco models so the Python hover/definition providers can map a model
 // back to its repo-relative path + side ("head" content is intelligence-eligible).
 let modelSeq = 0;
@@ -231,7 +583,7 @@ async function openDetail(repo, number) {
   const d = document.getElementById("detail");
   d.classList.remove("hidden");
   d.innerHTML = '<div class="loading-note">Fetching the code for this pull request…</div>';
-  document.getElementById("brandctx").textContent = "// " + repo + " #" + number;
+  document.getElementById("brandctx").textContent = repo + " #" + number;
   let data;
   try {
     [data] = await Promise.all([api(`api/pr/${owner}/${name}/${number}`), loadMonaco()]);
@@ -262,6 +614,25 @@ function statusBadges(pr) {
   return state + ci + rev + conflict;
 }
 
+function detailActionsHTML(pr) {
+  const parts = [];
+  if (pr.state === "draft") {
+    parts.push('<span class="draft-note" title="GitHub exposes draft -> ready for review only through its GraphQL API, which this tool\'s access does not include.">Mark ready isn\'t available here</span>');
+  } else {
+    const blocked = mergeBlockedReason(pr);
+    parts.push(`<button class="btn primary sm" id="actMerge"${blocked ? ` disabled title="${attr(blocked)}"` : ""}>Merge</button>`);
+  }
+  parts.push('<button class="btn danger sm" id="actClose">Close</button>');
+  return `<span class="detail-actions">${parts.join("")}</span>`;
+}
+
+function bindDetailActions(pr) {
+  const merge = document.getElementById("actMerge");
+  if (merge) merge.addEventListener("click", async () => { if (await actionMerge(pr.repo, pr.number, pr)) closeDetail(); });
+  const close = document.getElementById("actClose");
+  if (close) close.addEventListener("click", async () => { if (await actionClose(pr.repo, pr.number)) closeDetail(); });
+}
+
 function renderDetailShell() {
   const pr = DETAIL.pr;
   const conv = DETAIL.conversation || { comments: [], reviews: [], review_comments: [] };
@@ -270,7 +641,7 @@ function renderDetailShell() {
   d.innerHTML = `
     <div class="detail-head">
       <div class="crumb"><a id="backBtn">&larr; All pull requests</a><span class="sep">/</span><span>${esc(pr.repo)}</span><span class="sep">#${pr.number}</span>
-        <span class="spacer"></span><a href="${attr(pr.url)}" target="_blank" rel="noopener">Open on GitHub &#8599;</a></div>
+        <span class="spacer"></span>${detailActionsHTML(pr)}<a href="${attr(pr.url)}" target="_blank" rel="noopener">Open on GitHub &#8599;</a></div>
       <div class="detail-title-row"><h2 class="detail-title" id="dtitle">${esc(pr.title)}</h2>
         <button class="btn ghost sm" id="editTitleBtn">Edit title</button></div>
       <div class="detail-sub">${statusBadges(pr)}
@@ -306,6 +677,7 @@ function renderDetailShell() {
   d.querySelectorAll("#sb-changed .fitem").forEach(it => it.addEventListener("click", () => selectChangedFile(it.dataset.path)));
   d.querySelectorAll(".dtab").forEach(t => t.addEventListener("click", () => switchDetailTab(t.dataset.dtab)));
   d.querySelector("#editTitleBtn").addEventListener("click", editTitle);
+  bindDetailActions(pr);
   renderConversation();
 }
 
@@ -647,7 +1019,8 @@ async function selectChangedFile(path) {
   const pr = DETAIL.pr;
   const bar = document.getElementById("editorBar");
   bar.innerHTML = `<span class="epath">${esc(path)}</span><span class="etag">${file.status}</span>
-    <span class="spacer"></span><span class="mono" style="color:var(--faint)">diff vs ${esc(pr.base)}</span>`;
+    <span class="spacer"></span><span class="mono" style="color:var(--faint)">diff vs ${esc(pr.base)}</span>${wrapBtnHTML()}`;
+  bindWrapBtn();
   disposeEditors();
   document.getElementById("editor").innerHTML = '<div class="editor-empty"><div class="inner">Loading diff…</div></div>';
   const [owner, name] = pr.repo.split("/");
@@ -673,7 +1046,7 @@ async function selectChangedFile(path) {
     theme: "cockpit", readOnly: true, automaticLayout: true,
     renderSideBySide: true, fontFamily: '"IBM Plex Mono", monospace', fontSize: 12.5,
     hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
-    scrollBeyondLastLine: false, renderOverviewRuler: true,
+    scrollBeyondLastLine: false, renderOverviewRuler: true, wordWrap: wrapValue(),
   });
   diffEditor.setModel({ original, modified });
   attachUsageAction(diffEditor.getModifiedEditor());
@@ -721,13 +1094,33 @@ async function runPyDef(ed, pos) {
   }
 }
 
-function flashNote(msg) {
+function ensureToast() {
   let t = document.getElementById("defToast");
   if (!t) { t = document.createElement("div"); t.id = "defToast"; t.className = "def-toast"; document.body.appendChild(t); }
+  return t;
+}
+function flashNote(msg) {
+  const t = ensureToast();
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(t._hide);
   t._hide = setTimeout(() => t.classList.remove("show"), 3800);
+}
+// A toast with a single inline action (e.g. "Undo"). The action stays available
+// a little longer than a plain note.
+function flashAction(msg, actionLabel, onAction) {
+  const t = ensureToast();
+  t.textContent = "";
+  const span = document.createElement("span");
+  span.textContent = msg;
+  const btn = document.createElement("button");
+  btn.className = "toast-act";
+  btn.textContent = actionLabel;
+  btn.onclick = () => { t.classList.remove("show"); onAction(); };
+  t.append(span, btn);
+  t.classList.add("show");
+  clearTimeout(t._hide);
+  t._hide = setTimeout(() => t.classList.remove("show"), 7000);
 }
 
 // ---- code navigation: find usages / go to definition ----
@@ -839,7 +1232,8 @@ async function openRepoFile(path, line) {
   const [owner, name] = pr.head_repo.split("/");
   const bar = document.getElementById("editorBar");
   bar.innerHTML = `<span class="epath">${esc(path)}</span><span class="etag">context</span>
-    <span class="spacer"></span><span class="mono" style="color:var(--faint)">read-only @ ${esc(pr.head.slice(0, 24))}</span>`;
+    <span class="spacer"></span><span class="mono" style="color:var(--faint)">read-only @ ${esc(pr.head.slice(0, 24))}</span>${wrapBtnHTML()}`;
+  bindWrapBtn();
   disposeEditors();
   document.getElementById("editor").innerHTML = '<div class="editor-empty"><div class="inner">Loading file…</div></div>';
   let content;
@@ -854,6 +1248,7 @@ async function openRepoFile(path, line) {
   plainEditor = monaco.editor.create(document.getElementById("editor"), {
     model, theme: "cockpit", readOnly: true, automaticLayout: true,
     fontFamily: '"IBM Plex Mono", monospace', fontSize: 12.5, scrollBeyondLastLine: false, minimap: { enabled: true },
+    wordWrap: wrapValue(),
   });
   attachUsageAction(plainEditor);
   attachPyDefAction(plainEditor);
@@ -875,7 +1270,7 @@ function closeDetail() {
   DETAIL = null; BROWSE_FILES = null; activeFile = null;
   document.getElementById("detail").classList.add("hidden");
   document.getElementById("list").classList.remove("hidden");
-  document.getElementById("brandctx").textContent = "// review cockpit";
+  document.getElementById("brandctx").textContent = "all open work";
 }
 
 // ===================================================================
@@ -896,6 +1291,8 @@ async function boot() {
       STATUS_CACHE[keyFor(pr.repo, pr.number)] = st;
       const rowEl = document.querySelector(`.row[data-key="${cssEsc(keyFor(pr.repo, pr.number))}"]`);
       if (rowEl) { rowEl.outerHTML = rowHTML(pr); rebindRow(pr); }
+      updateChipCounts();
+      scheduleStatusReflow();
     });
   } catch (e) {
     document.getElementById("list").innerHTML = `<div class="err-note">Couldn't load your pull requests: ${esc(e.message)}</div>`;

@@ -340,6 +340,34 @@ def test_create_review_omits_event_when_pending() -> None:
     assert parsed["payload"] == {"commit_id": "sha123", "comments": []}
 
 
+def test_set_pr_state_closes_pr() -> None:
+    curl = json_route({"pulls": {"number": 5, "state": "closed"}})
+    github.set_pr_state("o/r", 5, "closed", curl)
+    parsed = parse_write_call(curl.calls[0])
+    assert parsed["method"] == "PATCH"
+    assert parsed["url"].endswith("repos/o/r/pulls/5")
+    assert parsed["payload"] == {"state": "closed"}
+
+
+def test_set_pr_state_rejects_invalid_state() -> None:
+    with pytest.raises(github.GitHubError, match="invalid state"):
+        github.set_pr_state("o/r", 5, "merged", json_route({}))
+
+
+def test_merge_pr_builds_put_with_method() -> None:
+    curl = json_route({"merge": {"merged": True, "message": "Pull Request successfully merged"}})
+    github.merge_pr("o/r", 5, "squash", curl)
+    parsed = parse_write_call(curl.calls[0])
+    assert parsed["method"] == "PUT"
+    assert parsed["url"].endswith("repos/o/r/pulls/5/merge")
+    assert parsed["payload"] == {"merge_method": "squash"}
+
+
+def test_merge_pr_rejects_invalid_method() -> None:
+    with pytest.raises(github.GitHubError, match="invalid merge method"):
+        github.merge_pr("o/r", 5, "fast-forward", json_route({}))
+
+
 def test_delete_issue_comment_issues_delete() -> None:
     curl = make_curl({"issues/comments/8": b""}, status=204)
     github.delete_issue_comment("o/r", 8, curl)

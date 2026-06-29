@@ -283,6 +283,20 @@ def update_pr(repo: str, number: int, fields: dict, curl: CurlFn = _curl) -> dic
     return gh_request("PATCH", f"repos/{repo}/pulls/{number}", allowed, curl)
 
 
+def set_pr_state(repo: str, number: int, state: str, curl: CurlFn = _curl) -> dict:
+    """Close or reopen a PR. ``state`` is "closed" or "open"."""
+    if state not in ("open", "closed"):
+        raise GitHubError(f"invalid state: {state!r} (expected 'open' or 'closed')")
+    return gh_request("PATCH", f"repos/{repo}/pulls/{number}", {"state": state}, curl)
+
+
+def merge_pr(repo: str, number: int, method: str = "merge", curl: CurlFn = _curl) -> dict:
+    """Merge a PR. ``method`` is "merge", "squash", or "rebase"."""
+    if method not in ("merge", "squash", "rebase"):
+        raise GitHubError(f"invalid merge method: {method!r}")
+    return gh_request("PUT", f"repos/{repo}/pulls/{number}/merge", {"merge_method": method}, curl)
+
+
 def create_review(
     repo: str, number: int, commit_id: str, body: str, event: str, comments: list[dict], curl: CurlFn = _curl
 ) -> dict:
