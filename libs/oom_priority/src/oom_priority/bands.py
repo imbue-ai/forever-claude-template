@@ -37,14 +37,6 @@ def _oom_score_adj_path(pid: int) -> Path:
     return _PROC_DIR / str(pid) / "oom_score_adj"
 
 
-def read_oom_score_adj(pid: int) -> int | None:
-    """Current ``oom_score_adj`` of ``pid``, or None if it can't be read."""
-    try:
-        return int(_oom_score_adj_path(pid).read_text().strip())
-    except (OSError, ValueError):
-        return None
-
-
 def set_oom_score_adj(pid: int, adj: int) -> bool:
     """Write ``pid``'s ``oom_score_adj`` to ``adj``. Returns whether it stuck.
 
