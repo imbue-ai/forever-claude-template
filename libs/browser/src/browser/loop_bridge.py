@@ -107,6 +107,22 @@ class AsyncLoopBridge:
         """
         return self._schedule(coro)
 
+    def result(self, task: "asyncio.Task[T]", timeout: float | None = None) -> T:
+        """Block the calling (sync) thread for the result of a task already on the loop.
+
+        The mirror of :meth:`run` for the ``submit`` path: ``submit`` starts a coroutine
+        and hands back its in-loop task (so the disconnect path can cancel it); ``result``
+        later waits, from a Flask thread, for that same task's outcome -- so the web layer
+        never needs its own ``async def`` just to ``await`` a task. On ``timeout`` the task
+        is cancelled on the loop before ``TimeoutError`` propagates.
+        """
+        future = asyncio.run_coroutine_threadsafe(_await_task(task), self._loop)
+        try:
+            return future.result(timeout)
+        except concurrent.futures.TimeoutError:
+            cancel_task(self._loop, task)
+            raise
+
     def stop(self) -> None:
         """Stop the loop and join its thread (best-effort, bounded)."""
         self._loop.call_soon_threadsafe(self._loop.stop)

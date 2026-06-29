@@ -48,7 +48,6 @@ from typing import Any
 from flask import Flask, Response, jsonify, request
 from flask_sock import Sock
 from loguru import logger
-from playwright.async_api import Error as PlaywrightError
 from simple_websocket import ConnectionClosed
 
 from browser.loop_bridge import AsyncLoopBridge, cancel_task
@@ -60,6 +59,9 @@ from browser.session import (
     FleetFullError,
     InvalidBrowserNameError,
     LiveBrowser,
+    # PlaywrightError comes from the engine module (session.py owns all Playwright/
+    # browser_use interaction); the sync web layer never imports playwright itself.
+    PlaywrightError,
     anthropic_key_status,
     deferred_install_ready,
 )
@@ -189,20 +191,10 @@ def _ndjson(event: dict[str, Any]) -> str:
     return json.dumps(event, default=str) + "\n"
 
 
-async def _resolve(browser_id: str) -> LiveBrowser:
-    """Return the browser with this name, or raise KeyError (-> 404).
-
-    There is no default browser: every browser is created on demand via ``POST
-    /browsers`` and addressed by its name. A closed/unknown name is gone (KeyError ->
-    404), never reused.
-    """
-    return manager.get(browser_id)
-
-
 def _resolve_sync(browser_id: str) -> "LiveBrowser | Response":
     """Resolve a browser on the loop, turning KeyError into 404 / startup errors into 503."""
     try:
-        return bridge.run(_resolve(browser_id), timeout=_ROUTE_TIMEOUT)
+        return bridge.run(manager.resolve(browser_id), timeout=_ROUTE_TIMEOUT)
     except KeyError:
         return _error({"error": f"No browser {browser_id}"}, 404)
     except _STARTUP_ERRORS as e:
@@ -375,7 +367,9 @@ def _stream_acquire(
             yield _ndjson(event)
     # Drain any events buffered after the task finished but before we noticed.
     yield from _drain_ndjson(gen_queue)
-    status_out.append(bridge.run(_acquire_result(acquire_task)))
+    # The acquire was submitted (fire-and-forget) so the wait-events could stream; now
+    # block for its final status on the loop via the bridge (no web-layer coroutine needed).
+    status_out.append(bridge.result(acquire_task))
 
 
 def _drain_ndjson(gen_queue: "queue.Queue[dict[str, Any] | None]") -> Iterator[str]:
@@ -389,12 +383,6 @@ def _drain_ndjson(gen_queue: "queue.Queue[dict[str, Any] | None]") -> Iterator[s
             continue
         if event is not None:
             yield _ndjson(event)
-
-
-async def _acquire_result(acquire_task: Any) -> str:
-    """Read a finished acquire task's result on the loop (it raised CancelledError if
-    cancelled, which the disconnect path handles by recording ``disconnected`` instead)."""
-    return await acquire_task
 
 
 def _make_on_wait(gen_queue: "queue.Queue[dict[str, Any] | None]") -> Callable[[str | None, str | None], Any]:
@@ -847,7 +835,7 @@ def cast_socket(ws: Any, browser_id: str) -> None:
 def _resolve_sync_for_ws(browser_id: str) -> "LiveBrowser | None":
     """Resolve a browser for the cast socket; None on any KeyError/startup error."""
     try:
-        return bridge.run(_resolve(browser_id), timeout=_ROUTE_TIMEOUT)
+        return bridge.run(manager.resolve(browser_id), timeout=_ROUTE_TIMEOUT)
     except (KeyError, *_STARTUP_ERRORS):
         return None
 

@@ -378,3 +378,20 @@ Two follow-up fixes from the adversarial re-review of the above:
   blocking-wait lives in `task`/`hold`, which heartbeat and so detect a dropped client.
   Honoring `wait=true` on this non-streaming endpoint could have pinned a worker thread and a
   queue slot indefinitely on a caller that walked away.
+
+Sync/async boundary cleanup (reviewer feedback): made the split between the sync web
+layer and the async engine more legible, with no behavior change.
+
+- The web layer (runner.py) no longer imports `playwright.async_api`; `PlaywrightError`
+  is now taken from the engine module (session.py), which owns all Playwright/browser_use
+  interaction. The web layer never touches Playwright directly.
+
+- Removed the web-layer `_acquire_result` coroutine in favor of a `bridge.result(task)`
+  method on the loop bridge: `submit` starts a coroutine and returns its in-loop task;
+  `result` later blocks a Flask thread for that task's outcome. The web layer no longer
+  defines an `async def` just to await a submitted task.
+
+- Removed the trivial `_resolve` coroutine from the web layer; resolving a browser on the
+  loop now goes through a `manager.resolve` coroutine on the engine. The engine remains
+  async because browser_use (and the Playwright observer that shares its Chromium) are
+  async-only; the web layer reaches it solely through the bridge.

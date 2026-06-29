@@ -2029,6 +2029,14 @@ class BrowserSessionManager(MutableModel):
         # Dict access raises KeyError for a missing/closed name; callers turn it into a 404.
         return self._browsers[browser_id]
 
+    async def resolve(self, browser_id: str) -> LiveBrowser:
+        """:meth:`get` as a coroutine, so the sync web layer can resolve a browser ON the
+        loop via ``bridge.run`` -- race-free against a concurrent close popping the name --
+        without defining its own ``async def``. There is no default browser: every browser
+        is created on demand and addressed by name; a closed/unknown name raises KeyError
+        (-> 404) and is never reused."""
+        return self.get(browser_id)
+
     def has_browser(self, browser_id: str) -> bool:
         return browser_id in self._browsers
 
