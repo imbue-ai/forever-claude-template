@@ -5,7 +5,7 @@ When a token appears or changes, starts (or restarts) ``cloudflared tunnel run
 --token <token>``; when the file is removed, stops cloudflared.
 
 ``runtime/secrets/`` is a directory of per-secret ``*.env`` files (this token,
-``restic.env`` for backups, ``telegram.env`` for the bot, ...). Each writer
+``restic.env`` for backups, ...). Each writer
 owns its own file so they never clobber one another -- the historical
 single-file ``runtime/secrets`` is gone.
 

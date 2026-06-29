@@ -5,7 +5,7 @@
 type = "claude"
 connect = false
 ensure_clean = false
-pass_env__extend = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
+pass_env__extend = ["REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
 host_env__extend = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
@@ -131,6 +131,16 @@ isolate_host_volumes = true
 # the default runtime where gVisor is unavailable (e.g. CI, Modal) with
 # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
 docker_runtime = "runsc"
+# Mount /run as a tmpfs so supervisord can install its control socket. When runsc
+# is registered with --overlay2=none (required so the container rootfs -- and
+# mngr's SSH provisioning written to it -- survives a restart), /run lives on
+# gVisor's gofer-backed filesystem, which returns EOPNOTSUPP for os.link() of a
+# socket inode. supervisord installs its control socket via a hard link, so on a
+# gofer-backed /run it wedges ("Unlinking stale socket") and never starts
+# system_interface -- the workspace then sits on the "Loading workspace" loader
+# forever. A tmpfs /run makes the hard link work. Mirrors the tmpfs /run that the
+# aws-<region> provider start args and the ovh/vultr/imbue_cloud host setup apply.
+default_start_args = ["--tmpfs", "/run"]
 
 [providers.lima]
 # is_enabled=false (mirrors [providers.docker]) is load-bearing: the lima backend
@@ -191,9 +201,9 @@ type = "main"
 # chat agent) and then launches supervisord, which runs every background
 # service (system_interface, web, cloudflared, app-watcher, runtime-backup,
 # host-backup, terminal, and the one-shot deferred-install -- see
-# supervisord.conf). The old telegram + git_auth_setup windows are gone
-# (telegram is retired; the git config it performed now runs inside bootstrap),
-# and terminal is a supervisord service rather than its own window.
+# supervisord.conf). The old git_auth_setup window is gone (the git config it
+# performed now runs inside bootstrap), and terminal is a supervisord service
+# rather than its own window.
 extra_window = ["bootstrap='uv run bootstrap'"]
 # Write a sane default tmux config on every minds host. tuple-typed
 # `extra_provision_command` stacks across templates (see
