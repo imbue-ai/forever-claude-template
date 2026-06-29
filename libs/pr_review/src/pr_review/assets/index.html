@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pull Requests</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="app.css" />
+</head>
+<body>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="brand">
+      <h1 id="homeLink">Pull Requests</h1>
+      <span class="sub" id="brandctx">// review cockpit</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="viewer" id="viewer"></div>
+    <button class="btn" id="refreshBtn">&#x21bb; Refresh</button>
+  </div>
+</header>
+
+<!-- ============ LIST VIEW ============ -->
+<main class="wrap" id="list"></main>
+
+<!-- ============ DETAIL VIEW ============ -->
+<div id="detail" class="hidden"></div>
+
+<!-- Monaco: AMD loader from CDN. Worker is loaded cross-origin via a blob shim. -->
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+<script>
+  window.__MONACO_BASE = "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs";
+  require.config({ paths: { vs: window.__MONACO_BASE } });
+  self.MonacoEnvironment = {
+    getWorkerUrl: function () {
+      const shim =
+        "self.MonacoEnvironment={baseUrl:'" + window.__MONACO_BASE + "/'};" +
+        "importScripts('" + window.__MONACO_BASE + "/base/worker/workerMain.js');";
+      return URL.createObjectURL(new Blob([shim], { type: "text/javascript" }));
+    },
+  };
+</script>
+<script src="app.js"></script>
+</body>
+</html>

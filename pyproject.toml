@@ -16,6 +16,7 @@ dependencies = [
     "tomlkit>=0.12",
     "playwright==1.58.0",
     "litellm>=1.88.1",
+    "pr-review",
 ]
 
 [dependency-groups]
@@ -51,7 +52,7 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "libs/tk_command_parsing", "apps/system_interface"]
+members = ["libs/telegram_bot", "libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "libs/tk_command_parsing", "apps/system_interface", "libs/pr_review"]
 
 [tool.uv.sources]
 telegram-bot = { workspace = true }
@@ -68,6 +69,7 @@ imbue-mngr = { path = "vendor/mngr/libs/mngr", editable = true }
 imbue-mngr-claude = { path = "vendor/mngr/libs/mngr_claude", editable = true }
 resource-guards = { path = "vendor/mngr/libs/resource_guards", editable = true }
 concurrency-group = { path = "vendor/mngr/libs/concurrency_group", editable = true }
+pr-review = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["."]
