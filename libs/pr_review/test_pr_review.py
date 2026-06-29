@@ -14,17 +14,10 @@ from pathlib import Path
 import pytest
 from flask.testing import FlaskClient
 
-from pr_review.runner import app
 from pr_review.testing import seed_repo_cache
 
 _SHA = "abc123"
 _REPO = "octocat/hello"
-
-
-@pytest.fixture
-def client() -> FlaskClient:
-    app.config.update(TESTING=True)
-    return app.test_client()
 
 
 # --- static + health ---
