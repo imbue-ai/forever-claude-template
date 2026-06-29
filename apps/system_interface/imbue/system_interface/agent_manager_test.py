@@ -307,6 +307,66 @@ def test_handle_agent_discovered(agent_manager: AgentManager, broadcaster: WebSo
     assert msg["type"] == "agents_updated"
 
 
+def _layout_ops(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [message for message in messages if message.get("type") == "layout_op"]
+
+
+def test_assist_labeled_agent_auto_opens_its_tab(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """A chat spawned by the get-help flow (carrying the ``assist`` label) auto-opens its tab."""
+    q = broadcaster.register()
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("assist-abc123"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {"assist": "true"}, "work_dir": "/tmp/work"},
+    )
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(agent))
+
+    opens = _layout_ops(_drain(q))
+    assert len(opens) == 1
+    assert opens[0]["op"] == "open"
+    assert opens[0]["args"] == {"ref": "chat:assist-abc123"}
+
+
+def test_non_assist_agent_does_not_auto_open(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """An ordinary discovered agent (no ``assist`` label) does not trigger an auto-open."""
+    q = broadcaster.register()
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("plain-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {"user_created": "true"}, "work_dir": "/tmp/work"},
+    )
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(agent))
+
+    assert _layout_ops(_drain(q)) == []
+
+
+def test_assist_agent_rediscovery_does_not_reopen(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """A re-emitted discovery delta for an already-seen assist chat does not reopen its tab."""
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("assist-xyz"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {"assist": "true"}, "work_dir": "/tmp/work"},
+    )
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(agent))
+    # Register only after the first discovery so the queue captures just the re-delivery.
+    q = broadcaster.register()
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(agent))
+
+    assert _layout_ops(_drain(q)) == []
+
+
 def test_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """Destroying an agent removes it from the tracked list and broadcasts."""
     test_agent_id = MngrAgentId()

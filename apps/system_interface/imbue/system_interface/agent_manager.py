@@ -60,6 +60,11 @@ _DEFAULT_MNGR_BINARY = "mngr"
 
 _COMPLETION_SIGNAL_PUT_TIMEOUT_SECONDS = 5.0
 
+# A chat spawned by the minds "get help -> have an agent help" flow carries this
+# label (set on its ``mngr create``). When such an agent is first discovered, we
+# auto-open its tab so the user lands on it without hunting.
+_ASSIST_AUTO_OPEN_LABEL = "assist"
+
 
 def _build_worktree_create_command(
     mngr_binary: str,
@@ -928,6 +933,7 @@ class AgentManager:
         )
 
         with self._lock:
+            is_newly_discovered = agent_id not in self._agents
             self._agents[agent_id] = agent_state
             # Record the location now (host_id + provider_name from the delta) so the
             # first message to a just-created agent skips discovery instead of waiting
@@ -937,6 +943,17 @@ class AgentManager:
         if agent_id == self._own_agent_id and agent_state.work_dir:
             self._start_app_watcher(agent_id, Path(agent_state.work_dir))
         self._ensure_activity_tracking(agent_id)
+
+        # Auto-open the tab for an assist chat the first time it is discovered. Gated
+        # on first discovery (not every re-emitted delta) so a tab the user closed is
+        # not forced back open; the startup snapshot path does not run this, so a
+        # restart restores the saved layout rather than re-opening the assist tab.
+        if is_newly_discovered and agent_state.labels.get(_ASSIST_AUTO_OPEN_LABEL) == "true":
+            self._broadcaster.broadcast_layout_op(
+                op="open",
+                args={"ref": f"chat:{agent_state.name}"},
+                requester_agent_id=self._own_agent_id,
+            )
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
