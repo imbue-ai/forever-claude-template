@@ -5,22 +5,24 @@ description: Diagnose and fix a problem the user is hitting in this workspace, a
 
 # Assisting with a problem
 
-You were launched (usually via `/assist <description>`) to help the user with something that is going wrong in this workspace. Your job: understand the problem, fix what you can, and -- when the problem is in built-in (not user-written) code -- report it to imbue so they can fix it upstream.
+You were launched (usually via `/assist <description>`) to help the user with something that is going wrong in this workspace. Your job: understand the problem, confirm your diagnosis with the user before touching anything, fix what you can, and -- when the problem is in built-in (not user-written) code -- report it to imbue so they can fix it upstream.
 
 Work the steps below in order. Keep the user informed in plain language as you go.
 
 ## 1. Understand the problem
 
 - Read the user's description carefully. If it is vague, state your assumptions and proceed; ask only if you truly cannot start.
-- Reproduce or locate the failure. Gather evidence rather than guessing:
+- **Reproduce or directly observe the failure before theorizing about it.** Actually trigger the thing the user reported and watch it happen -- measure the slow operation, hit the failing endpoint, reproduce the error. Gather evidence rather than guessing:
   - Service logs: `supervisorctl status` and `/var/log/supervisor/<name>-stdout.log` / `-stderr.log`.
   - The relevant app/service code and any error/traceback you can find.
   - Recent changes: `git log --oneline -20`.
-- If you cannot reproduce or find any evidence, say so honestly before going further.
+- If you cannot reproduce or find any evidence, say so honestly before going further -- do not paper over the gap with a plausible-sounding theory.
 
 ## 2. Find the root cause
 
 Trace the actual failing code path to the specific file and line(s) responsible. Do not pattern-match from symptoms -- find the real cause.
+
+**Match your confidence to your evidence.** A code path you found by reading is a *hypothesis* until you have observed it actually causing the reported symptom. Do not announce a cause as "confirmed" on the strength of code-reading alone -- confirm it by reproducing the symptom and tying it to that code (e.g. the slow operation measurably speeds up when you bypass the suspected hot path; the error stops when you correct the suspected line). Until then, describe it as your leading suspicion, not a settled fact.
 
 ## 3. Classify the cause
 
@@ -49,7 +51,7 @@ git log --grep="^update-self:" --oneline
 
 ### B. Which layer is it in? (decides whether you *can* fix it)
 
-- **Fixable from here** -- you run inside this container, so you can change and immediately use:
+- **Fixable from here** -- you run inside this container, so you can change and use (*how* you apply each fix safely differs by artifact -- see step 5):
   - user code,
   - template built-in code (e.g. `apps/system_interface`, skills, scripts), and
   - `vendor/mngr/` code, **but only** when the fix changes how mngr behaves *inside this container* (the container runs from this checkout).
@@ -60,13 +62,28 @@ git log --grep="^update-self:" --oneline
 
   You can still read all of these under `vendor/mngr/` to diagnose and to write a precise report -- you just cannot deploy a fix.
 
-## 4. Fix what you can
+## 4. Confirm the diagnosis and plan before you change anything
 
-If the issue is fixable from here (per B), fix it: make the change, verify it actually resolves the problem (run it, don't just assume), and commit. Tell the user what you changed.
+You are editing in the **same work directory the user's live workspace is served from** -- this `/assist` chat is a `chat`-type agent that shares that checkout, not an isolated clone. So before you touch any code, check in with the user:
 
-If it is not fixable from here, do not fake a fix. Explain that it needs a new version of the desktop app and that you are reporting it to imbue.
+- State the cause you found, the evidence that backs it, and the exact change you propose to make.
+- Wait for their go-ahead. Do not start editing on your own authority, even when you are confident -- the user asked you to help diagnose a problem, not to perform an unrequested rewrite.
 
-## 5. Report built-in issues to imbue
+(For a system-interface fix, this verbal go-ahead covers the *plan*; the `update-system-interface` preview in step 5 is where the user approves the actual change before it goes live.)
+
+## 5. Fix what you can: quick live fix, then defer the hardening
+
+If the issue is **not fixable from here** (per B -- it lives in the installed outer app), do not fake a fix. Explain that it needs a new version of the desktop app, and go report it (step 6).
+
+If it **is fixable from here**, unblock the user fast, then harden in the background. *How* you apply the fix depends on the artifact:
+
+- **`apps/system_interface`** (the workspace UI: dockview shell, chat panels, progress view): **never edit it directly here.** Because your checkout is the one being served, a hand-edit-and-rebuild can take the user's entire UI down with no surface left to show an error. Route the fix through the **`update-system-interface`** skill, whose preview lets the user approve the change and whose reveal step pre-flights on a throwaway port and auto-rolls-back on failure -- the only safe go-live for the UI. Since `/assist` shares the work dir and can spawn the worker, you drive that flow yourself.
+- **A skill, or a web service whose code is broken:** make the quick fix live so the user is unblocked now, then at turn-end defer the hardening (tests, review gates, isolated verification) to the **`heal-artifact`** skill rather than treating your inline edit as the finished article. Use **`edit-services`** instead if the fix is to add/remove/reconfigure a service rather than repair its code.
+- **User-written code:** make the fix live and verify it actually resolves the problem (run it -- don't assume). This is the user's own code, so there is no lifecycle skill to defer to; just tell them what you changed.
+
+Whatever the path, verify that the symptom you reproduced in step 1 is actually gone before you call it fixed, and tell the user plainly what changed.
+
+## 6. Report built-in issues to imbue
 
 Report **any built-in-code issue** (per A) to imbue -- even if you already fixed it (the upstream copy still needs the fix). Do **not** report purely user-created issues; those are yours and the user's to handle.
 
@@ -92,9 +109,13 @@ A successful call returns `{"ok": true}` and pops the pre-filled modal in the ap
 
 ## Summary of decisions
 
-| Cause is...                                  | Fix it?                | Report to imbue? |
-|----------------------------------------------|------------------------|------------------|
-| User-created code                            | Yes                    | No               |
-| Template built-in (system_interface, skills) | Yes                    | Yes              |
-| `vendor/mngr` affecting this container        | Yes                    | Yes              |
-| Outer app (`apps/minds`, `mngr_forward`, `mngr_latchkey`, outer vendored mngr) | No -- needs a new app build | Yes |
+Always confirm the diagnosis and plan with the user (step 4) before applying any of these.
+
+| Cause is...                                   | How to fix it                                                                 | Report to imbue? |
+|-----------------------------------------------|-------------------------------------------------------------------------------|------------------|
+| User-created code                             | Fix live, verify it works                                                     | No               |
+| Template built-in: `apps/system_interface`    | Route through `update-system-interface` (never edit the served tree directly) | Yes              |
+| Template built-in: a skill or web service     | Quick live fix, then defer hardening to `heal-artifact` (`edit-services` for service config) | Yes |
+| Other template built-in (scripts, etc.)       | Fix live, verify it works                                                     | Yes              |
+| `vendor/mngr` affecting this container         | Fix live, verify it works                                                      | Yes              |
+| Outer app (`apps/minds`, `mngr_forward`, `mngr_latchkey`, outer vendored mngr) | Cannot -- needs a new app build              | Yes |
