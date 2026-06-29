@@ -330,14 +330,14 @@ def test_discovered_agent_labels_read_from_local_data_json(
     data_dir = tmp_path / "agents" / str(agent_id)
     data_dir.mkdir(parents=True)
     (data_dir / "data.json").write_text(
-        json.dumps({"labels": {"caretaker": "true", "auto_created": "true"}})
+        json.dumps({"labels": {"caretaker": "true", "highlight": "1700000000"}})
     )
 
     agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
 
     agents = agent_manager.get_agents()
     assert len(agents) == 1
-    assert agents[0].labels == {"caretaker": "true", "auto_created": "true"}
+    assert agents[0].labels == {"caretaker": "true", "highlight": "1700000000"}
 
 
 def test_discovered_agent_without_local_data_json_has_empty_labels(

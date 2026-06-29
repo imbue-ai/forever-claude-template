@@ -92,8 +92,7 @@ create_caretaker() {
     --no-connect \
     --format json \
     --label caretaker=true \
-    --label auto_created=true \
-    --label "caretaker_run=$(date +%s)" \
+    --label "highlight=$(date +%s)" \
     "${label_args[@]}" \
     --message "$RUN_MESSAGE"
 }
@@ -114,9 +113,10 @@ main() {
   # more than one exists.
   id="$(printf '%s\n' "$ids" | head -n 1)"
 
-  # Bump the run key so the minds UI re-surfaces and re-flashes the tab if the
-  # user had closed it.
-  uv run mngr label "$id" -l "caretaker_run=$(date +%s)" 2>/dev/null || true
+  # Bump the highlight key so the minds UI re-flashes the tab for this new run --
+  # whether the user had closed it (re-surfaced) or left it open in the background
+  # (re-blinked in place).
+  uv run mngr label "$id" -l "highlight=$(date +%s)" 2>/dev/null || true
 
   # Clear the rendered chat so this run starts from an empty conversation.
   log "clearing Caretaker ${id} for a fresh run"
