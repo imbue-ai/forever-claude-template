@@ -27,6 +27,11 @@
 #   provision_skip_if_done <name>   # early-exits the calling script when matched
 #   provision_mark_done <name>      # call at the end, after a successful run
 
+# Strict mode. This file is sourced by callers that already set this (e.g.
+# setup_system.sh), so re-asserting it here is a no-op for them and keeps the
+# library safe to source from anywhere.
+set -euo pipefail
+
 # Canonical workspace repo location in the VM: the Lima bake clones here and a
 # create syncs the workspace here. Overridable for tests.
 _PROVISION_REPO_ROOT="${PROVISION_REPO_ROOT:-/mngr/code}"
