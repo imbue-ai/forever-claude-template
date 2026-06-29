@@ -489,6 +489,7 @@ function disposeEditors() {
   for (const m of CREATED_MODELS) { MODEL_META.delete(m.uri.toString()); m.dispose(); }
   CREATED_MODELS = [];
   CZ_MOD = []; CZ_ORIG = [];   // zones die with their editor
+  closeCommentDock();
   document.getElementById("editor").innerHTML = "";
 }
 
@@ -569,27 +570,34 @@ function attachCommentAction(editor, side) {
   });
 }
 
+// The composer is a normal DOM panel docked below the editor -- a textarea
+// inside a Monaco view zone can't receive keyboard focus (Monaco intercepts it).
 function openCommentComposer(editor, line, side) {
-  const node = document.createElement("div");
-  node.className = "cz cz-composer";
-  node.innerHTML = `<div class="cz-anchor">${esc(activeFile)}:${line} · ${side === "LEFT" ? "old" : "new"} side</div>
-    <textarea placeholder="Comment on this line…"></textarea>
-    <div class="row"><button class="btn ghost sm cz-cancel">Cancel</button><button class="btn primary sm cz-add">Add to review</button></div>`;
-  let zid;
-  const h = measureZoneHeight(node);
-  editor.changeViewZones((acc) => { zid = acc.addZone({ afterLineNumber: line, heightInPx: h + 2, domNode: node }); });
-  const ta = node.querySelector("textarea");
+  closeCommentDock();
+  const dock = document.createElement("div");
+  dock.id = "commentDock";
+  dock.className = "comment-dock";
+  dock.innerHTML = `<div class="cd-head">Comment on <code>${esc(activeFile)}:${line}</code> · ${side === "LEFT" ? "old" : "new"} side
+      <span class="spacer" style="flex:1"></span><button class="btn ghost sm" id="cdCancel">Cancel</button></div>
+    <textarea class="composer" id="cdText" placeholder="Comment on this line…"></textarea>
+    <div class="composer-actions"><button class="btn primary sm" id="cdAdd">Add to review</button></div>`;
+  document.querySelector(".editor-wrap").appendChild(dock);
+  const ta = dock.querySelector("#cdText");
   ta.focus();
-  const remove = () => editor.changeViewZones((acc) => acc.removeZone(zid));
-  node.querySelector(".cz-cancel").onclick = remove;
-  node.querySelector(".cz-add").onclick = () => {
+  dock.querySelector("#cdCancel").onclick = closeCommentDock;
+  dock.querySelector("#cdAdd").onclick = () => {
     const body = ta.value.trim();
-    if (!body) { remove(); return; }
+    if (!body) { closeCommentDock(); return; }
     pendingComments.push({ path: activeFile, line, side, body });
-    remove();
+    closeCommentDock();
     renderFileComments(activeFile);
     updateReviewBar();
   };
+}
+
+function closeCommentDock() {
+  const dock = document.getElementById("commentDock");
+  if (dock) dock.remove();
 }
 
 function updateReviewBar() {
