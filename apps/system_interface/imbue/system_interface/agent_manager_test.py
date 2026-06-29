@@ -367,6 +367,57 @@ def test_assist_agent_rediscovery_does_not_reopen(
     assert _layout_ops(_drain(q)) == []
 
 
+def _assist_discovered_agent(name: str) -> DiscoveredAgent:
+    return DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName(name),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {"assist": "true"}, "work_dir": "/tmp/work"},
+    )
+
+
+def test_snapshot_auto_opens_a_newly_appeared_assist_chat(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """A freshly-created chat usually surfaces in a full snapshot (not a per-agent delta),
+    so the snapshot path must auto-open assist chats too."""
+    q = broadcaster.register()
+    agent = _assist_discovered_agent("assist-snap")
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    opens = _layout_ops(_drain(q))
+    assert len(opens) == 1
+    assert opens[0]["op"] == "open"
+    assert opens[0]["args"] == {"ref": "chat:assist-snap"}
+
+
+def test_snapshot_does_not_reopen_assist_chat_on_later_snapshots(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    agent = _assist_discovered_agent("assist-snap2")
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+    # Register after the first snapshot so the queue captures only the second.
+    q = broadcaster.register()
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    assert _layout_ops(_drain(q)) == []
+
+
+def test_assist_chat_present_at_startup_is_not_auto_opened(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """Assist chats seeded as already-handled (what ``_initial_discover`` does for chats that
+    exist at startup) are not auto-opened, so a restart restores the saved layout."""
+    agent = _assist_discovered_agent("assist-existing")
+    with agent_manager._lock:
+        agent_manager._auto_opened_assist_ids.add(str(agent.agent_id))
+    q = broadcaster.register()
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    assert _layout_ops(_drain(q)) == []
+
+
 def test_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """Destroying an agent removes it from the tracked list and broadcasts."""
     test_agent_id = MngrAgentId()

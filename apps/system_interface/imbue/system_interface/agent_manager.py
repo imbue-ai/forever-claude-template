@@ -306,6 +306,11 @@ class AgentManager:
     _last_event_type_by_agent: dict[str, str | None]
     _last_event_timestamp_by_agent: dict[str, str | None]
     _activity_state_by_agent: dict[str, ActivityState]
+    # Assist chats whose tab we have already auto-opened (or that existed at
+    # startup, seeded by ``_initial_discover`` so we never auto-open them). Lets
+    # both discovery paths -- the per-agent delta and the full snapshot -- open
+    # each new assist chat exactly once without reopening it on later snapshots.
+    _auto_opened_assist_ids: set[str]
 
     @classmethod
     def build(cls, broadcaster: WebSocketBroadcaster, mngr_binary: str = _DEFAULT_MNGR_BINARY) -> "AgentManager":
@@ -337,6 +342,7 @@ class AgentManager:
         manager._last_event_type_by_agent = {}
         manager._last_event_timestamp_by_agent = {}
         manager._activity_state_by_agent = {}
+        manager._auto_opened_assist_ids = set()
         return manager
 
     def start(self) -> None:
@@ -722,6 +728,10 @@ class AgentManager:
                         work_dir=agent_info.work_dir,
                     )
                     self._agents[agent_info.id] = agent_state
+                    # Treat assist chats that already exist at startup as already-handled
+                    # so a restart restores the saved layout instead of reopening their tabs.
+                    if agent_info.labels.get(_ASSIST_AUTO_OPEN_LABEL) == "true":
+                        self._auto_opened_assist_ids.add(agent_info.id)
 
             for agent_info in agents:
                 if agent_info.id == self._own_agent_id and agent_info.work_dir:
@@ -888,6 +898,26 @@ class AgentManager:
         else:
             pass
 
+    def _maybe_auto_open_assist(self, agent_state: AgentStateItem) -> None:
+        """Auto-open ``agent_state``'s tab if it is an assist chat we have not opened yet.
+
+        Idempotent via ``_auto_opened_assist_ids``: assist chats present at startup are
+        seeded into that set by ``_initial_discover`` (so a restart never reopens them),
+        and each later-appearing assist chat is opened exactly once -- regardless of
+        whether it arrives via the per-agent delta or a full snapshot.
+        """
+        if agent_state.labels.get(_ASSIST_AUTO_OPEN_LABEL) != "true":
+            return
+        with self._lock:
+            if agent_state.id in self._auto_opened_assist_ids:
+                return
+            self._auto_opened_assist_ids.add(agent_state.id)
+        self._broadcaster.broadcast_layout_op(
+            op="open",
+            args={"ref": f"chat:{agent_state.name}"},
+            requester_agent_id=self._own_agent_id,
+        )
+
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
         """Handle a full discovery snapshot."""
         new_agents: dict[str, AgentStateItem] = {}
@@ -914,6 +944,13 @@ class AgentManager:
                 self._start_app_watcher(agent_id, Path(agent.work_dir))
             self._ensure_activity_tracking(agent_id)
 
+        # A newly-created chat usually surfaces here (the periodic snapshot), not as a
+        # per-agent delta, so auto-open assist chats that have appeared since the last
+        # snapshot. ``_maybe_auto_open_assist`` dedupes, so an assist chat that was
+        # already present (including at startup) is not reopened.
+        for agent_id in new_ids - old_ids:
+            self._maybe_auto_open_assist(new_agents[agent_id])
+
         for agent_id in old_ids - new_ids:
             self._stop_app_watcher(agent_id)
             self._stop_activity_tracking(agent_id)
@@ -933,7 +970,6 @@ class AgentManager:
         )
 
         with self._lock:
-            is_newly_discovered = agent_id not in self._agents
             self._agents[agent_id] = agent_state
             # Record the location now (host_id + provider_name from the delta) so the
             # first message to a just-created agent skips discovery instead of waiting
@@ -944,16 +980,9 @@ class AgentManager:
             self._start_app_watcher(agent_id, Path(agent_state.work_dir))
         self._ensure_activity_tracking(agent_id)
 
-        # Auto-open the tab for an assist chat the first time it is discovered. Gated
-        # on first discovery (not every re-emitted delta) so a tab the user closed is
-        # not forced back open; the startup snapshot path does not run this, so a
-        # restart restores the saved layout rather than re-opening the assist tab.
-        if is_newly_discovered and agent_state.labels.get(_ASSIST_AUTO_OPEN_LABEL) == "true":
-            self._broadcaster.broadcast_layout_op(
-                op="open",
-                args={"ref": f"chat:{agent_state.name}"},
-                requester_agent_id=self._own_agent_id,
-            )
+        # Auto-open the tab if this is an assist chat we have not opened yet (the
+        # snapshot path handles the same for chats that surface there instead).
+        self._maybe_auto_open_assist(agent_state)
 
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
