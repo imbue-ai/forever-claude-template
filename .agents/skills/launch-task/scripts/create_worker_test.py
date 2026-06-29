@@ -105,7 +105,7 @@ def test_happy_path_no_artifacts(tmp_path: Path) -> None:
     assert rc == 0
     argvs = [c.argv for c in runner.calls]
     assert argvs == [
-        ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
+        ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1", "--label", "agent_created=true"],
         [
             "mngr",
             "rsync",
@@ -451,7 +451,7 @@ def test_common_transcript_flushed_before_message_send(tmp_path: Path) -> None:
     argvs = [c.argv for c in runner.calls]
     expected_script = str(state_dir / "commands" / "common_transcript.sh")
     assert argvs == [
-        ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"],
+        ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1", "--label", "agent_created=true"],
         [
             "mngr",
             "rsync",
@@ -665,6 +665,55 @@ def test_await_times_out_when_report_never_appears(
     assert rc == create_worker_mod._AWAIT_TIMEOUT_RC
     assert out.getvalue() == ""
     assert "timed out" in capsys.readouterr().err
+
+
+def test_await_returns_shed_code_when_worker_shed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A worker shed for memory pressure ends the poll early with the shed code
+    and an actionable revive message -- not the silent full-length timeout."""
+    report = tmp_path / "runtime" / "launch-task" / "demo" / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    out = io.StringIO()
+
+    rc = create_worker_mod.await_report(
+        report_path=report,
+        timeout_seconds=1800,
+        poll_interval_seconds=5,
+        sleeper=_no_sleep,
+        clock=lambda: 0.0,
+        out=out,
+        worker_name="demo",
+        pending_shed_check=lambda name: name == "demo",
+    )
+
+    assert rc == create_worker_mod._AWAIT_SHED_RC
+    assert out.getvalue() == ""
+    err = capsys.readouterr().err
+    assert "demo" in err and "--restart" in err
+
+
+def test_await_report_wins_over_pending_shed(tmp_path: Path) -> None:
+    """The report file is checked before the shed ledger, so a worker that
+    reported and was then shed still yields its report (rc 0)."""
+    report = tmp_path / "runtime" / "launch-task" / "demo" / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("---\ntype: status\nname: done\n---\n\nfinished first\n")
+    out = io.StringIO()
+
+    rc = create_worker_mod.await_report(
+        report_path=report,
+        timeout_seconds=1800,
+        poll_interval_seconds=5,
+        sleeper=_no_sleep,
+        clock=lambda: 0.0,
+        out=out,
+        worker_name="demo",
+        pending_shed_check=lambda _name: True,
+    )
+
+    assert rc == 0
+    assert "finished first" in out.getvalue()
 
 
 def test_read_finish_report_path_returns_field(tmp_path: Path) -> None:

@@ -24,11 +24,13 @@ provision_skip_if_done setup_system
 : "${LATCHKEY_VERSION:=2.19.1}"
 
 # System packages (tini for signal handling; supervisor runs our background
-# services; the rest are agent/runtime deps). supervisor provides the system
-# supervisord + supervisorctl that `uv run bootstrap` execs into the foreground.
+# services; earlyoom is the OOM-prevention daemon that sheds memory under
+# pressure before the kernel kills an arbitrary victim; the rest are
+# agent/runtime deps). supervisor provides the system supervisord + supervisorctl
+# that `uv run bootstrap` execs into the foreground.
 apt-get update
 apt-get install -y --no-install-recommends \
-    bash build-essential ca-certificates curl fd-find git git-lfs jq less nano \
+    bash build-essential ca-certificates curl earlyoom fd-find git git-lfs jq less nano \
     openssh-server procps restic ripgrep rsync sqlite3 supervisor tini tmux unison util-linux wget \
     xxd xmlstarlet
 rm -rf /var/lib/apt/lists/*

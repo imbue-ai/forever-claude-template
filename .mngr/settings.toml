@@ -33,6 +33,14 @@ host_env__extend = [
     # subdirs too. /mngr/code/ is the container WORKDIR (set by the Dockerfile);
     # a /code -> /mngr/code symlink is kept in the image as a safety net.
     "TICKETS_DIR=/mngr/code/runtime/tickets",
+    # The OOM shed ledger + agent-pid registry live under runtime/ (so they ride
+    # the runtime-backup branch). The container-level earlyoom kill hook runs
+    # with work dir /mngr/code, but each agent's SessionStart hooks resolve paths
+    # relative to THEIR agent's MNGR_AGENT_WORK_DIR -- which for a worker is its
+    # own worktree, not /mngr/code. Pinning the absolute path here (same
+    # rationale as TICKETS_DIR above) makes the kill hook and every agent's hook
+    # resolve one shared ledger and registry, regardless of work dir.
+    "OOM_PRIORITY_RUNTIME_DIR=/mngr/code/runtime/oom_priority",
     # Workaround for an Apple M5 lima-VZ guest CPU mismatch: the Debian 12
     # guest kernel advertises SVE / SVE2 in /proc/cpuinfo, but lima-VZ on M5
     # traps the `cntb` SVE instruction emitted by OpenSSL's

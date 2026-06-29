@@ -114,6 +114,11 @@ _DEFAULT_POLL_INTERVAL = "5s"
 # matching coreutils ``timeout``'s convention so the prose's mental model
 # carries over.
 _AWAIT_TIMEOUT_RC = 124
+# Distinct exit code for an await that stopped early because the worker's own
+# agent was shed by the OOM daemon (so it will never report until revived).
+# Separate from the timeout code so the lead can tell "paused for memory" apart
+# from "still running, just slow".
+_AWAIT_SHED_RC = 75
 
 
 def _normalize_dir(value: str) -> str:
@@ -357,6 +362,12 @@ def launch(
             template,
             "--label",
             f"workspace={workspace}",
+            # Marks this as an agent-created (worker) agent so the OOM
+            # agent-tagging hook puts it in the worker-agent band -- shed before
+            # user-created agents (but after every agent's subprocesses) under
+            # memory pressure.
+            "--label",
+            "agent_created=true",
         ],
         check=True,
     )
@@ -382,6 +393,42 @@ def launch(
     return 0
 
 
+def _worker_name_from_task_file(task_file: Path) -> str:
+    """Best-effort worker (mngr agent) name, from the task file's directory.
+
+    Every flow stages the task at ``runtime/<flow>/<NAME>/task.md`` where
+    ``<NAME>`` is the worker's mngr agent name (launch passes the same ``<NAME>``
+    as both the directory and ``mngr create <NAME>``). So the parent directory
+    name is the worker name -- which is what lets ``await`` watch the shed ledger
+    for this worker even when the caller did not pass ``--name`` explicitly. If
+    the derived name is wrong it simply never matches a ledger record (no false
+    positive), so this is safe as a default.
+    """
+    return task_file.resolve().parent.name
+
+
+def _worker_has_pending_shed(worker_name: str) -> bool:
+    """Whether the OOM daemon shed this worker's own agent and it is not yet
+    revived, per the shed ledger.
+
+    Resolved through the ``oom_priority`` package (the same code the kill hook
+    and revival hook use), imported via a ``sys.path`` insert so it works whether
+    or not the package is installed in the active environment. If the package
+    can't be imported the check is skipped (await falls back to plain timeout
+    behaviour) -- a shed worker then simply surfaces as the normal timeout.
+    """
+    try:
+        watchdog_src = (
+            Path(__file__).resolve().parents[4] / "libs" / "oom_priority" / "src"
+        )
+        if watchdog_src.is_dir() and str(watchdog_src) not in sys.path:
+            sys.path.insert(0, str(watchdog_src))
+        from oom_priority.ledger import has_pending_shed
+    except ImportError:
+        return False
+    return has_pending_shed(worker_name)
+
+
 def await_report(
     report_path: Path,
     timeout_seconds: float,
@@ -389,6 +436,8 @@ def await_report(
     sleeper: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     out: TextIO | None = None,
+    worker_name: str | None = None,
+    pending_shed_check: Callable[[str], bool] | None = None,
 ) -> int:
     """Block until ``report_path`` exists, then print its contents.
 
@@ -396,6 +445,13 @@ def await_report(
     returns ``_AWAIT_TIMEOUT_RC`` if the deadline passes first, leaving a note
     on stderr so the caller diagnoses worker liveness per lead-proxy.md rather
     than treating the timeout as a terminal failure.
+
+    If ``worker_name`` and ``pending_shed_check`` are supplied, each poll also
+    checks whether the worker's own agent was shed by the OOM daemon. A shed
+    worker will never report until it is revived, so rather than wait out the
+    full timeout we surface an actionable message and return ``_AWAIT_SHED_RC``.
+    The report file is still checked first each loop, so a report that landed
+    before the shed (or a worker revived and reporting) still wins.
 
     ``sleeper``/``clock`` are injected so tests can drive the poll loop without
     real time. The file is checked before the first sleep, so a report already
@@ -407,6 +463,26 @@ def await_report(
         if report_path.is_file():
             stream.write(report_path.read_text(encoding="utf-8"))
             return 0
+        if (
+            worker_name is not None
+            and pending_shed_check is not None
+            and pending_shed_check(worker_name)
+        ):
+            print(
+                f"create_worker: worker '{worker_name}' was stopped by the OOM "
+                "daemon to relieve memory pressure -- its agent process was shed "
+                "and its background tasks (including its own report poll) were "
+                "cancelled, so it will NOT report until it is revived. Revive it "
+                f"with: mngr start {worker_name} --restart  (a plain `mngr message` "
+                "or `mngr start` will not relaunch a shed agent), then nudge it to "
+                f"continue (mngr message {worker_name} -m continue). You do not "
+                "need to resend the task -- it survives in the worker's "
+                "conversation history, and a SessionStart hook already tells the "
+                "revived worker it was paused, so it re-checks state before "
+                "continuing.",
+                file=sys.stderr,
+            )
+            return _AWAIT_SHED_RC
         if clock() >= deadline:
             print(
                 f"create_worker: timed out after {timeout_seconds:g}s waiting for "
@@ -545,6 +621,8 @@ def launch_sync(
         sleeper=sleeper,
         clock=clock,
         out=buffer,
+        worker_name=name,
+        pending_shed_check=_worker_has_pending_shed,
     )
     branch = f"mngr/{name}"
     if await_rc != 0:
@@ -601,10 +679,19 @@ def _run_await(args: argparse.Namespace) -> int:
     # file; let the ValueError raise for a full traceback rather than swallowing
     # it into a terse exit-2 message (matches ``launch``'s handling above).
     report_path = _read_finish_report_path(args.task_file)
+    # Watch the shed ledger so a worker paused for memory pressure surfaces
+    # promptly (and actionably) instead of as a silent 30-minute timeout. The
+    # worker name defaults to the task file's directory name (the
+    # runtime/<flow>/<NAME>/ convention) so this works even when the caller did
+    # not pass --name explicitly -- which a lead following the skill easily
+    # forgets. --name overrides when given.
+    worker_name = args.name or _worker_name_from_task_file(args.task_file)
     return await_report(
         report_path=report_path,
         timeout_seconds=args.timeout,
         poll_interval_seconds=args.poll_interval,
+        worker_name=worker_name,
+        pending_shed_check=_worker_has_pending_shed,
     )
 
 
@@ -676,6 +763,13 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
         type=Path,
         help="Same task file as launch; its frontmatter `finish_report_path` "
         "names the file to wait for.",
+    )
+    await_parser.add_argument(
+        "--name",
+        default=None,
+        help="Worker name. Used to watch the shed ledger so a worker paused for "
+        "memory pressure is surfaced promptly (and actionably) instead of as a "
+        "silent timeout. Defaults to the task file's directory name.",
     )
     await_parser.add_argument(
         "--timeout",

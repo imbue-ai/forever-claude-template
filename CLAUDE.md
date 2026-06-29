@@ -412,6 +412,8 @@ If you get a failure when trying to commit the first time, just try committing a
 
 If something unexpected happens -- errors, confusing state, things not working as documented -- use the `dealing-with-the-unexpected` skill for guidance.
 
+A background OOM-prevention daemon (earlyoom) kills ("sheds") memory-heavy processes under sustained memory pressure -- most-expendable first (an agent's build/test/browser subprocesses before the agent itself). If a command of yours dies with exit 137 (or SIGKILL/SIGTERM) and you did not kill it, confirm by checking the shed ledger at `/mngr/code/runtime/oom_priority/events/shed.jsonl` for a record naming it (matched by pid or process name). If it was shed, do NOT blindly re-run a memory-heavy command -- it will likely be shed again; find a lower-memory approach (smaller batches, streaming, releasing data you no longer need) and only retry if you can.
+
 # claude -p
 
 If ever building AI-powered services and wanting to use `claude -p`, make sure to unset the MAIN_CLAUDE_SESSION_ID for the process. This prevents conversation rendering issues.

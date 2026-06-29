@@ -116,6 +116,11 @@ def _build_chat_create_command(
         "none",
         "--template",
         "chat",
+        # Tags this as a user-created agent so the OOM agent-tagging hook puts it
+        # in the protected user-agent band (shed only as a last resort, after
+        # worker agents and every agent's subprocesses).
+        "--label",
+        "user_created=true",
         "--no-connect",
     ]
     # Inherit workspace and project labels from the primary agent.
