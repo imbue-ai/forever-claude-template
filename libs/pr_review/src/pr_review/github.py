@@ -14,11 +14,18 @@ import re
 import shutil
 import subprocess
 import tarfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
 API = "https://api.github.com"
 REPO_CACHE = Path("runtime/pr-review/repos")
+
+# The transport seam: a callable that runs ``latchkey curl`` with the given
+# argument list and returns stdout bytes. Every network function takes one as an
+# injectable parameter defaulting to the real ``_curl`` -- production callers use
+# the default, while tests pass a fake so no real GitHub call or write ever runs.
+CurlFn = Callable[[list[str]], bytes]
 
 
 class GitHubError(RuntimeError):
@@ -36,10 +43,10 @@ def _curl(args: list[str]) -> bytes:
     return result.stdout
 
 
-def gh_json(path: str) -> dict | list:
+def gh_json(path: str, curl: CurlFn = _curl) -> dict | list:
     """GET a GitHub REST endpoint and parse JSON. ``path`` is relative to the API root."""
     url = path if path.startswith("http") else f"{API}/{path.lstrip('/')}"
-    raw = _curl([url])
+    raw = curl([url])
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -49,7 +56,7 @@ def gh_json(path: str) -> dict | list:
 _STATUS_MARKER = "\n__HTTP_STATUS__"
 
 
-def gh_request(method: str, path: str, payload: dict | None = None) -> dict:
+def gh_request(method: str, path: str, payload: dict | None = None, curl: CurlFn = _curl) -> dict:
     """Make a write request (POST/PATCH/DELETE) and return the parsed JSON body.
 
     Raises GitHubError with the API message on any non-2xx status.
@@ -58,7 +65,7 @@ def gh_request(method: str, path: str, payload: dict | None = None) -> dict:
     args = ["-sS", "-w", _STATUS_MARKER + "%{http_code}", "-X", method, "-H", "Content-Type: application/json", url]
     if payload is not None:
         args = ["-d", json.dumps(payload), *args]
-    out = _curl(args).decode(errors="replace")
+    out = curl(args).decode(errors="replace")
     idx = out.rfind(_STATUS_MARKER)
     status = int(out[idx + len(_STATUS_MARKER):]) if idx >= 0 else 0
     body_text = out[:idx] if idx >= 0 else out
@@ -69,9 +76,9 @@ def gh_request(method: str, path: str, payload: dict | None = None) -> dict:
     return data if isinstance(data, dict) else {"result": data}
 
 
-def get_viewer() -> str:
+def get_viewer(curl: CurlFn = _curl) -> str:
     """The authenticated user's login."""
-    me = gh_json("user")
+    me = gh_json("user", curl)
     assert isinstance(me, dict)
     login = me.get("login")
     if not login:
@@ -114,8 +121,9 @@ def _review_decision(reviews: list) -> str:
     by_user: dict[str, str] = {}
     for review in reviews:
         state = review.get("state")
-        if state in ("APPROVED", "CHANGES_REQUESTED"):
-            by_user[(review.get("user") or {}).get("login")] = state
+        login = (review.get("user") or {}).get("login")
+        if login and state in ("APPROVED", "CHANGES_REQUESTED"):
+            by_user[login] = state
     states = set(by_user.values())
     if "CHANGES_REQUESTED" in states:
         return "changes requested"
@@ -143,10 +151,10 @@ def _summarize_search_item(item: dict, viewer: str) -> dict:
     }
 
 
-def list_prs(viewer: str) -> dict:
+def list_prs(viewer: str, curl: CurlFn = _curl) -> dict:
     """Both buckets of the viewer's open PRs, lightweight (no per-PR enrichment)."""
-    authored = gh_json(f"search/issues?q=is:open+is:pr+author:{viewer}&per_page=100")
-    requested = gh_json(f"search/issues?q=is:open+is:pr+review-requested:{viewer}&per_page=100")
+    authored = gh_json(f"search/issues?q=is:open+is:pr+author:{viewer}&per_page=100", curl)
+    requested = gh_json(f"search/issues?q=is:open+is:pr+review-requested:{viewer}&per_page=100", curl)
     assert isinstance(authored, dict) and isinstance(requested, dict)
     return {
         "viewer": viewer,
@@ -155,14 +163,14 @@ def list_prs(viewer: str) -> dict:
     }
 
 
-def enrich_status(repo: str, number: int) -> dict:
+def enrich_status(repo: str, number: int, curl: CurlFn = _curl) -> dict:
     """The full status signals for one PR (CI, review decision, conflicts, diffstat)."""
-    pr = gh_json(f"repos/{repo}/pulls/{number}")
+    pr = gh_json(f"repos/{repo}/pulls/{number}", curl)
     assert isinstance(pr, dict)
     sha = pr["head"]["sha"]
-    check_runs = gh_json(f"repos/{repo}/commits/{sha}/check-runs")
-    combined = gh_json(f"repos/{repo}/commits/{sha}/status")
-    reviews = gh_json(f"repos/{repo}/pulls/{number}/reviews")
+    check_runs = gh_json(f"repos/{repo}/commits/{sha}/check-runs", curl)
+    combined = gh_json(f"repos/{repo}/commits/{sha}/status", curl)
+    reviews = gh_json(f"repos/{repo}/pulls/{number}/reviews", curl)
     assert isinstance(check_runs, dict) and isinstance(combined, dict) and isinstance(reviews, list)
     return {
         "repo": repo,
@@ -197,12 +205,12 @@ def enrich_status(repo: str, number: int) -> dict:
     }
 
 
-def list_changed_files(repo: str, number: int) -> list[dict]:
+def list_changed_files(repo: str, number: int, curl: CurlFn = _curl) -> list[dict]:
     """Changed files for a PR (paginated)."""
     files: list[dict] = []
     # GitHub caps PR files at 3000; 30 pages of 100 covers any PR.
     for page in range(1, 31):
-        chunk = gh_json(f"repos/{repo}/pulls/{number}/files?per_page=100&page={page}")
+        chunk = gh_json(f"repos/{repo}/pulls/{number}/files?per_page=100&page={page}", curl)
         assert isinstance(chunk, list)
         if not chunk:
             break
@@ -225,11 +233,11 @@ def list_changed_files(repo: str, number: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def get_conversation(repo: str, number: int) -> dict:
+def get_conversation(repo: str, number: int, curl: CurlFn = _curl) -> dict:
     """The PR's general comments, reviews, and line-level review comments."""
-    issue_comments = gh_json(f"repos/{repo}/issues/{number}/comments?per_page=100")
-    reviews = gh_json(f"repos/{repo}/pulls/{number}/reviews?per_page=100")
-    review_comments = gh_json(f"repos/{repo}/pulls/{number}/comments?per_page=100")
+    issue_comments = gh_json(f"repos/{repo}/issues/{number}/comments?per_page=100", curl)
+    reviews = gh_json(f"repos/{repo}/pulls/{number}/reviews?per_page=100", curl)
+    review_comments = gh_json(f"repos/{repo}/pulls/{number}/comments?per_page=100", curl)
     assert isinstance(issue_comments, list) and isinstance(reviews, list) and isinstance(review_comments, list)
 
     def _user(obj: dict) -> str:
@@ -257,25 +265,27 @@ def get_conversation(repo: str, number: int) -> dict:
     }
 
 
-def add_issue_comment(repo: str, number: int, body: str) -> dict:
+def add_issue_comment(repo: str, number: int, body: str, curl: CurlFn = _curl) -> dict:
     """Post a general (conversation) comment on the PR."""
-    return gh_request("POST", f"repos/{repo}/issues/{number}/comments", {"body": body})
+    return gh_request("POST", f"repos/{repo}/issues/{number}/comments", {"body": body}, curl)
 
 
-def delete_issue_comment(repo: str, comment_id: int) -> None:
+def delete_issue_comment(repo: str, comment_id: int, curl: CurlFn = _curl) -> None:
     """Delete a general comment (used for clean test round-trips)."""
-    gh_request("DELETE", f"repos/{repo}/issues/comments/{comment_id}")
+    gh_request("DELETE", f"repos/{repo}/issues/comments/{comment_id}", curl=curl)
 
 
-def update_pr(repo: str, number: int, fields: dict) -> dict:
+def update_pr(repo: str, number: int, fields: dict, curl: CurlFn = _curl) -> dict:
     """Edit the PR title and/or body."""
     allowed = {k: v for k, v in fields.items() if k in ("title", "body")}
     if not allowed:
         raise GitHubError("nothing to update (expected title and/or body)")
-    return gh_request("PATCH", f"repos/{repo}/pulls/{number}", allowed)
+    return gh_request("PATCH", f"repos/{repo}/pulls/{number}", allowed, curl)
 
 
-def create_review(repo: str, number: int, commit_id: str, body: str, event: str, comments: list[dict]) -> dict:
+def create_review(
+    repo: str, number: int, commit_id: str, body: str, event: str, comments: list[dict], curl: CurlFn = _curl
+) -> dict:
     """Create a review. ``event`` is one of COMMENT / APPROVE / REQUEST_CHANGES,
     or empty/"PENDING_CREATE" to leave it pending (used for clean test round-trips).
     ``comments`` are ``{path, line, side, body}`` line-level comments.
@@ -285,12 +295,12 @@ def create_review(repo: str, number: int, commit_id: str, body: str, event: str,
         payload["body"] = body
     if event and event != "PENDING_CREATE":
         payload["event"] = event
-    return gh_request("POST", f"repos/{repo}/pulls/{number}/reviews", payload)
+    return gh_request("POST", f"repos/{repo}/pulls/{number}/reviews", payload, curl)
 
 
-def delete_pending_review(repo: str, number: int, review_id: int) -> None:
+def delete_pending_review(repo: str, number: int, review_id: int, curl: CurlFn = _curl) -> None:
     """Delete a still-pending review (used for clean test round-trips)."""
-    gh_request("DELETE", f"repos/{repo}/pulls/{number}/reviews/{review_id}")
+    gh_request("DELETE", f"repos/{repo}/pulls/{number}/reviews/{review_id}", curl=curl)
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +320,7 @@ def _safe_slug(repo: str) -> str:
     return repo.replace("/", "__")
 
 
-def ensure_repo_tree(repo: str, sha: str) -> RepoTree:
+def ensure_repo_tree(repo: str, sha: str, curl: CurlFn = _curl) -> RepoTree:
     """Fetch+extract the repo at ``sha`` (cached). Reuses existing GitHub auth.
 
     ``repo`` is the full ``owner/name`` of the repo that hosts the commit (for a
@@ -325,7 +335,7 @@ def ensure_repo_tree(repo: str, sha: str) -> RepoTree:
     dest.mkdir(parents=True, exist_ok=True)
     tarball = dest / "src.tar.gz"
     # The tarball endpoint 302-redirects to codeload; -L follows it with auth.
-    raw = _curl(["-L", f"{API}/repos/{repo}/tarball/{sha}"])
+    raw = curl(["-L", f"{API}/repos/{repo}/tarball/{sha}"])
     tarball.write_bytes(raw)
     with tarfile.open(tarball, "r:gz") as tf:
         _safe_extract(tf, dest)
@@ -342,7 +352,9 @@ def _safe_extract(tf: tarfile.TarFile, dest: Path) -> None:
         target = (dest / member.name).resolve()
         if not str(target).startswith(str(dest_resolved)):
             raise GitHubError(f"unsafe path in tarball: {member.name}")
-    tf.extractall(dest)
+    # The explicit check above is the primary guard; the "data" filter is a
+    # second line of defense (and silences the 3.14 default-filter warning).
+    tf.extractall(dest, filter="data")
 
 
 def read_tree_file(tree: RepoTree, rel_path: str) -> str | None:
@@ -438,9 +450,9 @@ def find_usages(tree: "RepoTree", symbol: str, limit: int = 400) -> dict:
     }
 
 
-def get_file_at_ref(repo: str, path: str, ref: str) -> str | None:
+def get_file_at_ref(repo: str, path: str, ref: str, curl: CurlFn = _curl) -> str | None:
     """Base-version content of a file via the contents/blobs API. None if absent."""
-    meta = gh_json(f"repos/{repo}/contents/{path}?ref={ref}")
+    meta = gh_json(f"repos/{repo}/contents/{path}?ref={ref}", curl)
     if isinstance(meta, dict) and meta.get("message") == "Not Found":
         return None
     assert isinstance(meta, dict)
@@ -454,7 +466,7 @@ def get_file_at_ref(repo: str, path: str, ref: str) -> str | None:
     # Large files: contents API omits content; fall back to the blob by sha.
     sha = meta.get("sha")
     if sha:
-        blob = gh_json(f"repos/{repo}/git/blobs/{sha}")
+        blob = gh_json(f"repos/{repo}/git/blobs/{sha}", curl)
         assert isinstance(blob, dict)
         if blob.get("encoding") == "base64" and blob.get("content"):
             data = base64.b64decode(blob["content"])
