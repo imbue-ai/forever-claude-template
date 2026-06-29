@@ -325,10 +325,15 @@ def test_assist_labeled_agent_auto_opens_its_tab(
     )
     agent_manager._handle_agent_discovered(make_agent_discovery_event(agent))
 
-    opens = _layout_ops(_drain(q))
+    messages = _drain(q)
+    opens = _layout_ops(messages)
     assert len(opens) == 1
     assert opens[0]["op"] == "open"
     assert opens[0]["args"] == {"ref": "chat:assist-abc123"}
+    # The agent list must be broadcast before the open, or the frontend drops the open
+    # (it resolves ``chat:<name>`` against its known-agents list).
+    types = [m.get("type") for m in messages]
+    assert types.index("agents_updated") < types.index("layout_op")
 
 
 def test_non_assist_agent_does_not_auto_open(
@@ -386,10 +391,15 @@ def test_snapshot_auto_opens_a_newly_appeared_assist_chat(
     agent = _assist_discovered_agent("assist-snap")
     agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
 
-    opens = _layout_ops(_drain(q))
+    messages = _drain(q)
+    opens = _layout_ops(messages)
     assert len(opens) == 1
     assert opens[0]["op"] == "open"
     assert opens[0]["args"] == {"ref": "chat:assist-snap"}
+    # The agent list must be broadcast before the open, or the frontend drops the open
+    # (it resolves ``chat:<name>`` against its known-agents list).
+    types = [m.get("type") for m in messages]
+    assert types.index("agents_updated") < types.index("layout_op")
 
 
 def test_snapshot_does_not_reopen_assist_chat_on_later_snapshots(

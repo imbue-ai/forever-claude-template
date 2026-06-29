@@ -944,18 +944,21 @@ class AgentManager:
                 self._start_app_watcher(agent_id, Path(agent.work_dir))
             self._ensure_activity_tracking(agent_id)
 
+        for agent_id in old_ids - new_ids:
+            self._stop_app_watcher(agent_id)
+            self._stop_activity_tracking(agent_id)
+
+        # Broadcast the updated agent list BEFORE any auto-open: the frontend's open
+        # handler resolves ``chat:<name>`` against its known-agents list and drops the
+        # open if the agent is not there yet, so the chat must be known first.
+        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
+
         # A newly-created chat usually surfaces here (the periodic snapshot), not as a
         # per-agent delta, so auto-open assist chats that have appeared since the last
         # snapshot. ``_maybe_auto_open_assist`` dedupes, so an assist chat that was
         # already present (including at startup) is not reopened.
         for agent_id in new_ids - old_ids:
             self._maybe_auto_open_assist(new_agents[agent_id])
-
-        for agent_id in old_ids - new_ids:
-            self._stop_app_watcher(agent_id)
-            self._stop_activity_tracking(agent_id)
-
-        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         """Handle an agent discovered event."""
@@ -980,11 +983,14 @@ class AgentManager:
             self._start_app_watcher(agent_id, Path(agent_state.work_dir))
         self._ensure_activity_tracking(agent_id)
 
+        # Broadcast the updated agent list BEFORE any auto-open: the frontend's open
+        # handler resolves ``chat:<name>`` against its known-agents list and drops the
+        # open if the agent is not there yet, so the chat must be known first.
+        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
+
         # Auto-open the tab if this is an assist chat we have not opened yet (the
         # snapshot path handles the same for chats that surface there instead).
         self._maybe_auto_open_assist(agent_state)
-
-        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
         """Handle an agent destroyed event."""
