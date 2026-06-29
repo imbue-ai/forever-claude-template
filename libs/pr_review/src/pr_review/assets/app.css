@@ -177,6 +177,10 @@ textarea.composer:focus{outline:none;border-color:var(--accent)}
 .cz-composer .row{display:flex;gap:8px;justify-content:flex-end;margin-top:7px}
 .cz-anchor{font-family:var(--mono);font-size:10.5px;color:var(--accent);margin-bottom:6px}
 
+.comment-dock{flex:none;border-top:1px solid var(--accent);background:var(--surface);padding:12px 14px}
+.comment-dock .cd-head{display:flex;align-items:center;font-size:12.5px;color:var(--muted);margin-bottom:8px;font-family:var(--mono)}
+.comment-dock .cd-head code{color:var(--accent)}
+
 .review-bar{position:fixed;bottom:0;right:0;left:300px;z-index:40;background:rgba(22,27,34,.97);backdrop-filter:blur(10px);border-top:1px solid var(--accent);padding:10px 18px;display:flex;align-items:center;gap:12px}
 .review-bar .n{font-weight:600}
 .review-bar .desc{color:var(--muted);font-size:12px}
