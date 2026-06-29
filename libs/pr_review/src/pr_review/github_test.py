@@ -348,6 +348,14 @@ def test_delete_issue_comment_issues_delete() -> None:
     assert parsed["url"].endswith("repos/o/r/issues/comments/8")
 
 
+def test_delete_pending_review_issues_delete() -> None:
+    curl = make_curl({"pulls/1/reviews/9": b""}, status=204)
+    github.delete_pending_review("o/r", 1, 9, curl)
+    parsed = parse_write_call(curl.calls[0])
+    assert parsed["method"] == "DELETE"
+    assert parsed["url"].endswith("repos/o/r/pulls/1/reviews/9")
+
+
 # --- get_file_at_ref ---
 
 
