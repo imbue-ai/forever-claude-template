@@ -10,9 +10,9 @@ an encrypted restic repo on cheaper object storage.
 
 ## Behavior
 
-- Single long-running tick loop in tmux window `svc-host-backup` (started by
-  the bootstrap service manager via `[services.host-backup]`). Restart
-  policy: `on-failure`.
+- Single long-running tick loop run as the `host-backup` supervisord program
+  (defined in `supervisord.conf`, started by supervisord after `bootstrap`).
+  Restart policy: `autorestart=true`.
 - The repository is created (and keyed) by the minds app, not by
   host_backup: minds runs `restic init` + `restic key add` from outside the
   workspace and injects the resulting `restic.env`. host_backup just backs up
@@ -38,6 +38,13 @@ an encrypted restic repo on cheaper object storage.
   - `outer_trigger`: write a `request.json` into `/mngr-snapshot/` (a
     docker volume shared with the outer VPS) and wait for the outer
     `snapshot_helper.service` to drop a matching `result.json` (vps-docker).
+    Each tick snapshots into a uniquely-named path
+    `<btrfs-mount>/snapshots/<timestamp>` -- never a reused path. Under the
+    sandbox's file gofer a reused path serves a stale, deleted subvolume, so
+    only the first post-boot backup would capture data; unique names avoid
+    that. After the backup, the oldest snapshots beyond `max_local_snapshots`
+    (default 5, an `[snapshot]` knob) are deleted by name via a `cleanup`
+    request that carries the snapshot name as `target`.
   - `direct`: no snapshot; restic reads `/mngr/` directly (plain docker;
     intended for testing).
 - Restic is run with `--exclude` for each entry in `backup.toml`'s
@@ -74,7 +81,8 @@ mtime, then tails `events/backup/events.jsonl` for the next
 ## Events
 
 Structured events at `$MNGR_AGENT_STATE_DIR/events/backup/events.jsonl`:
-- `backup_started`, `snapshot_created`, `snapshot_deleted`
+- `backup_started`, `snapshot_created`, `snapshot_deleted` (one per deleted
+  snapshot -- `outer_trigger` may emit several per tick during keep-N pruning)
 - `restic_backup_succeeded`, `restic_backup_failed`
 - `forget_completed`, `prune_completed`, `prune_skipped`
 - `config_reloaded`

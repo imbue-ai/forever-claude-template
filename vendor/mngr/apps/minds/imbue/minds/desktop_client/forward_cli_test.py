@@ -9,16 +9,15 @@ and lifecycle gating.
 """
 
 import json
-import os
-import signal
 import subprocess
 import threading
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import cast
 
 import pytest
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
@@ -27,17 +26,20 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
+from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -194,6 +196,50 @@ def test_full_snapshot_populates_resolver_and_fires_discovered_callbacks(
     assert all(entry[2] == "local" for entry in discovered)
 
 
+def test_full_snapshot_freshness_uses_producer_timestamp(consumer: EnvelopeStreamConsumer) -> None:
+    """``last_full_snapshot_at`` reflects the producer's poll time, not receive time.
+
+    The recovery redirect compares the snapshot timestamp against a locally-recorded
+    outage onset, so it must be *when discovery observed the world* (the envelope
+    timestamp), not when this consumer happened to read the line.
+    """
+    counter = [0]
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1),),
+        hosts=(),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
+    last_event_at, last_full_snapshot_at = consumer.resolver.get_freshness_timestamps()
+    expected = datetime(2026, 5, 3, 0, 0, 0, tzinfo=timezone.utc)
+    assert last_full_snapshot_at == expected
+    assert last_event_at == expected
+
+
+def test_full_snapshot_freshness_falls_back_to_receive_time_on_bad_timestamp(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """An unparseable envelope timestamp falls back to the consumer's receive time."""
+    counter = [0]
+    before = datetime.now(timezone.utc)
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=IsoTimestamp("not-a-real-timestamp"),
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1),),
+        hosts=(),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+    after = datetime.now(timezone.utc)
+
+    _, last_full_snapshot_at = consumer.resolver.get_freshness_timestamps()
+    assert last_full_snapshot_at is not None
+    assert before <= last_full_snapshot_at <= after
+
+
 def test_subsequent_snapshot_fires_destroyed_for_dropped_agents(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
@@ -219,6 +265,58 @@ def test_subsequent_snapshot_fires_destroyed_for_dropped_agents(
     )
     _dispatch(consumer, _observe_envelope(second))
 
+    assert destroyed == [_AGENT_ID_2]
+    assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
+
+
+def test_snapshot_retains_agent_whose_provider_errored_then_drops_on_clean(
+    consumer: EnvelopeStreamConsumer,
+) -> None:
+    """An agent omitted because its provider errored is retained (and surfaced stale); a clean snapshot drops it."""
+    counter = [0]
+    destroyed: list[AgentId] = []
+    consumer.add_on_agent_destroyed_callback(lambda aid: destroyed.append(aid))
+
+    first = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1), _make_agent(_AGENT_ID_2)),
+        hosts=(),
+    )
+    _dispatch(consumer, _observe_envelope(first))
+
+    # Snapshot omits agent 2 but its provider 'local' errored: agent 2 is
+    # retained in the resolver (no destroyed callback) and the error is
+    # surfaced so the workspace list can render it stale.
+    errored = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1),),
+        hosts=(),
+        error_by_provider_name={
+            ProviderInstanceName("local"): DiscoveryError(
+                type_name="RuntimeError",
+                message="discovery failed",
+                provider_name=ProviderInstanceName("local"),
+            )
+        },
+    )
+    _dispatch(consumer, _observe_envelope(errored))
+    assert destroyed == []
+    assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1, _AGENT_ID_2}
+    assert ProviderInstanceName("local") in consumer.resolver.get_provider_errors()
+
+    # Clean snapshot (no provider error) still omits agent 2 -> dropped now.
+    clean = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1),),
+        hosts=(),
+    )
+    _dispatch(consumer, _observe_envelope(clean))
     assert destroyed == [_AGENT_ID_2]
     assert set(consumer.resolver.list_known_agent_ids()) == {_AGENT_ID_1}
 
@@ -330,7 +428,78 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
     assert consumer.resolver.list_known_agent_ids() == ()
 
 
-# --- event stream: services / requests / refresh --------------------------
+# --- observe stream: host state threading ---------------------------------
+
+
+def _make_host(host_id: HostId, state: HostState) -> DiscoveredHost:
+    return DiscoveredHost(
+        host_id=host_id,
+        host_name=HostName(f"host-name-{host_id[-4:]}"),
+        provider_name=ProviderInstanceName("local"),
+        host_state=state,
+    )
+
+
+def test_full_snapshot_threads_host_state_into_resolver(consumer: EnvelopeStreamConsumer) -> None:
+    counter = [0]
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+        hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.RUNNING
+
+
+def test_host_discovered_event_updates_host_state(consumer: EnvelopeStreamConsumer) -> None:
+    counter = [0]
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+        hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
+    host_event = HostDiscoveryEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        host=_make_host(_HOST_ID_1, HostState.STOPPED),
+    )
+    _dispatch(consumer, _observe_envelope(host_event))
+
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.STOPPED
+
+
+def test_host_destroyed_event_marks_host_state_destroyed(consumer: EnvelopeStreamConsumer) -> None:
+    counter = [0]
+    snapshot = FullDiscoverySnapshotEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        agents=(_make_agent(_AGENT_ID_1, host_id=_HOST_ID_1),),
+        hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
+    )
+    _dispatch(consumer, _observe_envelope(snapshot))
+
+    host_destroyed = HostDestroyedEvent(
+        timestamp=_TIMESTAMP,
+        event_id=_next_event_id(counter),
+        source=_EVENT_SOURCE,
+        host_id=_HOST_ID_1,
+        agent_ids=(_AGENT_ID_1,),
+    )
+    _dispatch(consumer, _observe_envelope(host_destroyed))
+
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.DESTROYED
+
+
+# --- event stream: services / requests ------------------------------------
 
 
 def test_event_services_envelope_updates_resolver_services(consumer: EnvelopeStreamConsumer) -> None:
@@ -377,21 +546,6 @@ def test_event_requests_envelope_dispatches_to_request_callback(consumer: Envelo
         "request_id": "req-1",
     }
     _dispatch(consumer, _event_envelope(_AGENT_ID_1, request_payload))
-    assert len(fired) == 1
-    assert fired[0][0] == str(_AGENT_ID_1)
-
-
-def test_event_refresh_envelope_dispatches_to_refresh_callback(consumer: EnvelopeStreamConsumer) -> None:
-    fired: list[tuple[str, str]] = []
-    consumer.resolver.add_on_refresh_callback(lambda aid_str, raw: fired.append((aid_str, raw)))
-    refresh_payload = {
-        "timestamp": _TIMESTAMP,
-        "event_id": "evt-" + "0" * 32,
-        "type": "refresh",
-        "source": "refresh",
-        "service": "web",
-    }
-    _dispatch(consumer, _event_envelope(_AGENT_ID_1, refresh_payload))
     assert len(fired) == 1
     assert fired[0][0] == str(_AGENT_ID_1)
 
@@ -483,62 +637,7 @@ def test_malformed_listening_port_is_dropped_and_waiter_keeps_waiting(
     assert consumer.wait_for_listening(timeout=0.05) is None
 
 
-# --- bounce_observe / terminate -------------------------------------------
-
-
-def test_bounce_observe_sends_sighup_to_attached_pid(consumer: EnvelopeStreamConsumer) -> None:
-    """Install a real SIGHUP handler in this test process and confirm the
-    consumer's bounce_observe path sends SIGHUP to the configured PID.
-
-    Uses the test's own PID so the signal really lands in the same process
-    (xdist runs each worker in its own process, so this is isolated from
-    parallel tests).
-    """
-    received = threading.Event()
-
-    def _handler(_signo: int, _frame: object) -> None:
-        received.set()
-
-    previous = signal.signal(signal.SIGHUP, _handler)
-    try:
-        fake = _FakeProcess(pid=os.getpid())
-        # Plugin is still running (poll() returns None).
-        fake.returncode = None
-        _attach_fake(consumer, fake)
-        consumer.bounce_observe()
-        assert received.wait(timeout=2.0), "SIGHUP was not received"
-    finally:
-        signal.signal(signal.SIGHUP, previous)
-
-
-def test_bounce_observe_is_no_op_when_process_already_exited(
-    consumer: EnvelopeStreamConsumer,
-) -> None:
-    """If the plugin's poll() returns a non-None code, bounce_observe must not
-    deliver a signal -- the PID could now belong to a recycled, unrelated
-    process. Use a real SIGHUP handler that should never fire.
-    """
-    received = threading.Event()
-
-    def _handler(_signo: int, _frame: object) -> None:
-        received.set()
-
-    previous = signal.signal(signal.SIGHUP, _handler)
-    try:
-        fake = _FakeProcess(pid=os.getpid())
-        # Process has already exited.
-        fake.returncode = 0
-        _attach_fake(consumer, fake)
-        consumer.bounce_observe()
-        # Brief wait to confirm no signal lands.
-        assert not received.wait(timeout=0.2)
-    finally:
-        signal.signal(signal.SIGHUP, previous)
-
-
-def test_bounce_observe_is_no_op_when_no_process_attached(consumer: EnvelopeStreamConsumer) -> None:
-    # Must not raise even with no attached process.
-    consumer.bounce_observe()
+# --- terminate ------------------------------------------------------------
 
 
 def test_terminate_calls_terminate_then_returns(consumer: EnvelopeStreamConsumer) -> None:
@@ -554,44 +653,18 @@ def test_terminate_is_no_op_when_no_process_attached(consumer: EnvelopeStreamCon
     consumer.terminate()
 
 
-# --- intentional vs unintentional exit notification ---------------------------
+# --- intentional vs unintentional exit reporting ------------------------------
 
 
-class _RecordingNotificationDispatcher(NotificationDispatcher):
-    """Test-only NotificationDispatcher that records dispatch calls instead of dispatching.
-
-    Records into the ``recorded`` list passed at construction time. We cannot
-    use a Pydantic ``PrivateAttr`` because the parent class is a ``FrozenModel``
-    and we want to keep the test fixture self-contained; the list is held via
-    a closure on the subclass-defined ``dispatch`` override below.
-    """
-
-    _recorded: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
-
-    def dispatch(
-        self,
-        request: NotificationRequest,
-        agent_display_name: str,
-    ) -> None:
-        self._recorded.append((request, agent_display_name))
-
-    @property
-    def recorded(self) -> list[tuple[NotificationRequest, str]]:
-        return self._recorded
-
-
-def _make_recording_dispatcher() -> _RecordingNotificationDispatcher:
-    return _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
-
-
-def test_intentional_terminate_suppresses_subprocess_died_notification() -> None:
-    """After consumer.terminate(), the lifecycle watcher must not surface the
-    resulting non-zero exit code as a CRITICAL "Forwarding subprocess died"
-    notification -- minds itself asked the subprocess to stop.
+def test_intentional_terminate_does_not_report_exit() -> None:
+    """After consumer.terminate(), the lifecycle watcher must not report the
+    resulting exit to the on_unexpected_exit callbacks -- minds itself asked
+    the subprocess to stop, so the pipeline is not unexpectedly down.
     """
     resolver = MngrCliBackendResolver()
-    dispatcher = _make_recording_dispatcher()
-    consumer = EnvelopeStreamConsumer(resolver=resolver, notification_dispatcher=dispatcher)
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
+    reported: list[int] = []
+    consumer.add_on_unexpected_exit_callback(reported.append)
     fake = _FakeProcess(pid=4242)
     # Simulate SIGTERM -> exit code -15 after terminate() is called.
     fake.returncode = -15
@@ -600,33 +673,30 @@ def test_intentional_terminate_suppresses_subprocess_died_notification() -> None
     consumer.terminate()
     # Drive the lifecycle watcher synchronously; in production this runs on a
     # ConcurrencyGroup thread that calls process.wait().
-    consumer._wait_and_notify_on_exit()
+    consumer._wait_and_report_exit()
 
-    assert dispatcher.recorded == [], (
-        f"Intentional shutdown should not dispatch a notification, got: {dispatcher.recorded!r}"
-    )
+    assert reported == [], f"Intentional shutdown should not report an exit, got: {reported!r}"
 
 
-def test_unintentional_subprocess_crash_dispatches_notification() -> None:
-    """If the subprocess exits non-zero without minds calling terminate(),
-    the lifecycle watcher must still surface a CRITICAL notification so the
-    user knows agent traffic is no longer being forwarded.
+def test_unintentional_subprocess_exit_reports_to_callback() -> None:
+    """If the subprocess exits without minds calling terminate(), the lifecycle
+    watcher reports the exit code once to the on_unexpected_exit callbacks so
+    the watchdog can transition the app-global state to BLOCKED.
     """
     resolver = MngrCliBackendResolver()
-    dispatcher = _make_recording_dispatcher()
-    consumer = EnvelopeStreamConsumer(resolver=resolver, notification_dispatcher=dispatcher)
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
+    reported: list[int] = []
+    consumer.add_on_unexpected_exit_callback(reported.append)
     fake = _FakeProcess(pid=4242)
     # Arbitrary non-zero crash exit code.
     fake.returncode = 17
     _attach_fake(consumer, fake)
 
-    consumer._wait_and_notify_on_exit()
+    consumer._wait_and_report_exit()
+    # A second drain must not re-fire (reported at most once per consumer).
+    consumer._wait_and_report_exit()
 
-    assert len(dispatcher.recorded) == 1
-    request, agent_display_name = dispatcher.recorded[0]
-    assert request.title is not None
-    assert "died" in request.title.lower()
-    assert agent_display_name == "Minds"
+    assert reported == [17]
 
 
 def test_attach_twice_raises(consumer: EnvelopeStreamConsumer) -> None:

@@ -4,6 +4,42 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+The kanpan plugin's cross-scope config merge now follows the same standard config-merge semantics as every other config field. Previously `KanpanPluginConfig` carried a custom `merge_with` that automatically *unioned* its six dict fields (`commands`, `data_sources`, `shell_commands`, `columns`, `on_before_refresh`, `on_after_refresh`) across config scopes (user < project < local), so a key set by a lower scope always survived. That method is removed and the merge now runs through the standard overlay pipeline: these fields assign-by-default, guarded by the cross-scope narrowing detector.
+
+The user-visible effect: when a higher-precedence scope's `[plugins.kanpan]` block drops a key that a lower scope set in any of those six dict fields, it now raises the standard flag-gated settings-narrowing error (naming the scopes and how to opt in) instead of silently unioning the two scopes. To merge additively, use the `__extend` operator; to assign and drop keys without the warning, set `allow_settings_key_assignment_narrowing = true` (or use `key__assign`). Pure additions -- a higher scope that keeps every lower-scope key and adds more -- still apply unchanged.
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
+## 2026-06-15
+
+`mngr kanpan --help` synopsis: replace placeholder `[OPTIONS]` with an enumerated list of the filter flags users typically reach for -- `[--include CEL] [--exclude CEL] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT]`. The full agent-filter set is still available; rarely-used flags (`--label`, `--host-label`) are omitted from the synopsis but remain on the command.
+
+## 2026-06-14
+
+Fixed the kanpan footer flickering when a background refresh and a user action (e.g. deleting a marked agent) ran at the same time. The footer is now driven by a single writer that picks what to show by priority (transient notification > active action > refresh spinner > marked-agent summary > steady text), so overlapping spinner loops can no longer overwrite each other on alternating ticks.
+
+Batch operations in the kanpan TUI (delete, push, and markable custom commands) now surface failures instead of silently doing nothing. When `x` execution fails, the per-agent error detail (including a clear "timed out after Ns" message for timeouts) is listed at the bottom of the board, in the same place fetch errors appear, and persists until the next execution. The marks for failed agents are kept so you can retry.
+
+## 2026-06-10
+
+`mngr kanpan --format json` now prints a single board snapshot instead of launching the TUI, for programmatic use. The JSON has the ordered columns, agents grouped into sections (with human labels), and any fetch errors; each agent carries both the pre-rendered cells (text/url/color) and the structured field values (PR number, CI status, commits-ahead count, etc.).
+
+`--format jsonl` is also supported: it emits one agent record per line in board order, followed by any error lines.
+
+Previously `--format json` was accepted but silently ignored.
+
+The GitHub data source now pages through PR search results instead of fetching only the first 100. Boards tracking more than 100 agents previously hit GitHub's hard per-page cap and silently rendered "Create PR" for the overflow agents; kanpan now follows the search cursor and fetches every page (up to GitHub's ~1000-result ceiling, beyond which it surfaces an explicit error).
+
+Each page request is also retried with exponential backoff when GitHub returns a transient failure (HTTP 403 secondary rate limit, 5xx, or an unparseable body). A failure on a later page keeps the pages already fetched and retries only the failing page, so earlier results are never re-fetched.
+
+Raised the stale coverage floor from 83% to 85% to match the coverage CI already measures (~86%).
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-06-01
 
 Fixed a bug where muted agents could appear mixed in with the other rows

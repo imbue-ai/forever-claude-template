@@ -19,8 +19,8 @@
 # `cd` to the repo root is never needed.
 #
 # Scope: ONLY `start` and `close`. `create` is exempt -- agents legitimately
-# batch several `S1=$(tk create --step ...)` up front when declaring the plan,
-# and a create carries no positional transition the view must group around.
+# batch several `tk create --step ...` up front when declaring the plan, and a
+# create carries no positional transition the view must group around.
 #
 # Blocks via exit 2 with a stderr message the agent sees (mirrors
 # claude_prevent_commit_rewrite.sh). Skipped for subagents (they manage their

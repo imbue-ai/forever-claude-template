@@ -25,6 +25,7 @@ _ALLOWED = [
     'tk close cod-step-x "did A; then B > C && D"',  # operators only inside the summary
     'tk super close cod-step-x "s"',
     'S1=$(tk create --step "plan a thing")',  # create is exempt
+    'tk create --step "plan a"\ntk create --step "plan b"',  # the canonical batched-create form is exempt
     'git commit -m "tk close the bug"',  # tk close only inside the commit message
     "echo 'run tk start later'",
     "git push origin main",

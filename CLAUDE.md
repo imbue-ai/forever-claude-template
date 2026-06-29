@@ -13,7 +13,7 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - If you ever need to work with another *git* repo that is *outside* of this monorepo as a read-only dependency, you should do so by adding a git subtree under `vendor/`.
 - If you need to *actively develop* against an external repo (e.g. `mngr`), check out a standalone clone of it under `.external_worktrees/<repo-name>/`. This directory is gitignored so the external clones don't pollute the monorepo. The branch in the external clone should mirror the branch you're on in this monorepo.
 - This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `runtime/tickets/` (the path is set via the `TICKETS_DIR` env var so tickets ride the `mindsbackup/$MNGR_AGENT_ID` runtime-backup branch).
-- All relative paths in this repo assume cwd = repo root (`/code`). The bootstrap service manager runs from there; any process started elsewhere (manual launch, subprocess from a different cwd) must either set cwd to the repo root or use absolute paths. State directories live under `runtime/<feature>/`.
+- All relative paths in this repo assume cwd = repo root (`/code`). Supervisord runs the services from there; any process started elsewhere (manual launch, subprocess from a different cwd) must either set cwd to the repo root or use absolute paths. State directories live under `runtime/<feature>/`.
 - When adding a new web app, do NOT edit `libs/web_server/` -- it's an example placeholder. Use the `build-web-service` skill, which sets up a new lib + service entry + `forward_port.py` registration on its own port.
 
 # Task management (CRITICAL — read this before doing real work)
@@ -25,7 +25,7 @@ You manage your work using `tk`, the vendored ticket tracker at `vendor/tk/`. Th
 `tk` stores two distinct kinds of records, distinguished by the `step:` frontmatter field:
 
 - **Step records** (`tk create --step "..."`) are *turn-bound progress markers* — the direct replacement for Claude Code's `TodoWrite`. They populate the chat progress view: each step becomes a node on the timeline with a status icon and (on close) a one-line summary. Steps are **creator-private** — only the agent that created them sees them. They are sequential within a turn, ephemeral by intent, and exist purely to communicate progress to the user.
-- **Regular tickets** (`tk create "..."`, no `--step`) are *substantive work units worth tracking cross-agent*. Other agents can see them, pick them up, and own them. A ticket is "current" to whichever agent has it `in_progress` and assigned to themselves; that agent's progress view shows the ticket as a top-level node, with any step records they file *during* the work nested under it.
+- **Regular tickets** (`tk create "..."`, no `--step`) are *substantive work units worth tracking cross-agent*. Other agents can see them, pick them up, and own them. A ticket is "current" to whichever agent has it `in_progress` and assigned to themselves. Regular tickets are a cross-agent backlog tool only; they do **not** render in the chat progress view (only step records do).
 
 Most turns use only step records. Tickets enter the picture when a piece of work is large enough to span turns or to be handed between agents.
 
@@ -42,7 +42,7 @@ This means every step title and every closing summary is **user-facing copy**. W
 Concretely, the start of every substantive turn looks like:
 
 1. (Optional) One short prose acknowledgement to the user — e.g. "Sure, looking into that now." This renders as plain text above the timeline. Keep it to one line; do not narrate the plan here.
-2. `tk create --step "..."` for every step you currently expect the work to require, in order. Capture each id. Do NOT call `tk start` on any of them yet.
+2. `tk create --step "..."` for every step you currently expect the work to require, in order. Each `tk create --step` prints `Created <id>: <title>` — note each id (you pass it to `tk start`/`tk close`). Do NOT call `tk start` on any of them yet.
 3. `tk start` the first step and begin the work for that step.
 
 You may add steps later (`tk create --step` more as new sub-problems surface) or remove ones that turn out to be unneeded (`tk close <id> "No longer needed — the previous step covered this."`).
@@ -52,17 +52,6 @@ You may add steps later (`tk create --step` more as new sub-problems surface) or
 A step represents a logical step in the user's mental model of the work, not a unit of parallel computation. If you'd describe the work to the user as "first I'll do X, then Y, then Z," that's three steps. If you'd describe it as a single coherent step — even if it involves several parallel lookups internally — it's one step.
 
 Granularity: typically 2-5 sequential steps per substantive turn. Not one per tool call (way too granular). Not one step for the whole turn (defeats the purpose of progress).
-
-## Auto-nest under an in_progress ticket
-
-If you have a regular ticket that is currently `in_progress` AND assigned to you, `tk create --step` automatically nests the new step under that ticket as its parent. The chat view renders this as: the ticket appears as the top-level node, the steps appear indented underneath. You don't need to pass `--parent` in the common case — auto-nest handles it.
-
-If you have *more than one* ticket in_progress for yourself simultaneously, auto-nest is ambiguous and `tk create --step` will error with a list of candidate tickets. You must then disambiguate with either:
-
-- `tk create --step "..." --parent=<ticket-id>` to pick a specific parent, or
-- `tk create --step "..." --no-parent` to file a standalone step.
-
-In practice having two tickets in_progress at once is allowed but discouraged. Prefer to finish or hand off the current ticket before picking up another.
 
 ## When you don't need any records
 
@@ -76,27 +65,35 @@ If your turn is truly one of these, just write your reply directly — no record
 
 ## Step lifecycle (must follow exactly)
 
-At the **start of the turn**, create every step you currently expect the work to require:
+At the **start of the turn**, create every step you currently expect the work to require. Each `tk create --step` prints `Created <id>: <title>`; note the id it prints (you can batch the creates in one tool call):
 
 ```bash
-S1=$(tk create --step "Look through your recent changes to find the new theme")
-S2=$(tk create --step "Trace how the dark-mode toggle picks a theme")
-S3=$(tk create --step "Register the new theme and update the toggle")
-S4=$(tk create --step "Verify the toggle now reaches your new theme")
+tk create --step "Look through your recent changes to find the new theme"
+tk create --step "Trace how the dark-mode toggle picks a theme"
+tk create --step "Register the new theme and update the toggle"
+tk create --step "Verify the toggle now reaches your new theme"
+```
+
+This prints, e.g.:
+
+```
+Created cod-step-a1b2: Look through your recent changes to find the new theme
+Created cod-step-c3d4: Trace how the dark-mode toggle picks a theme
+...
 ```
 
 Title rules: plain English, describes the goal as the user understands it, no file names, no tool names, no internal jargon. The title is what the user sees as the step name.
 
-Then for **each step in order**, one at a time:
+Then for **each step in order**, one at a time, using the literal id from the `Created` line (run `tk steps` if you need to re-list the ids):
 
 1. **Start** it:
    ```bash
-   tk start "$S1"
+   tk start cod-step-a1b2
    ```
 2. **Do the work.** Run whatever tools you need.
 3. **Close with a summary** (required, positional):
    ```bash
-   tk close "$S1" "Read through your recent commits and the theme files to find what's new."
+   tk close cod-step-a1b2 "Read through your recent commits and the theme files to find what's new."
    ```
 4. Move on to the next step. Only one is `in_progress` at a time.
 
@@ -114,7 +111,7 @@ After all your steps for the turn are closed, write your final user-facing assis
 
 **Steps and prose:**
 - Text emitted while a step is `in_progress` shows as a live caption under the step, replaced by each new message.
-- **Close your final step *before* writing your user-facing wrap-up reply.** The progress view detects your reply by scanning backward from the end of the turn and stopping at the first closed step, so prose written *after* the last close is promoted to a top-level reply below the timeline, while prose written *before* it stays buried inside the step (reachable only by expanding it). This is best-effort, not a hard rule — the view renders sensibly either way, and if you do speak before closing you'll get a reminder to re-output user-facing text after the close.
+- **Close your final step *before* writing your user-facing wrap-up reply.** The progress view promotes the final run of prose with no step open to your top-level reply below the timeline; prose you speak *inside* a step, after its last work, is ejected to the inline stream just after that step. So closing the last step first keeps your wrap-up cleanly below the timeline. This is best-effort, not a hard rule — the view renders sensibly either way.
 - **Never mention steps, tickets, or `tk` in what you say to the user.** The step machinery is invisible to them — don't narrate it ("closing this step," "moving on to the next step," "starting X"). Speak only about the actual work and its subject matter, as if the timeline weren't there. Step titles and close summaries are the one place step structure may surface, and even those describe the *work*, not the act of tracking it.
 - Steps may stay open across turns. Close when work is done; leave open if work continues.
 
@@ -129,7 +126,7 @@ Regular tickets are for substantive work worth tracking cross-agent. The relevan
 - `tk close <id> [summary]` — close. Summary is optional for tickets (required for steps).
 - `tk assign <id> [agent]` / `tk unassign <id>` — explicit assignment.
 
-Tickets can be left `in_progress` across turns; the chat view will keep rendering them at the top of every subsequent turn (with a "continued in next turn" marker on the prior turn) until you close them.
+Tickets can be left `in_progress` across turns until you close them. (Regular tickets are not shown in the chat progress view — that view renders step records only. Use `tk ls` / `tk show` to track tickets.)
 
 ## Persistent task state across turns
 
@@ -183,7 +180,7 @@ Only after doing all of the above should you begin writing code.
 # Important commands and conventions:
 
 - Never run `uv sync`, always run `uv sync --all-packages` instead
-- For browser automation, Playwright's Python API is available in the root venv -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`. The Chromium browser itself (and its apt system libraries) installs asynchronously on first container boot via the `deferred-install` service rather than being baked into the image; if the install hasn't finished yet, any `playwright.chromium.launch()` call will fail with a clear error. Check `/var/lib/minds/deferred-install/done.playwright` (or watch `tmux capture-pane -t svc-deferred-install -p`) to confirm the install completed before using browser automation in a fresh workspace. See `libs/bootstrap/README.md` for the full deferral contract. Chromium works as-is under the docker provider's gVisor (runsc) runtime -- gVisor allows user namespaces, so Chromium's namespace sandbox starts even though the container runs as root (verified: `chromium.launch()` succeeds with and without `--no-sandbox`). If you ever hit a "No usable sandbox!" error (e.g. on a host/runtime that doesn't permit unprivileged user namespaces), pass `chromium.launch(args=["--no-sandbox"])` (or `chromium_sandbox=False`) -- gVisor is the security boundary, so disabling Chromium's in-browser sandbox there is acceptable.
+- For browser automation, Playwright's Python API is available in the root venv -- use `from playwright.sync_api import sync_playwright` in a script invoked via `uv run python`. The Chromium browser itself (and its apt system libraries) installs asynchronously on first container boot via the one-shot `deferred-install` supervisord program rather than being baked into the image; if the install hasn't finished yet, any `playwright.chromium.launch()` call will fail with a clear error. Check the marker file `/var/lib/minds/deferred-install/done.playwright` (or run `supervisorctl status deferred-install`, or read `/var/log/supervisor/deferred-install-stdout.log`) to confirm the install completed before using browser automation in a fresh workspace. See `libs/bootstrap/README.md` for the full deferral contract. Chromium works as-is under the docker provider's gVisor (runsc) runtime -- gVisor allows user namespaces, so Chromium's namespace sandbox starts even though the container runs as root (verified: `chromium.launch()` succeeds with and without `--no-sandbox`). If you ever hit a "No usable sandbox!" error (e.g. on a host/runtime that doesn't permit unprivileged user namespaces), pass `chromium.launch(args=["--no-sandbox"])` (or `chromium_sandbox=False`) -- gVisor is the security boundary, so disabling Chromium's in-browser sandbox there is acceptable.
 
 # Always remember these guidelines:
 
@@ -195,7 +192,7 @@ Only after doing all of the above should you begin writing code.
 - Never use emojis. Remove any emojis you see in the code or docs whenever you are modifying that code or those docs.
 - Be concise in your communications. Don't hype up your results, say "perfect!", or use emojis. Be serious and professional.
 - **Feedback systems combine binary and free-form signals.** When building anything that learns from user feedback, include *both* a basic binary signal (thumbs up/down, keep/skip, or whatever fits) *and* free-form text routed through an LLM judge -- unless the user specifies a different mechanism, which overrides this default. Binary is low-friction; free-form captures nuance you can't anticipate. The exact form depends on what's being built, but both should be present and intuitively accessible. Don't prescribe rigid taxonomies beyond the binary signal upfront.
-- **Default UI is web view.** When exposing a tool to the user, default to a web page. Don't enumerate options (CLI / telegram / status line / web) -- just propose the web view and only deviate when there's a specific reason (CLI for batch jobs, telegram for push-only notifications, etc.).
+- **Default UI is web view.** When exposing a tool to the user, default to a web page. Don't enumerate options (CLI / status line / web) -- just propose the web view and only deviate when there's a specific reason (e.g. CLI for batch jobs).
 - **Always preserve and surface the raw data and its source.** Anything you build *on top of* data -- a view, a summary, a derived metric -- sits between the user and the underlying records, so two things are non-negotiable. (1) *Preserve*: persist the raw source records the thing was built from, plus a reference to where they live (a URL, an API id, whatever lets you or the user get back to the origin) -- durably, not just in memory for the current run. Don't fetch-transform-discard. (2) *Surface*: give the user a clean, unprompted way to view that raw record or jump to its source -- they should never have to ask for it. "Raw data" means the source records the view was built from plus a link to where they live; for fuzzier cases (a metric computed from many calls) use judgement, but err toward keeping more. Preservation means a later change in processing requirements needs no refetch; surfacing means the user can bridge any gap the derived view leaves (a missing field, a rendering the agent didn't anticipate) without waiting on you. **Render the raw record in its native format** -- an HTML email shown as the rendered email, JSON pretty-printed, markdown rendered -- not dumped as escaped source text. "Raw" means *unprocessed by your derivation*, not *unrendered*: the goal is the faithful original as a human would view it, minus your summarization. **Keep all of this subtle.** Build the preserve and surface affordances in by default, but don't announce in chat that you're saving the data or adding a "view raw" control -- it should simply be there when the user wants it, not narrated as a feature.
 - **Naming is informative, not cheeky.** Service names, app names, skill names, command names: prefer something that explains what the thing does (`slack-inbox-checker`) over something clever (`nothing-new`). Cute names tax every later mention.
 - **Platform-internal APIs are valid.** Don't restrict yourself to officially documented public APIs. If a platform's own client (web app, mobile app) uses internal or undocumented endpoints to do something, those endpoints are fair game -- inspect what the official client actually calls and use the same endpoints with the same user-session auth. This is often cleaner than designing brute-force workarounds on top of a limited public API.
@@ -275,15 +272,9 @@ They are inherently flaky due to timing and useless in CI, but valuable for agen
 # Communication
 
 To talk to the user, always go through the `send-user-message` skill. It
-probes for configured channels (telegram, etc.) and dispatches; if none is
-configured, it falls back to writing the message inline in your current
-response. Do NOT hardcode a specific channel from other skills.
-
-If the deployment happens to use telegram, incoming messages arrive via
-`mngr message` from the telegram bot running in a background tmux window.
-`send-user-message` handles that case; `send-telegram-message` and
-`read-telegram-history` are the telegram-specific implementation details
-it delegates to.
+probes for any configured channels and dispatches; if none is configured, it
+falls back to writing the message inline in your current response. Do NOT
+hardcode a specific channel from other skills.
 
 If the user talks to you about files or directories on disk,
 unless context indicates otherwise, assume they mean their local
@@ -306,7 +297,7 @@ You can (and should) modify your own configuration to improve yourself:
 
 - **CLAUDE.md**: (this file) update these instructions if you discover better ways to operate.
 - **.agents/skills/**: Create new skills or modify existing ones. Each skill is a directory with a SKILL.md file. (Also symlinked from `.claude/skills/`.)
-- **services.toml**: Add, modify, or remove background services. See the `edit-services` skill.
+- **supervisord.conf**: Add, modify, or remove background services. See the `edit-services` skill.
 - **scripts/**: Add utility scripts that help you accomplish your purpose.
 
 Commit your changes to git after making modifications.
@@ -321,41 +312,68 @@ The upstream is defined in `parent.toml`.
 - **Prefer an applicable skill over reinventing.** Skill descriptions are
   injected so you can match by purpose, not by name.
 
-- **Live first, ratify at turn-end via the worker pipeline.** All four
-  lifecycle skills (`do-something-new`, `crystallize-task`, `heal-skill`,
-  `update-skill`) follow the same shape: handle the user's immediate
-  request *live* in the current chat to keep the conversation interactive
-  and iterative; at turn-end, invoke the appropriate worker-backed skill
-  to formalize the work through validation, scenario testing, and proper
-  commits. If you find yourself committing a change to any
-  contract-bearing file (a skill, a hook script with a documented
-  contract, an invariant elsewhere) and stopping there, you've skipped
-  the ratify step. The live phase is necessary but not sufficient -- the
-  worker pipeline exists to add the rigor that's awkward to do
-  interactively.
+- **Run a skill's steps step by step in chat.** When you invoke a skill in a
+  chat turn and it exposes per-step subcommands (plus a `run all`), drive the
+  subcommands one at a time -- mirror each as a `tk` step and surface its
+  output -- so the user gets a rich progress view, rather than running one
+  opaque `run all`. This is not a watch-and-steer mode: run straight through,
+  pausing for the user only at the skill's declared `[prose]` steps. Reserve
+  `run all` for headless or scheduled runs, where there is no chat to show
+  progress in.
+
+- **Live first, ratify at turn-end via the worker pipeline.** The
+  lifecycle skills follow the same shape: handle the user's immediate
+  request *live* in the current chat to keep it interactive and iterative;
+  at turn-end, formalize the work through a background worker. Three shared
+  references carry the core: the **live** half is the interactive-delivery
+  shape (`.agents/shared/references/interactive-delivery.md`), specialized
+  by `do-something-new`'s routes (`fetch-process-show` for data,
+  `build-web-service` for web views); the turn-end **harden pass** follows
+  the universal contract
+  (`.agents/shared/worker/references/harden-artifact.md`), driven by three generic
+  operation leads -- `crystallize-artifact` (create), `update-artifact`
+  (change), `heal-artifact` (fix) -- each parameterized by the artifact
+  (skill / service / system-interface). A single generic `harden-worker`
+  composes that contract with one operation reference (`op-crystallize.md` /
+  `op-update.md` / `op-heal.md`) and one artifact reference
+  (`artifact-skill.md` / `artifact-service.md` / `artifact-system-interface.md`)
+  per task. The leads sit on the worker **plumbing**, `lead-proxy.md` +
+  `worker-reporting.md`. The harden pass **always runs in a background
+  worker** -- the main agent never runs the code-guardian gates or the
+  thorough test passes itself (do not start those flows in the main agent).
+  If you find yourself committing a change to any contract-bearing file (a
+  skill, a hook script with a documented contract, an invariant elsewhere)
+  and stopping there, you've skipped the ratify step. The live phase is
+  necessary but not sufficient -- the worker pipeline exists to add the rigor
+  that's awkward to do interactively.
 
   Concrete cases:
   - **Net-new task needing research / experimentation**: invoke
-    `do-something-new` to drive the live phase. It hands off to
-    `crystallize-task` at the end.
-  - **Stop-hook crystallization nudge** after a normal turn that turned
-    out to be cohesive, likely to recur, and mostly deterministic:
-    invoke `crystallize-task` to ratify the just-finished work.
-    Otherwise acknowledge and move on.
+    `do-something-new`. It routes to `fetch-process-show` (data) or
+    `build-web-service` (web view) -- or applies the shared
+    interactive-delivery shape directly when neither fits -- to drive the
+    live phase. Both hand their confirmed artifact to `crystallize-artifact`
+    (artifact = skill for the data pipeline, service for the web view).
+  - **Crystallization nudge** after a normal turn that turned out to be
+    cohesive, likely to recur, and mostly deterministic: invoke
+    `crystallize-artifact` (artifact = skill) to ratify the just-finished
+    work. Otherwise acknowledge and move on. (This is a manual judgement at
+    turn-end, not a wired hook.)
   - **A skill errored or delivered a wrong result**: fulfil the user's
     request live by working around the failure, then at turn-end invoke
-    `heal-skill`. Never patch the skill inline -- `heal-skill` is the
+    `heal-artifact`. Never patch the skill inline -- `heal-artifact` is the
     ratify path.
   - **You and the user discussed and applied a change to an existing
     skill**: edit live so the user can iterate, then at turn-end invoke
-    `update-skill` (verify flow). Direct Edit + commit skips the
-    ratification. (For non-skill contract-bearing files like hook
-    scripts or CLAUDE.md itself, no worker pipeline exists today --
-    apply the live phase carefully and add manual rigor at turn-end:
-    real test fixtures, end-to-end exercise of new code paths, etc.)
+    `update-artifact` (committed origin -- skips the design gate, verifies
+    the live commit). Direct Edit + commit skips the ratification. (For
+    non-skill contract-bearing files like hook scripts or CLAUDE.md itself,
+    no worker pipeline exists today -- apply the live phase carefully and add
+    manual rigor at turn-end: real test fixtures, end-to-end exercise of new
+    code paths, etc.)
   - **A skill use was successful but required manual post-processing**:
-    do the post-work live, then at turn-end invoke `update-skill`
-    (absorb flow) so the skill swallows the gap.
+    do the post-work live, then at turn-end invoke `update-artifact`
+    (emergent origin) so the skill swallows the gap.
 
 # Memory
 
@@ -364,8 +382,9 @@ Memory is gitignored from the main branch but is backed up automatically by the 
 
 # Services
 
-You can define background services in `services.toml`. 
-The bootstrap service manager (running in a separate tmux window) watches this file and starts/stops tmux windows accordingly.
+You can define background services as supervisord programs in `supervisord.conf`.
+Supervisord (launched by `bootstrap` after first-boot setup) supervises them; each program writes its own rotated logs under `/var/log/supervisor/<name>-stdout.log` and `/var/log/supervisor/<name>-stderr.log`.
+To add, change, or remove a service, edit `supervisord.conf` and run `supervisorctl reread && supervisorctl update` (and `supervisorctl restart <name>` to bounce one). Inspect with `supervisorctl status` / `supervisorctl tail -f <name> stderr`.
 See the `edit-services` skill for details.
 
 # Git

@@ -14,6 +14,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.auth import FileAuthStore
@@ -236,6 +237,86 @@ def test_preauth_cookie_short_circuit(tmp_path: Path) -> None:
     response = client.get("/", cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: "opaque-pre-shared-token"})
     assert response.status_code == 200
     assert "Discovered agents" in response.text
+
+
+def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path) -> None:
+    """A stale subdomain cookie must redirect to /goto/<id>/ on the bare
+    origin, not the bare landing page.
+
+    Background: the host app (minds.app) regenerates its signing key on
+    every restart, so any pre-existing per-subdomain session cookie
+    fails verification after a quit/reopen. Previously the unauthenticated
+    HTML response 302-redirected to ``localhost:<port>/``, dumping the
+    user on the landing page even though their session was valid on the
+    bare origin. The fix self-heals by sending the browser through the
+    ``/goto/<agent_id>/`` bridge: the bare-origin session cookie still
+    verifies, the bridge mints a fresh subdomain auth token, the
+    subdomain handler then sets a fresh subdomain cookie, and the user
+    lands in their workspace without an interactive re-auth.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend"})
+    tunnel_manager = SSHTunnelManager()
+    envelope_writer = EnvelopeWriter(output=io.StringIO())
+    listen_port = 18421
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=listen_port,
+    )
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:{listen_port}", follow_redirects=False) as client:
+        response = client.get(
+            "/",
+            headers={
+                "accept": "text/html",
+                # Cookie value that fails signature verification (signed
+                # by a different key) -- the post-restart scenario.
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}=stale-cookie-from-previous-launch",
+            },
+        )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == f"http://localhost:{listen_port}/goto/{agent_id}/"
+
+
+def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
+    """Stale cookie on a non-HTML request still returns 403 (no goto redirect).
+
+    The /goto/ self-heal applies only to navigational HTML loads; an
+    XHR / API call carrying a stale cookie has no browser to follow
+    the redirect and should get a clean 403 instead.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend"})
+    tunnel_manager = SSHTunnelManager()
+    envelope_writer = EnvelopeWriter(output=io.StringIO())
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=18421,
+    )
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        response = client.get(
+            "/api/something",
+            headers={
+                "accept": "application/json",
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}=stale",
+            },
+        )
+
+    assert response.status_code == 403
 
 
 def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_path: Path) -> None:
@@ -945,6 +1026,70 @@ def test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Pat
     assert html_response.status_code == 503
     assert "Loading workspace" in html_response.text
     # The failure envelope is what lets a consumer drive its recovery flow.
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(agent_id)
+    payload = envelope["payload"]
+    assert payload["type"] == "system_interface_backend_failure"
+    assert payload["reason"] == "CONNECT_ERROR"
+
+
+def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(tmp_path: Path) -> None:
+    """A websocket whose SSH-tunnel setup fails must emit ``CONNECT_ERROR``.
+
+    The websocket analogue of
+    ``test_subdomain_forward_emits_failure_on_ssh_tunnel_setup_error``: a
+    stopped container still has a resolver entry, so the handler resolves a
+    target with ssh_info and then fails opening the tunnel, closing the socket
+    before ``accept()``.
+
+    Regression test: the websocket forward path used to close the socket
+    without emitting a failure envelope, unlike the HTTP path. A mind whose
+    only live channel is a websocket -- an already-loaded SPA after its system
+    interface dies -- would then leave minds blind to the dead backend: the
+    agent was never enrolled as a probe suspect, so it never reached STUCK and
+    the chrome never redirected to the recovery page.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    # Non-loopback URL + ssh_info so the handler takes the SSH-tunnel path,
+    # where the failing tunnel manager raises during tunnel setup.
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend:8000"})
+    resolver.update_ssh_info(
+        agent_id,
+        RemoteSSHInfo(user="root", host="stub-host", port=22, key_path=tmp_path / "fake_key"),
+    )
+    envelope_output = io.StringIO()
+    preauth = "preauth-cookie-ws-tunnel-fail"
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=_FailingTunnelManager(),
+        envelope_writer=EnvelopeWriter(output=envelope_output),
+        listen_host="127.0.0.1",
+        listen_port=18421,
+        preauth_cookie_value=preauth,
+    )
+
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421") as client:
+        # ``websocket_connect`` ignores ``base_url`` and builds the URL against
+        # ``ws://testserver``, so the agent subdomain must be in the URL itself
+        # for the handler to route on the right host header. The handler closes
+        # the socket before accepting, which the test client surfaces as a
+        # WebSocketDisconnect on connect.
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                f"ws://{agent_id}.localhost:18421/api/ws",
+                headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            ):
+                pass
+
+    # The failure envelope is what lets minds enroll the agent as a probe
+    # suspect and drive its recovery flow.
     lines = _envelope_lines(envelope_output)
     assert len(lines) == 1
     envelope = json.loads(lines[0])

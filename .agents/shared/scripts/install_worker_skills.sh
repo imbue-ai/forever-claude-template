@@ -1,18 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install bundled worker sub-skills from each parent skill's assets/worker/
-# directory into the worker's .agents/skills/ tree. Called at worker provision
-# time by the crystallize-worker create template (see .mngr/settings.toml).
+# Install the generic harden worker sub-skill into a worker's .agents/skills/
+# tree. Called at worker provision time by the subskill-worker create template
+# (see .mngr/settings.toml).
 #
-# Each parent skill under .agents/skills/ that has an assets/worker/ directory
-# is installed at <destination>/<parent>-worker/ so it becomes loadable as a
-# regular skill inside the worker.
+# There is exactly one worker source -- the generic worker at
+# .agents/shared/worker/. It is installed at <destination>/harden-worker/ so it
+# becomes loadable as a regular skill inside the worker. Homing it under
+# .agents/shared/ (rather than under a parent skill's assets/worker/) keeps any
+# worker-only material out of the auto-loaded .agents/skills/ tree, and means
+# every subskill-worker installs exactly this one worker -- it reads the
+# operation + artifact from its task file and composes the matching references.
+#
+# The worker's references live at .agents/shared/worker/references/ and the
+# worker reads them from there (its checkout has the full repo). We deliberately
+# do NOT bundle that references/ subdir into the installed skill -- it would be a
+# never-read duplicate of the repo copy. Only the SKILL.md needs to land in the
+# .agents/skills/ tree for the skill to be loadable.
 #
 # Usage:
 #   install_worker_skills.sh <destination-directory>
 #
-# The destination is created if missing. Existing <parent>-worker/ dirs are
+# The destination is created if missing. An existing harden-worker/ dir is
 # overwritten so the worker always gets the freshest copy.
 
 if [ $# -ne 1 ]; then
@@ -22,30 +32,20 @@ fi
 
 destination="$1"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# script lives at <repo>/.agents/shared/scripts; walk up three to reach repo root
-repo_root="$(cd "$script_dir/../../.." && pwd)"
-skills_root="$repo_root/.agents/skills"
+# script lives at <repo>/.agents/shared/scripts; walk up one to reach .agents/shared
+worker_source="$(cd "$script_dir/.." && pwd)/worker"
 
-if [ ! -d "$skills_root" ]; then
-    echo "expected skills root at $skills_root" >&2
+if [ ! -d "$worker_source" ]; then
+    echo "expected generic worker at $worker_source" >&2
     exit 1
 fi
 
 mkdir -p "$destination"
-installed_count=0
-for parent_dir in "$skills_root"/*; do
-    worker_source="$parent_dir/assets/worker"
-    [ -d "$worker_source" ] || continue
-    parent_name="$(basename "$parent_dir")"
-    dest_name="${parent_name}-worker"
-    rm -rf "${destination:?}/$dest_name"
-    cp -R "$worker_source" "$destination/$dest_name"
-    installed_count=$((installed_count + 1))
-done
+dest_name="harden-worker"
+rm -rf "${destination:?}/$dest_name"
+cp -R "$worker_source" "$destination/$dest_name"
+# The references are read from the repo, not the installed skill -- drop the
+# bundled copy so there is a single source of truth.
+rm -rf "$destination/$dest_name/references"
 
-if [ "$installed_count" -eq 0 ]; then
-    echo "no parent skills with assets/worker/ found under $skills_root" >&2
-    exit 1
-fi
-
-echo "installed $installed_count worker sub-skills into $destination"
+echo "installed harden-worker into $destination"

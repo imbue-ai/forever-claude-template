@@ -4,6 +4,28 @@ Full, unedited changelog entries for the `mngr_tutor` project, consolidated nigh
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-19
+
+Trimmed the README to user-relevant content and tightened it for concision.
+
+## 2026-06-18
+
+Internal refactor: the tutor's tmux-session-has-clients check now builds the agent's tmux session name via the shared `MngrConfig.agent_session_name` helper instead of hand-rolling the `prefix + name` string, keeping it consistent with mngr's centralized session-name construction. No user-visible behavior change.
+
+## 2026-06-10
+
+Raised the stale coverage floor from 90% to 95% to match the coverage CI already measures (~96%).
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-02
+
+Updated to the repo-wide error-hierarchy consolidation: the check runner's
+`except (BaseMngrError, OSError)` now reads `except (MngrError, OSError)` (`BaseMngrError` has
+been removed). No behavior change.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

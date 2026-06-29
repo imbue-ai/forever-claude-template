@@ -136,7 +136,7 @@ PREVENT_BASE_EXCEPTION_CATCH = RegexRatchetRule(
 PREVENT_BUILTIN_EXCEPTION_RAISES = RegexRatchetRule(
     rule_name="direct raising of built-in exceptions",
     rule_description="Never raise built-in exceptions directly. Create custom exception types that inherit from both the package base exception and the built-in",
-    pattern_string=r"raise\s+(ValueError|KeyError|TypeError|AttributeError|IndexError|RuntimeError|OSError|IOError|KeyboardInterrupt)\(\b",
+    pattern_string=r"raise\s+(ValueError|KeyError|TypeError|AttributeError|IndexError|RuntimeError|OSError|IOError|KeyboardInterrupt)\(",
 )
 
 
@@ -373,6 +373,16 @@ PREVENT_PYTEST_MARK_INTEGRATION = RegexRatchetRule(
 
 # --- AST-based ratchet metadata ---
 
+PREVENT_PER_FILE_HOST_UPLOAD = RatchetRuleInfo(
+    rule_name="per-file host uploads inside loops",
+    rule_description=(
+        "Do not upload files to a host one at a time by calling write_file/write_text_file/put_file "
+        "inside a loop. Each call is a separate round-trip (an SFTP channel open per file), which over "
+        "an SSH tunnel scales linearly and has repeatedly caused upload timeouts and 'connection reset / "
+        "SSH protocol banner' failures. Transfer many files with a single host.copy_directory (rsync) call."
+    ),
+)
+
 PREVENT_IF_ELIF_WITHOUT_ELSE = RatchetRuleInfo(
     rule_name="if/elif without else",
     rule_description=(
@@ -484,7 +494,7 @@ PREVENT_HARDCODED_CLAUDE_DIR = RegexRatchetRule(
         "Use the accessor functions from claude_config.py instead of hardcoding "
         "Path.home() / '.claude' or Path.home() / '.claude.json'. "
         "For the config directory: get_claude_config_dir() / get_user_claude_config_dir(). "
-        "For the user config file: find_user_claude_config(). "
+        "For the user config file: find_user_config_in_isolated_mode(). "
         "This allows paths to be overridden via CLAUDE_CONFIG_DIR "
         "and ORIGINAL_CLAUDE_CONFIG_DIR environment variables."
     ),

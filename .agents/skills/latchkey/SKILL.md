@@ -18,7 +18,7 @@ Usage:
 2. **Pass through all regular curl arguments** - latchkey is a transparent wrapper.
 3. **Check for `latchkey services list`** to get a list of supported services. Use `--viable` to only show the currently configured ones.
 4. **Use `latchkey services info <service_name>`** to get information about a specific service (auth options, credentials status, API docs links, special requirements, etc.).
-5. **Submit a permission request to the user if necessary** by calling `latchkey curl -XPOST http://latchkey-self.invalid/extensions/permission-requests` (see the "Ask for user permission" example below) when either there are no valid credentials for the given service or the curl requests come back with the "request not permitted by the user" message.
+5. **Submit a permission request to the user if necessary** by calling `latchkey curl -XPOST http://latchkey-self.invalid/permission-requests` (see the "Ask for user permission" example below) when either there are no valid credentials for the given service or the curl requests come back with the "request not permitted by the user" message.
 6. **Look for the newest documentation of the desired public API online.** Avoid bot-only endpoints.
 
 
@@ -107,10 +107,11 @@ Permission management, or any other commands other than `latchkey curl`, are not
 - All curl arguments are passed through unchanged
 - Return code, stdout and stderr are passed back from curl
 - Unless the user explicitly asks about it, don't discuss Latchkey or the technical details (it's easy for the user to get confused).
+- Unless the user explicitly asks you to do that, do not directly call `latchkey auth browser` or `latchkey auth browser-prepare`. (The Minds app is supposed to do that as part of the permission request approval process.)
 
 ## Currently supported services
 
 Latchkey currently offers varying levels of support for the
 following services: AWS, Calendly, Coolify, Discord, Dropbox, Figma, GitHub, GitLab,
 Gmail, Google Analytics, Google Calendar, Google Docs, Google Drive, Google Sheets,
-Linear, Mailchimp, Notion, Sentry, Slack, Stripe, Telegram, Umami, Yelp, Zoom, and more.
+Linear, Mailchimp, Notion, Ramp, Sentry, Slack, Stripe, Telegram, Todoist, Umami, Yelp, Zoom, and more.

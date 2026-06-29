@@ -7,19 +7,22 @@ once per successful login.
 
 The `ClaudeAuthService` (which holds the in-flight OAuth subprocess) and
 the `WelcomeResender` are created once in `create_application` and stored
-on `app.state`; each handler reads them from `request.app.state` so the
-OAuth subprocess survives between the `/start` and `/submit-code` calls.
+on the app's `SystemInterfaceState`; each handler reads them via
+`get_state()` so the OAuth subprocess survives between the `/start` and
+`/submit-code` calls.
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+import json
+
+from flask import Flask
+from flask import Response
+from flask import request
 from loguru import logger as _loguru_logger
-from starlette.concurrency import run_in_threadpool
-from starlette.requests import Request
-from starlette.responses import JSONResponse
 
 from imbue.system_interface import claude_auth
+from imbue.system_interface.app_context import get_state
 from imbue.system_interface.models import ClaudeAuthApiKeyRequest
 from imbue.system_interface.models import ClaudeAuthStatusResponse
 from imbue.system_interface.models import ClaudeOAuthStartRequest
@@ -31,6 +34,11 @@ from imbue.system_interface.welcome_resend import WelcomeResender
 logger = _loguru_logger
 
 
+def _json_response(content: object, status_code: int = 200) -> Response:
+    body = json.dumps(content, separators=(",", ":"), ensure_ascii=False)
+    return Response(body, status=status_code, mimetype="application/json")
+
+
 def _status_to_response(status: claude_auth.AuthStatus) -> ClaudeAuthStatusResponse:
     # Both models share the same field names and types; validating directly
     # off the AuthStatus dump keeps the conversion automatic so adding a
@@ -39,13 +47,11 @@ def _status_to_response(status: claude_auth.AuthStatus) -> ClaudeAuthStatusRespo
     return ClaudeAuthStatusResponse.model_validate(status.model_dump())
 
 
-def _error_response(detail: str, status_code: int = 400) -> JSONResponse:
-    return JSONResponse(content=ErrorResponse(detail=detail).model_dump(), status_code=status_code)
+def _error_response(detail: str, status_code: int = 400) -> Response:
+    return _json_response(ErrorResponse(detail=detail).model_dump(), status_code=status_code)
 
 
-async def _on_auth_success(
-    status: claude_auth.AuthStatus, welcome_resender: WelcomeResender
-) -> None:
+def _on_auth_success(status: claude_auth.AuthStatus, welcome_resender: WelcomeResender) -> None:
     """Chokepoint for every auth-success path: run welcome-resend check.
 
     `WelcomeResender.check_and_resend_welcome` is itself failure-tolerant
@@ -56,93 +62,91 @@ async def _on_auth_success(
     """
     if not status.logged_in:
         return
-    await run_in_threadpool(welcome_resender.check_and_resend_welcome)
+    welcome_resender.check_and_resend_welcome()
 
 
-async def get_status(request: Request) -> JSONResponse:
-    """GET /api/claude-auth/status — current auth state."""
-    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
+def get_status() -> Response:
+    """GET /api/claude-auth/status -- current auth state."""
+    service: claude_auth.ClaudeAuthService = get_state().claude_auth_service
     try:
-        status = await run_in_threadpool(service.get_auth_status)
+        status = service.get_auth_status()
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=500)
-    return JSONResponse(content=_status_to_response(status).model_dump())
+    return _json_response(_status_to_response(status).model_dump())
 
 
-async def start_oauth(request: Request) -> JSONResponse:
-    """POST /api/claude-auth/start — spawn `claude auth login --<provider>`."""
-    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
+def start_oauth() -> Response:
+    """POST /api/claude-auth/start -- spawn `claude auth login --<provider>`."""
+    service: claude_auth.ClaudeAuthService = get_state().claude_auth_service
     try:
-        body = ClaudeOAuthStartRequest.model_validate(await request.json())
+        body = ClaudeOAuthStartRequest.model_validate(request.get_json())
     except (ValueError, TypeError) as e:
         return _error_response(f"Invalid request body: {e}")
     try:
         provider = claude_auth.OAuthProvider(body.provider)
     except ValueError:
-        return _error_response(
-            f"Unknown provider {body.provider!r}; must be 'claudeai' or 'console'"
-        )
+        return _error_response(f"Unknown provider {body.provider!r}; must be 'claudeai' or 'console'")
     try:
-        result = await run_in_threadpool(service.start_oauth_login, provider)
+        result = service.start_oauth_login(provider)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=500)
-    return JSONResponse(
-        content=ClaudeOAuthStartResponse(
-            session_id=result.session_id, oauth_url=result.oauth_url
-        ).model_dump()
+    return _json_response(
+        ClaudeOAuthStartResponse(session_id=result.session_id, oauth_url=result.oauth_url).model_dump()
     )
 
 
-async def submit_oauth_code(request: Request) -> JSONResponse:
-    """POST /api/claude-auth/submit-code — submit user's pasted CODE#STATE."""
-    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
-    welcome_resender: WelcomeResender = request.app.state.welcome_resender
+def submit_oauth_code() -> Response:
+    """POST /api/claude-auth/submit-code -- submit user's pasted CODE#STATE."""
+    state = get_state()
+    service: claude_auth.ClaudeAuthService = state.claude_auth_service
+    welcome_resender: WelcomeResender = state.welcome_resender
     try:
-        body = ClaudeOAuthSubmitCodeRequest.model_validate(await request.json())
+        body = ClaudeOAuthSubmitCodeRequest.model_validate(request.get_json())
     except (ValueError, TypeError) as e:
         return _error_response(f"Invalid request body: {e}")
     try:
-        status = await run_in_threadpool(service.submit_oauth_code, body.session_id, body.code)
+        status = service.submit_oauth_code(body.session_id, body.code)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=400)
-    await _on_auth_success(status, welcome_resender)
-    return JSONResponse(content=_status_to_response(status).model_dump())
+    _on_auth_success(status, welcome_resender)
+    return _json_response(_status_to_response(status).model_dump())
 
 
-async def submit_api_key(request: Request) -> JSONResponse:
-    """POST /api/claude-auth/submit-api-key — persist key and restart claude agents."""
-    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
-    welcome_resender: WelcomeResender = request.app.state.welcome_resender
+def submit_api_key() -> Response:
+    """POST /api/claude-auth/submit-api-key -- persist key and restart claude agents."""
+    state = get_state()
+    service: claude_auth.ClaudeAuthService = state.claude_auth_service
+    welcome_resender: WelcomeResender = state.welcome_resender
     try:
-        body = ClaudeAuthApiKeyRequest.model_validate(await request.json())
+        body = ClaudeAuthApiKeyRequest.model_validate(request.get_json())
     except (ValueError, TypeError) as e:
         return _error_response(f"Invalid request body: {e}")
     if not body.api_key.get_secret_value().strip():
         return _error_response("api_key must be a non-empty string")
     try:
-        status = await run_in_threadpool(service.submit_api_key, body.api_key)
+        status = service.submit_api_key(body.api_key)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=500)
-    await _on_auth_success(status, welcome_resender)
-    return JSONResponse(content=_status_to_response(status).model_dump())
+    _on_auth_success(status, welcome_resender)
+    return _json_response(_status_to_response(status).model_dump())
 
 
-async def abort_oauth(request: Request) -> JSONResponse:
-    """POST /api/claude-auth/abort — drop the in-flight OAuth subprocess."""
-    service: claude_auth.ClaudeAuthService = request.app.state.claude_auth_service
-    await run_in_threadpool(service.abort_oauth_login)
-    return JSONResponse(content={"status": "ok"})
+def abort_oauth() -> Response:
+    """POST /api/claude-auth/abort -- drop the in-flight OAuth subprocess."""
+    service: claude_auth.ClaudeAuthService = get_state().claude_auth_service
+    service.abort_oauth_login()
+    return _json_response({"status": "ok"})
 
 
-def register_routes(application: FastAPI) -> None:
-    """Wire `/api/claude-auth/*` endpoints onto the FastAPI application.
+def register_routes(application: Flask) -> None:
+    """Wire `/api/claude-auth/*` endpoints onto the Flask application.
 
-    The handlers read the `ClaudeAuthService` / `WelcomeResender` from
-    `app.state`; `create_application` is responsible for placing them
-    there before the app serves requests.
+    The handlers read the `ClaudeAuthService` / `WelcomeResender` from the
+    app's `SystemInterfaceState`; `create_application` is responsible for
+    placing them there before the app serves requests.
     """
-    application.add_api_route("/api/claude-auth/status", get_status, methods=["GET"])
-    application.add_api_route("/api/claude-auth/start", start_oauth, methods=["POST"])
-    application.add_api_route("/api/claude-auth/submit-code", submit_oauth_code, methods=["POST"])
-    application.add_api_route("/api/claude-auth/submit-api-key", submit_api_key, methods=["POST"])
-    application.add_api_route("/api/claude-auth/abort", abort_oauth, methods=["POST"])
+    application.add_url_rule("/api/claude-auth/status", view_func=get_status, methods=["GET"])
+    application.add_url_rule("/api/claude-auth/start", view_func=start_oauth, methods=["POST"])
+    application.add_url_rule("/api/claude-auth/submit-code", view_func=submit_oauth_code, methods=["POST"])
+    application.add_url_rule("/api/claude-auth/submit-api-key", view_func=submit_api_key, methods=["POST"])
+    application.add_url_rule("/api/claude-auth/abort", view_func=abort_oauth, methods=["POST"])

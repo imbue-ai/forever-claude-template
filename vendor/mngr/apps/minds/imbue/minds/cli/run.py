@@ -6,7 +6,7 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 1. Spawns ``mngr forward --service system_interface --preauth-cookie ...`` as
    a subprocess via ``EnvelopeStreamConsumer`` (which feeds the surviving
    ``MngrCliBackendResolver`` from the plugin's envelope stream).
-2. Builds the slimmed minds-side bare-origin FastAPI app and runs it on
+2. Builds the slimmed minds-side bare-origin Flask app and runs it on
    ``--port`` (default 8420).
 3. Emits a ``mngr_forward_started`` JSONL event on stdout carrying the
    preauth cookie value, so the Electron shell can pre-set
@@ -24,12 +24,10 @@ import secrets
 import threading
 import webbrowser
 from pathlib import Path
-from types import FrameType
 from typing import Final
 
 import click
-import uvicorn
-from fastapi import FastAPI
+from flask import Flask
 from loguru import logger
 from pydantic import Field
 
@@ -38,6 +36,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import minds_data_dir_for
 from imbue.minds.bootstrap import reconcile_imbue_cloud_providers_from_sessions
 from imbue.minds.bootstrap import resolve_minds_root_name
+from imbue.minds.build_info import resolve_git_sha
+from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_HOST
 from imbue.minds.config.data_types import DEFAULT_DESKTOP_CLIENT_PORT
 from imbue.minds.config.data_types import MNGR_BINARY
@@ -46,20 +46,22 @@ from imbue.minds.config.loader import load_client_config
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
+from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
-from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
+from imbue.minds.desktop_client.discovery_health import SupervisorProducerRemediator
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.laptop_agent_types_seed import seed_laptop_agent_types_for_minds
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey_auto_register import LatchkeyAutoRegister
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -68,24 +70,41 @@ from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissi
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.desktop_client.server import desktop_client_runtime
+from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
+from imbue.minds.utils.sentry.core import resolve_sentry_environment
+from imbue.minds.utils.sentry.core import setup_sentry
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
+from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
+from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # How long `minds run` waits for the spawned `mngr forward` plugin to report
 # its bound port via a `listening` envelope before treating startup as failed.
-# The plugin emits this from its FastAPI lifespan startup, so the wait only
-# needs to cover the subprocess's own interpreter start and imports.
-_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 5.0
+# The plugin emits this from its own server's startup, so on a warm
+# install the wait only needs to cover the subprocess's own interpreter
+# start and imports. On a cold install (vanilla Mac, no `~/.minds/.venv`),
+# uv has to download the python toolchain + install the venv + load
+# plugins first; that can take 30-60s on a fresh machine. A 5s budget was
+# tight enough to deterministically fail every first-time-user launch on
+# a clean Mac (proven via Tart VM). Give it 120s to comfortably cover
+# cold-install while still surfacing a real wedge before the user gives up.
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension to
 # decide where to forward inbound proxy requests. Published to the
@@ -156,6 +175,32 @@ def run(
     root_name = resolve_minds_root_name()
     data_directory = minds_data_dir_for(root_name)
     minds_config = MindsConfig(data_dir=data_directory)
+    paths = WorkspacePaths(data_dir=data_directory)
+
+    # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
+    # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
+    #
+    # Sentry always initializes, but what it actually sends is gated live by per-machine user
+    # settings (stored in MindsConfig, surfaced via the first-launch consent screen and account
+    # settings): ``report_unexpected_errors`` gates automatic error sends, and ``include_error_logs``
+    # gates log/traceback attachments. Both are read live, so toggling a setting takes effect without
+    # restarting. Manual bug reports are always sent regardless of ``report_unexpected_errors``.
+    #
+    # The activated minds env (from `minds env activate`) selects the Sentry DSN and, for
+    # production/staging, which S3 attachment bucket: production and staging each get their own, while
+    # every other env (dev-*, ci-*, or no activated env) reports to the dev project. We treat "not
+    # activated" as dev so an un-activated `minds run` never accidentally reports to the production
+    # project; development never uploads attachments regardless. The release id (desktop app version)
+    # and git sha come from the Electron launcher via env vars, falling back to the in-repo
+    # package.json / "unknown" for bare source runs (see imbue.minds.build_info).
+    setup_sentry(
+        environment=resolve_sentry_environment(),
+        release_id=resolve_release_id(),
+        git_commit_sha=resolve_git_sha(),
+        log_folder=paths.log_dir,
+        is_error_reporting_enabled=minds_config.get_report_unexpected_errors,
+        is_log_inclusion_enabled=minds_config.get_include_error_logs,
+    )
     client_config_path = config_file
     client_env_config = load_client_config(client_config_path)
     connector_url_str = str(client_env_config.connector_url).rstrip("/")
@@ -173,7 +218,6 @@ def run(
     # so the reconcile happens here once we've loaded the client config.
     reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
-    paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
     notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
@@ -207,13 +251,36 @@ def run(
     # across desktop-client restarts.
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
+    # Build the supervisor once and keep the handle: the startup restart runs on
+    # the background thread below, and the same instance is held in the app state
+    # so the provider-change request handlers can ``bounce()`` it mid-session
+    # (mirroring the SIGHUP minds already sends its own ``mngr forward`` observe).
+    latchkey_forward_supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=MNGR_BINARY,
+        latchkey_binary=latchkey.latchkey_binary,
+        latchkey_directory=latchkey.latchkey_directory,
+        # Spawn the detached supervisor (and its `mngr observe` discovery
+        # producer grandchild) from $HOME, like every other laptop-side mngr
+        # invocation -- notably the `mngr forward` consumer below. Without this
+        # it inherits minds' cwd, which in a dev checkout is the monorepo root:
+        # its mngr children then load `<repo>/.mngr/settings.toml`, and under
+        # the e2e test that trips mngr's pytest config guard so the supervisor
+        # never starts. A dead producer means no discovery snapshots, which the
+        # discovery-health watchdog escalates to a terminal BLOCKED takeover.
+        cwd=Path.home(),
+        extra_env={
+            MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
+            MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
+        },
+    )
+
     # Background thread: supervisor restart must complete before the
     # gateway-client pre-warm reads the on-disk forward record, or it
     # caches the previous supervisor's stale port for the rest of the
     # process lifetime.
     root_concurrency_group.start_new_thread(
         _restart_supervisor_then_prewarm_gateway_client,
-        args=(latchkey, gateway_client, port, minds_api_key),
+        args=(latchkey_forward_supervisor, gateway_client),
         name="mngr-latchkey-supervisor-and-gateway-init",
     )
 
@@ -226,11 +293,19 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    mngr_message_sender = MngrMessageSender()
+    # Run ``mngr message`` (and, over time, other ``mngr`` CLI calls) in a
+    # pre-warmed, single-use ``mngr`` process instead of spawning (and importing)
+    # a fresh interpreter each time, so UI actions like Approve/Deny don't pay the
+    # multi-second interpreter+import startup cost. ``prewarm`` is non-blocking:
+    # it spawns the first warm process (which pays the import cost) on a
+    # background thread, off the request path.
+    mngr_caller = get_default_mngr_caller()
+    mngr_caller.prewarm(root_concurrency_group)
+    mngr_message_sender = MngrMessageSender(mngr_caller=mngr_caller, concurrency_group=root_concurrency_group)
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
-        services_catalog=ServicesCatalog(gateway_client=gateway_client),
+        services_catalog=ServicesCatalog(),
         mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
     )
@@ -258,14 +333,31 @@ def run(
     # are needed here.
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+    # `mngr forward` and every other laptop-side mngr invocation (including the
+    # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
+    # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
+    # `/code/.mngr/settings.toml` inside the lima VM is invisible to them.
+    # Seed the mapping into user-scope settings.toml here so subsequent mngr
+    # subprocesses resolve `type=main` -> ClaudeAgent without depending on cwd.
+    seed_laptop_agent_types_for_minds(mngr_host_dir)
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
     )
     consumer, preauth_cookie = start_mngr_forward(
         config=forward_config,
         resolver=backend_resolver,
-        notification_dispatcher=notification_dispatcher,
     )
+
+    # App-global discovery-pipeline health watchdog. Detects a stalled pipeline
+    # (a producer stall via the resolver's snapshot-freshness age; a consumer
+    # death via the lifecycle watcher) and self-heals by re-kicking the producer
+    # (supervisor bounce -> restart) before surfacing a terminal app-global
+    # BLOCKED screen. The consumer-death callback is wired before
+    # ``consumer.start()`` so an early exit is caught.
+    discovery_health_watchdog = DiscoveryHealthWatchdog(
+        remediator=SupervisorProducerRemediator(supervisor=latchkey_forward_supervisor),
+    )
+    consumer.add_on_unexpected_exit_callback(lambda _exit_code: discovery_health_watchdog.record_consumer_death())
 
     # System-interface health tracker: feeds on backend failures observed by
     # the plugin (registered as a callback below) and on the readiness-probe
@@ -372,6 +464,18 @@ def run(
         mngr_binary=MNGR_BINARY,
         mngr_host_dir=mngr_host_dir,
         minds_api_key=minds_api_key,
+        latchkey_forward_supervisor=latchkey_forward_supervisor,
+        discovery_health_watchdog=discovery_health_watchdog,
+    )
+
+    # Background loop driving the discovery-pipeline watchdog: polls snapshot
+    # freshness, runs the producer bounce -> restart remediations on a stall, and
+    # transitions the app-global state. Started here (not inside
+    # create_desktop_client) so test factories can skip the background thread.
+    start_discovery_health_watchdog_loop(
+        watchdog=discovery_health_watchdog,
+        backend_resolver=backend_resolver,
+        root_concurrency_group=root_concurrency_group,
     )
 
     # Background probe loop: flips STUCK/RESTARTING agents back to HEALTHY
@@ -386,21 +490,21 @@ def run(
         root_concurrency_group=root_concurrency_group,
     )
 
-    # Wire the permission-requests streaming consumer once the FastAPI
-    # app is built so the on_request callback can mutate ``app.state``
+    # Wire the permission-requests streaming consumer once the Flask
+    # app is built so the on_request callback can mutate the app state
     # directly. The consumer thread runs for the lifetime of
     # ``root_concurrency_group``.
     permission_requests_consumer = PermissionRequestsConsumer(
         gateway_client=gateway_client,
-        on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver),
+        on_request=_StreamedPermissionRequestHandler(app=app, backend_resolver=backend_resolver, latchkey=latchkey),
     )
     permission_requests_consumer.start(root_concurrency_group)
-    # Stash on app.state so the lifespan shutdown can stop() the consumer
+    # Stash on the app state so the shutdown teardown can stop() the consumer
     # before draining the root concurrency group; without this the
     # consumer thread stays blocked on its follow-stream read=None socket
     # for the full CG shutdown timeout and the group surfaces a "1 strand
     # did not finish in time" warning on every clean exit.
-    app.state.permission_requests_consumer = permission_requests_consumer
+    get_state(app).permission_requests_consumer = permission_requests_consumer
 
     if not no_browser:
         # Open the URL that carries the one-time code rather than the bare
@@ -414,95 +518,48 @@ def run(
         thread = threading.Thread(target=_sleep_then_open, args=(minds_login_url,), daemon=True)
         thread.start()
 
-    server = _PreShutdownAwareServer(config=uvicorn.Config(app, host=host, port=port, timeout_graceful_shutdown=1))
-    server.pre_shutdown_app = app
-    server.pre_shutdown_resolver = backend_resolver
-    try:
-        server.run()
-    finally:
-        consumer.terminate()
-
-
-class _PreShutdownAwareServer(uvicorn.Server):
-    """A uvicorn Server that flips ``app.state.shutdown_event`` on SIGINT/SIGTERM.
-
-    Without this hook, uvicorn's shutdown order is:
-
-    1. Signal handler sets ``should_exit = True``.
-    2. Main loop notices, calls ``shutdown()``.
-    3. ``shutdown()`` waits ``timeout_graceful_shutdown`` seconds for
-       in-flight connections (SSE streams that the browser is holding
-       open are still in-flight).
-    4. On timeout, cancels every in-flight task with ``CancelledError``
-       -- which surfaces as a noisy starlette/anyio traceback in the
-       log on every clean shutdown.
-    5. THEN calls ``lifespan.shutdown()`` (i.e. our ``_managed_lifespan``
-       finally block).
-
-    Setting ``shutdown_event`` from the lifespan finally is too late --
-    the cancel has already happened. ``handle_exit`` is the earliest
-    hook we have: it fires from the signal handler itself, BEFORE
-    uvicorn starts waiting for connections, so our SSE handlers see
-    the flag set on their next iteration and return their generators
-    cleanly. Once they're done, ``shutdown()``'s wait completes
-    without timing out, no tasks need to be cancelled, no traceback.
-
-    The ``backend_resolver.notify_change()`` poke wakes the chrome SSE
-    out of its 30-second ``change_event.wait()`` immediately, so the
-    SSE handlers don't have to wait out the full poll interval before
-    noticing ``shutdown_event``.
-
-    ``pre_shutdown_app`` and ``pre_shutdown_resolver`` are set by the
-    caller via direct attribute assignment immediately after
-    construction. We can't override ``__init__`` (the project ratchet
-    forbids it on non-exception classes), and the parent's __init__
-    takes only ``config``, so the cleanest way to thread these in is
-    explicit post-construction assignment. ``None`` defaults keep the
-    type checker happy and let the handler no-op gracefully if a future
-    caller forgets to wire them up.
-    """
-
-    pre_shutdown_app: FastAPI | None = None
-    pre_shutdown_resolver: BackendResolverInterface | None = None
-
-    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
-        # Fire BEFORE super(): super().handle_exit sets should_exit,
-        # which begins uvicorn's shutdown sequence. We want shutdown_event
-        # set first so SSE handlers exit before uvicorn starts waiting
-        # on still-in-flight connections.
-        if self.pre_shutdown_app is not None:
-            self.pre_shutdown_app.state.shutdown_event.set()
-        if isinstance(self.pre_shutdown_resolver, MngrCliBackendResolver):
-            self.pre_shutdown_resolver.notify_change()
-        super().handle_exit(sig, frame)
+    # ``desktop_client_runtime`` owns the shared HTTP client + geo-detection
+    # startup and the ordered shutdown teardown (close client, terminate
+    # consumers, stop the mngr caller, drain the root concurrency group).
+    # ``serve_desktop_client`` runs the graceful cheroot server until
+    # SIGINT/SIGTERM, flipping ``shutdown_event`` + waking the SSE handlers
+    # before the server drains so streams end cleanly with no tracebacks.
+    with desktop_client_runtime(get_state(app), is_externally_managed_client=False):
+        serve_desktop_client(app, get_state(app), host=host, port=port)
 
 
 class _StreamedPermissionRequestHandler(FrozenModel):
     """Callable that appends a streamed permission request to the app inbox.
 
-    The handler runs on the permission-requests consumer thread (not
-    the FastAPI event loop), so it only does thread-safe work:
-    appending to the immutable :class:`RequestInbox` produces a new
-    instance per mutation and Python attribute assignment is atomic for
-    our purposes here. Same trick the legacy JSONL
-    ``_handle_request_event_callback`` already uses.
+    The handler runs on the permission-requests consumer thread (not a
+    request thread), so it only does thread-safe work: appending to the
+    immutable :class:`RequestInbox` produces a new instance per mutation
+    and Python attribute assignment is atomic for our purposes here. Same
+    trick the legacy JSONL ``_handle_request_event_callback`` already uses.
     """
 
-    app: FastAPI = Field(
+    app: Flask = Field(
         frozen=True,
-        description="Desktop-client FastAPI instance whose ``state.request_inbox`` is mutated on receipt.",
+        description="Desktop-client Flask instance whose state ``request_inbox`` is mutated on receipt.",
     )
     backend_resolver: MngrCliBackendResolver = Field(
         frozen=True,
         description="Resolver whose ``notify_change()`` wakes the chrome SSE so the panel updates promptly.",
     )
+    latchkey: Latchkey = Field(
+        frozen=True,
+        description=(
+            "Latchkey instance used to repair a host whose canonical "
+            "``latchkey_permissions.json`` is missing when a fresh request arrives."
+        ),
+    )
 
-    # ``FastAPI`` and ``MngrCliBackendResolver`` are not pydantic
-    # natives; tolerate them with ``arbitrary_types_allowed``.
+    # ``Flask``, ``MngrCliBackendResolver`` and ``Latchkey`` are not
+    # pydantic natives; tolerate them with ``arbitrary_types_allowed``.
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
     def __call__(self, event: RequestEvent) -> None:
-        current: RequestInbox | None = self.app.state.request_inbox
+        current: RequestInbox | None = get_state(self.app).request_inbox
         if current is None:
             return
         # The gateway re-emits every still-pending request on each
@@ -514,7 +571,12 @@ class _StreamedPermissionRequestHandler(FrozenModel):
         # wake the SSE for nothing.
         if current.get_request_by_id(str(event.event_id)) is not None:
             return
-        self.app.state.request_inbox = current.add_request(event)
+        # Repair a host whose canonical permissions file was never
+        # materialized *before* surfacing the request, so the user's
+        # eventual approval actually takes effect. Best-effort: failures
+        # are logged and the request is still surfaced.
+        self._maybe_recover_host_permissions(event)
+        get_state(self.app).request_inbox = current.add_request(event)
         if isinstance(event, LatchkeyPredefinedPermissionRequestEvent):
             logger.info(
                 "Streamed latchkey permission request for agent {} (scope={}, request_id={})",
@@ -537,6 +599,69 @@ class _StreamedPermissionRequestHandler(FrozenModel):
                 event.event_id,
             )
         self.backend_resolver.notify_change()
+
+    def _maybe_recover_host_permissions(self, event: RequestEvent) -> None:
+        """Recreate a missing per-host permissions file for the request's agent.
+
+        The streamed request carries ``permissions_target_path`` -- the
+        agent's opaque permissions handle (what its gateway JWT resolves
+        to). :func:`maybe_recover_host_permissions_for_agent` swings that
+        handle into the canonical host path when the latter is missing (so grants
+        written by the approval flow are visible to the agent) and
+        idempotently re-registers the agent in the host's allowlist. No-op
+        when the target is absent (non-latchkey request) or the host is
+        not yet known to discovery.
+        """
+        if not isinstance(
+            event,
+            (LatchkeyPredefinedPermissionRequestEvent, LatchkeyFileSharingPermissionRequestEvent),
+        ):
+            return
+        target = event.permissions_target_path
+        if target is None:
+            return
+        agent_id = AgentId(event.agent_id)
+        host_id = self._resolve_host_id(agent_id)
+        if host_id is None:
+            return
+        try:
+            did_recover = maybe_recover_host_permissions_for_agent(
+                latchkey=self.latchkey,
+                host_id=host_id,
+                agent_id=agent_id,
+                opaque_permissions_path=Path(target),
+            )
+        except LatchkeyStoreError as e:
+            logger.opt(exception=e).error(
+                "Could not recover missing latchkey permissions file for host {} (agent {}): {}",
+                host_id,
+                event.agent_id,
+                e,
+            )
+            return
+        if did_recover:
+            logger.info(
+                "Recovered missing latchkey permissions file for host {} (agent {}) from opaque handle {}",
+                host_id,
+                event.agent_id,
+                target,
+            )
+
+    def _resolve_host_id(self, agent_id: AgentId) -> HostId | None:
+        """Resolve the host an agent runs on, or ``None`` when discovery hasn't caught up.
+
+        Mirrors the resolution the permission-grant handler does: the
+        backend resolver maps the agent id to its host id, and the
+        placeholder ``"localhost"`` string (used by static / in-memory
+        resolvers) is treated as "unknown host".
+        """
+        info = self.backend_resolver.get_agent_display_info(agent_id)
+        if info is None:
+            return None
+        try:
+            return HostId(info.host_id)
+        except ValueError:
+            return None
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:
@@ -580,10 +705,8 @@ def _sleep_then_open(url: str, delay: float = 1.0) -> None:
 
 
 def _restart_supervisor_then_prewarm_gateway_client(
-    latchkey: Latchkey,
+    supervisor: LatchkeyForwardSupervisor,
     gateway_client: LatchkeyGatewayClient,
-    minds_api_port: int,
-    minds_api_key: str,
 ) -> None:
     """Restart the latchkey supervisor, then pre-warm the gateway client.
 
@@ -591,8 +714,8 @@ def _restart_supervisor_then_prewarm_gateway_client(
     the bound port from the supervisor's on-disk record, so it must
     run after the supervisor restart has stamped the fresh port.
 
-    ``minds_api_port`` is the port the minds bare-origin server is
-    bound to in *this* process; it's threaded through to the
+    The supervisor was constructed in ``run`` with the bare-origin port
+    baked into its ``extra_env``; it's threaded through to the
     supervisor as ``LATCHKEY_EXTENSION_MINDS_API_URL`` so the gateway's
     bundled ``minds-api-proxy`` extension knows where to forward agent
     traffic. Restarting the supervisor on every minds start is what
@@ -602,7 +725,7 @@ def _restart_supervisor_then_prewarm_gateway_client(
     can inject ``Authorization: Bearer <key>`` on every forwarded
     request.
     """
-    _ensure_mngr_latchkey_forward_supervisor(latchkey, minds_api_port, minds_api_key)
+    _restart_mngr_latchkey_forward_supervisor(supervisor)
     try:
         gateway_client.ensure_initialized()
     except LatchkeyGatewayClientError as e:
@@ -612,23 +735,8 @@ def _restart_supervisor_then_prewarm_gateway_client(
         )
 
 
-def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey, minds_api_port: int, minds_api_key: str) -> None:
+def _restart_mngr_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor) -> None:
     """Restart the detached ``mngr latchkey forward`` supervisor on minds startup.
-
-    Reuses ``latchkey``'s already-resolved binary + directory paths so
-    the supervisor sees exactly the same latchkey state minds itself
-    works against. Bare-name ``mngr`` is used; bundled minds builds
-    rely on the Electron shell having put ``mngr`` on the child's
-    PATH alongside the bundled ``latchkey`` (the
-    :class:`MngrMessageSender` and ``mngr forward`` subprocess paths
-    already make the same assumption).
-
-    ``minds_api_port`` is published to the spawned supervisor as the
-    ``LATCHKEY_EXTENSION_MINDS_API_URL`` env var so the gateway's
-    bundled ``minds-api-proxy`` extension knows the bare-origin URL
-    to forward agent traffic to. The supervisor inherits this env var
-    into the ``latchkey gateway`` subprocess it owns and from there
-    into the extension's ``process.env``.
 
     Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
     ``ensure_running`` so that minds upgrades always run with a
@@ -640,21 +748,13 @@ def _ensure_mngr_latchkey_forward_supervisor(latchkey: Latchkey, minds_api_port:
     consumer today. Restarting on every minds start is also what
     keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync with the
     current bare-origin port -- minds re-binds its server on every
-    start, and the supervisor restart re-publishes the env var.
+    start, and the supervisor restart re-publishes the env var (baked
+    into the supervisor's ``extra_env`` at construction time in ``run``).
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
     but should not prevent minds itself from starting.
     """
-    supervisor = LatchkeyForwardSupervisor(
-        mngr_binary=MNGR_BINARY,
-        latchkey_binary=latchkey.latchkey_binary,
-        latchkey_directory=latchkey.latchkey_directory,
-        extra_env={
-            MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{minds_api_port}",
-            MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
-        },
-    )
     try:
         info = supervisor.restart()
     except LatchkeyError as e:

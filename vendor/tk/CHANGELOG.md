@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Changed
+- Step lifecycle commands now echo their decoration on stdout so a downstream progress view can read titles and summaries straight from the transcript (no side-channel file watching). `tk create --step` prints `Created <id>: <title>` (regular creates still print the bare id, so `ID=$(tk create ...)` captures are unaffected); `tk start <step>` prints `tk-step <id> title: <title>`; `tk close <step> "summary"` prints `tk-step <id> title: <title>` and `tk-step <id> summary: <summary>`.
+- Removed step auto-nesting under an in_progress ticket (and the `--no-parent` flag that disabled it). `--parent` still works for explicitly nesting any ticket or step.
 - Step records (`tk create --step`) now get an id with a literal `-step-` segment (e.g. `cod-step-f1zl`) instead of the plain `cod-f1zl`, so a step is distinguishable from a regular ticket by its id alone -- without reading the file's `step: true` frontmatter. Regular ticket ids are unchanged. (Lets a downstream progress view keep a step's grouping after its `.tickets/` file is deleted, when the frontmatter is no longer readable.)
 - `tk close <id> "summary"` now stores the close summary in a dedicated, untimestamped `## Summary` section (printf-appended, so arbitrary text is escaping-safe) instead of a timestamped `## Notes` entry; a re-close replaces the prior summary rather than appending a duplicate
 - Extracted `edit`, `ls`, `query`, and `migrate-beads` commands to plugins (ticket-extras)

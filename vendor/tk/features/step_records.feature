@@ -60,6 +60,40 @@ Feature: Step records (turn-bound progress markers)
     And the output should contain "Plain ticket"
     And the output should contain "Progress marker"
 
+  Scenario: Creating a step prints a Created decoration line carrying the title
+    # The chat progress view reads the title straight from tk's stdout (the
+    # transcript), so create echoes "Created <id>: <title>" for steps.
+    When I run "ticket create 'Look through recent changes' --step"
+    Then the command should succeed
+    And the output should contain "Created "
+    And the output should contain ": Look through recent changes"
+
+  Scenario: Creating a regular ticket prints only the bare id
+    When I run "ticket create 'Regular ticket'"
+    Then the command should succeed
+    And the output should not contain "Created "
+
+  Scenario: Starting a step echoes a tk-step title line
+    Given a step record exists with ID "tt-step-strt" and title "Trace the toggle"
+    When I run "ticket start tt-step-strt"
+    Then the command should succeed
+    And the output should contain "Updated tt-step-strt -> in_progress"
+    And the output should contain "tk-step tt-step-strt title: Trace the toggle"
+
+  Scenario: Closing a step echoes tk-step title and summary lines
+    Given a step record exists with ID "tt-step-clz" and title "Register the theme"
+    When I run "ticket close tt-step-clz 'Wired the new theme into the toggle.'"
+    Then the command should succeed
+    And the output should contain "Updated tt-step-clz -> closed"
+    And the output should contain "tk-step tt-step-clz title: Register the theme"
+    And the output should contain "tk-step tt-step-clz summary: Wired the new theme into the toggle."
+
+  Scenario: Starting a regular ticket emits no tk-step line
+    Given a ticket exists with ID "tt-plain-strt" and title "Plain work"
+    When I run "ticket start tt-plain-strt"
+    Then the command should succeed
+    And the output should not contain "tk-step"
+
   Scenario: tk close <id> "summary" writes the summary into a Summary section
     Given a ticket exists with ID "tt-summable" and title "Summable"
     When I run "ticket close tt-summable 'Did the thing.'"

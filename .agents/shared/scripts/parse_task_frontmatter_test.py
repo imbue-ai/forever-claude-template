@@ -20,7 +20,7 @@ _spec.loader.exec_module(parse_task_frontmatter)
 
 _VALID_FRONTMATTER = """---
 lead_agent: crystallize-test
-finish_report_path: runtime/update/foo/reports/report.md
+finish_report_path: runtime/harden/update-foo/reports/report.md
 ---
 
 # Task body
@@ -39,7 +39,7 @@ def test_happy_path(tmp_path: Path) -> None:
     result = parse_task_frontmatter.parse(task)
     assert result == {
         "lead_agent": "crystallize-test",
-        "finish_report_path": "runtime/update/foo/reports/report.md",
+        "finish_report_path": "runtime/harden/update-foo/reports/report.md",
     }
 
 
@@ -48,7 +48,7 @@ def test_render_shell_evalable(tmp_path: Path) -> None:
     fields = parse_task_frontmatter.parse(task)
     rendered = parse_task_frontmatter._render(fields)
     assert "LEAD_AGENT=crystallize-test\n" in rendered
-    assert "FINISH_REPORT_PATH=runtime/update/foo/reports/report.md\n" in rendered
+    assert "FINISH_REPORT_PATH=runtime/harden/update-foo/reports/report.md\n" in rendered
 
 
 def test_render_quotes_unsafe_values(tmp_path: Path) -> None:

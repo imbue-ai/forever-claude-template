@@ -33,6 +33,7 @@ class BackupEventType(UpperCaseStrEnum):
 
     BACKUP_STARTED = auto()
     SNAPSHOT_CREATED = auto()
+    SNAPSHOT_FAILED = auto()
     SNAPSHOT_DELETED = auto()
     RESTIC_BACKUP_SUCCEEDED = auto()
     RESTIC_BACKUP_FAILED = auto()
@@ -76,6 +77,16 @@ class SnapshotCreatedEvent(BackupEvent):
     )
     helper_stdout: str = Field(default="")
     helper_stderr: str = Field(default="")
+
+
+class SnapshotFailedEvent(BackupEvent):
+    """The snapshot step failed; the tick was aborted before restic ran."""
+
+    tick_id: str
+    method: str = Field(description="btrfs_local | outer_trigger | direct")
+    error_message: str = Field(
+        description="Failure detail (for outer_trigger, includes the helper's exit code + stderr)"
+    )
 
 
 class SnapshotDeletedEvent(BackupEvent):

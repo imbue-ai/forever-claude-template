@@ -66,6 +66,7 @@ def default_create_cli_opts() -> CreateCliOptions:
         name_style="coolname",
         extra_window=(),
         source=None,
+        adopt_session=(),
         target_path=None,
         transfer=None,
         rsync=None,
@@ -102,9 +103,13 @@ def default_create_cli_opts() -> CreateCliOptions:
         start_host=True,
         extra_provision_command=(),
         post_host_create_command=(),
+        post_host_create_outer_command=(),
         upload_file=(),
         update=False,
         yes=False,
+        tmux_width=None,
+        tmux_height=None,
+        tmux_window_size=None,
     )
 
 
@@ -128,6 +133,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         start=True,
         reconnect=True,
         session_command=None,
+        connect_command=None,
         allow_unknown_host=False,
     )
 

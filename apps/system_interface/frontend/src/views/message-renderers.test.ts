@@ -1,13 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ToolCall, TranscriptEvent, ToolResultEvent } from "../models/Response";
-import {
-  buildToolResultsWithSkillExpansions,
-  parsePermissionRequest,
-  renderPermissionRequestFooter,
-  openPermissionRequest,
-  renderSubagentCard,
-} from "./message-renderers";
-import { isSkillExpansionUserMessage } from "./user-message-classification";
+import type { ToolCall, TranscriptEvent } from "../models/Response";
+import { buildToolResultsWithSkillExpansions, renderSubagentCard } from "./message-renderers";
+import { isSkillExpansionUserMessage, parsePermissionResolution } from "./message-classification";
 
 // Avoid importing the heavy/DOM-dependent module graph (dockview, dompurify) at test time;
 // renderSubagentCard only needs openSubagentTab, and the card path never calls MarkdownContent.
@@ -58,6 +52,36 @@ describe("isSkillExpansionUserMessage", () => {
     expect(isSkillExpansionUserMessage("Base directory for this skill: /x")).toBe(true);
     expect(isSkillExpansionUserMessage("hello")).toBe(false);
     expect(isSkillExpansionUserMessage("Stop hook feedback:\n...")).toBe(false);
+  });
+});
+
+describe("parsePermissionResolution", () => {
+  it("reads the verdict from the injected granted/denied notifications", () => {
+    expect(
+      parsePermissionResolution(
+        "Your permission request for Slack was granted with the following permissions: slack-read-all. Please retry the call that was blocked.",
+      ),
+    ).toBe("granted");
+    expect(
+      parsePermissionResolution("Your permission request for Slack was denied. Do not retry the blocked call."),
+    ).toBe("denied");
+    expect(
+      parsePermissionResolution(
+        "Your read & write file-sharing permission request for '/Users/you/Documents/report' was granted. Please retry the call that was blocked.",
+      ),
+    ).toBe("granted");
+    // A request that could not be completed is an "error", not a deny decision.
+    expect(
+      parsePermissionResolution(
+        "Your permission request for Google Drive could not be completed because the user's sign-in flow did not finish. Do not retry yet; report this to the user.",
+      ),
+    ).toBe("error");
+  });
+
+  it("ignores ordinary user messages", () => {
+    expect(parsePermissionResolution("can you grant me access to slack?")).toBeNull();
+    expect(parsePermissionResolution("Your permission request looks good")).toBeNull();
+    expect(parsePermissionResolution("")).toBeNull();
   });
 });
 
@@ -188,14 +212,45 @@ describe("renderSubagentCard", () => {
       description: "explore foo",
       subagent_type: "Explore",
     };
-    const vnode = renderSubagentCard(toolCall, "agent-1");
+    const vnode = renderSubagentCard(toolCall, "agent-1", true);
     const text = allText(vnode);
+    const classes = collectClasses(vnode).join(" ");
 
     expect(text).toContain("explore foo");
     expect(text).toContain("Explore");
-    // Not yet linked: shows the running placeholder, not a clickable conversation link.
-    expect(text).toContain("Running");
-    expect(text).not.toContain("View conversation");
+    // Not yet linked: the label is the muted, non-clickable "View conversation" placeholder.
+    expect(text).toContain("View conversation");
+    expect(classes).toContain("subagent-card-link--pending");
+  });
+
+  it("shows a pulsing running dot on a green card while the sub-agent is working", () => {
+    const toolCall: ToolCall = {
+      tool_call_id: "t1",
+      tool_name: "Agent",
+      input_preview: "{}",
+      description: "explore foo",
+      subagent_type: "Explore",
+      subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
+    };
+    const classes = collectClasses(renderSubagentCard(toolCall, "agent-1", true)).join(" ");
+    expect(classes).toContain("subagent-card-status-dot--running");
+    expect(classes).not.toContain("subagent-card-status-check");
+    expect(classes).not.toContain("subagent-card--done");
+  });
+
+  it("switches to a checkmark and greys the card once the sub-agent finishes", () => {
+    const toolCall: ToolCall = {
+      tool_call_id: "t1",
+      tool_name: "Agent",
+      input_preview: "{}",
+      description: "explore foo",
+      subagent_type: "Explore",
+      subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
+    };
+    const classes = collectClasses(renderSubagentCard(toolCall, "agent-1", false)).join(" ");
+    expect(classes).toContain("subagent-card-status-check");
+    expect(classes).toContain("subagent-card--done");
+    expect(classes).not.toContain("subagent-card-status-dot--running");
   });
 
   it("renders a clickable conversation link once the subagent session is linked", () => {
@@ -207,11 +262,13 @@ describe("renderSubagentCard", () => {
       subagent_type: "Explore",
       subagent_metadata: { agent_type: "Explore", description: "explore foo", session_id: "agent-sub1" },
     };
-    const vnode = renderSubagentCard(toolCall, "agent-1");
+    const vnode = renderSubagentCard(toolCall, "agent-1", false);
     const text = allText(vnode);
+    const classes = collectClasses(vnode).join(" ");
 
     expect(text).toContain("View conversation");
-    expect(text).not.toContain("Running");
+    // Linked: the active link, not the muted pending placeholder.
+    expect(classes).not.toContain("subagent-card-link--pending");
   });
 
   it("falls back to subagent_metadata fields when the tool call lacks description", () => {
@@ -221,132 +278,22 @@ describe("renderSubagentCard", () => {
       input_preview: "{}",
       subagent_metadata: { agent_type: "Explore", description: "from metadata", session_id: "agent-sub1" },
     };
-    const text = allText(renderSubagentCard(toolCall, "agent-1"));
+    const text = allText(renderSubagentCard(toolCall, "agent-1", false));
     expect(text).toContain("from metadata");
     expect(text).toContain("View conversation");
   });
 });
 
-function makeToolCall(inputPreview: string): ToolCall {
-  return {
-    tool_call_id: "call-1",
-    tool_name: "Bash",
-    input_preview: inputPreview,
-  };
-}
-
-function makeResult(output: string, isError = false): ToolResultEvent {
-  return {
-    timestamp: "2026-01-01T00:00:00Z",
-    type: "tool_result",
-    event_id: "evt-result-1",
-    source: "session",
-    message_uuid: "uuid-1",
-    tool_call_id: "call-1",
-    tool_name: "Bash",
-    output,
-    is_error: isError,
-  };
-}
-
-// A realistic input_preview: the command is JSON-encoded and may be truncated
-// at 200 chars, but the reserved host appears near the start.
-const PERMISSION_INPUT = JSON.stringify({
-  command:
-    "latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \\\n  -H 'Content-Type: application/json' \\\n  -d '{...}'",
-});
-
-// A realistic output: curl writes a progress meter to stderr/stdout before the
-// JSON body, so the whole thing is not directly JSON-parseable.
-const PERMISSION_OUTPUT = `  % Total    % Received % Xferd
-100  1007  100   670  100   337
-{
-  "request_id": "885711ec07bf47239d71294e1534330b",
-  "agent_id": "agent-28dc23edadd34caeaba58441ac8e7218",
-  "request_type": "predefined"
-}`;
-
-describe("parsePermissionRequest", () => {
-  it("extracts the request id from a successful creation POST", () => {
-    const result = parsePermissionRequest(makeToolCall(PERMISSION_INPUT), makeResult(PERMISSION_OUTPUT));
-    expect(result).toEqual({ requestId: "885711ec07bf47239d71294e1534330b" });
-  });
-
-  it("ignores tool calls that are not permission-request POSTs", () => {
-    const unrelated = makeToolCall(JSON.stringify({ command: "ls -la" }));
-    expect(parsePermissionRequest(unrelated, makeResult("anything"))).toBeNull();
-  });
-
-  it("ignores reads of the latchkey permissions endpoints (non-POST host)", () => {
-    const read = makeToolCall(
-      JSON.stringify({ command: "latchkey curl http://latchkey-self.invalid/permissions/self" }),
-    );
-    expect(parsePermissionRequest(read, makeResult('{"rules": []}'))).toBeNull();
-  });
-
-  it("returns null while the tool result is still pending", () => {
-    expect(parsePermissionRequest(makeToolCall(PERMISSION_INPUT), null)).toBeNull();
-  });
-
-  it("returns null when the creation call errored", () => {
-    const errored = makeResult("request not permitted by the user", true);
-    expect(parsePermissionRequest(makeToolCall(PERMISSION_INPUT), errored)).toBeNull();
-  });
-
-  it("returns null when the output has no request_id", () => {
-    expect(parsePermissionRequest(makeToolCall(PERMISSION_INPUT), makeResult("nope"))).toBeNull();
-  });
-});
-
-// Depth-first search for the first vnode matching a predicate.
-function findVnode(
-  node: unknown,
-  pred: (v: { tag?: unknown }) => boolean,
-): { tag?: unknown; children?: unknown } | null {
-  if (Array.isArray(node)) {
-    for (const child of node) {
-      const hit = findVnode(child, pred);
-      if (hit) return hit;
-    }
-    return null;
+// Walk a mithril vnode tree and collect every element's class string, so tests can assert
+// on structural state (e.g. the running vs done status indicator) that allText can't see.
+function collectClasses(node: unknown): string[] {
+  if (node == null) return [];
+  if (Array.isArray(node)) return node.flatMap(collectClasses);
+  if (typeof node === "object") {
+    // Mithril normalizes the `class` hyperscript attr into `className` on the vnode.
+    const v = node as { attrs?: { className?: unknown }; children?: unknown };
+    const own = typeof v.attrs?.className === "string" ? [v.attrs.className] : [];
+    return [...own, ...collectClasses(v.children)];
   }
-  if (node !== null && typeof node === "object") {
-    const vnode = node as { tag?: unknown; children?: unknown };
-    if (pred(vnode)) return vnode;
-    return findVnode(vnode.children, pred);
-  }
-  return null;
+  return [];
 }
-
-describe("renderPermissionRequestFooter", () => {
-  it("renders a footer div containing a 'Permission request' button", () => {
-    const vnode = renderPermissionRequestFooter("req-123") as unknown as {
-      tag: string;
-      attrs: { className: string };
-    };
-    expect(vnode.tag).toBe("div");
-    // Mithril normalizes the `class` attr to `className`.
-    expect(vnode.attrs.className).toBe("tool-call-permission-footer");
-
-    const button = findVnode(vnode, (v) => v.tag === "button");
-    expect(button).not.toBeNull();
-    // Mithril wraps the label string in a text vnode (tag "#").
-    const label = findVnode(button, (v) => v.tag === "#");
-    expect(label?.children).toBe("Permission request");
-  });
-});
-
-describe("openPermissionRequest", () => {
-  it("posts the open-request-modal message to the parent window", () => {
-    // The chat UI runs inside an iframe; vitest's node environment has no
-    // `window`, so stand one in with a spy parent.
-    const postMessage = vi.fn();
-    vi.stubGlobal("window", { parent: { postMessage } });
-    try {
-      openPermissionRequest("req-123");
-    } finally {
-      vi.unstubAllGlobals();
-    }
-    expect(postMessage).toHaveBeenCalledWith({ type: "minds:open-request-modal", requestId: "req-123" }, "*");
-  });
-});

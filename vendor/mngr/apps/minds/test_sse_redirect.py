@@ -16,9 +16,9 @@ import threading
 from pathlib import Path
 
 import pytest
-import uvicorn
 from loguru import logger
 from playwright.sync_api import sync_playwright
+from werkzeug.serving import make_server
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
@@ -80,9 +80,8 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
         agent_creator=creator,
     )
 
-    config = uvicorn.Config(app, host=host, port=port, log_level="warning")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
+    server = make_server(host, port, app, threaded=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     for _ in range(50):
@@ -105,11 +104,11 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 page.goto(f"http://{host}:{port}/login?one_time_code={code}")
                 page.wait_for_url(re.compile(r"/$|/create"), timeout=5000)
 
-                # Go directly to the creating page, which now opens on the
-                # onboarding question flow (the workspace is created in the
-                # background while the user answers).
+                # Go directly to the creating page, which shows the loading /
+                # progress screen while the workspace is created in the
+                # background and redirects into it once creation completes.
                 page.goto(f"http://{host}:{port}/creating/{agent_id}")
-                page.wait_for_selector("#onboarding", state="attached", timeout=5000)
+                page.wait_for_selector("#creating", state="attached", timeout=5000)
                 logger.info("On creating page, waiting for SSE stream to connect...")
 
                 # Give the EventSource time to connect
@@ -124,8 +123,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
 
                 # Set status to DONE and put sentinel. Once DONE is published
                 # the page records the redirect URL (via the SSE done event and
-                # the status poll); the actual redirect fires when the user
-                # finishes the questions.
+                # the status poll) and redirects into the workspace on its own.
                 with creator._lock:
                     creator._statuses[str(agent_id)] = AgentCreationStatus.DONE
                     creator._redirect_urls[str(agent_id)] = f"/agents/{agent_id}/"
@@ -133,16 +131,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 log_queue.put("[test] Agent created successfully.")
                 log_queue.put(LOG_SENTINEL)
 
-                # Walk the three onboarding questions accepting their
-                # pre-selected defaults; finishing the last one enters the
-                # workspace because creation has already completed.
-                logger.info("Walking onboarding questions...")
-                for question_screen in ("q1", "q2", "q3"):
-                    next_button = f'[data-screen="{question_screen}"] .js-next'
-                    page.wait_for_selector(next_button, state="visible", timeout=5000)
-                    page.click(next_button)
-
-                logger.info("Questions done, waiting for browser redirect...")
+                logger.info("Creation done, waiting for browser redirect...")
 
                 # Wait for the redirect
                 page.wait_for_url(re.compile(r"/agents/"), timeout=10000)
@@ -152,5 +141,5 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
             finally:
                 browser.close()
     finally:
-        server.should_exit = True
+        server.shutdown()
         thread.join(timeout=5)

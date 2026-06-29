@@ -7,6 +7,7 @@ import m from "mithril";
 import {
   DockviewComponent,
   themeLight,
+  type DockviewGroupPanel,
   type IContentRenderer,
   type IHeaderActionsRenderer,
   type SerializedDockview,
@@ -18,6 +19,7 @@ import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
+import { reloadInterface } from "../reload";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
   addAgentsUpdatedListener,
@@ -87,6 +89,14 @@ interface PanelParams {
 // Modal state
 let showNewChatModal = false;
 let showNewAgentModal = false;
+
+// The dockview group whose header "+" button opened the New chat / New agent
+// modal. Captured at click time because those modals create their chat panel
+// asynchronously (after the user confirms), by which point the active group
+// may have changed. Consumed in the modal's onCreated callback so the new
+// chat lands in the split the "+" was clicked in, then cleared. Null when the
+// flow was started from the empty-state overlay (no host group).
+let newTabTargetGroup: DockviewGroupPanel | null = null;
 
 // Destroy dialog state
 let showDestroyDialog = false;
@@ -301,7 +311,24 @@ function getOpenAppNames(): Set<string> {
   return names;
 }
 
-function buildDropdownItems(): Array<{ label: string; action: () => void; dividerAfter?: boolean }> {
+/** Placement options that tab a newly-added panel into ``targetGroup`` (the
+ *  dockview group whose header "+" button was clicked) instead of letting
+ *  dockview fall back to the currently-active group. Returns an empty object
+ *  -- i.e. default placement -- when no target is given (the empty-state
+ *  overlay has no host group) or the target group has since been disposed
+ *  (e.g. it was closed while a New chat / New agent modal was open). */
+function placementForGroup(
+  targetGroup: DockviewGroupPanel | null | undefined,
+): { position: { referenceGroup: DockviewGroupPanel } } | Record<string, never> {
+  if (targetGroup && dockview?.groups.some((g) => g.id === targetGroup.id)) {
+    return { position: { referenceGroup: targetGroup } };
+  }
+  return {};
+}
+
+function buildDropdownItems(
+  targetGroup?: DockviewGroupPanel,
+): Array<{ label: string; action: () => void; dividerAfter?: boolean }> {
   const items: Array<{ label: string; action: () => void; dividerAfter?: boolean }> = [];
   const openChatIds = getOpenChatAgentIds();
   const openAppNames = getOpenAppNames();
@@ -318,7 +345,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
       const proxyUrl = getServiceUrl(app.name);
       items.push({
         label: app.name,
-        action: () => openIframeTab(proxyUrl, app.name, "iframe", app.name),
+        action: () => openIframeTab(proxyUrl, app.name, "iframe", app.name, targetGroup),
       });
     }
   }
@@ -329,7 +356,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
     if (!openChatIds.has(agent.id)) {
       items.push({
         label: agent.name,
-        action: () => addChatPanel(agent.id, agent.name),
+        action: () => addChatPanel(agent.id, agent.name, targetGroup),
       });
     }
   }
@@ -340,7 +367,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
     if (!openChatIds.has(proto.agent_id)) {
       items.push({
         label: `${proto.name} (creating...)`,
-        action: () => addChatPanel(proto.agent_id, proto.name),
+        action: () => addChatPanel(proto.agent_id, proto.name, targetGroup),
       });
     }
   }
@@ -355,6 +382,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   items.push({
     label: "New chat",
     action: () => {
+      newTabTargetGroup = targetGroup ?? null;
       showNewChatModal = true;
       m.redraw();
     },
@@ -363,17 +391,18 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   // Terminal -- always primary agent's work_dir
   items.push({
     label: "New terminal",
-    action: () => openIframeTab(buildTerminalUrl(), "terminal"),
+    action: () => openIframeTab(buildTerminalUrl(), "terminal", "iframe", undefined, targetGroup),
   });
 
   items.push({
     label: "New URL",
-    action: () => showCustomUrlDialog(),
+    action: () => showCustomUrlDialog(targetGroup),
   });
 
   items.push({
     label: "New agent",
     action: () => {
+      newTabTargetGroup = targetGroup ?? null;
       showNewAgentModal = true;
       m.redraw();
     },
@@ -382,7 +411,7 @@ function buildDropdownItems(): Array<{ label: string; action: () => void; divide
   return items;
 }
 
-function createAddTabButton(): IHeaderActionsRenderer {
+function createAddTabButton(group: DockviewGroupPanel): IHeaderActionsRenderer {
   const element = document.createElement("div");
   element.className = "dockview-add-tab-wrapper";
 
@@ -405,7 +434,7 @@ function createAddTabButton(): IHeaderActionsRenderer {
       dropdown.style.display = "none";
     } else {
       dropdown.innerHTML = "";
-      const items = buildDropdownItems();
+      const items = buildDropdownItems(group);
       for (const item of items) {
         const menuItem = document.createElement("div");
         menuItem.className = "dockview-add-tab-dropdown-item";
@@ -445,7 +474,11 @@ function createAddTabButton(): IHeaderActionsRenderer {
   };
 }
 
-function focusOrCreateChatPanel(chatAgentId: string, chatAgentName: string): void {
+function focusOrCreateChatPanel(
+  chatAgentId: string,
+  chatAgentName: string,
+  targetGroup?: DockviewGroupPanel | null,
+): void {
   if (!dockview) return;
   const panelId = `chat-${chatAgentId}`;
   const existingPanel = dockview.panels.find((p) => p.id === panelId);
@@ -455,10 +488,10 @@ function focusOrCreateChatPanel(chatAgentId: string, chatAgentName: string): voi
     }
     return;
   }
-  addChatPanel(chatAgentId, chatAgentName);
+  addChatPanel(chatAgentId, chatAgentName, targetGroup);
 }
 
-function addChatPanel(chatAgentId: string, chatAgentName: string): void {
+function addChatPanel(chatAgentId: string, chatAgentName: string, targetGroup?: DockviewGroupPanel | null): void {
   if (!dockview) return;
   const panelId = `chat-${chatAgentId}`;
   const params: PanelParams = { panelType: "chat", agentId: chatAgentId, chatAgentId };
@@ -469,6 +502,7 @@ function addChatPanel(chatAgentId: string, chatAgentName: string): void {
     title: chatAgentName,
     params,
     renderer: "always",
+    ...placementForGroup(targetGroup),
   });
 }
 
@@ -500,7 +534,13 @@ function openInitialChatTab(): boolean {
 let awaitingInitialChat = false;
 let agentsUpdatedListener: AgentsUpdatedListener | null = null;
 
-function openIframeTab(url: string, title: string, panelType: PanelType = "iframe", serviceName?: string): void {
+function openIframeTab(
+  url: string,
+  title: string,
+  panelType: PanelType = "iframe",
+  serviceName?: string,
+  targetGroup?: DockviewGroupPanel | null,
+): void {
   if (!dockview) return;
   const primaryId = getPrimaryAgentId();
   const panelId = `${panelType}-${primaryId}-${Date.now()}`;
@@ -511,6 +551,7 @@ function openIframeTab(url: string, title: string, panelType: PanelType = "ifram
     component: "iframe",
     title,
     params,
+    ...placementForGroup(targetGroup),
   });
 }
 
@@ -907,7 +948,7 @@ export function openSubagentTab(agentId: string, subagentSessionId: string, desc
   });
 }
 
-function showCustomUrlDialog(): void {
+function showCustomUrlDialog(targetGroup?: DockviewGroupPanel | null): void {
   const overlay = document.createElement("div");
   overlay.className = "custom-url-dialog-overlay";
 
@@ -950,7 +991,7 @@ function showCustomUrlDialog(): void {
       }
     }
     close();
-    openIframeTab(url, title);
+    openIframeTab(url, title, "iframe", undefined, targetGroup);
   }
 
   dialog.querySelector(".custom-url-dialog-cancel")!.addEventListener("click", close);
@@ -1157,6 +1198,9 @@ async function handleLayoutOp(event: LayoutOpEvent): Promise<void> {
       return;
     case "refresh":
       await handleRefresh(event.args, requesterAgentId);
+      return;
+    case "reload_system_interface":
+      reloadInterface();
       return;
   }
 }
@@ -1715,8 +1759,8 @@ function initializeDockview(parentElement: HTMLElement): void {
     createTabComponent(options) {
       return createCustomTab(options);
     },
-    createLeftHeaderActionComponent() {
-      return createAddTabButton();
+    createLeftHeaderActionComponent(group) {
+      return createAddTabButton(group);
     },
   });
 
@@ -1874,10 +1918,13 @@ export const DockviewWorkspace: m.Component = {
               mode: "chat",
               onCreated(newAgentId: string, newAgentName: string) {
                 showNewChatModal = false;
-                focusOrCreateChatPanel(newAgentId, newAgentName);
+                const targetGroup = newTabTargetGroup;
+                newTabTargetGroup = null;
+                focusOrCreateChatPanel(newAgentId, newAgentName, targetGroup);
               },
               onCancel() {
                 showNewChatModal = false;
+                newTabTargetGroup = null;
               },
             })
           : null,
@@ -1887,10 +1934,13 @@ export const DockviewWorkspace: m.Component = {
               mode: "worktree",
               onCreated(newAgentId: string, newAgentName: string) {
                 showNewAgentModal = false;
-                focusOrCreateChatPanel(newAgentId, newAgentName);
+                const targetGroup = newTabTargetGroup;
+                newTabTargetGroup = null;
+                focusOrCreateChatPanel(newAgentId, newAgentName, targetGroup);
               },
               onCancel() {
                 showNewAgentModal = false;
+                newTabTargetGroup = null;
               },
             })
           : null,

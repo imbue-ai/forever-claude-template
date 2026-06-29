@@ -1,6 +1,6 @@
 """Integration tests for the permission routes wired into ``app.py``.
 
-Drives the FastAPI app via ``TestClient`` against a real catalog and a
+Drives the Flask app via the test client against a real catalog and a
 fake ``LatchkeyPermissionGrantHandler`` so the routes are exercised
 end-to-end without spawning any subprocesses.
 """
@@ -9,17 +9,19 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi.responses import Response
-from fastapi.testclient import TestClient
+from flask import Request
+from flask import Response
+from flask.testing import FlaskClient
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.app import _build_requests_payload
+from imbue.minds.desktop_client.app import _displayable_pending_requests
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -31,8 +33,6 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -43,9 +43,14 @@ from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
+from imbue.minds.desktop_client.responses import make_response
+from imbue.minds.desktop_client.state import get_state
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
@@ -68,8 +73,8 @@ def _make_other_request_event(agent_id: str) -> RequestEvent:
 class _RecordingHandler(LatchkeyPermissionGrantHandler):
     """Subclass of ``LatchkeyPermissionGrantHandler`` that records calls instead of running them.
 
-    Inheriting from the real handler keeps the ``app.state`` typing happy
-    without polluting production code with a Protocol.
+    Inheriting from the real handler keeps the ``request_event_handlers``
+    typing happy without polluting production code with a Protocol.
     """
 
     grant_outcome: GrantOutcome = Field(default=GrantOutcome.GRANTED)
@@ -96,9 +101,9 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
                 "granted_permissions": tuple(granted_permissions),
             }
         )
-        # NEEDS_MANUAL_CREDENTIALS keeps the request pending and writes
-        # no response event; the other outcomes resolve it.
-        if self.grant_outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS:
+        # NEEDS_MANUAL_CREDENTIALS and FAILED keep the request pending and
+        # write no response event; the other outcomes resolve it.
+        if self.grant_outcome in (GrantOutcome.NEEDS_MANUAL_CREDENTIALS, GrantOutcome.FAILED):
             return GrantResult(
                 outcome=self.grant_outcome,
                 message=self.grant_message,
@@ -145,11 +150,9 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         return self.deny_message, response_event
 
 
-def _get_app_request_inbox(client: TestClient) -> RequestInbox:
-    """Pull the live request inbox out of the FastAPI app behind a TestClient."""
-    app = client.app
-    assert isinstance(app, FastAPI)
-    inbox = app.state.request_inbox
+def _get_app_request_inbox(client: FlaskClient) -> RequestInbox:
+    """Pull the live request inbox out of the Flask app behind a test client."""
+    inbox = get_state(client.application).request_inbox
     assert isinstance(inbox, RequestInbox)
     return inbox
 
@@ -185,12 +188,16 @@ def _make_recording_handler(
 ) -> _RecordingHandler:
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     gateway_client = build_fake_gateway_client()
-    gateway_client.available_services_payload = dict(_TEST_SERVICES_CATALOG_PAYLOAD)
     return _RecordingHandler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
-        services_catalog=ServicesCatalog(gateway_client=gateway_client),
-        mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
+        services_catalog=ServicesCatalog.from_catalog_payload(_TEST_SERVICES_CATALOG_PAYLOAD),
+        mngr_message_sender=MngrMessageSender(
+            mngr_caller=RecordingMngrCaller(),
+            # ``_RecordingHandler`` overrides grant/deny, so the sender is never
+            # used; an un-entered group satisfies the required field.
+            concurrency_group=ConcurrencyGroup(name="permission-routes-test-unused"),
+        ),
         gateway_client=gateway_client,
         grant_outcome=grant_outcome,
         grant_message=grant_message,
@@ -231,7 +238,7 @@ def _build_authenticated_client(
     inbox: RequestInbox,
     agent_id: AgentId | None = None,
     host_id: HostId | None = None,
-) -> TestClient:
+) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
     backend_resolver: BackendResolverInterface
@@ -253,9 +260,9 @@ def _build_authenticated_client(
         request_inbox=inbox,
         request_event_handlers=(handler,),
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
     return client
 
 
@@ -276,7 +283,7 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.get(f"/requests/{request.event_id}")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -300,16 +307,14 @@ def test_get_permission_request_page_pre_checks_agent_requested_permissions(tmp_
     assert "disabled" in body
 
 
-def test_get_permission_request_page_renders_as_modal(tmp_path: Path) -> None:
-    """The request page is rendered as a dismissable modal overlay.
+def test_get_permission_request_page_labels_wildcard_permission_as_all(tmp_path: Path) -> None:
+    """The catch-all ``any`` permission is shown to users as ``all``.
 
-    The desktop client hosts it in a transparent full-window overlay view
-    stacked over the workspace, so the page provides a dim backdrop, a
-    centered dialog card, and a close affordance. Dismissal (close button,
-    backdrop click, Escape, or a completed grant/deny) must prefer the
-    Electron modal host (``window.minds.closeModal``) so the workspace view
-    is left untouched, falling back to navigating home only when no modal
-    host is present (page opened directly in a browser).
+    The underlying checkbox value stays ``any`` (Detent's wildcard that
+    is actually stored / submitted), but the user-facing label reads
+    ``all`` for clarity. The wildcard checkbox is also tagged with
+    ``data-wildcard`` so the inbox shell can make it mutually exclusive
+    with the specific permissions.
     """
     agent_id = AgentId()
     request = create_latchkey_predefined_permission_request_event(
@@ -322,31 +327,130 @@ def test_get_permission_request_page_renders_as_modal(tmp_path: Path) -> None:
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.get(f"/requests/{request.event_id}")
+    response = client.get(f"/inbox/detail/{request.event_id}")
+
+    assert response.status_code == 200
+    body = response.text
+    # The checkbox keeps the wildcard value and is tagged so the shell's
+    # exclusivity JS can find it.
+    any_idx = body.find('value="any"')
+    assert any_idx != -1
+    any_tag_start = body.rfind("<input", 0, any_idx)
+    any_tag_end = body.find(">", any_idx)
+    assert 'data-wildcard="true"' in body[any_tag_start:any_tag_end]
+    # The wildcard is labelled ``all`` (in a <code> element), and never
+    # surfaced to the user as the raw ``any`` value.
+    assert ">all</code>" in body
+    assert ">any</code>" not in body
+
+
+def test_inbox_page_renders_as_modal(tmp_path: Path) -> None:
+    """The inbox page renders as a dismissable modal overlay.
+
+    The desktop client hosts it in a transparent full-window overlay view
+    stacked over the workspace, so the page provides a dim backdrop, a
+    centered dialog card, and a close affordance. Dismissal (close button,
+    backdrop click, Escape) prefers the Electron modal host
+    (``window.minds.closeModal``) so the workspace view is left untouched,
+    falling back to navigating home only when no modal host is present
+    (page opened directly in a browser). The chrome lives on the inbox
+    page, not on per-handler detail fragments.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.get("/inbox")
 
     assert response.status_code == 200
     body = response.text
     # Modal scaffolding: a dim backdrop, a dialog card, and a close button.
-    assert 'id="permissions-backdrop"' in body
-    assert 'id="permissions-dialog"' in body
-    assert 'id="permissions-close-btn"' in body
+    assert 'id="inbox-backdrop"' in body
+    assert 'id="inbox-dialog"' in body
+    assert 'id="inbox-close-btn"' in body
     # The transparent body lets the overlay reveal the workspace behind it.
     assert "bg-transparent" in body
     # Dismissal prefers the Electron modal host over a home navigation.
     assert "window.minds.closeModal" in body
-    closemodal_idx = body.find("window.minds.closeModal")
-    href_idx = body.find('window.location.href = "/"')
-    assert closemodal_idx != -1 and href_idx != -1
-    assert closemodal_idx < href_idx, "closeModal must be preferred over the home-nav fallback"
     # Backdrop click and Escape are wired to the same dismissal helper.
     assert "onBackdropClick" in body
     assert 'e.key === "Escape"' in body
-    # Overflow scrolls inside the dialog card (capped at the viewport height
-    # with an inner scroll region), not down the full width of the app.
-    dialog_idx = body.find('id="permissions-dialog"')
-    dialog_tag_end = body.find(">", dialog_idx)
-    assert "max-h-full" in body[dialog_idx:dialog_tag_end]
-    assert "overflow-y-auto" in body
+
+
+def test_inbox_page_hides_requests_whose_host_cannot_be_resolved(tmp_path: Path) -> None:
+    """A pending request from an agent the resolver no longer knows is hidden.
+
+    When a workspace is stopped, its agent drops out of discovery, so the
+    backend resolver can no longer map the agent to a host/workspace. The
+    inbox would otherwise fall back to rendering the raw agent id (a
+    meaningless 16-char hex string). Such requests are filtered out of the
+    inbox list -- only the request whose agent is still resolvable shows.
+    """
+    known_agent = AgentId()
+    stopped_agent = AgentId()
+    visible_request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(known_agent),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="visible",
+    )
+    hidden_request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(stopped_agent),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="hidden",
+    )
+    inbox = RequestInbox().add_request(visible_request).add_request(hidden_request)
+    handler = _make_recording_handler(tmp_path)
+    # The resolver knows only ``known_agent``; ``stopped_agent`` resolves to None.
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=known_agent)
+
+    response = client.get("/inbox")
+
+    assert response.status_code == 200
+    body = response.text
+    assert str(visible_request.event_id) in body
+    assert str(hidden_request.event_id) not in body
+
+
+def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
+    """The SSE badge payload counts only requests whose host is resolvable.
+
+    The badge count and the rendered cards are driven off the same filter,
+    so a request from a since-stopped workspace neither inflates the badge
+    nor appears in the panel.
+    """
+    known_agent = AgentId()
+    stopped_agent = AgentId()
+    visible_request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(known_agent),
+        scope="slack-api",
+        rationale="visible",
+    )
+    hidden_request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(stopped_agent),
+        scope="slack-api",
+        rationale="hidden",
+    )
+    inbox = RequestInbox().add_request(visible_request).add_request(hidden_request)
+    backend_resolver = _HostKnownStaticResolver(
+        url_by_agent_and_service={},
+        fixed_host_id=HostId(),
+        known_agent_ids=(known_agent,),
+    )
+
+    displayable = _displayable_pending_requests(inbox, backend_resolver)
+    payload = _build_requests_payload(inbox, backend_resolver)
+
+    assert [str(req.event_id) for req in displayable] == [str(visible_request.event_id)]
+    assert payload == {"count": 1, "request_ids": [str(visible_request.event_id)]}
 
 
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:
@@ -362,7 +466,7 @@ def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: P
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.get(f"/requests/{request.event_id}")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -391,7 +495,7 @@ def test_get_permission_request_page_renders_no_pre_checks_when_request_and_exis
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.get(f"/requests/{request.event_id}")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -428,7 +532,7 @@ def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) 
     )
 
     assert response.status_code == 200
-    assert response.json() == {"outcome": "GRANTED", "message": "granted"}
+    assert response.get_json() == {"outcome": "GRANTED", "message": "granted"}
     assert len(handler.grant_calls) == 1
     call = handler.grant_calls[0]
     assert call["scope"] == "slack-api"
@@ -462,7 +566,8 @@ def test_post_permission_grant_rejects_empty_permissions(tmp_path: Path) -> None
     assert final_inbox.get_pending_count() == 1
 
 
-def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_path: Path) -> None:
+def test_post_permission_grant_with_failed_signin_keeps_request_pending(tmp_path: Path) -> None:
+    """A failed sign-in is reported as FAILED and must not auto-deny the request."""
     agent_id = AgentId()
     request = create_latchkey_predefined_permission_request_event(
         agent_id=str(agent_id),
@@ -472,8 +577,8 @@ def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_pat
     inbox = RequestInbox().add_request(request)
     handler = _make_recording_handler(
         tmp_path,
-        grant_outcome=GrantOutcome.DENIED,
-        grant_message="Your sign-in flow did not finish. Reason: user cancelled.",
+        grant_outcome=GrantOutcome.FAILED,
+        grant_message="Sign-in to Slack did not complete. Reason: user cancelled.",
     )
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id)
 
@@ -483,11 +588,14 @@ def test_post_permission_grant_with_failed_signin_returns_denied_outcome(tmp_pat
     )
 
     assert response.status_code == 200
-    payload = response.json()
-    # No separate AUTH_FAILED status: a failed sign-in is reported as DENIED
-    # with a distinct message so the agent can tell the user what happened.
-    assert payload["outcome"] == "DENIED"
+    payload = response.get_json()
+    # FAILED is a distinct outcome from DENIED: the approval failed but the
+    # request is not resolved, so the agent's message carries the reason.
+    assert payload["outcome"] == "FAILED"
     assert "user cancelled" in payload["message"]
+    # The request must remain pending so the user can click Approve again.
+    final_inbox = _get_app_request_inbox(client)
+    assert final_inbox.get_pending_count() == 1
 
 
 def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp_path: Path) -> None:
@@ -514,7 +622,7 @@ def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp
     )
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response.get_json()
     assert payload["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
     assert payload["set_credentials_example"] == expected_example
     # The request must remain pending so the user can click Approve again
@@ -537,10 +645,89 @@ def test_post_permission_deny_calls_handler_and_resolves_inbox(tmp_path: Path) -
     response = client.post(f"/requests/{request.event_id}/deny")
 
     assert response.status_code == 200
-    assert response.json() == {"outcome": "DENIED"}
+    assert response.get_json() == {"outcome": "DENIED"}
     assert len(handler.deny_calls) == 1
     final_inbox = _get_app_request_inbox(client)
     assert final_inbox.get_pending_count() == 0
+
+
+def test_get_permission_request_page_shows_unavailable_after_resolution(tmp_path: Path) -> None:
+    """Re-opening a granted/denied request shows the "no longer available" page.
+
+    The granted request lingers in the append-only log, so the page handler
+    must detect the recorded response and render the friendly notice instead
+    of the (re-submittable) grant/deny form.
+    """
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    # Deny resolves the request without needing a discovered host.
+    deny = client.post(f"/requests/{request.event_id}/deny")
+    assert deny.status_code == 200
+
+    page = client.get(f"/inbox/detail/{request.event_id}")
+    assert page.status_code == 200
+    body = page.text
+    assert "no longer available" in body
+    # The actionable form must be gone so it cannot be submitted again.
+    assert 'id="permissions-approve-btn"' not in body
+    assert 'action="/requests/' not in body
+
+
+def test_post_permission_grant_after_resolution_returns_409(tmp_path: Path) -> None:
+    """A second grant on an already-resolved request is rejected, not re-applied."""
+    agent_id = AgentId()
+    host_id = HostId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
+
+    first = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+    assert first.status_code == 200
+    assert len(handler.grant_calls) == 1
+
+    second = client.post(
+        f"/requests/{request.event_id}/grant",
+        data={"permissions": ["slack-read-all"]},
+    )
+    assert second.status_code == 409
+    # The handler must not have been invoked a second time.
+    assert len(handler.grant_calls) == 1
+
+
+def test_post_permission_deny_after_resolution_returns_409(tmp_path: Path) -> None:
+    """A second deny on an already-resolved request is rejected, not re-applied."""
+    agent_id = AgentId()
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        rationale="reason",
+    )
+    inbox = RequestInbox().add_request(request)
+    handler = _make_recording_handler(tmp_path)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    assert client.post(f"/requests/{request.event_id}/deny").status_code == 200
+    assert len(handler.deny_calls) == 1
+
+    second = client.post(f"/requests/{request.event_id}/deny")
+    assert second.status_code == 409
+    assert len(handler.deny_calls) == 1
 
 
 def test_post_permission_grant_unknown_service_returns_400(tmp_path: Path) -> None:
@@ -585,7 +772,7 @@ def test_get_permission_request_page_pre_checks_existing_grants(tmp_path: Path) 
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
 
-    response = client.get(f"/requests/{request.event_id}")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -623,7 +810,7 @@ def test_get_permission_request_page_pre_checks_union_of_existing_and_requested(
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=agent_id, host_id=host_id)
 
-    response = client.get(f"/requests/{request.event_id}")
+    response = client.get(f"/inbox/detail/{request.event_id}")
 
     assert response.status_code == 200
     body = response.text
@@ -687,7 +874,7 @@ def test_unauthenticated_grant_post_returns_403(tmp_path: Path) -> None:
     handler = _make_recording_handler(tmp_path)
     client = _build_authenticated_client(tmp_path, handler, inbox)
     # Drop the cookie to simulate an unauthenticated request.
-    client.cookies.clear()
+    client.delete_cookie(SESSION_COOKIE_NAME)
 
     response = client.post(
         f"/requests/{request.event_id}/grant",
@@ -721,21 +908,21 @@ class _StubOtherHandler(RequestEventHandler):
     def display_name_for_event(self, req_event: RequestEvent) -> str:
         return ""
 
-    def render_request_page(
+    def render_request_detail_fragment(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
-    ) -> Response:
-        return Response(content="ok", status_code=200)
+    ) -> str:
+        return "ok"
 
-    async def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
+    def apply_grant_request(self, request: Request, req_event: RequestEvent) -> Response:
         self.grant_event_ids.append(str(req_event.event_id))
-        return Response(content="granted", status_code=200)
+        return make_response(content="granted", status_code=200)
 
-    async def apply_deny_request(self, request: Request, req_event: RequestEvent) -> Response:
+    def apply_deny_request(self, request: Request, req_event: RequestEvent) -> Response:
         self.deny_event_ids.append(str(req_event.event_id))
-        return Response(content="denied", status_code=200)
+        return make_response(content="denied", status_code=200)
 
 
 def _build_authenticated_client_with_handlers(
@@ -744,7 +931,7 @@ def _build_authenticated_client_with_handlers(
     inbox: RequestInbox,
     known_agent_ids: tuple[AgentId, ...] = (),
     host_id: HostId | None = None,
-) -> TestClient:
+) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
     backend_resolver: BackendResolverInterface
@@ -765,9 +952,9 @@ def _build_authenticated_client_with_handlers(
         request_inbox=inbox,
         request_event_handlers=handlers,
     )
-    client = TestClient(app, base_url="http://localhost")
+    client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
     return client
 
 

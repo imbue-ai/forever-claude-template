@@ -6,6 +6,7 @@ import threading
 import tomllib
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger as _loguru_logger
 from pydantic import Field
@@ -28,9 +29,12 @@ from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
@@ -39,8 +43,11 @@ from imbue.system_interface.activity_state import has_unmatched_tool_use
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
+from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
+from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
+from imbue.system_interface.agent_discovery import send_message
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
@@ -132,6 +139,28 @@ def _build_observe_command_argv(mngr_binary: str) -> list[str]:
         "observe",
         "--discovery-only",
     ]
+
+
+# AgentMatch requires a host_name, but the send path never reads it -- it groups
+# and resolves hosts by host_id + provider_name (see mngr's group_agents_by_host /
+# send_message_to_agents). So we don't track real host names: the cached match
+# carries this placeholder, which only ever flows back into send_message_to_agents.
+_UNUSED_HOST_NAME: Final[HostName] = HostName("unknown")
+
+
+def _build_agent_match(agent: DiscoveredAgent) -> AgentMatch:
+    """Assemble the messaging-location AgentMatch for a discovered agent.
+
+    Addressed by agent_id + host_id + provider_name; host_name is a placeholder
+    (see `_UNUSED_HOST_NAME`).
+    """
+    return AgentMatch(
+        agent_id=agent.agent_id,
+        agent_name=agent.agent_name,
+        host_id=agent.host_id,
+        host_name=_UNUSED_HOST_NAME,
+        provider_name=agent.provider_name,
+    )
 
 
 def _safe_log_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
@@ -249,6 +278,12 @@ class AgentManager:
     _broadcaster: WebSocketBroadcaster
     _lock: threading.Lock
     _agents: dict[str, AgentStateItem]
+    # agent id -> its discovered location (host/provider), maintained from the
+    # observe snapshot/discovered/destroy events so messaging can resolve an
+    # agent's location without a fresh find_all_agents discovery. Best-effort:
+    # paths that mutate _agents without a discovery event (creation/refresh) skip
+    # it, and a miss in get_agent_matches_by_id just falls back to discovery.
+    _match_by_agent_id: dict[str, AgentMatch]
     _applications: list[ApplicationEntry]
     _app_observers: dict[str, Any]
     _proto_agents: dict[str, dict[str, Any]]
@@ -278,6 +313,7 @@ class AgentManager:
         manager._broadcaster = broadcaster
         manager._lock = threading.Lock()
         manager._agents = {}
+        manager._match_by_agent_id = {}
         manager._applications = []
         manager._app_observers = {}
         manager._proto_agents = {}
@@ -348,6 +384,43 @@ class AgentManager:
         with self._lock:
             return self._agents.get(agent_id)
 
+    def get_agent_info_by_id(self, agent_id: str) -> AgentInfo | None:
+        """Resolve an agent id to its web-UI :class:`AgentInfo` (with resolved dirs), or None."""
+        agent_state = self.get_agent_by_id(agent_id)
+        if agent_state is None:
+            return None
+        agent_state_dir = self._get_agent_state_dir(agent_state.id)
+        return AgentInfo(
+            id=agent_state.id,
+            name=agent_state.name,
+            state=agent_state.state,
+            agent_state_dir=agent_state_dir,
+            claude_config_dir=read_claude_config_dir_from_env_file(agent_state_dir),
+            labels=agent_state.labels,
+            work_dir=agent_state.work_dir,
+        )
+
+    def get_agent_matches_by_id(self, agent_id: str) -> list[AgentMatch]:
+        """Return the discovered location of the agent with this id (0- or 1-element).
+
+        Sourced from the live observe stream, so a caller can message the agent
+        without running a fresh discovery. Empty when the id is not (yet) in the
+        latest snapshot -- the caller falls back to discovery in that case.
+        """
+        with self._lock:
+            match = self._match_by_agent_id.get(agent_id)
+            return [match] if match is not None else []
+
+    def send_message_to_agent(self, agent_id: AgentId, message: str) -> bool:
+        """Send a message to the agent with ``agent_id``, using the live location cache.
+
+        The single entry point for messaging an agent: it reads this manager's
+        event-fed location for the id and hands it to `send_message`, so the message
+        skips a fresh mngr discovery whenever the location is already known. Returns
+        True on success.
+        """
+        return send_message(agent_id, message, self.get_agent_matches_by_id(str(agent_id)))
+
     def remove_agent(self, agent_id: str) -> None:
         """Remove an agent from the tracked state and broadcast the update.
 
@@ -356,6 +429,7 @@ class AgentManager:
         """
         with self._lock:
             self._agents.pop(agent_id, None)
+            self._match_by_agent_id.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
         self._stop_activity_tracking(agent_id)
@@ -715,10 +789,11 @@ class AgentManager:
             # same project-local .mngr/settings.toml that mngr create uses --
             # otherwise observe picks up ~/.mngr config, which inside a Docker
             # agent typically has providers enabled (e.g. modal) that are not
-            # authenticated. Provider errors make `list_agents` error out,
-            # which in turn prevents periodic DISCOVERY_FULL snapshots from
-            # being written, so the system_interface's agent list drifts out
-            # of sync with reality whenever an individual event is missed.
+            # authenticated. `mngr observe` itself now tolerates unauthenticated
+            # providers (its discovery runs under ErrorBehavior.CONTINUE, so a
+            # failing provider is surfaced per-provider and still emits a
+            # DISCOVERY_FULL snapshot); scoping to the project providers via cwd
+            # is kept only to avoid that noise and the wasted credential probes.
             # `is_checked_by_group=False` because we terminate this long-running
             # subprocess explicitly via `.terminate()` in `stop()`; that SIGTERM
             # produces a non-zero exit code that should not surface as a
@@ -820,9 +895,12 @@ class AgentManager:
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
             )
 
+        new_matches = {str(agent.agent_id): _build_agent_match(agent) for agent in event.agents}
+
         with self._lock:
             old_ids = set(self._agents.keys())
             self._agents = new_agents
+            self._match_by_agent_id = new_matches
             new_ids = set(new_agents.keys())
 
         for agent_id in new_ids:
@@ -851,6 +929,10 @@ class AgentManager:
 
         with self._lock:
             self._agents[agent_id] = agent_state
+            # Record the location now (host_id + provider_name from the delta) so the
+            # first message to a just-created agent skips discovery instead of waiting
+            # for the next full snapshot.
+            self._match_by_agent_id[agent_id] = _build_agent_match(agent)
 
         if agent_id == self._own_agent_id and agent_state.work_dir:
             self._start_app_watcher(agent_id, Path(agent_state.work_dir))
@@ -864,6 +946,7 @@ class AgentManager:
 
         with self._lock:
             self._agents.pop(agent_id, None)
+            self._match_by_agent_id.pop(agent_id, None)
 
         self._stop_app_watcher(agent_id)
         self._stop_activity_tracking(agent_id)
@@ -875,6 +958,7 @@ class AgentManager:
             aid = str(agent_id)
             with self._lock:
                 self._agents.pop(aid, None)
+                self._match_by_agent_id.pop(aid, None)
             self._stop_app_watcher(aid)
             self._stop_activity_tracking(aid)
 
@@ -1050,9 +1134,11 @@ class AgentManager:
             self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
             self._last_event_type_by_agent[agent_id] = new_last_type
             # Refreshed alongside the type so the stale-tail check sees the
-            # current tail's time. Kept out of the short-circuit above so a new
-            # event that leaves pending/type unchanged does not force a recompute
-            # (and a per-event marker stat) on every streamed line.
+            # current tail's time. This sits under the same short-circuit above:
+            # a new event that leaves pending/type unchanged returns early and
+            # skips both this refresh and the recompute (and its per-event marker
+            # stat), so streamed lines that don't change the derived signals stay
+            # cheap.
             self._last_event_timestamp_by_agent[agent_id] = new_last_timestamp
 
         self._recompute_activity_state(agent_id, broadcast_on_change=True)

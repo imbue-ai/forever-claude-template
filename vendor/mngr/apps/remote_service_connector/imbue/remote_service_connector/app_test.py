@@ -1689,13 +1689,46 @@ def test_lease_host_returns_available_host(monkeypatch: pytest.MonkeyPatch) -> N
     assert body["agent_id"] == "agent-111"
     assert body["host_name"] == "my-workspace"
     assert body["attributes"] == {"version": "v0.1.0"}
-    # Verify SSH key was injected on both VPS and container
+    # The lease returns both pinned sshd host keys so the client can verify the
+    # host strictly instead of trust-on-first-use.
+    assert body["outer_host_public_key"]
+    assert body["container_host_public_key"]
+    # Verify SSH key was injected on both VPS and container, each pinning the
+    # corresponding recorded host key (the 6th element of the recorded call).
     assert len(backend.append_key_calls) == 2
+    injected_ports = {call[1]: call[5] for call in backend.append_key_calls}
+    assert injected_ports[22] == body["outer_host_public_key"]
+    assert injected_ports[2222] == body["container_host_public_key"]
     # Verify host was marked as leased and the user-supplied host_name was
     # written to the row.
     assert backend.pool_rows[0].status == "leased"
     assert backend.pool_rows[0].leased_to_user == _ADMIN_STUB_USERNAME
     assert backend.pool_rows[0].host_name == "my-workspace"
+
+
+def test_lease_host_fails_closed_when_host_keys_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pool row with no pinned host keys is not leasable (no trust-on-first-use)."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        outer_host_public_key=None,
+        container_host_public_key=None,
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 503
+    assert "host-key backfill" in resp.json()["detail"]
+    # The row must NOT have been leased, and no SSH key injection was attempted.
+    assert backend.pool_rows[0].status == "available"
+    assert backend.append_key_calls == []
 
 
 def test_lease_host_returns_503_when_pool_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1731,6 +1764,50 @@ def test_lease_host_returns_503_when_version_mismatch(monkeypatch: pytest.Monkey
     assert "No pre-created agents" in resp.json()["detail"]
     # Verify the host was not leased
     assert backend.pool_rows[0].status == "available"
+
+
+def test_lease_host_hard_region_filters_out_other_regions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hard ``region`` only leases a host in that datacenter; otherwise 503."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        region="US-WEST-OR",
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+            "region": "US-EAST-VA",
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 503
+    assert backend.pool_rows[0].status == "available"
+
+
+def test_lease_host_hard_region_leases_matching_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hard ``region`` leases a host whose region matches."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        region="US-EAST-VA",
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+            "region": "US-EAST-VA",
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+    assert backend.pool_rows[0].status == "leased"
 
 
 def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2549,3 +2626,20 @@ def test_paid_lists_migration_declares_both_tables() -> None:
     assert "create table paid_emails" in migration_sql
     for column in ("is_paid", "created_at", "updated_at"):
         assert column in migration_sql, f"paid-lists migration is missing column {column!r}"
+
+
+def test_slice_name_env_owner_parses_stamped_instance_and_disk_names() -> None:
+    host_hex = "0123456789abcdef0123456789abcdef"
+    assert app_mod.slice_name_env_owner(f"mngr-slice-dev-josh-foo-{host_hex}") == "dev-josh-foo"
+    # The env is recoverable from the data-disk name too (the -data suffix is stripped).
+    assert app_mod.slice_name_env_owner(f"mngr-slice-dev-josh-foo-{host_hex}-data") == "dev-josh-foo"
+
+
+def test_slice_name_env_owner_returns_none_for_legacy_and_non_slice_names() -> None:
+    host_hex = "0123456789abcdef0123456789abcdef"
+    # Legacy un-stamped slice names have no env owner (must be left untouched).
+    assert app_mod.slice_name_env_owner(f"mngr-slice-{host_hex}") is None
+    assert app_mod.slice_name_env_owner(f"mngr-slice-{host_hex}-data") is None
+    # Non-slice lima names are never attributed to an env.
+    assert app_mod.slice_name_env_owner("default") is None
+    assert app_mod.slice_name_env_owner("some-other-vm") is None

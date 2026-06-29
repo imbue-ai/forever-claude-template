@@ -5,12 +5,19 @@
 type = "claude"
 connect = false
 ensure_clean = false
-pass_env__extend = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
+pass_env__extend = ["REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
 host_env__extend = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
-    # might as well use the latest model if we actually do want to try fast mode, sure
+    # Fast mode is enabled for all agents (settings_overrides fastMode=true on
+    # agent_types.claude below); this gates the Opus fast-mode capability on.
     "CLAUDE_CODE_ENABLE_OPUS_4_7_FAST_MODE=1",
+    # Skip Claude Code's org-level fast-mode eligibility check. Agents sign in
+    # with a Claude Max subscription that supports fast mode, but the session
+    # resolves under an organization whose org check otherwise reports fast
+    # mode as "currently unavailable" -- so without this, /fast is refused in
+    # the container even though the same account gets fast mode on the laptop.
+    "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1",
     # Lock Claude Code to the version pinned in agent_types.claude.version and the
     # Dockerfile's CLAUDE_CODE_VERSION; disable the auto-updater + background
     # feedback pings so the installed binary cannot silently drift. Tracks the
@@ -67,7 +74,7 @@ include__extend = ["""has(labels.workspace)"""]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode,TodoWrite,TaskCreate,TaskList,TaskUpdate"""
-settings_overrides__extend = {model = "opus[1m]", fastMode = false}
+settings_overrides__extend = {model = "opus[1m]", fastMode = true}
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
@@ -77,7 +84,7 @@ version = "2.1.160"
 # (inside the services agent) and inherited via the host env file the
 # bootstrap writes. Disabled below on the "main" type, which still owns
 # the per-agent config dir that everyone else points at.
-use_env_config_dir = true
+isolate_local_config_dir = false
 
 # The "main" (services) agent type -- inherits everything from claude, then
 # disables every path that pulls user-local content into the workspace. The
@@ -92,13 +99,15 @@ sync_credentials_on_login = false
 # Keep this agent's per-agent CLAUDE_CONFIG_DIR (don't inherit the parent's
 # new shared-mode default). Every other agent in the workspace points at
 # *this* directory via the host env var the bootstrap writes.
-use_env_config_dir = false
-# Window 0 of the services agent must never actually run claude -- the
-# bootstrap+services live in other tmux windows, and the real chat agents
-# are spun up separately by the bootstrap. The trailing "&& claude" is
-# unreachable; it exists only so ClaudeAgent.assemble_command can still
-# splice --resume / --session-id onto a claude-shaped invocation without
-# producing a syntactically bogus command.
+isolate_local_config_dir = true
+# Window 0 of the services agent must never actually run claude -- the bootstrap
+# window (extra_window) runs supervisord, which owns every background service,
+# and the real chat agents are spun up separately by the bootstrap. Making
+# window 0 a live claude is unsafe: the user could close it, tearing down the
+# tmux session (and supervisord with it). The trailing "&& claude" is
+# unreachable; it exists only so ClaudeAgent.assemble_command can still splice
+# --resume / --session-id onto a claude-shaped invocation without producing a
+# syntactically bogus command.
 command = "sleep infinity && claude"
 
 # the "worker" agent type -- the default for delegated tasks
@@ -122,6 +131,16 @@ isolate_host_volumes = true
 # the default runtime where gVisor is unavailable (e.g. CI, Modal) with
 # MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
 docker_runtime = "runsc"
+# Mount /run as a tmpfs so supervisord can install its control socket. When runsc
+# is registered with --overlay2=none (required so the container rootfs -- and
+# mngr's SSH provisioning written to it -- survives a restart), /run lives on
+# gVisor's gofer-backed filesystem, which returns EOPNOTSUPP for os.link() of a
+# socket inode. supervisord installs its control socket via a hard link, so on a
+# gofer-backed /run it wedges ("Unlinking stale socket") and never starts
+# system_interface -- the workspace then sits on the "Loading workspace" loader
+# forever. A tmpfs /run makes the hard link work. Mirrors the tmpfs /run that the
+# aws-<region> provider start args and the ovh/vultr/imbue_cloud host setup apply.
+default_start_args = ["--tmpfs", "/run"]
 
 [providers.lima]
 # is_enabled=false (mirrors [providers.docker]) is load-bearing: the lima backend
@@ -172,24 +191,34 @@ docker_runtime = "runsc"
 # the template that is shared across all agent types
 [create_templates.main]
 type = "main"
-# `/welcome` is *not* set here anymore: the services agent's window 0 sleeps
-# forever (see `[agent_types.main] command`) and never reaches claude. The
-# bootstrap creates a separate chat agent on first boot and passes
-# `--message /welcome` to it instead.
-env__extend = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=0"]
-extra_window = [
-    "bootstrap='uv run bootstrap'",
-    "telegram='uv run telegram-bot'",
-    "terminal='bash scripts/run_ttyd.sh'",
-    "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'",
-    "git_auth_setup='git config --global --replace-all url.\"https://github.com/\".insteadOf \"git@github.com:\" && git config --global --add url.\"https://github.com/\".insteadOf \"ssh://git@github.com/\" && git config --global core.hooksPath /mngr/code/scripts/git_hooks && gh auth setup-git'"
-]
+# `/welcome` is still NOT set here: the services agent's window 0 sleeps forever
+# (see `[agent_types.main] command`) and never reaches claude. The bootstrap
+# creates a separate chat agent on first boot and passes `--message /welcome`
+# to it instead.
+#
+# bootstrap is the only extra_window now. It runs first-boot setup (git config,
+# runtime worktree, CLAUDE_CONFIG_DIR host-env write, backup config, initial
+# chat agent) and then launches supervisord, which runs every background
+# service (system_interface, web, cloudflared, app-watcher, runtime-backup,
+# host-backup, terminal, and the one-shot deferred-install -- see
+# supervisord.conf). The old git_auth_setup window is gone (the git config it
+# performed now runs inside bootstrap), and terminal is a supervisord service
+# rather than its own window.
+extra_window = ["bootstrap='uv run bootstrap'"]
 # Write a sane default tmux config on every minds host. tuple-typed
 # `extra_provision_command` stacks across templates (see
 # `apply_create_template` in vendor/mngr/.../common_opts.py), so the
 # mode-specific templates (docker/lima/...) keep their own commands.
+#
+# `mouse on` keeps wheel scroll and in-app mouse working in the browser
+# terminal. The clipboard lines make a plain mouse-drag copy reach the system
+# clipboard via OSC 52: `set-clipboard on` tells tmux to emit it,
+# `terminal-features ,*:clipboard` makes tmux believe the terminal accepts it,
+# and the copy-mode bindings copy-and-emit on drag-release. This relies on the
+# mngr_ttyd plugin serving an OSC 52-capable web client (the stock ttyd client
+# drops these escapes); see libs/mngr_ttyd in the mngr repo.
 extra_provision_command__extend = [
-    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' > "$HOME/.tmux.conf"''',
+    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' 'set -g set-clipboard on' 'set -as terminal-features ,*:clipboard' 'bind -T copy-mode MouseDragEnd1Pane send -X copy-pipe-and-cancel' 'bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-and-cancel' > "$HOME/.tmux.conf"''',
 ]
 
 # template for docker provider
@@ -213,7 +242,12 @@ build_arg__extend = ["--file=Dockerfile", "."]
 # tolerates a pre-existing cwd; runsc does not. Pointing the cwd at `/` (always
 # present) sidesteps it; nothing depends on the host container's default cwd
 # (the entrypoint just sleeps; agents set their own work_dir=/mngr/code).
-start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
+#
+# `--restart=unless-stopped` brings the container back after a docker daemon
+# restart or host reboot; the container entrypoint then self-heals sshd, so the
+# host is reachable again without a manual `mngr start`. The agent itself is
+# relaunched by the minds desktop client in this (debugging-oriented) mode.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
@@ -262,6 +296,12 @@ extra_provision_command__extend = [
     "bash /mngr/code/scripts/setup_system.sh",
     "bash /mngr/code/scripts/install_dependencies.sh",
     "bash /mngr/code/scripts/build_workspace.sh",
+    # Install a systemd unit that relaunches the system-services agent on VM
+    # boot, so the workspace recovers from a VM reboot even when the minds
+    # desktop app is not running. The agent runs directly in the VM here, so
+    # this runs `mngr start system-services` in the VM (mngr is installed by
+    # build_workspace.sh above).
+    "bash /mngr/code/scripts/minds_lima_autostart.sh",
 ]
 
 # template for vultr VPS provider (cloud mode)
@@ -286,35 +326,192 @@ idle_mode = "disabled"
 # `docker run` args go via start_arg (vps_docker forwards start_arg to the inner
 # `docker run`): `--workdir=/` (runsc aborts when the image WORKDIR /mngr/code,
 # inside the mounted /mngr volume, already exists as the process cwd) and
-# `--security-opt=no-new-privileges`.
-start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
+# `--security-opt=no-new-privileges`. `--restart=unless-stopped` brings the
+# agent container back after a VPS reboot; the entrypoint then self-heals sshd.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
 post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# Install the outer-VM boot unit so the agent recovers after a VPS reboot even
+# without the desktop app; same as the pool_host template..
+post_host_create_outer_command__extend = [
+    """
+set -eu
+cat > /usr/local/sbin/minds-outer-autostart.sh <<'BOOT'
+#!/bin/sh
+# On VM boot, start every mngr-managed agent container and relaunch the
+# system-services agent inside it (in its full host+agent env, via the shared
+# in-container start script). Containers are found by the fixed mngr label, so
+# this survives container rebuilds. `docker start` is a no-op if the container's
+# --restart policy already brought it back; `mngr start` is idempotent + flock-
+# serialized, so racing the desktop client is safe.
+set -u
+for cid in $(docker ps -aq --filter "label=com.imbue.mngr.host-id"); do
+    docker start "$cid" >/dev/null 2>&1 || true
+    docker exec --workdir / "$cid" bash -lc 'exec /mngr/code/scripts/minds_start_services_agent.sh' || true
+done
+BOOT
+chmod +x /usr/local/sbin/minds-outer-autostart.sh
+cat > /etc/systemd/system/minds-autostart.service <<'UNIT'
+[Unit]
+Description=Start the minds system-services agent on boot
+After=docker.service
+Requires=docker.service
 
-# template for OVH VPS provider (the imbue-cloud pool-bake's default)
-[create_templates.ovh]
-provider = "ovh"
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/minds-outer-autostart.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable minds-autostart.service
+""",
+]
+
+# Provider-agnostic FCT pool-host build recipe (the imbue-cloud pool bake stacks
+# this on top of `main` for BOTH OVH VPSes and lima slices -- they build the same
+# container image). No `provider` is declared: the create address selects it
+# (`@host.ovh` for OVH, `@host.imbue_cloud_slice` for a slice), mirroring the
+# `aws` / `imbue_cloud` templates. Declaring `provider = "ovh"` here used to make
+# slice bakes fail ("conflicting providers": the slice address vs this template).
+[create_templates.pool_host]
 target_path = "/mngr/code/"
-# No plan / datacenter baked in: the pool-bake CLI
-# (``mngr imbue_cloud admin pool create``) appends
-# ``-b --vps-datacenter=<region>`` per invocation so a single bake
-# session can spread hosts across regions. Plan defaults come from
-# ``OvhProviderConfig.default_plan`` (``vps-2025-model1`` -- 1 vCPU /
-# 8 GB RAM / 80 GB SSD at ~$7.99/mo as of 2025-05). Operators who want
-# a different plan override per-invocation with ``-b --vps-plan=<code>``.
+# No plan / datacenter / sizing baked in: each pool-bake path appends its own per
+# invocation -- the OVH backend appends ``-b --vps-datacenter=<region>`` (plan
+# defaults from ``OvhProviderConfig.default_plan``), the slice backend passes the
+# box address + per-slice carve sizing via ``-S providers.imbue_cloud_slice.*``.
 build_arg__extend = ["--file=Dockerfile", "."]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
 # gVisor runsc hardening for the agent container; see the vultr template comment.
-# runsc is installed+selected on the [providers.ovh] block above.
-start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/"]
+# runsc is installed+selected by the chosen provider (the OVH/vultr provider block,
+# or the slice VM's own provisioning).
+#
+# `--restart=unless-stopped` brings the agent container back after a pool-VM
+# reboot; the container entrypoint then self-heals sshd. The agent itself is
+# relaunched by the outer boot unit installed below.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
 post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# Install a systemd unit on the OUTER pool/slice VM that, on every VM boot,
+# starts the agent container and relaunches the system-services agent inside it
+# -- so the workspace recovers from a VM reboot even when the minds desktop app
+# is not running. Runs once on the VM (post_host_create_command / fct-seed has
+# already seeded /mngr/code in the container, so the installer can be copied out
+# of it). The unit persists across leases and container rebuilds (it finds the
+# container by mngr label, not by name).
+post_host_create_outer_command__extend = [
+    """
+set -eu
+cat > /usr/local/sbin/minds-outer-autostart.sh <<'BOOT'
+#!/bin/sh
+# On VM boot, start every mngr-managed agent container and relaunch the
+# system-services agent inside it (in its full host+agent env, via the shared
+# in-container start script). Containers are found by the fixed mngr label, so
+# this survives container rebuilds. `docker start` is a no-op if the container's
+# --restart policy already brought it back; `mngr start` is idempotent + flock-
+# serialized, so racing the desktop client is safe.
+set -u
+for cid in $(docker ps -aq --filter "label=com.imbue.mngr.host-id"); do
+    docker start "$cid" >/dev/null 2>&1 || true
+    docker exec --workdir / "$cid" bash -lc 'exec /mngr/code/scripts/minds_start_services_agent.sh' || true
+done
+BOOT
+chmod +x /usr/local/sbin/minds-outer-autostart.sh
+cat > /etc/systemd/system/minds-autostart.service <<'UNIT'
+[Unit]
+Description=Start the minds system-services agent on boot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/minds-outer-autostart.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable minds-autostart.service
+""",
+]
+
+# template for AWS EC2 VPS provider (aws mode)
+[create_templates.aws]
+target_path = "/mngr/code/"
+# No `provider` declared: minds addresses the create as
+# `system-services@<host>.aws-<region>`, which selects the region-specific
+# `[providers.aws-<region>]` block minds writes into its mngr profile settings
+# at startup (mirroring how the imbue_cloud template omits `provider` and lets
+# the `imbue_cloud_<slug>` address pick the instance). No region or instance
+# type is baked in: the region comes from the provider block's `default_region`
+# (and the matching `-b --aws-region=` minds passes), the instance type from
+# `AwsProviderConfig.default_instance_type`.
+build_arg__extend = ["--file=Dockerfile", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown. The
+# AWS provider's `auto_shutdown_seconds` max-lifetime cap is also left unset
+# (the minds-written provider blocks don't set it), so the EC2 instance stays
+# up for the whole user session rather than self-terminating after a timeout.
+idle_mode = "disabled"
+# gVisor runsc hardening for the agent container, matching the vultr/ovh
+# templates. runsc is installed+selected via `install_gvisor_runtime` /
+# `docker_runtime` on the minds-written `[providers.aws-<region>]` blocks; these
+# `docker run` args go via start_arg (vps_docker forwards start_arg to the inner
+# `docker run`): `--workdir=/` (runsc aborts when the image WORKDIR /mngr/code,
+# inside the mounted /mngr volume, already exists as the process cwd) and
+# `--security-opt=no-new-privileges`. `--restart=unless-stopped` brings the
+# agent container back after an EC2 reboot; the entrypoint then self-heals sshd.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
+# Same forwarding as the docker template; see comment there.
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# Install the outer-VM boot unit so the agent recovers after an EC2 reboot even
+# without the desktop app; same as the pool_host template..
+post_host_create_outer_command__extend = [
+    """
+set -eu
+cat > /usr/local/sbin/minds-outer-autostart.sh <<'BOOT'
+#!/bin/sh
+# On VM boot, start every mngr-managed agent container and relaunch the
+# system-services agent inside it (in its full host+agent env, via the shared
+# in-container start script). Containers are found by the fixed mngr label, so
+# this survives container rebuilds. `docker start` is a no-op if the container's
+# --restart policy already brought it back; `mngr start` is idempotent + flock-
+# serialized, so racing the desktop client is safe.
+set -u
+for cid in $(docker ps -aq --filter "label=com.imbue.mngr.host-id"); do
+    docker start "$cid" >/dev/null 2>&1 || true
+    docker exec --workdir / "$cid" bash -lc 'exec /mngr/code/scripts/minds_start_services_agent.sh' || true
+done
+BOOT
+chmod +x /usr/local/sbin/minds-outer-autostart.sh
+cat > /etc/systemd/system/minds-autostart.service <<'UNIT'
+[Unit]
+Description=Start the minds system-services agent on boot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/minds-outer-autostart.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable minds-autostart.service
+""",
+]
 
 # Template for imbue_cloud-leased pool hosts. minds invokes this as
 # `--template main --template imbue_cloud` (mirroring how the other modes
@@ -339,6 +536,11 @@ target_path = "/mngr/code/"
 # pre-baked image and ignores these (the imbue_cloud provider treats them as
 # pass-through and only the slow path consumes them). Mirrors the ovh template.
 build_arg__extend = ["--file=Dockerfile", "."]
+# `--restart=unless-stopped` on the inner agent container so a slow-path rebuild
+# (which recreates the container) comes back after a pool-VM reboot, matching the
+# baked container from the pool_host template. The fast (adopt) path reuses the
+# pre-baked container, which already carries this policy.
+start_arg__extend = ["--restart=unless-stopped"]
 # Forward the LiteLLM-minted ANTHROPIC creds + the minds-side MNGR_PREFIX
 # + an optional GH_TOKEN from minds' subprocess env onto the host's
 # ``/mngr/env``. minds writes these into the subprocess env it hands
@@ -357,10 +559,6 @@ post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 # Chat template: minimal agent for additional chat sessions in the same work directory
 [create_templates.chat]
 type = "claude"
-env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=0"]
-extra_window = [
-    "reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"
-]
 
 # Worktree template: agent in a new git worktree, no services by default --
 # creates its own as needed. Uses the plain `claude` type (not `main`), so
@@ -372,25 +570,27 @@ type = "claude"
 # Worker template: general purpose sub agent for doing tasks reliably (and ensuring that they are verified)
 [create_templates.worker]
 type = "worker"
-extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR'"]
+extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]
 # REVIEWER_CI_ENABLE=0: repos created from this template are isolated units --
 # the stop hook must never auto-create PRs or push to origin (the repo-level
 # .reviewer/settings.json likewise disables ci + stop_hook.fetch_and_merge).
-env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0"]
+env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
 agent_args = [
     "--dangerously-skip-permissions",
     "--append-system-prompt",
     "You were launched by another agent. List any questions at the end of your final response, along with the assumptions you made.",
 ]
 
-# Crystallize-worker template: sub-agent for the crystallize-task / heal-skill /
-# update-skill flows. Inherits from `worker`, adds:
-#  - MNGR_AGENT_ROLE=worker so the crystallization Stop hook skips in-worker.
-#  - A pre-provision step that installs the bundled worker sub-skills from
-#    each lifecycle skill's assets/worker/ directory into the worker's
-#    .agents/skills/ tree. The installer auto-discovers any parent skill
-#    under .agents/skills/ that has an assets/worker/ subdir.
-[create_templates.crystallize-worker]
+# Subskill-worker template: sub-agent for any flow that hands its worker the
+# generic harden worker -- the crystallize-artifact / update-artifact /
+# heal-artifact lifecycle (across skills, services, and the system interface).
+# Inherits from `worker`, adds:
+#  - MNGR_AGENT_ROLE=worker so the harden Stop hook skips in-worker.
+#  - A pre-provision step that installs the single generic worker sub-skill from
+#    .agents/shared/worker/ into the worker's .agents/skills/ tree as
+#    `harden-worker`. The worker reads the operation + artifact from its task
+#    file and composes the matching references.
+[create_templates.subskill-worker]
 type = "worker"
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]
 # REVIEWER_CI_ENABLE=0: same isolated-unit rationale as the worker template.

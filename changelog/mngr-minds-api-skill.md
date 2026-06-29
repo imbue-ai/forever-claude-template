@@ -1,0 +1,5 @@
+Add a `minds-api` skill that teaches the workspace agent how to act on *other* Minds workspaces through the latchkey `minds-api-proxy`.
+
+It documents the gateway addressing (`latchkey curl http://latchkey-self.invalid/minds-api-proxy/...`), points at `GET /api/schema` as the always-current source of routes and types, and walks through the core capabilities: listing/inspecting workspaces, creating a fresh one (with operation polling), SSHing into one (generate keypair -> `POST .../ssh` -> connect, including the local reverse-tunnel case), reading/exporting backups, and recover/lifecycle/destroy. The headline workflow strings these together to migrate content out of an old or broken workspace into a clean new one and then hand the cleanup to the new workspace's own agent via `mngr message`.
+
+Crucially it covers the latchkey permission flow for getting access to a *specific* workspace: each `/api/v1/workspaces/...` verb is gated by the `minds-workspaces` scope (only the schema is allowed by default), and a per-workspace grant is requested with a `type: "workspace"` permission request whose payload carries the verb list plus the `target_workspace_id`.

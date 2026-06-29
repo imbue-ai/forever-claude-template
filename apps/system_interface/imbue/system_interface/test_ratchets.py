@@ -32,7 +32,8 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # +1 for service_dispatcher_test._wait_for_port's TCP-ready poll loop.
+    # +1 for testing.py's _wait_until_serving TCP-ready poll loop, used by the
+    # WebSocket/SSE tests that need a real Werkzeug listener.
     rc.check_time_sleep(_DIR, snapshot(7))
 
 
@@ -77,7 +78,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(5))
+    rc.check_inline_imports(_DIR, snapshot(2))
 
 
 def test_prevent_relative_imports() -> None:
@@ -104,21 +105,9 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # +1 for service_dispatcher.py driving the two WS-forward tasks via
-    # asyncio.create_task + asyncio.wait(return_when=FIRST_COMPLETED), so the
-    # surviving direction can be cancelled once either side finishes. Dropping
-    # asyncio here would mean rolling our own cancellation-aware wait; the spirit
-    # of the ratchet is "prefer the project's concurrency_group for
-    # threads/procs", which doesn't apply to pure asyncio tasks.
-    # +1 for ws_broadcaster.py: register() captures asyncio.current_task() /
-    # get_running_loop() so eviction can cancel a wedged WS handler via
-    # loop.call_soon_threadsafe(task.cancel) -- the only way to free a coroutine
-    # blocked in ``await websocket.send_text(...)`` from a non-asyncio thread.
-    # Same exception as the existing +1: pure asyncio cancellation.
-    # +1 for ws_broadcaster_test.py's asyncio.run, which drives the cancel-on-
-    # eviction test. It needs a real Task and event loop to verify the
-    # call_soon_threadsafe(task.cancel) path actually cancels.
-    rc.check_asyncio_import(_DIR, snapshot(3))
+    # The system interface is fully synchronous (Flask + flask-sock on the
+    # threaded Werkzeug server); there is no asyncio anywhere.
+    rc.check_asyncio_import(_DIR, snapshot(0))
 
 
 def test_prevent_pandas_import() -> None:
@@ -152,7 +141,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(5))
+    rc.check_trailing_comments(_DIR, snapshot(4))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -214,7 +203,7 @@ def test_prevent_logger_exception() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(3))
+    rc.check_unittest_mock_imports(_DIR, snapshot(2))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
@@ -271,19 +260,14 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    # +1 since the introduction of the tickets pipeline:
-    # AgentTicketsWatcher.__init__ (stateful background watcher, mirroring
-    # AgentSessionWatcher's __init__ pattern -- a classmethod factory
-    # wouldn't help). The watchdog file-change handler's __init__ is
-    # already counted toward the project's existing total (it lived in
-    # session_watcher.py before the tickets pipeline arrived; it now
-    # lives in watcher_common.py as the shared WakeOnChangeHandler
-    # consumed by both watchers).
+    # The watchdog file-change handler's __init__ is counted toward the
+    # project's existing total: it lived in session_watcher.py and now lives
+    # in watcher_common.py as the shared WakeOnChangeHandler.
     # +1 for layout_ops.LayoutMutex.__init__. The mutex holds runtime state
     # (a ``threading.Lock`` and a holder dict mutated under that lock) that
     # is not a natural fit for a Pydantic model, matching the precedent
     # already set by session_watcher / event_queues entries here.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(5))
 
 
 def test_prevent_cast_usage() -> None:

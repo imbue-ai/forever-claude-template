@@ -1,21 +1,11 @@
 import m from "mithril";
 import { apiUrl } from "../base-path";
-import type {
-  TranscriptEvent,
-  AssistantMessageEvent,
-  UserMessageEvent,
-  ToolResultEvent,
-  SubagentMetadata,
-} from "../models/Response";
+import type { TranscriptEvent, SubagentMetadata } from "../models/Response";
 import { parseJsonMessage } from "../models/ws-json";
 import { computeVisibleWindow } from "../models/virtualWindow";
-import {
-  createRowMeasurer,
-  OVERSCAN_PX,
-  ESTIMATED_USER_HEIGHT_PX,
-  ESTIMATED_ASSISTANT_HEIGHT_PX,
-} from "./row-measurement";
-import { buildToolResultsWithSkillExpansions, renderAssistantMessageChildren } from "./message-renderers";
+import { nextUserScrolledUp } from "../models/scrollFollow";
+import { createRowMeasurer, OVERSCAN_PX } from "./row-measurement";
+import { buildConversationRows, isSubagentRunning, type RowDescriptor } from "./conversation-rows";
 
 interface SubagentViewAttrs {
   agentId: string;
@@ -25,56 +15,6 @@ interface SubagentViewAttrs {
 interface SubagentEventsResponse {
   events: TranscriptEvent[];
   metadata: SubagentMetadata | null;
-}
-
-interface RowDescriptor {
-  key: string;
-  estimate: number;
-  render: () => m.Vnode;
-}
-
-function renderUserMessage(event: UserMessageEvent): m.Vnode {
-  return m("div", { id: event.event_id, class: "message message-user", key: event.event_id }, [
-    m("div", { class: "message-user-bubble" }, [
-      m("div", { class: "message-content whitespace-pre-wrap" }, event.content || ""),
-    ]),
-  ]);
-}
-
-function renderAssistantMessage(
-  event: AssistantMessageEvent,
-  toolResults: Map<string, ToolResultEvent>,
-  agentId: string,
-): m.Vnode {
-  return m(
-    "div",
-    { id: event.event_id, class: "message message-assistant", key: event.event_id },
-    m("div", renderAssistantMessageChildren(event, toolResults, agentId)),
-  );
-}
-
-function buildRows(agentId: string, events: TranscriptEvent[]): RowDescriptor[] {
-  // Skill-expansion user_messages are folded into their Skill tool call's output
-  // (same as the main panel) rather than rendered as separate rows.
-  const toolResults = buildToolResultsWithSkillExpansions(events);
-
-  const rows: RowDescriptor[] = [];
-  for (const event of events) {
-    if (event.type === "user_message") {
-      rows.push({
-        key: event.event_id,
-        estimate: ESTIMATED_USER_HEIGHT_PX,
-        render: () => renderUserMessage(event),
-      });
-    } else if (event.type === "assistant_message") {
-      rows.push({
-        key: event.event_id,
-        estimate: ESTIMATED_ASSISTANT_HEIGHT_PX,
-        render: () => renderAssistantMessage(event, toolResults, agentId),
-      });
-    }
-  }
-  return rows;
 }
 
 export function SubagentView(): m.Component<SubagentViewAttrs> {
@@ -95,10 +35,10 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
   let userScrolledUp = false;
   let previousScrollTop = 0;
   let viewportResizeObserver: ResizeObserver | null = null;
-  // Memoized rows. buildRows walks the whole subagent transcript, so it is
-  // recomputed only when the event set changes -- not on every scroll redraw.
-  // The transcript is append-only here (no in-place upgrades, no eviction), so
-  // the event count is a sufficient cache key.
+  // Memoized rows. buildConversationRows walks the whole subagent transcript, so
+  // it is recomputed only when the event set or idleness changes -- not on every
+  // scroll redraw. The transcript is append-only here (no in-place upgrades, no
+  // eviction), so the event count plus the idle flag is a sufficient cache key.
   let rowsCacheKey = "";
   let cachedRows: RowDescriptor[] = [];
 
@@ -185,13 +125,13 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     const didScrollUp = currentScrollTop < previousScrollTop;
     previousScrollTop = currentScrollTop;
     scrollTop = currentScrollTop;
-    if (didScrollUp) {
-      userScrolledUp = true;
-      return;
-    }
-    if (element.scrollHeight - element.scrollTop - element.clientHeight < 40) {
-      userScrolledUp = false;
-    }
+    // A subagent transcript is a single loaded list with no off-tail jump, so
+    // there is never newer unloaded history below: hasMoreAfter is always false.
+    userScrolledUp = nextUserScrolledUp({
+      didScrollUp,
+      isNearBottom: element.scrollHeight - element.scrollTop - element.clientHeight < 40,
+      hasMoreAfter: false,
+    });
   }
 
   // Refresh the cached viewport height and schedule a measure pass; the
@@ -204,9 +144,17 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
   }
 
   function renderWindowedList(agentId: string): m.Vnode {
-    const renderKey = `${agentId}|${events.length}`;
+    // A subagent has no server-derived activity_state, so derive idleness from
+    // the transcript tail; idle settles the frontier spinner. It is part of the
+    // cache key alongside the event count.
+    const agentIsIdle = !isSubagentRunning(events);
+    const renderKey = `${agentId}|${events.length}|${agentIsIdle ? 1 : 0}`;
     if (renderKey !== rowsCacheKey) {
-      cachedRows = buildRows(agentId, events);
+      // Same transcript -> sections -> rows pipeline as the main chat, so the
+      // subagent's conversation renders an identical progress timeline; only the
+      // idle source differs (derived here rather than from activity_state).
+      cachedRows = buildConversationRows(agentId, events, agentIsIdle);
+      rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
       rowsCacheKey = renderKey;
     }
     const rows = cachedRows;
@@ -219,7 +167,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
       overscanPx: OVERSCAN_PX,
     });
 
-    const visibleRows: m.Vnode[] = [];
+    const visibleRows: m.Children[] = [];
     visibleRows.push(m("div", { key: "__spacer_top", style: `height: ${windowResult.topPad}px` }));
     for (let i = windowResult.startIndex; i < windowResult.endIndex; i++) {
       visibleRows.push(rows[i].render());

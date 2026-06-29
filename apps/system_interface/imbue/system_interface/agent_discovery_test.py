@@ -1,11 +1,22 @@
 """Tests for agent_discovery module."""
 
+from collections.abc import Iterator
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
+from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.message import MessageResult
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.system_interface.agent_discovery import _get_mngr_context
+from imbue.system_interface.agent_discovery import _send_message_to_agent
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
-from imbue.system_interface.agent_discovery import read_tickets_dir_from_env_file
 
 
 def test_reads_claude_config_dir_from_env_file(tmp_path: Path) -> None:
@@ -97,34 +108,95 @@ def test_falls_back_to_home_claude_when_nothing_else_exists(monkeypatch: pytest.
     assert result == Path.home() / ".claude"
 
 
-def test_tickets_dir_read_from_agent_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-    (agent_state_dir / "env").write_text("TICKETS_DIR=/from/env/file\n")
-    monkeypatch.setenv("TICKETS_DIR", "/from/process/env")
-
-    result = read_tickets_dir_from_env_file(agent_state_dir, tmp_path / "work")
-
-    assert result == Path("/from/env/file")
-
-
-def test_tickets_dir_falls_back_to_process_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-    (agent_state_dir / "env").write_text("OTHER=x\n")
-    monkeypatch.setenv("TICKETS_DIR", "/from/process/env")
-
-    result = read_tickets_dir_from_env_file(agent_state_dir, tmp_path / "work")
-
-    assert result == Path("/from/process/env")
+@pytest.fixture
+def mngr_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[MngrContext]:
+    """A real MngrContext rooted at empty tmp dirs (no project config files to load)."""
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "host"))
+    ctx, cg = _get_mngr_context()
+    try:
+        yield ctx
+    finally:
+        cg.__exit__(None, None, None)
 
 
-def test_tickets_dir_falls_back_to_work_dir_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    agent_state_dir = tmp_path / "agent_state"
-    agent_state_dir.mkdir()
-    monkeypatch.delenv("TICKETS_DIR", raising=False)
-    work_dir = tmp_path / "work"
+_AGENT_ID = AgentId("agent-00000000000000000000000000000001")
 
-    result = read_tickets_dir_from_env_file(agent_state_dir, work_dir)
 
-    assert result == work_dir / ".tickets"
+def _make_match(agent_id: AgentId = _AGENT_ID, host: str = "host-a") -> AgentMatch:
+    return AgentMatch(
+        agent_id=agent_id,
+        agent_name=AgentName("alpha"),
+        host_id=HostId.generate(),
+        host_name=HostName(host),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def test_known_location_is_messaged_without_discovery(mngr_ctx: MngrContext) -> None:
+    match = _make_match()
+    discover_calls: list[AgentId] = []
+    send_calls: list[tuple[AgentMatch, ...]] = []
+
+    def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
+        discover_calls.append(agent_id)
+        return ()
+
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        send_calls.append(tuple(matches))
+        return MessageResult(successful_agents=[str(m.agent_id) for m in matches])
+
+    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (match,), discover=_discover, send=_send)
+    assert discover_calls == []
+    assert send_calls == [(match,)]
+
+
+def test_empty_known_locations_falls_back_to_discovery(mngr_ctx: MngrContext) -> None:
+    discovered = _make_match()
+    discover_calls: list[AgentId] = []
+    send_calls: list[tuple[AgentMatch, ...]] = []
+
+    def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
+        discover_calls.append(agent_id)
+        return (discovered,)
+
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        send_calls.append(tuple(matches))
+        return MessageResult(successful_agents=[str(m.agent_id) for m in matches])
+
+    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (), discover=_discover, send=_send)
+    assert discover_calls == [_AGENT_ID]
+    assert send_calls == [(discovered,)]
+
+
+def test_stale_known_location_falls_back_to_discovery(mngr_ctx: MngrContext) -> None:
+    stale = _make_match(host="host-a")
+    fresh = _make_match(host="host-b")
+    discover_calls: list[AgentId] = []
+    send_calls: list[tuple[AgentMatch, ...]] = []
+
+    def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
+        discover_calls.append(agent_id)
+        return (fresh,)
+
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        send_calls.append(tuple(matches))
+        # The stale location reaches no agent; the freshly discovered one does.
+        reached = [str(m.agent_id) for m in matches if str(m.host_name) == "host-b"]
+        return MessageResult(successful_agents=reached)
+
+    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (stale,), discover=_discover, send=_send)
+    assert discover_calls == [_AGENT_ID]
+    assert send_calls == [(stale,), (fresh,)]
+
+
+def test_returns_false_when_nothing_reachable(mngr_ctx: MngrContext) -> None:
+    def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
+        return ()
+
+    def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
+        return MessageResult(successful_agents=[])
+
+    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (), discover=_discover, send=_send) is False

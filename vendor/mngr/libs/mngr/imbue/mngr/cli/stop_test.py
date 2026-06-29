@@ -20,6 +20,8 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.errors import LocalHostNotStoppableError
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -42,6 +44,7 @@ def test_stop_cli_options_fields() -> None:
         archive=False,
         sessions=(),
         stop_host=False,
+        dry_run=False,
         snapshot_mode=None,
         graceful=True,
         graceful_timeout=None,
@@ -311,6 +314,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
         archive=True,
         sessions=("mngr-session-1", "mngr-session-2"),
         stop_host=True,
+        dry_run=False,
         snapshot_mode="auto",
         graceful=False,
         graceful_timeout="30s",
@@ -341,7 +345,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
 def test_stop_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in HUMAN format with stopped agents."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    _output_result(["agent-1", "agent-2"], output_opts)
+    _output_result(["agent-1", "agent-2"], [], output_opts)
     captured = capsys.readouterr()
     assert "Successfully stopped 2 agent(s)" in captured.out
 
@@ -349,7 +353,7 @@ def test_stop_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]
 def test_stop_output_result_human_empty(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in HUMAN format with no agents outputs nothing."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    _output_result([], output_opts)
+    _output_result([], [], output_opts)
     captured = capsys.readouterr()
     # With no agents, the HUMAN output does not write a success message
     assert "Successfully stopped" not in captured.out
@@ -358,17 +362,20 @@ def test_stop_output_result_human_empty(capsys: pytest.CaptureFixture[str]) -> N
 def test_stop_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    _output_result(["agent-x"], output_opts)
+    _output_result(["agent-x"], [], output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["stopped_agents"] == ["agent-x"]
     assert data["count"] == 1
+    assert data["failures"] == []
+    assert data["failure_count"] == 0
+    assert data["exit_code"] == 0
 
 
 def test_stop_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSONL format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    _output_result(["agent-a"], output_opts)
+    _output_result(["agent-a"], [], output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["event"] == "stop_result"
@@ -378,9 +385,35 @@ def test_stop_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
 def test_stop_output_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result with a format template."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
-    _output_result(["template-agent"], output_opts)
+    _output_result(["template-agent"], [], output_opts)
     captured = capsys.readouterr()
     assert "template-agent" in captured.out
+
+
+def test_stop_output_result_json_reports_failures(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_result emits the structured failures payload (failures / failure_count / exit_code)."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    host_id = HostId.generate()
+    failure = CleanupFailure(
+        category=CleanupFailureCategory.PROCESSES_REMAIN,
+        message="kill -KILL failed: operation not permitted",
+        agent_name=AgentName("agent-z"),
+        host_id=host_id,
+    )
+    _output_result(["agent-z"], [failure], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["failure_count"] == 1
+    assert data["failures"] == [
+        {
+            "category": "PROCESSES_REMAIN",
+            "message": "kill -KILL failed: operation not permitted",
+            "agent_name": "agent-z",
+            "host_id": str(host_id),
+        }
+    ]
+    # PROCESSES_REMAIN maps to exit code 3.
+    assert data["exit_code"] == 3
 
 
 # =============================================================================
@@ -413,6 +446,39 @@ def test_stop_host_routes_to_provider_stop_host(
 
     assert result.exit_code != 0
     assert "Cannot stop the local host" in result.output
+
+
+@pytest.mark.tmux
+def test_stop_dry_run_does_not_stop_agent(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    create_test_agent: Callable[..., str],
+    temp_host_dir: Path,
+) -> None:
+    """``stop --dry-run`` reports the agent that would be stopped but leaves it running."""
+    create_test_agent("dry-run-agent", "sleep 300019")
+
+    dry_result = cli_runner.invoke(
+        stop,
+        ["dry-run-agent", "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert dry_result.exit_code == 0
+    assert "Would stop:" in dry_result.output
+    assert "dry-run-agent" in dry_result.output
+    # The dry run must not actually stop anything.
+    assert "Stopped agent" not in dry_result.output
+
+    # Proof the agent was left running: a real stop now finds and stops it.
+    real_result = cli_runner.invoke(
+        stop,
+        ["dry-run-agent"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert real_result.exit_code == 0
+    assert "Stopped agent: dry-run-agent" in real_result.output
 
 
 @pytest.mark.tmux

@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
@@ -14,7 +15,10 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -22,15 +26,15 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 REQUESTS_EVENT_SOURCE_NAME: Final[str] = "requests"
-REFRESH_EVENT_SOURCE_NAME: Final[str] = "refresh"
 
-# Every minds workspace runs a constant-named ``main``-type agent that owns
-# the bootstrap service manager (and thus the system interface). This is the
+# Every minds workspace runs a constant-named ``main``-type agent whose
+# bootstrap execs supervisord (and thus owns the system interface). This is the
 # canonical definition of that name; ``agent_creator._DEFAULT_AGENT_NAME``
 # is the ``AgentName``-typed form built from it.
 SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
@@ -84,8 +88,49 @@ class BackendResolverInterface(MutableModel, ABC):
 
         Default implementation returns all known agent IDs (no filtering).
         Subclasses with access to agent labels should override this.
+
+        This is the *full* set, including workspaces whose host has been
+        destroyed (retained for the provider's destroyed-host persistence
+        window). Active-workspace surfaces should call
+        :meth:`list_active_workspace_ids` instead; a restore view that needs
+        the destroyed ones uses this plus :meth:`get_host_state`.
         """
         return self.list_known_agent_ids()
+
+    def list_active_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Return workspace agent IDs whose host is not in a terminal DESTROYED state.
+
+        Default implementation has no host-state data, so it returns the same
+        set as :meth:`list_known_workspace_ids`. Subclasses with discovery host
+        state should override to drop agents on DESTROYED hosts.
+        """
+        return self.list_known_workspace_ids()
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        """Return the last-known lifecycle state of a host, or None if unknown.
+
+        Default implementation has no host-state data and returns None.
+        Subclasses fed by discovery should override this. Implementations may
+        return a short-lived optimistic override set via
+        :meth:`set_host_state_override` ahead of discovery catching up.
+        """
+        return None
+
+    def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
+        """Optimistically override a host's state until discovery confirms it.
+
+        Lets a UI-initiated lifecycle action (e.g. a Start/Stop click) flip
+        :meth:`get_host_state` immediately instead of waiting for the next
+        discovery snapshot. The override is dropped once discovery agrees with
+        it or a short TTL elapses. Default implementation is a no-op (resolvers
+        without discovery host state have nothing to override).
+        """
+
+    def clear_host_state_override(self, host_id: HostId) -> None:
+        """Drop any optimistic override for ``host_id`` (e.g. after a failed action).
+
+        Default implementation is a no-op.
+        """
 
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
@@ -117,6 +162,19 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None
 
+    def get_workspace_color(self, agent_id: AgentId) -> str | None:
+        """Return the workspace color hex for an agent, or None if unset.
+
+        Returns a normalized ``#rrggbb`` lowercase string, ``None`` if the
+        agent has no ``color`` label (callers fall back to the default
+        workspace color), or the default color hex if the stored label is
+        malformed.
+
+        Default implementation returns None. Subclasses with access to
+        agent labels should override this.
+        """
+        return None
+
     def get_system_services_agent_id(self, workspace_agent_id: AgentId) -> AgentId | None:
         """Return the ``system-services`` agent id that shares the workspace agent's host.
 
@@ -133,6 +191,27 @@ class BackendResolverInterface(MutableModel, ABC):
         Default implementation returns True (appropriate for static resolvers).
         """
         return True
+
+    def get_provider_errors(self) -> dict[ProviderInstanceName, DiscoveryError]:
+        """Return errored providers keyed by name from the latest discovery snapshot.
+
+        Default implementation returns an empty mapping (resolvers without
+        provider state never report errors); ``MngrCliBackendResolver``
+        overrides it. The workspace list uses this to mark a retained-but-
+        unverified workspace stale when its provider's last poll errored.
+        """
+        return {}
+
+    def get_freshness_timestamps(self) -> tuple[datetime | None, datetime | None]:
+        """Return ``(last_event_at, last_full_snapshot_at)`` from discovery.
+
+        Default implementation returns ``(None, None)`` (resolvers without
+        discovery have no freshness to report); ``MngrCliBackendResolver``
+        overrides it. ``None`` for the last full snapshot means discovery has
+        not (recently) confirmed state, so callers that gate on freshness treat
+        it as stale.
+        """
+        return None, None
 
 
 class StaticBackendResolver(BackendResolverInterface):
@@ -184,6 +263,10 @@ class ParsedAgentsResult(FrozenModel):
         default_factory=dict,
         description="SSH info keyed by agent ID string, only for remote agents",
     )
+    host_state_by_host_id: Mapping[str, HostState] = Field(
+        default_factory=dict,
+        description="Host lifecycle state keyed by host ID string, for hosts whose state is known",
+    )
 
 
 def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
@@ -203,6 +286,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     agents = data.get("agents", [])
     agent_ids: list[AgentId] = []
     ssh_info_by_id: dict[str, RemoteSSHInfo] = {}
+    host_state_by_host_id: dict[str, HostState] = {}
 
     for agent in agents:
         agent_id_str = agent.get("id")
@@ -213,6 +297,15 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
         host = agent.get("host")
         if host is None:
             continue
+
+        host_id_value = host.get("id")
+        state_value = host.get("state")
+        if isinstance(host_id_value, str) and isinstance(state_value, str):
+            try:
+                host_state_by_host_id[host_id_value] = HostState(state_value)
+            except ValueError:
+                logger.warning("Unknown host state {!r} for host {}", state_value, host_id_value)
+
         ssh = host.get("ssh")
         if ssh is None:
             continue
@@ -231,6 +324,7 @@ def parse_agents_from_json(json_output: str | None) -> ParsedAgentsResult:
     return ParsedAgentsResult(
         agent_ids=tuple(agent_ids),
         ssh_info_by_agent_id=ssh_info_by_id,
+        host_state_by_host_id=host_state_by_host_id,
     )
 
 
@@ -387,6 +481,21 @@ def _write_last_good_agent_topology(path: Path, topology: _LastGoodAgentTopology
 # -- MngrCliBackendResolver --
 
 
+# How long an optimistic host-state override is trusted before discovery is
+# believed instead. A UI lifecycle action's command has already returned by the
+# time the override is set, so the next discovery snapshot (~10s) normally
+# confirms it well within this window; the TTL only bounds how long a *stuck*
+# discovery (e.g. a provider erroring) can keep showing a stale optimistic state.
+_HOST_STATE_OVERRIDE_TTL_SECONDS: Final[float] = 90.0
+
+
+class _HostStateOverride(FrozenModel):
+    """A short-lived optimistic host state set by a UI-initiated lifecycle action."""
+
+    state: HostState = Field(description="The optimistic state to report until discovery confirms it")
+    set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
+
+
 class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
@@ -422,12 +531,22 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
-    _on_refresh_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
+    # host_id_str -> a short-lived optimistic state set by a UI lifecycle action,
+    # masking discovery in ``get_host_state`` until discovery agrees or the TTL
+    # elapses. Guarded by _lock. Only ever holds a real RUNNING/STOPPED-style
+    # transition the user just triggered -- never DESTROYED -- so it cannot affect
+    # the DESTROYED-only filtering in ``list_active_workspace_ids``.
+    _host_state_override_by_host_id: dict[str, _HostStateOverride] = PrivateAttr(default_factory=dict)
     # host_id_str -> the agents last completely enumerated on that host (the
     # in-memory image of the persisted last-good topology). Updated under
     # _lock by update_agents; read by get_system_services_agent_id as the
     # fallback when live discovery has lost the host.
     _last_good_agents_by_host: dict[str, tuple[_AgentRecord, ...]] = PrivateAttr(default_factory=dict)
+    # Set of agent ids for which we've already logged a malformed-color-label
+    # warning, so the log line fires once per agent rather than on every SSE
+    # tick. Plain set is fine -- get_workspace_color holds ``_lock`` while
+    # mutating it.
+    _logged_malformed_color_agents: set[str] = PrivateAttr(default_factory=set)
 
     def model_post_init(self, __context: object) -> None:
         """Load the persisted last-good agent topology from disk, if configured."""
@@ -500,11 +619,30 @@ class MngrCliBackendResolver(BackendResolverInterface):
         with self._lock:
             self._agents_result = result
             self._initial_discovery_done = True
+            self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
             if self._merge_last_good_topology_locked(result.discovered_agents) and path is not None:
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)
         self._fire_on_change()
+
+    def _sweep_host_state_overrides_locked(self, discovery_state_by_host_id: Mapping[str, HostState]) -> None:
+        """Drop optimistic overrides that the fresh snapshot has confirmed or that have expired.
+
+        Keeps the override map bounded to genuinely-still-pending overrides (so a
+        host that has since left discovery never lingers) without firing on-change
+        itself -- the surrounding ``update_agents`` already fires once. Must be
+        called with ``self._lock`` held.
+        """
+        now = time.monotonic()
+        for host_id_str in tuple(self._host_state_override_by_host_id):
+            override = self._host_state_override_by_host_id[host_id_str]
+            discovery_state = discovery_state_by_host_id.get(host_id_str)
+            if (
+                discovery_state == override.state
+                or (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            ):
+                del self._host_state_override_by_host_id[host_id_str]
 
     def _merge_last_good_topology_locked(self, agents: tuple[DiscoveredAgent, ...]) -> bool:
         """Fold a fresh discovery snapshot into the last-good per-host topology.
@@ -606,6 +744,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return agent IDs that are primary workspace agents.
 
         Filters for agents with both ``workspace`` and ``is_primary`` labels.
+        Includes workspaces on DESTROYED hosts; see the interface docstring.
         """
         with self._lock:
             return tuple(
@@ -614,6 +753,62 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 if "workspace" in agent.labels and "is_primary" in agent.labels
             )
 
+    def list_active_workspace_ids(self) -> tuple[AgentId, ...]:
+        """Return primary workspace agent IDs whose host is not DESTROYED.
+
+        A destroyed host lingers in discovery for the provider's destroyed-host
+        persistence window; its workspace agents stay in the snapshot but should
+        drop off every active surface. Filtering here (rather than removing the
+        agents from the snapshot) keeps the full set available via
+        :meth:`list_known_workspace_ids` for a future restore view.
+        """
+        with self._lock:
+            host_state_by_host_id = self._agents_result.host_state_by_host_id
+            return tuple(
+                agent.agent_id
+                for agent in self._agents_result.discovered_agents
+                if "workspace" in agent.labels
+                and "is_primary" in agent.labels
+                and host_state_by_host_id.get(str(agent.host_id)) is not HostState.DESTROYED
+            )
+
+    def get_host_state(self, host_id: HostId) -> HostState | None:
+        """Return the host's lifecycle state, preferring a fresh optimistic override.
+
+        Discovery is authoritative: an optimistic override (set by a UI-initiated
+        Start/Stop) wins only until discovery agrees with it or its TTL elapses, at
+        which point it is dropped here and discovery is returned. Returns None when
+        neither an override nor discovery knows the host.
+        """
+        host_id_str = str(host_id)
+        with self._lock:
+            discovery_state = self._agents_result.host_state_by_host_id.get(host_id_str)
+            override = self._host_state_override_by_host_id.get(host_id_str)
+            if override is None:
+                return discovery_state
+            if (
+                discovery_state == override.state
+                or (time.monotonic() - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            ):
+                del self._host_state_override_by_host_id[host_id_str]
+                return discovery_state
+            return override.state
+
+    def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
+        """Optimistically override ``host_id``'s state until discovery confirms it; fires on-change."""
+        with self._lock:
+            self._host_state_override_by_host_id[str(host_id)] = _HostStateOverride(
+                state=state, set_at_monotonic=time.monotonic()
+            )
+        self._fire_on_change()
+
+    def clear_host_state_override(self, host_id: HostId) -> None:
+        """Drop any optimistic override for ``host_id``; fires on-change only if one was present."""
+        with self._lock:
+            existed = self._host_state_override_by_host_id.pop(str(host_id), None) is not None
+        if existed:
+            self._fire_on_change()
+
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
         """Return the workspace label value for an agent, or None."""
         with self._lock:
@@ -621,6 +816,73 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 if agent.agent_id == agent_id:
                     return agent.labels.get("workspace")
             return None
+
+    def get_workspace_color(self, agent_id: AgentId) -> str | None:
+        """Return the normalized ``#rrggbb`` color label for an agent.
+
+        Returns ``None`` when the agent has no ``color`` label (callers
+        fall back to the default workspace color). Defensively parses the stored
+        value: if it is non-empty but not a recognized hex literal, logs
+        once at WARNING and returns the default workspace color so the
+        UI never crashes on a bad label. Mngr itself does not validate
+        label values, so a hand-edited or future-version label might
+        carry junk.
+        """
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    raw = agent.labels.get("color")
+                    if raw is None:
+                        return None
+                    normalized = normalize_workspace_color(raw)
+                    if normalized is None:
+                        if str(agent_id) not in self._logged_malformed_color_agents:
+                            logger.warning(
+                                "Ignoring malformed color label {!r} for agent {}; "
+                                "rendering as default. Repick in workspace settings to fix.",
+                                raw,
+                                agent_id,
+                            )
+                            self._logged_malformed_color_agents.add(str(agent_id))
+                        return DEFAULT_WORKSPACE_COLOR
+                    return normalized
+            return None
+
+    def set_workspace_color_locally(self, agent_id: AgentId, color_hex: str) -> bool:
+        """Optimistically update the cached ``color`` label for an agent.
+
+        Called by the settings POST handler after a successful ``mngr label``
+        write so the SSE workspaces payload reflects the new color on the
+        next emit -- without having to wait the ~10s discovery tick for
+        the change to propagate back through ``mngr observe``.
+
+        ``color_hex`` must already be normalized (``#rrggbb`` lowercase);
+        the caller is responsible for validation. Returns True if the
+        snapshot was updated and ``_fire_on_change`` was called, False
+        if the agent is not in the current snapshot (in which case the
+        next discovery emit will pick up the on-disk label anyway).
+        """
+        with self._lock:
+            updated_agents: list[DiscoveredAgent] = []
+            found = False
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    found = True
+                    new_labels = {**agent.labels, "color": color_hex}
+                    new_certified_data = {**agent.certified_data, "labels": new_labels}
+                    updated_agents.append(
+                        agent.model_copy_update(to_update(agent.field_ref().certified_data, new_certified_data))
+                    )
+                else:
+                    updated_agents.append(agent)
+            if not found:
+                return False
+            self._agents_result = self._agents_result.model_copy_update(
+                to_update(self._agents_result.field_ref().discovered_agents, tuple(updated_agents))
+            )
+            self._logged_malformed_color_agents.discard(str(agent_id))
+        self._fire_on_change()
+        return True
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
@@ -697,38 +959,3 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def _fire_on_request(self, agent_id_str: str, raw_line: str) -> None:
         """Internal alias for ``fire_on_request`` retained for backward compatibility."""
         self.fire_on_request(agent_id_str, raw_line)
-
-    def add_on_refresh_callback(self, callback: Callable[[str, str], None]) -> None:
-        """Register a callback invoked when a refresh event arrives.
-
-        The callback receives (agent_id_str, raw_json_line). Refresh events
-        tell the desktop client to reload open web-service tabs for a service.
-        """
-        with self._lock:
-            self._on_refresh_callbacks.append(callback)
-
-    def remove_on_refresh_callback(self, callback: Callable[[str, str], None]) -> None:
-        """Unregister a refresh event callback."""
-        with self._lock:
-            try:
-                self._on_refresh_callbacks.remove(callback)
-            except ValueError:
-                pass
-
-    def fire_on_refresh(self, agent_id_str: str, raw_line: str) -> None:
-        """Invoke all registered refresh event callbacks.
-
-        Public dispatch entry point used by both the legacy in-process
-        ``MngrStreamManager`` and the new ``EnvelopeStreamConsumer``.
-        """
-        with self._lock:
-            callbacks = list(self._on_refresh_callbacks)
-        for callback in callbacks:
-            try:
-                callback(agent_id_str, raw_line)
-            except (OSError, RuntimeError) as e:
-                logger.warning("Refresh event callback failed: {}", e)
-
-    def _fire_on_refresh(self, agent_id_str: str, raw_line: str) -> None:
-        """Internal alias for ``fire_on_refresh`` retained for backward compatibility."""
-        self.fire_on_refresh(agent_id_str, raw_line)

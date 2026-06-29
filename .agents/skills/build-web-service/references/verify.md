@@ -16,8 +16,8 @@ to the URL registered in `runtime/applications.toml`. Expected: `200`.
 Common failures:
 
 - **502** -- backend not reachable. Either the app crashed (check
-  `tmux capture-pane -t svc-<name> -p`) or it's bound to the wrong
-  host. See cross-flow-gotchas.md.
+  `supervisorctl status <name>` and `/var/log/supervisor/<name>-stderr.log`)
+  or it's bound to the wrong host. See cross-flow-gotchas.md.
 - **404 from system_interface** -- the service name is not in
   `runtime/applications.toml`. Either `forward_port.py` was not run,
   or it was passed the wrong `--name`.

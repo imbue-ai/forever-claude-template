@@ -3,28 +3,29 @@
 Phase 2 deletes minds' in-process subdomain-forwarding, auth, and observe-
 spawning code; this file replaces them with a thin consumer that:
 
-- spawns ``mngr forward`` as a subprocess (via ``subprocess.Popen`` so we get
-  direct access to the PID for ``SIGHUP``);
+- spawns ``mngr forward --observe-via-file`` as a subprocess so it tails the
+  shared discovery events file written by the single ``mngr observe`` under
+  ``mngr latchkey forward`` instead of running its own observe;
 - reads stdout line-by-line on a background thread and parses each line as a
   ``ForwardEnvelope``;
 - dispatches by ``stream``: ``observe`` lines drive the surviving
   ``MngrCliBackendResolver`` plus a set of ``on_agent_discovered`` /
   ``on_agent_destroyed`` callbacks; ``event`` lines drive the resolver's
-  service map and fan out to request / refresh callbacks; ``forward`` lines
+  service map and fan out to request callbacks; ``forward`` lines
   feed the ``system_interface_backend_failure`` health tracker and the
   ``listening`` port handshake;
-- exposes ``bounce_observe()`` (sends ``SIGHUP`` to the plugin's PID), used
-  by ``supertokens_routes`` after a freshly-written
-  ``[providers.imbue_cloud_<slug>]`` block in ``settings.toml``;
-- watches the subprocess for premature exit and surfaces stderr + exit code
-  via ``NotificationDispatcher``.
+- watches the subprocess for premature exit and reports it (the consumer is
+  dead, so the discovery pipeline is down) to the discovery-health watchdog
+  via registered ``on_unexpected_exit`` callbacks.
+
+Provider-set changes are picked up by bouncing the detached ``mngr latchkey
+forward`` supervisor (the single discovery observer); the tailer here then sees
+the fresh snapshot automatically, so this consumer no longer sends ``SIGHUP``.
 """
 
 import json
 import os
 import secrets
-import shutil
-import signal
 import subprocess
 import threading
 from collections.abc import Callable
@@ -44,23 +45,24 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
-from imbue.minds.desktop_client.backend_resolver import REFRESH_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import SERVICES_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.backend_resolver import ServiceDeregisteredRecord
 from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.errors import EnvelopeStreamConsumerError
+from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
 from imbue.mngr.api.discovery_events import DiscoveryErrorEvent
 from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
 from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_events import HostDiscoveryEvent
 from imbue.mngr.api.discovery_events import HostSSHInfoEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_events import partition_removed_agents_by_provider_error
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostState
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
@@ -70,6 +72,29 @@ _PREAUTH_TOKEN_LENGTH: Final[int] = 64
 OnAgentDiscoveredCallback = Callable[[AgentId, RemoteSSHInfo | None, str], None]
 OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnSystemInterfaceBackendFailureCallback = Callable[[AgentId, SystemInterfaceBackendFailureReason, int | None], None]
+OnUnexpectedExitCallback = Callable[[int], None]
+
+
+def _full_snapshot_observed_at(event: FullDiscoverySnapshotEvent) -> datetime:
+    """Producer-side poll time of a full snapshot, for freshness comparisons.
+
+    The envelope ``timestamp`` is stamped when the discovery producer finished the
+    poll, so the host states the snapshot carries were observed at that instant.
+    Minds gates the recovery redirect on whether a snapshot postdates an outage's
+    onset, so it must compare against *when discovery observed the world*, not when
+    minds happened to receive the line -- using the producer time removes the
+    receive-tail-latency slop between the two. The producer and this consumer run
+    on the same machine, so the timestamps share a clock. Falls back to the receive
+    time if the envelope timestamp is unparseable (which only loosens the gate back
+    to the prior receive-time behavior).
+    """
+    try:
+        return datetime.fromisoformat(event.timestamp)
+    except ValueError:
+        logger.warning(
+            "Full discovery snapshot carried an unparseable timestamp {!r}; using receive time", event.timestamp
+        )
+        return datetime.now(timezone.utc)
 
 
 class ForwardSubprocessConfig(FrozenModel):
@@ -103,14 +128,11 @@ class EnvelopeStreamConsumer(MutableModel):
     """
 
     resolver: MngrCliBackendResolver = Field(frozen=True, description="Resolver to feed observe + event lines into")
-    notification_dispatcher: NotificationDispatcher | None = Field(
-        default=None,
-        description="Dispatcher used to surface plugin-exit failures to the user",
-    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _agent_host_map: dict[str, str] = PrivateAttr(default_factory=dict)
     _ssh_by_host_id: dict[str, RemoteSSHInfo] = PrivateAttr(default_factory=dict)
+    _host_state_by_host_id: dict[str, HostState] = PrivateAttr(default_factory=dict)
     _discovered_agents: dict[str, DiscoveredAgent] = PrivateAttr(default_factory=dict)
     _services_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
@@ -118,8 +140,9 @@ class EnvelopeStreamConsumer(MutableModel):
     _on_system_interface_backend_failure_callbacks: list[OnSystemInterfaceBackendFailureCallback] = PrivateAttr(
         default_factory=list
     )
+    _on_unexpected_exit_callbacks: list[OnUnexpectedExitCallback] = PrivateAttr(default_factory=list)
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
-    _has_notified_exit: bool = PrivateAttr(default=False)
+    _has_reported_exit: bool = PrivateAttr(default=False)
     _intentional_shutdown: bool = PrivateAttr(default=False)
     # Set once the plugin emits its `listening` envelope; `_listening_port`
     # then holds the port the plugin actually bound. `wait_for_listening`
@@ -159,6 +182,17 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._on_system_interface_backend_failure_callbacks.append(callback)
 
+    def add_on_unexpected_exit_callback(self, callback: OnUnexpectedExitCallback) -> None:
+        """Register a callback fired once when the plugin subprocess exits unexpectedly.
+
+        The callback receives the subprocess exit code. It fires only for an
+        exit minds did not ask for (i.e. not after :meth:`terminate`), and at
+        most once per consumer. The discovery-health watchdog registers here so
+        a dead consumer transitions the app-global state straight to BLOCKED.
+        """
+        with self._lock:
+            self._on_unexpected_exit_callbacks.append(callback)
+
     # -- Subprocess lifecycle ---------------------------------------------
 
     def attach(self, process: subprocess.Popen[bytes]) -> None:
@@ -171,7 +205,7 @@ class EnvelopeStreamConsumer(MutableModel):
         dispatched against an empty callback list.
         """
         if self._process is not None:
-            raise RuntimeError("EnvelopeStreamConsumer.attach already called")
+            raise EnvelopeStreamConsumerError("EnvelopeStreamConsumer.attach already called")
         self._process = process
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
@@ -181,7 +215,7 @@ class EnvelopeStreamConsumer(MutableModel):
         need to see the very first envelope have been registered.
         """
         if self._process is None:
-            raise RuntimeError("EnvelopeStreamConsumer.start called before attach")
+            raise EnvelopeStreamConsumerError("EnvelopeStreamConsumer.start called before attach")
         concurrency_group.start_new_thread(
             target=self._read_stdout_loop,
             name="mngr-forward-stdout-reader",
@@ -195,7 +229,7 @@ class EnvelopeStreamConsumer(MutableModel):
             is_checked=False,
         )
         concurrency_group.start_new_thread(
-            target=self._wait_and_notify_on_exit,
+            target=self._wait_and_report_exit,
             name="mngr-forward-lifecycle-watcher",
             daemon=True,
             is_checked=False,
@@ -218,36 +252,12 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             return self._listening_port
 
-    def bounce_observe(self) -> None:
-        """Send ``SIGHUP`` to the plugin so its observe child is bounced.
-
-        Used whenever minds writes a change to its providers settings that
-        should take effect on the next discovery poll: either after a new
-        ``[providers.imbue_cloud_<slug>]`` block is registered on signin,
-        or after the providers panel's Enable/Disable toggle flips
-        ``is_enabled`` on any provider block via ``set_provider_is_enabled``.
-        Per-agent event subprocesses, SSH tunnels, and the FastAPI app on
-        the plugin side stay alive (the plugin's SIGHUP handler only
-        restarts ``mngr observe``).
-
-        No-op if the plugin process is no longer running.
-        """
-        process = self._process
-        if process is None or process.poll() is not None:
-            logger.debug("bounce_observe: plugin not running; skipping")
-            return
-        try:
-            os.kill(process.pid, signal.SIGHUP)
-        except OSError as e:
-            logger.warning("bounce_observe: failed to send SIGHUP to {}: {}", process.pid, e)
-
     def terminate(self) -> None:
         """Stop the plugin subprocess (SIGTERM, then SIGKILL on timeout).
 
         Sets ``_intentional_shutdown`` *before* signalling the subprocess
-        so the lifecycle watcher (``_wait_and_notify_on_exit``) does not
-        surface the resulting non-zero exit code as a CRITICAL "Forwarding
-        subprocess died" notification.
+        so the lifecycle watcher (``_wait_and_report_exit``) does not report
+        the resulting exit to the watchdog as a dead pipeline.
         """
         process = self._process
         if process is None:
@@ -282,34 +292,30 @@ class EnvelopeStreamConsumer(MutableModel):
             if stripped:
                 logger.debug("mngr forward stderr: {}", stripped)
 
-    def _wait_and_notify_on_exit(self) -> None:
+    def _wait_and_report_exit(self) -> None:
         process = self._process
         if process is None:
             return
         exit_code = process.wait()
-        # If minds asked the subprocess to stop (lifespan shutdown), the
-        # non-zero exit code is the expected SIGTERM/SIGKILL signal, not a
-        # crash. Surfacing it as a CRITICAL notification on every clean
-        # shutdown trains the user to ignore the notification entirely,
-        # which defeats its purpose for the crash-on-its-own case.
+        # If minds asked the subprocess to stop (lifespan shutdown), the exit is
+        # expected -- not a dead pipeline.
         if self._intentional_shutdown:
             logger.debug("mngr forward exited with code {} after intentional shutdown", exit_code)
             return
-        if exit_code != 0 and not self._has_notified_exit:
-            self._has_notified_exit = True
-            logger.error("mngr forward exited with code {}", exit_code)
-            if self.notification_dispatcher is not None:
-                self.notification_dispatcher.dispatch(
-                    NotificationRequest(
-                        title="Forwarding subprocess died",
-                        message=(
-                            f"`mngr forward` exited with code {exit_code}. The minds desktop client "
-                            "is no longer forwarding agent traffic; restart minds to recover."
-                        ),
-                        urgency=NotificationUrgency.CRITICAL,
-                    ),
-                    agent_display_name="Minds",
-                )
+        # Any unasked-for exit means the consumer (and thus the discovery
+        # pipeline + traffic proxy) is down. Report it once to the watchdog,
+        # which owns the user-facing surfacing (the app-global BLOCKED screen).
+        if self._has_reported_exit:
+            return
+        self._has_reported_exit = True
+        logger.error("mngr forward exited unexpectedly with code {}", exit_code)
+        with self._lock:
+            callbacks = list(self._on_unexpected_exit_callbacks)
+        for callback in callbacks:
+            try:
+                callback(exit_code)
+            except (OSError, RuntimeError, ValueError) as e:
+                logger.warning("on_unexpected_exit callback failed: {}", e)
 
     # -- Envelope parsing + dispatch --------------------------------------
 
@@ -359,15 +365,21 @@ class EnvelopeStreamConsumer(MutableModel):
         self.resolver.record_discovery_event_received(datetime.now(timezone.utc))
         if isinstance(event, HostSSHInfoEvent):
             self._handle_host_ssh_info(event)
+        elif isinstance(event, HostDiscoveryEvent):
+            self._handle_host_discovered(event)
         elif isinstance(event, AgentDiscoveryEvent):
             self._handle_agent_discovered(event)
         elif isinstance(event, AgentDestroyedEvent):
             self._handle_agent_destroyed(event.agent_id)
         elif isinstance(event, HostDestroyedEvent):
+            # Record the terminal state first so any snapshot that re-lists this
+            # host during the destroyed-host persistence window is recognized as
+            # destroyed, then tear down the agents that were on it.
+            with self._lock:
+                self._host_state_by_host_id[str(event.host_id)] = HostState.DESTROYED
+                self._ssh_by_host_id.pop(str(event.host_id), None)
             for aid in event.agent_ids:
                 self._handle_agent_destroyed(aid)
-            with self._lock:
-                self._ssh_by_host_id.pop(str(event.host_id), None)
         elif isinstance(event, DiscoveryErrorEvent):
             logger.warning(
                 "Discovery error from {}: {} ({})", event.source_name, event.error_message, event.error_type
@@ -381,41 +393,105 @@ class EnvelopeStreamConsumer(MutableModel):
             logger.trace("Ignoring unknown discovery event: {}", type(event).__name__)
 
     def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        agent_ids: list[AgentId] = []
-        agent_host_map: dict[str, str] = {}
-        kept: dict[str, DiscoveredAgent] = {}
+        # Agents present in this snapshot.
+        fresh_agents: dict[str, DiscoveredAgent] = {}
+        fresh_host_map: dict[str, str] = {}
         for agent in event.agents:
-            agent_ids.append(agent.agent_id)
-            agent_host_map[str(agent.agent_id)] = str(agent.host_id)
-            kept[str(agent.agent_id)] = agent
+            fresh_agents[str(agent.agent_id)] = agent
+            fresh_host_map[str(agent.agent_id)] = str(agent.host_id)
         with self._lock:
-            previously_known = set(self._discovered_agents.keys())
-            self._discovered_agents = kept
-            self._agent_host_map = agent_host_map
+            prior_agents = dict(self._discovered_agents)
+            prior_host_map = dict(self._agent_host_map)
+            removed = prior_agents.keys() - fresh_agents.keys()
+            # An agent absent because its provider errored is retained (kept in
+            # the resolver and surfaced as stale via error_by_provider_name)
+            # rather than dropped; only genuinely-removed agents fire destroyed.
+            partition = partition_removed_agents_by_provider_error(
+                removed_agent_ids=removed,
+                provider_name_by_prior_agent_id={
+                    aid_str: str(agent.provider_name) for aid_str, agent in prior_agents.items()
+                },
+                error_by_provider_name=event.error_by_provider_name,
+            )
+            merged_agents = dict(fresh_agents)
+            merged_host_map = dict(fresh_host_map)
+            for aid_str in partition.retained:
+                merged_agents[aid_str] = prior_agents[aid_str]
+                merged_host_map[aid_str] = prior_host_map[aid_str]
+            self._discovered_agents = merged_agents
+            self._agent_host_map = merged_host_map
             ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid] for aid, hid in agent_host_map.items() if hid in self._ssh_by_host_id
+                aid: self._ssh_by_host_id[hid] for aid, hid in merged_host_map.items() if hid in self._ssh_by_host_id
             }
-            removed = previously_known - set(kept.keys())
+            # Rebuild host state from this snapshot's hosts (a destroyed host
+            # lingers here with host_state=DESTROYED for its persistence window).
+            # Retained agents' hosts are absent from an errored provider's
+            # snapshot, so carry their last-known state forward.
+            prior_host_state = dict(self._host_state_by_host_id)
+            merged_host_state: dict[str, HostState] = {
+                str(host.host_id): host.host_state for host in event.hosts if host.host_state is not None
+            }
+            for aid_str in partition.retained:
+                retained_host_id = merged_host_map[aid_str]
+                if retained_host_id not in merged_host_state and retained_host_id in prior_host_state:
+                    merged_host_state[retained_host_id] = prior_host_state[retained_host_id]
+            self._host_state_by_host_id = merged_host_state
+            host_state_snapshot = dict(merged_host_state)
+        # Push the merged set (fresh + retained) so retained agents stay listed
+        # in the workspace UI; their provider_name lets the workspace list mark
+        # them stale by cross-referencing the errored providers below.
         self.resolver.update_agents(
             ParsedAgentsResult(
-                agent_ids=tuple(agent_ids),
-                discovered_agents=event.agents,
+                agent_ids=tuple(agent.agent_id for agent in merged_agents.values()),
+                discovered_agents=tuple(merged_agents.values()),
                 ssh_info_by_agent_id=ssh_info_by_agent,
+                host_state_by_host_id=host_state_snapshot,
             )
         )
         # Push provider state + freshness timestamp through the resolver so the
-        # providers panel can render OK / Error badges and "time since last full
-        # discovery event" without parsing the discovery stream itself.
+        # providers panel can render OK / Error badges, the workspace list can
+        # mark retained agents stale, and the "time since last full discovery
+        # event" counter updates -- without parsing the discovery stream itself.
         self.resolver.update_providers(
             providers=event.providers,
             error_by_provider_name=event.error_by_provider_name,
-            last_full_snapshot_at=datetime.now(timezone.utc),
+            last_full_snapshot_at=_full_snapshot_observed_at(event),
         )
-        for aid_str in removed:
+        if partition.retained:
+            logger.debug(
+                "Retained {} agent(s) through a provider discovery error; surfacing as stale: {}",
+                len(partition.retained),
+                sorted(partition.retained),
+            )
+        for aid_str in partition.dropped:
             self._fire_destroyed(AgentId(aid_str))
-        for agent in event.agents:
+        # Only (re)fire discovery for agents actually present in this snapshot;
+        # retained agents were already announced and stay set up.
+        for agent in fresh_agents.values():
             ssh_info = ssh_info_by_agent.get(str(agent.agent_id))
             self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
+
+    def _build_agents_result_locked(self) -> ParsedAgentsResult:
+        """Snapshot the current agent/ssh/host-state maps into a ParsedAgentsResult.
+
+        Must be called while ``self._lock`` is held: it reads the shared mutable
+        maps. Callers push the result to the resolver *after* releasing the lock.
+        Centralizing this keeps the per-event handlers from each re-deriving (and
+        having to re-thread every new resolver-snapshot field through) the same
+        merged view.
+        """
+        agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
+        ssh_info_by_agent = {
+            aid: self._ssh_by_host_id[hid] for aid, hid in self._agent_host_map.items() if hid in self._ssh_by_host_id
+        }
+        discovered = tuple(self._discovered_agents.values())
+        host_state_snapshot = dict(self._host_state_by_host_id)
+        return ParsedAgentsResult(
+            agent_ids=agent_ids,
+            discovered_agents=discovered,
+            ssh_info_by_agent_id=ssh_info_by_agent,
+            host_state_by_host_id=host_state_snapshot,
+        )
 
     def _handle_host_ssh_info(self, event: HostSSHInfoEvent) -> None:
         ssh_info = RemoteSSHInfo(
@@ -425,20 +501,18 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._ssh_by_host_id[host_id_str] = ssh_info
             agents_on_host = [AgentId(aid) for aid, hid in self._agent_host_map.items() if hid == host_id_str]
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids, discovered_agents=discovered, ssh_info_by_agent_id=ssh_info_by_agent
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         for agent_id in agents_on_host:
             self._fire_discovered(agent_id, ssh_info, self._provider_name_for_agent(agent_id))
+
+    def _handle_host_discovered(self, event: HostDiscoveryEvent) -> None:
+        if event.host.host_state is None:
+            return
+        with self._lock:
+            self._host_state_by_host_id[str(event.host.host_id)] = event.host.host_state
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
 
     def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
         agent = event.agent
@@ -446,19 +520,9 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._agent_host_map[aid_str] = str(agent.host_id)
             self._discovered_agents[aid_str] = agent
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
             ssh_info = self._ssh_by_host_id.get(str(agent.host_id))
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids, discovered_agents=discovered, ssh_info_by_agent_id=ssh_info_by_agent
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         self._fire_discovered(agent.agent_id, ssh_info, str(agent.provider_name))
 
     def _handle_agent_destroyed(self, agent_id: AgentId) -> None:
@@ -467,18 +531,8 @@ class EnvelopeStreamConsumer(MutableModel):
             self._discovered_agents.pop(aid_str, None)
             self._agent_host_map.pop(aid_str, None)
             self._services_by_agent.pop(aid_str, None)
-            agent_ids = tuple(AgentId(aid) for aid in self._agent_host_map)
-            ssh_info_by_agent = {
-                aid: self._ssh_by_host_id[hid]
-                for aid, hid in self._agent_host_map.items()
-                if hid in self._ssh_by_host_id
-            }
-            discovered = tuple(self._discovered_agents.values())
-        self.resolver.update_agents(
-            ParsedAgentsResult(
-                agent_ids=agent_ids, discovered_agents=discovered, ssh_info_by_agent_id=ssh_info_by_agent
-            )
-        )
+            agents_result = self._build_agents_result_locked()
+        self.resolver.update_agents(agents_result)
         self.resolver.update_services(agent_id, {})
         self._fire_destroyed(agent_id)
 
@@ -512,7 +566,7 @@ class EnvelopeStreamConsumer(MutableModel):
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_agent_destroyed callback failed for {}: {}", agent_id, e)
 
-    # -- Per-agent event lines (services / requests / refresh) ------------
+    # -- Per-agent event lines (services / requests) ----------------------
 
     def _handle_event_payload(self, agent_id: AgentId, payload: dict[str, Any]) -> None:
         source = payload.get("source", "")
@@ -520,10 +574,6 @@ class EnvelopeStreamConsumer(MutableModel):
         if source == REQUESTS_EVENT_SOURCE_NAME:
             raw_line = json.dumps(payload, separators=(",", ":"))
             self.resolver.fire_on_request(aid_str, raw_line)
-            return
-        if source == REFRESH_EVENT_SOURCE_NAME:
-            raw_line = json.dumps(payload, separators=(",", ":"))
-            self.resolver.fire_on_refresh(aid_str, raw_line)
             return
         if source != SERVICES_EVENT_SOURCE_NAME:
             return
@@ -632,7 +682,6 @@ class EnvelopeStreamConsumer(MutableModel):
 def start_mngr_forward(
     config: ForwardSubprocessConfig,
     resolver: MngrCliBackendResolver,
-    notification_dispatcher: NotificationDispatcher | None = None,
 ) -> tuple[EnvelopeStreamConsumer, str]:
     """Spawn the ``mngr forward`` subprocess and attach an envelope consumer.
 
@@ -652,15 +701,17 @@ def start_mngr_forward(
     would be dispatched against an empty callback list and silently
     dropped.
     """
-    binary = _resolve_mngr_binary(config.mngr_binary)
     preauth_cookie = secrets.token_urlsafe(_PREAUTH_TOKEN_LENGTH)
     command: list[str] = [
-        binary,
+        config.mngr_binary,
         "forward",
         "--host",
         "127.0.0.1",
         "--service",
         config.service,
+        # Tail the shared discovery log written by the single `mngr observe` under
+        # `mngr latchkey forward` rather than spawning a second discovery observer.
+        "--observe-via-file",
         "--preauth-cookie",
         preauth_cookie,
         "--format",
@@ -684,43 +735,21 @@ def start_mngr_forward(
         env=env,
         cwd=str(Path.home()),
     )
-    consumer = EnvelopeStreamConsumer(
-        resolver=resolver,
-        notification_dispatcher=notification_dispatcher,
-    )
+    consumer = EnvelopeStreamConsumer(resolver=resolver)
     consumer.attach(process)
     return consumer, preauth_cookie
 
 
-def _resolve_mngr_binary(candidate: str) -> str:
-    """Resolve the mngr binary, falling back to PATH lookup if the candidate is just 'mngr'."""
-    if "/" in candidate:
-        return candidate
-    resolved = shutil.which(candidate)
-    if resolved is None:
-        # Best-effort: trust the bare name. Popen will raise if it's missing.
-        return candidate
-    return resolved
-
-
 def _redact_secrets(command: list[str]) -> list[str]:
-    """Return a copy of ``command`` with secret-bearing argument values masked.
+    """Return a copy of ``command`` with secret-bearing argument values masked for logging.
 
-    Used only for logging. The actual ``Popen`` call uses the unredacted
-    list so the plugin still receives the real values. Today we redact the
-    ``--preauth-cookie`` value (a freshly-minted shared secret between
-    minds, the plugin, and the Electron shell); future secret-bearing
-    flags can be added to ``_SECRET_BEARING_FLAGS``.
+    The actual ``Popen`` call uses the unredacted list so the plugin still
+    receives the real values. Today we redact the ``--preauth-cookie`` value
+    (a freshly-minted shared secret between minds, the plugin, and the
+    Electron shell); future secret-bearing flags can be added to
+    ``_SECRET_BEARING_FLAGS``.
     """
-    redacted = list(command)
-    for flag in _SECRET_BEARING_FLAGS:
-        try:
-            idx = redacted.index(flag)
-        except ValueError:
-            continue
-        if idx + 1 < len(redacted):
-            redacted[idx + 1] = "***"
-    return redacted
+    return redact_secret_flag_values(command, secret_bearing_flags=_SECRET_BEARING_FLAGS)
 
 
 _SECRET_BEARING_FLAGS: Final[tuple[str, ...]] = ("--preauth-cookie",)

@@ -1,14 +1,13 @@
-// Creating-page flow: the workspace is already being created in the
-// background, so this page first walks the user through three onboarding
-// questions and only falls through to the loading screen if creation hasn't
-// finished by the time they're done. Creation status + logs stream over SSE.
+// Creating-page flow: the workspace is created in the background, so this
+// page shows a loading screen (progress bar + rotating hints) and redirects
+// into the workspace once creation finishes. Creation status + logs stream
+// over SSE.
 (function () {
-  var root = document.getElementById('onboarding');
+  var root = document.getElementById('creating');
   if (!root) return;
   var agentId = root.getAttribute('data-agent-id');
   var expectedDuration = parseFloat(root.getAttribute('data-expected-duration-seconds')) || 60;
 
-  var QUESTION_SCREENS = ['q1', 'q2', 'q3'];
   var startTime = (window.performance && performance.now) ? performance.now() : Date.now();
 
   // Shared creation state, updated by the SSE handler.
@@ -16,117 +15,6 @@
   var creationFailed = false;
   var redirectUrl = null;
   var creationError = '';
-
-  function screenEl(name) {
-    return root.querySelector('[data-screen="' + name + '"]');
-  }
-  function showScreen(name) {
-    var screens = root.querySelectorAll('.screen');
-    for (var i = 0; i < screens.length; i++) {
-      screens[i].classList.toggle('hidden', screens[i].getAttribute('data-screen') !== name);
-    }
-  }
-
-  // ---- Option selection (exclusive within a screen) ----
-  root.querySelectorAll('.opt').forEach(function (opt) {
-    opt.addEventListener('click', function () {
-      var section = opt.closest('.screen');
-      section.querySelectorAll('.opt').forEach(function (other) {
-        other.classList.toggle('opt-selected', other === opt);
-      });
-      var textarea = opt.querySelector('.opt-text');
-      if (textarea) {
-        setTimeout(function () {
-          textarea.focus();
-          textarea.setSelectionRange(textarea.value.length, textarea.value.length);
-        }, 0);
-      }
-    });
-  });
-  // Clicks inside a textarea should not bubble up and re-trigger selection.
-  root.querySelectorAll('.opt-text').forEach(function (textarea) {
-    textarea.addEventListener('click', function (event) {
-      event.stopPropagation();
-    });
-  });
-
-  function selectedOption(screenName) {
-    return screenEl(screenName).querySelector('.opt.opt-selected');
-  }
-  function selectedValue(screenName) {
-    var opt = selectedOption(screenName);
-    return opt ? opt.getAttribute('data-val') : '';
-  }
-  function selectedText(screenName) {
-    var opt = selectedOption(screenName);
-    if (!opt) return '';
-    var textarea = opt.querySelector('.opt-text');
-    return textarea ? textarea.value : '';
-  }
-
-  function collectAnswers() {
-    return {
-      user_data_preference: selectedValue('q1'),
-      initial_problem: selectedText('q2'),
-      permissions_preference: selectedText('q3')
-    };
-  }
-
-  function submitAnswers() {
-    var body = collectAnswers();
-    return fetch('/api/create-agent/' + agentId + '/onboarding', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      // keepalive lets the request survive the immediate navigation that
-      // follows on the common "creation already finished" path; without it
-      // the browser would abort the in-flight POST and the onboarding side
-      // effects would silently never fire.
-      keepalive: true
-    }).catch(function () {
-      // Onboarding side effects are best-effort; a failed submit should not
-      // block the user from entering their workspace.
-    });
-  }
-
-  // ---- Navigation ----
-  function currentScreen() {
-    var screens = root.querySelectorAll('.screen');
-    for (var i = 0; i < screens.length; i++) {
-      if (!screens[i].classList.contains('hidden')) {
-        return screens[i].getAttribute('data-screen');
-      }
-    }
-    return QUESTION_SCREENS[0];
-  }
-
-  root.querySelectorAll('.js-next').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var cur = currentScreen();
-      var idx = QUESTION_SCREENS.indexOf(cur);
-      if (idx === QUESTION_SCREENS.length - 1) {
-        finishQuestions();
-      } else {
-        showScreen(QUESTION_SCREENS[idx + 1]);
-      }
-    });
-  });
-  root.querySelectorAll('.js-back').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var cur = currentScreen();
-      var idx = QUESTION_SCREENS.indexOf(cur);
-      if (idx > 0) showScreen(QUESTION_SCREENS[idx - 1]);
-    });
-  });
-
-  function finishQuestions() {
-    submitAnswers();
-    if (creationDone && redirectUrl) {
-      window.location.href = redirectUrl;
-      return;
-    }
-    showLoading();
-  }
 
   // ---- Loading screen: progress bar + rotating hints ----
   var TIPS = [
@@ -137,12 +25,15 @@
     'Tip: share a running app with a teammate from the workspace’s Share menu.',
     'Did you know: you can revisit permissions and compute settings later.'
   ];
-  var loadingStarted = false;
+  var tipsInterval = null;
 
-  function showLoading() {
-    showScreen('loading');
-    if (loadingStarted) return;
-    loadingStarted = true;
+  function startLoading() {
+    // If creation already failed, never show the in-progress UI -- jump
+    // straight to the failure view.
+    if (creationFailed) {
+      showFailure();
+      return;
+    }
     startTips();
     requestAnimationFrame(tickProgress);
   }
@@ -152,7 +43,7 @@
     if (!tipEl) return;
     var idx = 0;
     tipEl.innerHTML = TIPS[0];
-    setInterval(function () {
+    tipsInterval = setInterval(function () {
       idx = (idx + 1) % TIPS.length;
       tipEl.style.opacity = '0';
       setTimeout(function () {
@@ -160,6 +51,28 @@
         tipEl.style.opacity = '1';
       }, 250);
     }, 3000);
+  }
+
+  // ---- Failure view ----
+  // Surface a creation failure prominently. Stops the rotating tips and
+  // progress bar, swaps the loading screen's progress sub-view for the
+  // failure sub-view, and fills in the error message. Idempotent: safe to
+  // call from both the status poll and the SSE 'done' handler.
+  var failureShown = false;
+  function showFailure() {
+    if (failureShown) return;
+    failureShown = true;
+    if (tipsInterval) { clearInterval(tipsInterval); tipsInterval = null; }
+    var progressView = document.getElementById('progress-view');
+    var failureView = document.getElementById('failure-view');
+    if (progressView) progressView.classList.add('hidden');
+    if (failureView) failureView.classList.remove('hidden');
+    var msgEl = document.getElementById('error-message');
+    if (msgEl) msgEl.textContent = creationError || 'unknown error';
+    // The prominent error box now carries the message, so clear the faint
+    // footer caption to avoid showing it twice.
+    var stage = document.getElementById('stage');
+    if (stage) stage.textContent = '';
   }
 
   // Time-based bar: ease to 80% over the expected duration, then crawl the
@@ -173,9 +86,9 @@
 
   function tickProgress() {
     var fill = document.getElementById('bar-fill');
-    var stage = document.getElementById('stage');
     if (creationFailed) {
-      if (stage) stage.textContent = 'Failed: ' + (creationError || 'unknown error');
+      // showFailure() (called from the poll/SSE handlers) owns the failure
+      // UI; just stop advancing the bar.
       return;
     }
     if (creationDone && redirectUrl) {
@@ -213,8 +126,7 @@
     } else if (data.status === 'FAILED') {
       creationFailed = true;
       creationError = data.error || 'unknown error';
-      var stage = document.getElementById('stage');
-      if (stage) stage.textContent = 'Failed: ' + creationError;
+      showFailure();
       if (statusPoll) { clearInterval(statusPoll); statusPoll = null; }
     }
   }
@@ -256,8 +168,7 @@
       } else if (data.status === 'FAILED') {
         creationFailed = true;
         creationError = data.error || 'unknown error';
-        var stage = document.getElementById('stage');
-        if (stage) stage.textContent = 'Failed: ' + creationError;
+        showFailure();
       }
     } else if (data._type === 'status' && data.status_text) {
       var stageEl = document.getElementById('stage');
@@ -273,4 +184,8 @@
   source.onerror = function () {
     source.close();
   };
+
+  // Kick off the loading UI immediately -- there are no questions to answer
+  // first.
+  startLoading();
 })();

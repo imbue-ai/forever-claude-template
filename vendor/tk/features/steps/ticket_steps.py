@@ -19,6 +19,19 @@ use_step_matcher("re")
 # Helper Functions
 # ============================================================================
 
+def created_id_from_output(stdout):
+    """Resolve the created ticket id from `tk create` stdout.
+
+    Regular creates print the bare id. Step creates print
+    `Created <id>: <title>` so the chat progress view can read the title
+    straight from tk's stdout; extract the id from that form.
+    """
+    stripped = stdout.strip()
+    if stripped.startswith("Created "):
+        return stripped[len("Created "):].split(":", 1)[0].strip()
+    return stripped
+
+
 def get_ticket_script(context):
     """Get the ticket script path, defaulting to ./ticket or using TICKET_SCRIPT env var."""
     ticket_script = os.environ.get('TICKET_SCRIPT')
@@ -27,7 +40,7 @@ def get_ticket_script(context):
     return str(Path(context.project_dir) / 'ticket')
 
 
-def create_ticket(context, ticket_id, title, priority=2, parent=None):
+def create_ticket(context, ticket_id, title, priority=2, parent=None, step=False):
     """Helper to create a ticket file."""
     tickets_dir = Path(context.test_dir) / '.tickets'
     tickets_dir.mkdir(parents=True, exist_ok=True)
@@ -42,6 +55,8 @@ created: 2024-01-01T00:00:00Z
 type: task
 priority: {priority}
 '''
+    if step:
+        content += 'step: true\n'
     if parent:
         content += f'parent: {parent}\n'
     content += f'''---
@@ -90,6 +105,12 @@ def step_ticket_exists_with_priority(context, ticket_id, title, priority):
 def step_ticket_exists_with_parent(context, ticket_id, title, parent_id):
     """Create a ticket with given ID, title, and parent."""
     create_ticket(context, ticket_id, title, parent=parent_id)
+
+
+@given(r'a step record exists with ID "(?P<ticket_id>[^"]+)" and title "(?P<title>[^"]+)"')
+def step_record_exists(context, ticket_id, title):
+    """Create a step record (step: true) with given ID and title."""
+    create_ticket(context, ticket_id, title, step=True)
 
 
 @given(r'a ticket exists with ID "(?P<ticket_id>[^"]+)" and title "(?P<title>[^"]+)"')
@@ -284,7 +305,7 @@ def step_run_command_as_agent(context, command, agent_name):
     # Mirror step_run_command: track the created ticket id so subsequent
     # "the created ticket should ..." assertions can find the file.
     if 'ticket create' in command and result.returncode == 0:
-        context.last_created_id = result.stdout.strip()
+        context.last_created_id = created_id_from_output(result.stdout)
 
 
 @when(r'I run "(?P<command>(?:[^"\\]|\\.)+)" with TICKETS_DIR set to "(?P<tickets_dir>[^"]+)"')
@@ -353,7 +374,7 @@ def step_run_command(context, command):
 
     # If this was a create command, track the created ticket ID
     if 'ticket create' in command and result.returncode == 0:
-        context.last_created_id = result.stdout.strip()
+        context.last_created_id = created_id_from_output(result.stdout)
 
 
 # ============================================================================
@@ -733,7 +754,7 @@ def run_with_plugin_path(context, command):
     context.last_command = command
 
     if 'ticket create' in command and result.returncode == 0:
-        context.last_created_id = result.stdout.strip()
+        context.last_created_id = created_id_from_output(result.stdout)
 
 
 @given(r'a plugin "(?P<name>[^"]+)" that outputs "(?P<output>[^"]+)"')

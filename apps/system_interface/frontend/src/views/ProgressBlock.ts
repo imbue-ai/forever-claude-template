@@ -3,10 +3,9 @@
  *
  * The section is a flat, ordered list of timeline items produced by the
  * transcript walk (see turn-grouping): step nodes, ungrouped work/prose runs
- * (rendered inline, thread-breaking), inter-step interjections (a step's
- * closing prose, promoted to break the thread between two steps), and chips.
- * Step nodes carry their own grouped events; expanding a step reveals that
- * grouped work. The wrap-up reply renders below the timeline.
+ * (rendered inline, thread-breaking -- including a step's ejected closing
+ * prose), and chips. Step nodes carry their own grouped events; expanding a step
+ * reveals that grouped work. The wrap-up reply renders below the timeline.
  *
  * This component renders structure it is given; it does no grouping or
  * ordering itself.
@@ -15,7 +14,12 @@
 import m from "mithril";
 import { MarkdownContent, renderMarkdown } from "../markdown";
 import type { ToolResultEvent, AssistantMessageEvent } from "../models/Response";
-import { renderAssistantMessage, renderAssistantMessageChildren, renderUserMessage } from "./message-renderers";
+import {
+  renderAssistantMessage,
+  renderAssistantMessageChildren,
+  renderPermissionItem,
+  renderUserMessage,
+} from "./message-renderers";
 import type { StepNode, StepStatus, TimelineItem } from "./turn-grouping";
 
 interface ProgressBlockAttrs {
@@ -134,24 +138,6 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
               : null,
           ],
         ),
-        // The step's backing .tickets file is gone (the directory was cleared),
-        // so the title fell back to the raw id and the summary is unavailable.
-        // A "?" marker signals this, with a CSS tooltip (data-tooltip + ::after)
-        // rather than the native `title` attribute -- the desktop client renders
-        // in a webview where native title tooltips don't reliably appear.
-        // aria-label carries the same text for assistive tech.
-        step.file_missing
-          ? m(
-              "span.pv-tl-missing",
-              {
-                "data-tooltip":
-                  "The ticket file backing this step is missing. Rich information (title, closing summary) is unavailable.",
-                "aria-label":
-                  "The ticket file backing this step is missing. Rich information (title, closing summary) is unavailable.",
-              },
-              "?",
-            )
-          : null,
         renderStepCaption(step, isExpanded),
         isExpanded ? m("div.pv-tl-expanded", renderExpandedStepBody(step, toolResults, agentId)) : null,
       ]),
@@ -171,28 +157,25 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
           return renderStepNode(item.step, idx === lastStepIdx, toolResults, agentId);
         }
         if (item.kind === "ungrouped") {
-          // Real work / prose that happened with no step open: rendered inline
-          // as a thread-breaking block, exactly like a no-steps turn.
+          // Real work / prose that happened with no step open -- including a
+          // step's ejected closing prose: rendered inline as a thread-breaking
+          // block, exactly like a no-steps turn.
           return m(
             "div.pv-ungrouped",
             { key: item.key },
             item.events.map((e) => renderAssistantMessage(e, toolResults, agentId)),
           );
         }
-        if (item.kind === "interjection") {
-          // A step's closing prose, promoted to break the timeline thread
-          // between the closing step and the next (top/bottom hairlines mark
-          // the break -- see .pv-interstep). Interjection events are always
-          // pure prose (no tool calls), so render the text directly like the
-          // trailing reply does -- NOT via renderAssistantMessage, whose
-          // `.message-assistant` wrapper carries a 20px bottom margin that
-          // would sit inside the bordered block and leave a lopsided gap below
-          // the text.
-          const interText = item.events
-            .map((e) => e.text ?? "")
-            .filter(Boolean)
-            .join("\n\n");
-          return m("div.pv-interstep", { key: item.key }, m(MarkdownContent, { content: interText }));
+        if (item.kind === "permission") {
+          // A permission request lifted out of its step: rendered inline as a
+          // thread-breaking block so it is always visible, as the
+          // permission-request card the renderer produces (with its review button
+          // or, once the user decides, a granted/denied verdict).
+          return m(
+            "div.pv-permission",
+            { key: `perm-${item.event.event_id}` },
+            renderPermissionItem(item.event, toolResults, agentId, item.resolution),
+          );
         }
         // chip
         return m("div.pv-stophook", { key: `chip-${item.event.event_id}` }, renderUserMessage(item.event));

@@ -14,6 +14,7 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
@@ -22,7 +23,11 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -49,6 +54,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_com
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
+from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_lima.config import LimaProviderConfig
@@ -87,6 +93,17 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
 
 # Filename of the pre-injected ed25519 sshd host key stored per host on disk.
 _HOST_KEY_NAME = "ssh_host_ed25519_key"
+
+# Substrings that, when present in a LimaCommandError message, indicate the
+# targeted VM or disk is already gone (so the cleanup failure is benign rather
+# than a resource left behind). Matched case-insensitively.
+_LIMA_NOT_FOUND_MARKERS: tuple[str, ...] = ("no such", "not found", "does not exist", "already")
+
+
+def _is_lima_not_found_error(message: str) -> bool:
+    """Whether a limactl error message indicates the target resource is already gone."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _LIMA_NOT_FOUND_MARKERS)
 
 
 class LimaProviderInstance(BaseProviderInstance):
@@ -250,18 +267,20 @@ class LimaProviderInstance(BaseProviderInstance):
         host_id: HostId,
         host_name: HostName,
         ssh_config: LimaSshConfig,
+        is_run_as_root: bool,
     ) -> Host:
         """Create a Host object from SSH connection info."""
         # Add the host to known_hosts. Re-run on every create/start/get_host
         # because Lima reassigns the forwarded port across restarts.
         self._record_pre_injected_host_key(host_id, ssh_config.hostname, ssh_config.port)
 
+        ssh_user, identity_file = self._effective_ssh_user_and_identity(ssh_config, is_run_as_root)
         pyinfra_host = create_pyinfra_host(
             hostname=ssh_config.hostname,
             port=ssh_config.port,
-            private_key_path=ssh_config.identity_file,
+            private_key_path=identity_file,
             known_hosts_path=self._host_known_hosts_path(host_id),
-            ssh_user=ssh_config.user,
+            ssh_user=ssh_user,
         )
         connector = PyinfraConnector(pyinfra_host)
 
@@ -298,16 +317,23 @@ class LimaProviderInstance(BaseProviderInstance):
             self._host_store.write_host_record(updated_host_record)
 
     def _create_offline_host(self, host_record: HostRecord) -> OfflineHost:
-        """Create an OfflineHost from a host record."""
+        """Create an OfflineHost from a host record.
+
+        Wrapped so the offline host is readable (file reads served from its
+        persisted volume) whether reached via ``get_host`` or
+        ``to_offline_host``; the volume is resolved lazily, so this is free.
+        """
         host_id = HostId(host_record.certified_host_data.host_id)
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=host_record.certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data
-            ),
+        return make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=host_record.certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+                on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
+                    callback_host_id, certified_data
+                ),
+            )
         )
 
     def _create_shutdown_script(self, host: Host) -> None:
@@ -365,6 +391,31 @@ sudo poweroff
         with log_span("Saving failed host record for host_id={}", host_id):
             self._host_store.write_host_record(host_record)
 
+    def _cleanup_failed_lima_instance(
+        self,
+        *,
+        instance_name: str,
+        host_data_disk_name: str | None,
+    ) -> None:
+        """Best-effort teardown of a half-created Lima VM and its btrfs disk.
+
+        Tolerates already-absent resources so it is safe to call from a `finally`
+        on any failure path. Also swallows concurrency-group ``ProcessError``s
+        (e.g. a limactl timeout) so a slow cleanup never masks the original
+        creation failure that triggered it.
+        """
+        try:
+            limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
+        except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+            logger.debug("Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err)
+        if host_data_disk_name is not None:
+            try:
+                limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
+            except (LimaCommandError, OSError, ProcessError) as cleanup_err:
+                logger.debug(
+                    "Failed to clean up Lima disk {} during error recovery: {}", host_data_disk_name, cleanup_err
+                )
+
     def _wait_for_cloud_init(self, instance_name: str) -> None:
         """Wait for cloud-init to complete inside the VM."""
         with log_span("Waiting for cloud-init to complete in {}", instance_name):
@@ -376,6 +427,32 @@ sudo poweroff
             )
             if exit_code != 0:
                 logger.debug("cloud-init wait returned non-zero (may not be installed): {}", stderr)
+
+    # =========================================================================
+    # Run-as-root SSH helpers
+    # =========================================================================
+
+    def _ensure_keys_dir(self) -> Path:
+        """Create (if needed) and return the provider-wide keys directory."""
+        self._keys_dir.mkdir(parents=True, exist_ok=True)
+        return self._keys_dir
+
+    def _root_ssh_keypair(self) -> tuple[Path, str]:
+        """Client keypair mngr uses to reach the VM as root when is_run_as_root is set."""
+        return load_or_create_ssh_keypair(self._ensure_keys_dir(), "root_ssh_key")
+
+    def _effective_ssh_user_and_identity(self, ssh_config: LimaSshConfig, is_run_as_root: bool) -> tuple[str, Path]:
+        """Resolve the SSH user and identity file for connecting to the agent host.
+
+        When is_run_as_root is set, mngr connects as root using its injected root
+        client key; otherwise it uses Lima's own default user and key. The caller
+        passes the value locked into the host record (not the live provider
+        config) so lifecycle operations replay the choice made at create time.
+        """
+        if is_run_as_root:
+            root_key_path, _root_public_key = self._root_ssh_keypair()
+            return "root", root_key_path
+        return ssh_config.user, ssh_config.identity_file
 
     # =========================================================================
     # Core Lifecycle Methods
@@ -417,6 +494,13 @@ sudo poweroff
         # Generate the sshd host keypair to inject into the VM and record in known_hosts.
         host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
 
+        # When running the agent as root, materialize the client keypair and pass
+        # its public key into the provisioning script so mngr can ssh in as root.
+        if self.config.is_run_as_root:
+            _root_key_path, root_authorized_public_key = self._root_ssh_keypair()
+        else:
+            root_authorized_public_key = None
+
         # Generate or load Lima YAML config
         yaml_path_from_build_args = parse_build_args_for_yaml_path(tuple(build_args or ()))
         if yaml_path_from_build_args is not None:
@@ -430,6 +514,7 @@ sudo poweroff
                 host_public_key_openssh=host_public_key_openssh,
                 host_data_disk_name=host_data_disk_name,
                 host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
+                root_authorized_public_key=root_authorized_public_key,
             )
             lima_config = merge_lima_yaml(base_config, user_config)
         else:
@@ -444,6 +529,7 @@ sudo poweroff
                 host_public_key_openssh=host_public_key_openssh,
                 host_data_disk_name=host_data_disk_name,
                 host_data_disk_size=self.config.host_data_disk_size if host_data_disk_name else None,
+                root_authorized_public_key=root_authorized_public_key,
             )
 
         # Write the YAML config to a temp file
@@ -451,6 +537,12 @@ sudo poweroff
 
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
+        # Tracked so the `finally` can tear down a half-built VM + disk on ANY
+        # failure -- including ConcurrencyExceptionGroup / ProcessTimeoutError /
+        # KeyboardInterrupt, which are not MngrError/OSError and would otherwise
+        # escape the `except` below leaving an orphaned, untracked VM behind.
+        is_creation_successful = False
+        failure_reason = "Lima host creation was interrupted by an unexpected error"
         try:
             # Pre-create the Lima-managed additional disk in btrfs mode.
             # `additionalDisks` with `format: true` only auto-formats an
@@ -483,40 +575,29 @@ sudo poweroff
                 wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
 
             # Create the Host object
-            host = self._create_host_object(host_id, name, ssh_config)
+            host = self._create_host_object(host_id, name, ssh_config, self.config.is_run_as_root)
+            is_creation_successful = True
 
         except (MngrError, OSError) as e:
             failure_reason = str(e)
-            logger.error("Lima host creation failed: {}", failure_reason)
-            # Clean up the Lima instance
-            try:
-                limactl_delete(self.mngr_ctx.concurrency_group, instance_name, force=True)
-            except (LimaCommandError, OSError) as cleanup_err:
-                logger.debug(
-                    "Failed to clean up Lima instance {} during error recovery: {}", instance_name, cleanup_err
-                )
-            # Also clean up the orphaned btrfs additional disk so a retry with
-            # the same host_id can re-create it without colliding.
-            if host_data_disk_name is not None:
-                try:
-                    limactl_disk_delete(self.mngr_ctx.concurrency_group, host_data_disk_name, force=True)
-                except (LimaCommandError, OSError) as cleanup_err:
-                    logger.debug(
-                        "Failed to clean up Lima disk {} during error recovery: {}",
-                        host_data_disk_name,
-                        cleanup_err,
-                    )
-            self._save_failed_host_record(
-                host_id=host_id,
-                host_name=name,
-                tags=tags,
-                failure_reason=failure_reason,
-                build_log="",
-            )
             raise LimaHostCreationError(self.name, failure_reason) from e
         finally:
             # Clean up the temporary YAML config file
             yaml_path.unlink(missing_ok=True)
+            if not is_creation_successful:
+                logger.error("Lima host creation failed; tearing down {}: {}", instance_name, failure_reason)
+                # Tear down the VM (and the orphaned btrfs additional disk so a
+                # retry with the same host_id can re-create it without colliding).
+                self._cleanup_failed_lima_instance(
+                    instance_name=instance_name,
+                    host_data_disk_name=host_data_disk_name,
+                )
+                try:
+                    self._save_failed_host_record(
+                        host_id=host_id, host_name=name, tags=tags, failure_reason=failure_reason, build_log=""
+                    )
+                except (MngrError, OSError) as record_err:
+                    logger.warning("Failed to write failed-host record for {}: {}", host_id, record_err)
 
         # Build lifecycle config
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -539,6 +620,11 @@ sudo poweroff
             updated_at=now,
         )
 
+        # Resolve the effective SSH login (root when is_run_as_root, else Lima's user).
+        effective_ssh_user, effective_ssh_identity = self._effective_ssh_user_and_identity(
+            ssh_config, self.config.is_run_as_root
+        )
+
         # Build and save host record with resources
         lima_config_record = LimaHostConfig(
             instance_name=instance_name,
@@ -546,6 +632,7 @@ sudo poweroff
             image_url=str(image) if image else None,
             is_host_data_volume_exposed=is_host_data_volume_exposed,
             host_data_disk_name=host_data_disk_name,
+            is_run_as_root=self.config.is_run_as_root,
         )
 
         # Read configured resources from Lima config
@@ -555,8 +642,8 @@ sudo poweroff
             certified_host_data=host_data,
             ssh_hostname=ssh_config.hostname,
             ssh_port=ssh_config.port,
-            ssh_user=ssh_config.user,
-            ssh_identity_file=str(ssh_config.identity_file),
+            ssh_user=effective_ssh_user,
+            ssh_identity_file=str(effective_ssh_identity),
             config=lima_config_record,
             resources=resources,
         )
@@ -580,14 +667,14 @@ sudo poweroff
 
         # Add authorized keys if provided
         if authorized_keys:
-            add_authorized_keys_cmd = build_add_authorized_keys_command(ssh_config.user, tuple(authorized_keys))
+            add_authorized_keys_cmd = build_add_authorized_keys_command(effective_ssh_user, tuple(authorized_keys))
             if add_authorized_keys_cmd is not None:
                 with log_span("Adding {} authorized_keys entries to VM", len(authorized_keys)):
                     host.execute_stateful_command(f"sh -c '{add_authorized_keys_cmd}'")
 
         # Add known hosts entries if provided
         if known_hosts:
-            add_known_hosts_cmd = build_add_known_hosts_command(ssh_config.user, tuple(known_hosts))
+            add_known_hosts_cmd = build_add_known_hosts_command(effective_ssh_user, tuple(known_hosts))
             if add_known_hosts_cmd is not None:
                 with log_span("Adding {} known_hosts entries to VM", len(known_hosts)):
                     host.execute_stateful_command(f"sh -c '{add_known_hosts_cmd}'")
@@ -682,14 +769,19 @@ sudo poweroff
         with log_span("Waiting for SSH to be ready..."):
             wait_for_sshd(ssh_config.hostname, ssh_config.port, self.config.ssh_connect_timeout)
 
-        host_obj = self._create_host_object(host_id, HostName(host_record.certified_host_data.host_name), ssh_config)
+        is_run_as_root = host_record.config.is_run_as_root
+        host_obj = self._create_host_object(
+            host_id, HostName(host_record.certified_host_data.host_name), ssh_config, is_run_as_root
+        )
 
-        # Update SSH info in host record (port may change after restart)
+        # Update SSH info in host record (port may change after restart). The user
+        # and identity follow the locked-in run-as-root choice, not Lima's own user.
+        effective_ssh_user, effective_ssh_identity = self._effective_ssh_user_and_identity(ssh_config, is_run_as_root)
         updated_record = host_record.model_copy_update(
             to_update(host_record.field_ref().ssh_hostname, ssh_config.hostname),
             to_update(host_record.field_ref().ssh_port, ssh_config.port),
-            to_update(host_record.field_ref().ssh_user, ssh_config.user),
-            to_update(host_record.field_ref().ssh_identity_file, str(ssh_config.identity_file)),
+            to_update(host_record.field_ref().ssh_user, effective_ssh_user),
+            to_update(host_record.field_ref().ssh_identity_file, str(effective_ssh_identity)),
         )
         # Clear stop reason
         updated_certified = updated_record.certified_host_data.model_copy_update(
@@ -711,47 +803,82 @@ sudo poweroff
         return host_obj
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
-        """Permanently destroy a Lima VM and mark the host as DESTROYED."""
+        """Permanently destroy a Lima VM and mark the host as DESTROYED.
+
+        Best-effort: every teardown step is attempted, and a real failure (a
+        resource that exists but could not be removed) is recorded and raised
+        as a ``CleanupFailedGroup`` rather than aborting or being silently
+        swallowed. A failure indicating the resource was already gone is
+        benign. See specs/cleanup-error-aggregation.md.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
         logger.info("Destroying Lima VM: {}", host_id)
 
-        # Disconnect SSH
-        if isinstance(host, Host):
-            host.disconnect()
-        self._evict_cached_host(host_id)
+        with collecting_cleanup_failures() as failures:
+            # Disconnect SSH (local, no remote resource -- nothing to record on failure).
+            if isinstance(host, Host):
+                host.disconnect()
+            self._evict_cached_host(host_id)
 
-        host_record = self._host_store.read_host_record(host_id, use_cache=False)
-        if host_record is not None and host_record.config is not None:
-            try:
-                limactl_delete(self.mngr_ctx.concurrency_group, host_record.config.instance_name, force=True)
-            except LimaCommandError as e:
-                logger.warning("Error deleting Lima instance: {}", e)
-            # Remove the Lima-managed btrfs additional disk for hosts that
-            # were created with is_host_data_volume_exposed=False. The disk
-            # lives under ~/.lima/_disks/ and is otherwise orphaned because
-            # `limactl delete` only removes the VM definition, not named
-            # disks it referenced. Tolerate the disk already being absent.
-            if host_record.config.host_data_disk_name is not None:
+            host_record = self._host_store.read_host_record(host_id, use_cache=False)
+            if host_record is not None and host_record.config is not None:
                 try:
-                    limactl_disk_delete(
-                        self.mngr_ctx.concurrency_group,
-                        host_record.config.host_data_disk_name,
-                        force=True,
-                    )
+                    limactl_delete(self.mngr_ctx.concurrency_group, host_record.config.instance_name, force=True)
                 except LimaCommandError as e:
-                    logger.warning("Error deleting Lima additional disk: {}", e)
+                    logger.warning("Error deleting Lima instance: {}", e)
+                    if not _is_lima_not_found_error(str(e)):
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to delete Lima VM for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
+                # Remove the Lima-managed btrfs additional disk for hosts that
+                # were created with is_host_data_volume_exposed=False. The disk
+                # lives under ~/.lima/_disks/ and is otherwise orphaned because
+                # `limactl delete` only removes the VM definition, not named
+                # disks it referenced. Tolerate the disk already being absent.
+                if host_record.config.host_data_disk_name is not None:
+                    try:
+                        limactl_disk_delete(
+                            self.mngr_ctx.concurrency_group,
+                            host_record.config.host_data_disk_name,
+                            force=True,
+                        )
+                    except LimaCommandError as e:
+                        logger.warning("Error deleting Lima additional disk: {}", e)
+                        if not _is_lima_not_found_error(str(e)):
+                            failures.append(
+                                CleanupFailure(
+                                    category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                    message=f"failed to delete Lima additional disk for host {host_id}: {e}",
+                                    host_id=host_id,
+                                )
+                            )
 
-        # Mark as destroyed in host record
-        if host_record is not None:
-            updated_certified = host_record.certified_host_data.model_copy_update(
-                to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.DESTROYED.value),
-                to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
-            )
-            self._host_store.write_host_record(
-                host_record.model_copy_update(
-                    to_update(host_record.field_ref().certified_host_data, updated_certified),
+            # Mark as destroyed in host record. A failure here leaves the record
+            # inconsistent rather than leaving infrastructure behind, so it is OTHER.
+            if host_record is not None:
+                updated_certified = host_record.certified_host_data.model_copy_update(
+                    to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.DESTROYED.value),
+                    to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
                 )
-            )
+                try:
+                    self._host_store.write_host_record(
+                        host_record.model_copy_update(
+                            to_update(host_record.field_ref().certified_host_data, updated_certified),
+                        )
+                    )
+                except (MngrError, OSError) as e:
+                    logger.warning("Error marking host {} as destroyed: {}", host_id, e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.OTHER,
+                            message=f"failed to mark host {host_id} destroyed: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a destroyed host."""
@@ -834,9 +961,14 @@ sudo poweroff
         if not is_running:
             return self._create_offline_host(host_record)
 
-        # Instance is running -- create online host
+        # Instance is running -- create online host.
         ssh_config = self._get_ssh_config(instance_name)
-        host_obj = self._create_host_object(host_id, HostName(host_record.certified_host_data.host_name), ssh_config)
+        host_obj = self._create_host_object(
+            host_id,
+            HostName(host_record.certified_host_data.host_name),
+            ssh_config,
+            host_record.config.is_run_as_root,
+        )
         self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
 
@@ -920,6 +1052,24 @@ sudo poweroff
                     provider_name=self.name,
                     host_state=host_state,
                 )
+            )
+
+        # Surface orphaned Lima VMs: prefix-matched instances that no host record
+        # claims (whatever is left in instance_status after the loop above popped
+        # every recorded host). These are leftovers from a create that failed
+        # before its record was written -- e.g. a build-time error that escaped
+        # cleanup -- so they are invisible to the record-driven discovery above
+        # and are never reaped by gc. Warn loudly with the manual cleanup command.
+        # We deliberately do not emit synthetic DiscoveredHosts for them: gc would
+        # call get_host(), which raises HostNotFoundError for an id with no record.
+        for orphan_instance_name, orphan_status in instance_status.items():
+            logger.warning(
+                "Found orphaned Lima VM {!r} (status={}) with no mngr host record -- likely a failed or "
+                "interrupted create. mngr cannot manage or garbage-collect it; remove it manually with "
+                "`limactl delete --force {}`.",
+                orphan_instance_name,
+                orphan_status,
+                orphan_instance_name,
             )
 
         return discovered

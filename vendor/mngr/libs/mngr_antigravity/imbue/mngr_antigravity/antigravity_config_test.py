@@ -6,23 +6,40 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr_antigravity.antigravity_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
-from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
+from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
+from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
+from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
+from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hooks
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 
 
-def test_user_settings_path_lives_under_gemini_antigravity_cli() -> None:
-    """Path is fixed by agy; no env-var override exists in the binary."""
-    path = get_antigravity_user_settings_path()
-    assert path == Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+def test_path_helpers_address_the_gemini_tree_under_a_given_home() -> None:
+    """All path helpers are rooted at a given ``$HOME``, so the same builders serve
+    both the user's real home and each agent's relocated home (no env-var override
+    exists in agy; a per-agent ``$HOME`` is the only lever)."""
+    home = Path("/some/home")
+    cli_dir = home / ".gemini" / "antigravity-cli"
+    assert get_antigravity_cli_dir(home) == cli_dir
+    assert get_antigravity_settings_path(home) == cli_dir / "settings.json"
+    assert get_antigravity_oauth_token_path(home) == cli_dir / "antigravity-oauth-token"
+    assert get_antigravity_onboarding_cache_path(home) == cli_dir / "cache" / "onboarding.json"
+    assert get_antigravity_hooks_config_path(home) == home / ".gemini" / "config" / "hooks.json"
 
 
 def test_serialize_round_trips_to_two_space_indented_json() -> None:
@@ -32,7 +49,10 @@ def test_serialize_round_trips_to_two_space_indented_json() -> None:
 
     assert json.loads(serialized) == settings
     # Two-space indent, no trailing newline -- mirrors what agy itself writes.
-    assert "  " in serialized
+    # A top-level key must be indented by exactly two spaces (not four, which a
+    # bare ``"  " in serialized`` check could not distinguish).
+    color_scheme_line = next(line for line in serialized.splitlines() if '"colorScheme"' in line)
+    assert color_scheme_line.startswith("  ") and not color_scheme_line.startswith("   ")
     assert not serialized.endswith("\n")
 
 
@@ -64,6 +84,109 @@ def test_merge_trusted_workspace_promotes_non_list_value_to_fresh_array() -> Non
 
     assert merged is not None
     assert merged["trustedWorkspaces"] == ["/work/agent-1"]
+
+
+# =============================================================================
+# Per-agent settings + onboarding builders
+# =============================================================================
+
+
+def test_build_isolated_settings_layers_base_trust_and_overrides() -> None:
+    """Base (copy of user settings) is the floor; trust is merged; overrides win on top."""
+    base = {"colorScheme": "dark", "model": "Base Model", "trustedWorkspaces": ["/repo"]}
+    overrides = {"model": "Override Model", "permissions": {"allow": ["command(git)"]}}
+
+    result = build_isolated_settings(base, overrides, ["/tmp/ws"])
+
+    # Inherited base key survives.
+    assert result["colorScheme"] == "dark"
+    # Overrides win over the base value.
+    assert result["model"] == "Override Model"
+    assert result["permissions"] == {"allow": ["command(git)"]}
+    # Workspace path appended to the inherited trust list (deduped, order preserved).
+    assert result["trustedWorkspaces"] == ["/repo", "/tmp/ws"]
+
+
+def test_build_isolated_settings_does_not_mutate_base() -> None:
+    """The builder is @pure: the caller's base mapping is left untouched."""
+    base = {"trustedWorkspaces": ["/repo"]}
+    build_isolated_settings(base, {}, ["/tmp/ws"])
+    assert base == {"trustedWorkspaces": ["/repo"]}
+
+
+def test_build_isolated_settings_dedupes_already_trusted_workspace() -> None:
+    base = {"trustedWorkspaces": ["/tmp/ws"]}
+    result = build_isolated_settings(base, {}, ["/tmp/ws"])
+    assert result["trustedWorkspaces"] == ["/tmp/ws"]
+
+
+def test_build_isolated_settings_leaves_trust_untouched_for_empty_workspace_list() -> None:
+    """An empty trusted_workspaces sequence must not change the inherited trust list."""
+    base = {"trustedWorkspaces": ["/repo"]}
+    result = build_isolated_settings(base, {}, [])
+    assert result["trustedWorkspaces"] == ["/repo"]
+
+
+def test_build_isolated_settings_omits_trust_key_for_empty_base_and_empty_workspaces() -> None:
+    """No spurious empty trustedWorkspaces key when there's nothing to trust."""
+    result = build_isolated_settings({}, {}, [])
+    assert "trustedWorkspaces" not in result
+
+
+def test_build_isolated_settings_seeds_trust_list_from_empty_base() -> None:
+    """With an empty base (sync_home_settings=False) the workspace still gets trusted."""
+    result = build_isolated_settings({}, {}, ["/tmp/ws"])
+    assert result["trustedWorkspaces"] == ["/tmp/ws"]
+
+
+def test_build_isolated_settings_mngr_merge_extends_onto_base() -> None:
+    """A desugared ``__mngr_merge`` extend (the internal suffix form provision passes)
+    merges the override onto the base list rather than replacing it -- parity with
+    mngr_claude's fold."""
+    base = {"permissions": {"allow": ["command(git)"]}}
+    overrides = {"permissions__extend": {"allow__extend": ["command(npm)"]}}
+    result = build_isolated_settings(base, overrides, [])
+    assert result["permissions"]["allow"] == ["command(git)", "command(npm)"]
+
+
+def test_build_isolated_settings_bare_override_narrows_raises_with_mngr_merge_remediation() -> None:
+    """A bare override that narrows raises, surfacing the Claude-compatible ``__mngr_merge``
+    remediation through antigravity's fold, never the internal suffix form. (The exact
+    recursive patch is pinned in external_settings_test.)"""
+    base = {"permissions": {"allow": ["command(git)"]}}
+    overrides = {"permissions": {"allow": ["command(npm)"]}}
+    with pytest.raises(ConfigParseError) as exc_info:
+        build_isolated_settings(base, overrides, [])
+    message = str(exc_info.value)
+    assert "__mngr_merge" in message
+    assert "allow__extend" not in message
+
+
+def test_build_isolated_settings_narrowing_allowed_with_escape_hatch() -> None:
+    """``allow_narrowing`` lets a bare override replace the base aggregate without erroring."""
+    base = {"permissions": {"allow": ["command(git)"]}}
+    overrides = {"permissions": {"allow": ["command(npm)"]}}
+    result = build_isolated_settings(base, overrides, [], allow_narrowing=True)
+    assert result["permissions"] == {"allow": ["command(npm)"]}
+
+
+def test_build_isolated_settings_strips_mngr_merge_key_from_base() -> None:
+    """A ``__mngr_merge`` key in the base (a no-op on the floor, ignored by agy) is dropped
+    so it never leaks into the written settings.json."""
+    base = {"model": "Base", "__mngr_merge": {"model": "extend"}}
+    result = build_isolated_settings(base, {}, [])
+    assert "__mngr_merge" not in result
+    assert result["model"] == "Base"
+
+
+def test_build_onboarding_seed_emits_the_three_nux_keys() -> None:
+    """The NUX seed must carry exactly the keys agy checks to skip the first-run flow."""
+    seed = build_onboarding_seed()
+    assert seed == {
+        "consumerOnboardingComplete": True,
+        "enterpriseOnboardingComplete": True,
+        "onboardingComplete": True,
+    }
 
 
 def test_read_antigravity_settings_returns_empty_dict_for_missing_file(
@@ -131,26 +254,84 @@ def test_read_antigravity_settings_returns_parsed_dict(
 
 
 # =============================================================================
+# statusLine settings builder
+# =============================================================================
+
+
+def test_statusline_settings_emits_command_block() -> None:
+    """The statusLine block runs statusline.sh, agy's source of truth for lifecycle.
+
+    agy invokes this command on every agent-state change; statusline.sh maintains
+    the active marker (RUNNING/WAITING), records the root conversation, and fires
+    the message-submission signal. The block must be a {"type":"command"} shape
+    pointing at the provisioned script path.
+    """
+    settings = build_antigravity_statusline_settings()
+    assert settings == {
+        "statusLine": {
+            "type": "command",
+            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"',
+        }
+    }
+
+
+def test_extract_statusline_command_returns_command_for_command_block() -> None:
+    """A runnable command-type statusLine yields its command string (for compose)."""
+    assert extract_statusline_command({"type": "command", "command": "echo hi"}) == "echo hi"
+
+
+# Each is a statusLine that cannot be run as a shell command, so it is not
+# composable: None; a non-dict; a non-"command" type; a command-type block with a
+# missing, blank, whitespace-only, or non-string command.
+_NON_RUNNABLE_STATUSLINES = [
+    None,
+    "not-a-dict",
+    {"type": "static", "text": "x"},
+    {"type": "command"},
+    {"type": "command", "command": ""},
+    {"type": "command", "command": "   "},
+    {"type": "command", "command": 123},
+]
+
+
+@pytest.mark.parametrize("statusline", _NON_RUNNABLE_STATUSLINES)
+def test_extract_statusline_command_returns_none_for_non_runnable(statusline: Any) -> None:
+    """Anything but a {"type":"command","command":<non-blank str>} block is not composable."""
+    assert extract_statusline_command(statusline) is None
+
+
+# =============================================================================
 # Hook config builder
 # =============================================================================
 
 
-def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() -> None:
-    """PreInvocation touches the active marker; Stop removes it.
+def test_hooks_config_emits_only_conversation_id_capture_preinvocation() -> None:
+    """The lone hook is a single PreInvocation handler running capture_conversation_id.sh.
 
-    The active marker drives BaseAgent's RUNNING/WAITING detection. agy fires
-    PreInvocation before each model call (agent working) and Stop when the
-    loop terminates (agent idle), so this pair flips the marker at the right
-    boundaries.
+    Lifecycle (RUNNING/WAITING) and message submission are driven by the
+    statusLine command, NOT hooks -- so the hooks config carries no marker
+    handler and no Stop block. The capture hook exists because the statusLine
+    payload only ever reports the root conversation, so subagent ids (needed for
+    transcript scoping) are surfaced only here.
     """
     config = build_antigravity_hooks_config()
 
     mngr = config["mngr"]
-    # PreInvocation/Stop use the flat handler-list shape (no matcher wrapper).
+    # Only PreInvocation remains -- no Stop block.
+    assert set(mngr) == {"PreInvocation"}
     pre = mngr["PreInvocation"]
-    stop = mngr["Stop"]
-    assert pre == [{"type": "command", "command": f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
-    assert stop == [{"type": "command", "command": f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+    assert pre == [
+        {
+            "type": "command",
+            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"',
+        }
+    ]
+
+
+def test_hooks_config_emits_no_stop_handler() -> None:
+    """No Stop handler: clearing the active marker is the statusLine command's job."""
+    config = build_antigravity_hooks_config()
+    assert "Stop" not in config["mngr"]
 
 
 def test_hooks_config_never_emits_pretooluse() -> None:
@@ -159,15 +340,18 @@ def test_hooks_config_never_emits_pretooluse() -> None:
     agy's documented PreToolUse {"decision": "allow"} output does not actually
     gate the run_command confirmation dialog (verified live against agy 1.0.3),
     so permission auto-approval is wired through --dangerously-skip-permissions
-    in assemble_command instead. The hooks file only carries lifecycle markers.
+    in assemble_command instead. The hooks file only carries the capture handler.
     """
     config = build_antigravity_hooks_config()
     assert "PreToolUse" not in config["mngr"]
-    assert set(config["mngr"]) == {"PreInvocation", "Stop"}
+    assert set(config["mngr"]) == {"PreInvocation"}
 
 
 def test_serialize_antigravity_hooks_round_trips() -> None:
     config = build_antigravity_hooks_config()
     serialized = serialize_antigravity_hooks(config)
     assert json.loads(serialized) == config
-    assert "  " in serialized
+    # Two-space indent: the top-level key must start with exactly two spaces,
+    # which a bare ``"  " in serialized`` check could not distinguish from four.
+    mngr_key_line = next(line for line in serialized.splitlines() if '"mngr"' in line)
+    assert mngr_key_line.startswith("  ") and not mngr_key_line.startswith("   ")

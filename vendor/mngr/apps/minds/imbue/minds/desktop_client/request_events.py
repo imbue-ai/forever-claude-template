@@ -99,6 +99,15 @@ class LatchkeyPredefinedPermissionRequestEvent(RequestEvent):
         ),
     )
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). Used to recover a host whose canonical permissions file was never "
+            "materialized. ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
 
 
 class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
@@ -126,6 +135,15 @@ class LatchkeyFileSharingPermissionRequestEvent(RequestEvent):
         ),
     )
     rationale: str = Field(description="One-paragraph human-readable reason the agent needs this access.")
+    permissions_target_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path of the permissions.json the agent's gateway JWT resolves to "
+            "(the streamed request's ``target`` field, i.e. the agent's opaque permissions "
+            "handle). Used to recover a host whose canonical permissions file was never "
+            "materialized. ``None`` when the event did not originate from the gateway stream."
+        ),
+    )
 
 
 class RequestResponseEvent(EventEnvelope):
@@ -264,11 +282,26 @@ class RequestInbox(FrozenModel):
         return pending
 
     def get_request_by_id(self, event_id: str) -> RequestEvent | None:
-        """Find a request event by its event_id."""
+        """Find a request event by its event_id.
+
+        Note: this returns the request regardless of whether it has been
+        responded to. Callers that must not act on an already-resolved
+        request (e.g. re-rendering the grant/deny page) should additionally
+        check :meth:`is_request_resolved`.
+        """
         for req in self.requests:
             if str(req.event_id) == event_id:
                 return req
         return None
+
+    def is_request_resolved(self, event_id: str) -> bool:
+        """Return whether a response has already been recorded for this request.
+
+        A granted or denied request lingers in ``requests`` (the log is
+        append-only), so its presence alone does not mean it is still
+        actionable -- a matching response in ``responses`` means it is done.
+        """
+        return any(str(r.request_event_id) == event_id for r in self.responses)
 
     def get_pending_count(self) -> int:
         """Return the number of pending requests."""

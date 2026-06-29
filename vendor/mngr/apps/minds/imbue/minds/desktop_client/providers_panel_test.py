@@ -6,12 +6,12 @@ Covers:
 - ``_build_providers_state_payload``: combines resolver-tracked providers,
   errored providers, and disabled-on-disk providers into the SSE payload.
 
-The toggle endpoint also sends ``SIGHUP`` to the ``mngr forward`` plugin via
-``EnvelopeStreamConsumer.bounce_observe``. Tests deliberately do not wire a
-consumer (``create_desktop_client`` defaults the slot to ``None``); the
-handler's ``if consumer is not None`` guard makes the bounce a no-op in that
-case. The bounce side-effect itself is exercised by the forward_cli unit
-tests; this file focuses on the new routing/validation/serialization logic.
+The toggle endpoint also bounces the detached ``mngr latchkey forward``
+supervisor (the single discovery observer) via
+``bounce_latchkey_forward_supervisor``. Tests deliberately do not wire a
+supervisor (``create_desktop_client`` defaults the slot to ``None``); the
+helper's ``if supervisor is None`` guard makes the bounce a no-op in that
+case. This file focuses on the new routing/validation/serialization logic.
 """
 
 import tomllib
@@ -20,28 +20,35 @@ from datetime import timezone
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
+from flask.testing import FlaskClient
 
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.desktop_client.app import _build_providers_state_payload
+from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 
 _ROOT_NAME = "minds-dev-tname"
 
 
-def _make_test_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore]:
+def _make_test_client(tmp_path: Path) -> tuple[FlaskClient, FileAuthStore]:
     """Build a desktop client backed by a real MngrCliBackendResolver + on-disk authn."""
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
@@ -51,13 +58,12 @@ def _make_test_client(tmp_path: Path) -> tuple[TestClient, FileAuthStore]:
         backend_resolver=resolver,
         http_client=None,
     )
-    client = TestClient(app, base_url="http://localhost")
-    return client, auth_store
+    return app.test_client(), auth_store
 
 
-def _authenticate(client: TestClient, auth_store: FileAuthStore) -> None:
+def _authenticate(client: FlaskClient, auth_store: FileAuthStore) -> None:
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
-    client.cookies.set(SESSION_COOKIE_NAME, cookie_value, path="/")
+    client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
 
 
 # -- _handle_provider_toggle -----------------------------------------------
@@ -84,7 +90,7 @@ def test_provider_toggle_returns_400_on_non_json_body(monkeypatch: pytest.Monkey
 
     response = client.post(
         "/api/providers/modal/toggle",
-        content=b"not json",
+        data=b"not json",
         headers={"Content-Type": "application/json"},
     )
 
@@ -158,7 +164,7 @@ def test_provider_toggle_writes_settings_and_returns_changed_true(
     response = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
 
     assert response.status_code == 200
-    payload = response.json()
+    payload = response.get_json()
     assert payload == {"provider_name": "modal", "is_enabled": False, "changed": True}
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["modal"] == {"is_enabled": False}
@@ -173,12 +179,12 @@ def test_provider_toggle_is_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     first = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
     assert first.status_code == 200
-    assert first.json()["changed"] is True
+    assert first.get_json()["changed"] is True
     mtime_after_first = settings_path.stat().st_mtime_ns
 
     second = client.post("/api/providers/modal/toggle", json={"is_enabled": False})
     assert second.status_code == 200
-    assert second.json()["changed"] is False
+    assert second.get_json()["changed"] is False
     # File untouched
     assert settings_path.stat().st_mtime_ns == mtime_after_first
 
@@ -344,3 +350,95 @@ def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_
 
     assert names == ["docker"]
     assert payload["providers"][0]["status"] == "disabled"
+
+
+# -- _build_workspace_list stale marking --
+
+
+def _make_workspace_agent(provider_name: str, extra_labels: dict[str, str] | None = None) -> DiscoveredAgent:
+    """A primary workspace agent (carries the workspace + is_primary labels)."""
+    labels = {"workspace": "my-workspace", "is_primary": "true", **(extra_labels or {})}
+    return DiscoveredAgent(
+        host_id=HostId("host-" + "0" * 31 + "1"),
+        agent_id=AgentId("agent-" + "0" * 31 + "1"),
+        agent_name=AgentName("ws-agent"),
+        provider_name=ProviderInstanceName(provider_name),
+        certified_data={"labels": labels},
+    )
+
+
+def test_build_workspace_list_marks_workspace_stale_when_its_provider_errored() -> None:
+    """A retained workspace whose provider's last poll errored is flagged ``is_stale``; healthy ones are not."""
+    resolver = MngrCliBackendResolver()
+    provider_name = "imbue_cloud_acct"
+    agent = _make_workspace_agent(provider_name)
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    # No provider error -> the workspace is not stale.
+    healthy = _build_workspace_list(resolver)
+    assert len(healthy) == 1
+    assert "is_stale" not in healthy[0]
+
+    # Its provider's latest poll errored -> the retained workspace is stale.
+    errored = ProviderInstanceName(provider_name)
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={
+            errored: DiscoveryError(type_name="RuntimeError", message="boom", provider_name=errored)
+        },
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    stale = _build_workspace_list(resolver)
+    assert len(stale) == 1
+    assert stale[0]["is_stale"] == "true"
+
+
+def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error() -> None:
+    """An error on a different provider must not flag a healthy provider's workspace stale."""
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("imbue_cloud_acct")
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    other = ProviderInstanceName("some_other_provider")
+    resolver.update_providers(
+        providers=(),
+        error_by_provider_name={other: DiscoveryError(type_name="RuntimeError", message="boom", provider_name=other)},
+        last_full_snapshot_at=datetime.now(timezone.utc),
+    )
+    workspaces = _build_workspace_list(resolver)
+    assert len(workspaces) == 1
+    assert "is_stale" not in workspaces[0]
+
+
+# -- _build_workspace_list color emission --
+#
+# These assert the SSE workspaces payload carries the stored color.
+# Pre-migration workspaces (no ``color`` label) fall back to
+# ``DEFAULT_WORKSPACE_COLOR`` so the rollout doesn't visually break
+# existing workspaces. The titlebar derives its contrasting foreground
+# from the accent in pure CSS (see .titlebar-surface in app.css), so the
+# payload no longer carries an ``accent_fg``.
+
+
+def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("docker", extra_labels={"color": "#0b292b"})
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert len(workspaces) == 1
+    assert workspaces[0]["accent"] == "#0b292b"
+    assert "accent_fg" not in workspaces[0]
+
+
+def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -> None:
+    """Workspaces without a ``color`` label (created before the picker
+    shipped, or backfilled but not yet written through ``mngr label``)
+    render as ``DEFAULT_WORKSPACE_COLOR`` -- the same value new
+    workspaces get pre-selected in the picker."""
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("imbue_cloud_acct")
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert workspaces[0]["accent"] == DEFAULT_WORKSPACE_COLOR

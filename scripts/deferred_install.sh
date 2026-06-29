@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Idempotent installer for packages that are too heavy to bake into the
 # Docker image but not required to start the chat agent or any boot-time
-# service. Run once per container lifetime by the `deferred-install` entry
-# in services.toml, gated by per-package marker files under
+# service. Run once per container lifetime by the one-shot `deferred-install`
+# supervisord program, gated by per-package marker files under
 # /var/lib/minds/deferred-install/done.<package>.
 #
 # Designed to behave the same way across container restarts (no-op when
@@ -29,17 +29,40 @@ _marker_for() {
 }
 
 _recover_interrupted_dpkg() {
-    # A prior apt/dpkg run that was killed mid-operation leaves dpkg
-    # half-configured, after which every `apt-get install` aborts with
-    # "dpkg was interrupted, you must manually run 'dpkg --configure -a'".
-    # This happens routinely for pool hosts: the bake's `mngr stop` parks the
-    # host while this deferred install's first-boot `apt` is still running, so
-    # the post-lease retry would otherwise fail forever. Run the documented
-    # recovery up front -- it's a fast no-op when dpkg is already consistent.
-    # Best-effort: if recovery itself fails we log it loudly (not silently) and
-    # let the apt step below surface the real error.
+    # A prior apt/dpkg run killed mid-operation leaves dpkg broken, after which
+    # every `apt-get install` aborts. This happens routinely for pool hosts: the
+    # bake's `mngr stop` parks the host while this deferred install's first-boot
+    # `apt` is still running, so the post-lease retry would otherwise fail
+    # forever. Recover up front -- each step is a fast no-op when dpkg is already
+    # consistent. Best-effort: we log failures loudly (not silently) and let the
+    # apt step below surface the real error.
+    #
+    # Two distinct breakages need two different repairs:
+    #   1. Killed during *configure*: packages are unpacked-but-unconfigured;
+    #      `dpkg --configure -a` finishes them.
+    #   2. Killed during *unpack*: the half-unpacked package gets dpkg's
+    #      reinst-required ("R") flag (the "very bad inconsistent state" error),
+    #      which `dpkg --configure -a` CANNOT fix -- it skips reinst-required
+    #      packages. Those must be reinstalled.
     if ! dpkg --configure -a; then
-        _log "WARNING: 'dpkg --configure -a' returned non-zero; the apt install below may still fail"
+        _log "WARNING: 'dpkg --configure -a' returned non-zero; continuing with broken-package repair"
+    fi
+    # Reinstall any package left reinst-required (the 3rd char of dpkg's status
+    # abbreviation is "R"); only a reinstall repairs a half-unpacked package.
+    local reinst_required
+    reinst_required="$(dpkg-query -W -f '${Package} ${db:Status-Abbrev}\n' 2>/dev/null \
+        | awk 'substr($2, 3, 1) == "R" { print $1 }')"
+    if [ -n "$reinst_required" ]; then
+        # shellcheck disable=SC2086
+        _log "reinstalling packages left reinst-required by an interrupted unpack: $(echo $reinst_required | tr '\n' ' ')"
+        # shellcheck disable=SC2086
+        if ! apt-get install --reinstall -y $reinst_required; then
+            _log "WARNING: reinstall of reinst-required packages returned non-zero; the apt install below may still fail"
+        fi
+    fi
+    # Finally, let apt repair any remaining broken dependencies (no-op when clean).
+    if ! apt-get --fix-broken install -y; then
+        _log "WARNING: 'apt-get --fix-broken install' returned non-zero; the apt install below may still fail"
     fi
 }
 

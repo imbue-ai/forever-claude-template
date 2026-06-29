@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: TMR agent prompts reworked so generated e2e tests converge to a stable size instead of accreting assertions. The mapper anchors test quality to two sources (claims the tutorial block makes; effects implied by each command or flag), making removal of over-fitted assertions a first-class improvement. Testing agents flag cross-cutting blockers with `# FIXME(tmr): ...` comments. The integrator gained a normalize stage that extracts genuinely-duplicated scaffolding (preserving the 1:1 test/tutorial relationship) and triages FIXMEs, with unresolved blockers surfaced as `escalations` in the outcome schema and HTML report.
 - Changed: `mngr tmr` testing agents now publish a single `outputs.tar.gz` archive into the per-agent volume API, replacing the rsync + git-pull finalization; SSH provider no longer supported for testing-agent outputs.
 - Changed: TMR run names are now a single compact timestamp `YYYYMMDDHHMMSS` used consistently across the output directory, the `mapreduce_run_name` agent label, and every TMR-spawned entity's agent / host / branch names. Testing agents are `tmr-<run>-<suffix>`, branches `tmr/<run>/<suffix>`, and the random hex id is gone.
 - Changed: Added `--run-name` flag to override the auto-generated run name.
@@ -24,6 +25,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: `mngr tmr --provider modal --use-snapshot` now bootstraps the Modal per-user environment on first run instead of aborting with `ProviderEmptyError`; the pre-snapshot provider lookup passes `is_for_host_creation=True` to match the create path.
 - Fixed: Several silent-success failure modes now exit non-zero — `--reintegrate` when `mngr list` fails or no agents match the run name, and any tmr run where every test agent failed to launch.
+- Fixed: `mngr tmr` See-Also reference now links to `mngr rsync` instead of the removed `pull` command, so the generated docs no longer contain a broken `[mngr help pull](mngr help pull)` markdown link.
 
 ## [v0.2.8] - 2026-05-13
 

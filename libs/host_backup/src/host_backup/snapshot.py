@@ -5,7 +5,11 @@ Each mechanism implements the same `SnapshotTakerInterface` contract:
 - `take_snapshot()` produces a consistent view of the host_dir at a known
   in-container path; returns a `SnapshotResult` describing where restic
   should read.
-- `delete_snapshot()` removes whatever `take_snapshot` produced. Idempotent.
+- `cleanup_after_backup()` reclaims snapshots after restic has read them and
+  returns the snapshot paths it deleted (for event logging). For
+  `outer_trigger` this retains the newest `max_local_snapshots` and deletes
+  the rest; for `btrfs_local` it deletes the single `current` snapshot; for
+  `direct` it is a no-op.
 
 The three concrete implementations are selected from `SnapshotSettings.method`.
 """
@@ -29,6 +33,21 @@ from host_backup.config import SnapshotMethod, SnapshotSettings
 
 class SnapshotError(RuntimeError):
     """Raised when a snapshot step fails (caught by the tick loop)."""
+
+
+class SnapshotCleanupError(SnapshotError):
+    """Raised when keep-N cleanup fails partway, carrying what was already deleted.
+
+    Lets the runner log the deletions that did succeed (and which target failed)
+    instead of losing that detail when the exception propagates.
+    """
+
+    def __init__(
+        self, message: str, *, deleted: tuple[str, ...], failed_target: str
+    ) -> None:
+        super().__init__(message)
+        self.deleted = deleted
+        self.failed_target = failed_target
 
 
 class SnapshotResult(FrozenModel):
@@ -60,8 +79,8 @@ class SnapshotTakerInterface(MutableModel, ABC):
         """Produce a consistent snapshot; raises SnapshotError on failure."""
 
     @abstractmethod
-    def delete_snapshot(self) -> None:
-        """Tear down the most-recent snapshot. Idempotent (no-op when absent)."""
+    def cleanup_after_backup(self) -> tuple[str, ...]:
+        """Reclaim snapshots after restic has read them; return deleted paths."""
 
 
 def make_snapshot_taker(settings: SnapshotSettings) -> SnapshotTakerInterface:
@@ -138,6 +157,14 @@ class BtrfsLocalSnapshotTaker(SnapshotTakerInterface):
             helper_stderr=result.stderr,
         )
 
+    def cleanup_after_backup(self) -> tuple[str, ...]:
+        # lima keeps a single `current` snapshot; delete it after each backup
+        # exactly as before.
+        target = self.settings.snapshot_current_path
+        existed = target is not None and target.exists()
+        self.delete_snapshot()
+        return (str(target),) if existed else ()
+
     def delete_snapshot(self) -> None:
         target = self.settings.snapshot_current_path
         if target is None:
@@ -181,53 +208,77 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
     """Writes request.json, waits for the outer helper to produce result.json."""
 
     def take_snapshot(self) -> SnapshotResult:
-        # Always cleanup first via the helper, then create the new snapshot.
-        self.delete_snapshot()
+        # Create a fresh, uniquely-named snapshot. We never reuse a path: under
+        # gVisor the gofer caches a handle to the first subvolume it opens at a
+        # given path, so deleting and recreating one path makes every snapshot
+        # after the first read empty. The request id (a timestamp) doubles as
+        # the snapshot's directory name, and cleanup_after_backup garbage-
+        # collects old snapshots by name.
+        assert self.settings.snapshot_read_path is not None
+        assert self.settings.snapshot_current_path is not None
         start = time.monotonic()
-        request_id = uuid4().hex
-        result = self._do_request("snapshot", request_id)
+        snapshot_name = _iso_now()
+        result = self._do_request("snapshot", request_id=snapshot_name)
         duration = time.monotonic() - start
         if result.exit_code != 0:
             raise SnapshotError(
                 f"outer helper snapshot failed (rc={result.exit_code}): "
                 f"stderr={result.stderr.strip()!r}"
             )
-        assert self.settings.snapshot_read_path is not None
-        snapshot_path = result.snapshot_path or str(self.settings.snapshot_current_path)
+        outer_snapshot_path = result.snapshot_path or str(
+            self.settings.snapshot_current_path.parent / snapshot_name
+        )
         return SnapshotResult(
             method=SnapshotMethod.OUTER_TRIGGER,
-            snapshot_path=snapshot_path,
-            read_path=self.settings.snapshot_read_path,
+            snapshot_path=outer_snapshot_path,
+            read_path=self.settings.snapshot_read_path.parent / snapshot_name,
             duration_seconds=duration,
             helper_exit_code=result.exit_code,
             helper_stdout=result.stdout,
             helper_stderr=result.stderr,
         )
 
-    def delete_snapshot(self) -> None:
-        request_id = uuid4().hex
-        result = self._do_request("cleanup", request_id)
-        # The outer helper is expected to treat "snapshot didn't exist" as success,
-        # so a non-zero exit really is an error here.
-        if result.exit_code != 0:
-            raise SnapshotError(
-                f"outer helper cleanup failed (rc={result.exit_code}): "
-                f"stderr={result.stderr.strip()!r}"
-            )
+    def cleanup_after_backup(self) -> tuple[str, ...]:
+        # Retain the newest `max_local_snapshots`; delete the rest by name. The
+        # parent of the configured read/current path is the snapshots dir (the
+        # `current` basename in the config is vestigial under the per-name
+        # scheme). We enumerate over the read mount -- listing the parent dir is
+        # reliable; only same-path inode swaps were affected by the gofer bug.
+        assert self.settings.snapshot_read_path is not None
+        assert self.settings.snapshot_current_path is not None
+        read_dir = self.settings.snapshot_read_path.parent
+        outer_dir = self.settings.snapshot_current_path.parent
+        names = _list_snapshot_names(read_dir)
+        surplus_count = max(0, len(names) - self.settings.max_local_snapshots)
+        deleted: list[str] = []
+        for name in names[:surplus_count]:
+            result = self._do_request("cleanup", request_id=uuid4().hex, target=name)
+            if result.exit_code != 0:
+                raise SnapshotCleanupError(
+                    f"outer helper cleanup failed (rc={result.exit_code}): "
+                    f"stderr={result.stderr.strip()!r}",
+                    deleted=tuple(deleted),
+                    failed_target=str(outer_dir / name),
+                )
+            deleted.append(str(outer_dir / name))
+        return tuple(deleted)
 
-    def _do_request(self, operation: str, request_id: str) -> _HelperResult:
+    def _do_request(
+        self, operation: str, request_id: str, target: str | None = None
+    ) -> _HelperResult:
         """Send a request.json to the outer helper and wait for its matching result.json."""
         trigger_dir = self.settings.trigger_dir
         assert trigger_dir is not None
         trigger_dir.mkdir(parents=True, exist_ok=True)
-        request_payload = {
+        request_payload: dict[str, str] = {
             "request_id": request_id,
             "operation": operation,
             "timestamp_iso": _iso_now(),
         }
+        if target is not None:
+            request_payload["target"] = target
         request_path = trigger_dir / "request.json"
         result_path = trigger_dir / "result.json"
-        previous_result_mtime = _safe_mtime(result_path)
 
         tmp_path = trigger_dir / "request.json.tmp"
         tmp_path.write_text(json.dumps(request_payload))
@@ -239,27 +290,25 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
             request_path,
         )
 
+        # The request_id is unique per request (a microsecond timestamp for
+        # snapshots, a uuid for cleanups), so result.json carrying our id
+        # unambiguously means the helper serviced *this* request -- we key on that
+        # rather than on a result.json mtime change. The old mtime gate could both
+        # miss a same-mtime rewrite (coarse-resolution filesystems) and accept a
+        # stale result from a prior request whose id happened to be re-read; the
+        # id match is the authoritative, race-free freshness signal.
         deadline = time.monotonic() + self.settings.outer_helper_timeout_seconds
         while True:
-            current_mtime = _safe_mtime(result_path)
-            if current_mtime is not None and current_mtime != previous_result_mtime:
-                parsed = _parse_helper_result(result_path)
-                if parsed is not None and parsed.request_id == request_id:
-                    return parsed
-                # Stale or unparseable result; keep polling.
+            parsed = _parse_helper_result(result_path)
+            if parsed is not None and parsed.request_id == request_id:
+                return parsed
+            # Absent, unparseable, or a result for a different request: keep polling.
             if time.monotonic() >= deadline:
                 raise SnapshotError(
                     f"Timed out after {self.settings.outer_helper_timeout_seconds}s "
                     f"waiting for outer helper result for request_id={request_id}"
                 )
             time.sleep(_HELPER_POLL_INTERVAL_SECONDS)
-
-
-def _safe_mtime(path: Path) -> float | None:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
 
 
 def _parse_helper_result(path: Path) -> _HelperResult | None:
@@ -280,8 +329,38 @@ def _parse_helper_result(path: Path) -> _HelperResult | None:
         return None
 
 
+_SNAPSHOT_NAME_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(timezone.utc).strftime(_SNAPSHOT_NAME_FORMAT)
+
+
+def _parse_snapshot_timestamp(name: str) -> datetime | None:
+    """Parse a snapshot dir name back to its timestamp, or None if it isn't one."""
+    try:
+        return datetime.strptime(name, _SNAPSHOT_NAME_FORMAT)
+    except ValueError:
+        return None
+
+
+def _list_snapshot_names(read_dir: Path) -> list[str]:
+    """Return timestamped snapshot dir names under `read_dir`, oldest first.
+
+    Entries whose names don't parse as a snapshot timestamp are ignored, so a
+    stray or partial directory can never be selected for deletion.
+    """
+    try:
+        entries = list(read_dir.iterdir())
+    except OSError:
+        return []
+    timestamped = [
+        (timestamp, entry.name)
+        for entry in entries
+        if (timestamp := _parse_snapshot_timestamp(entry.name)) is not None
+    ]
+    timestamped.sort(key=lambda pair: pair[0])
+    return [name for _, name in timestamped]
 
 
 # ---------------------------------------------------------------------------
@@ -301,5 +380,6 @@ class DirectSnapshotTaker(SnapshotTakerInterface):
             duration_seconds=0.0,
         )
 
-    def delete_snapshot(self) -> None:
-        return None
+    def cleanup_after_backup(self) -> tuple[str, ...]:
+        # Nothing was snapshotted (restic reads /mngr live), so nothing to clean.
+        return ()

@@ -7,6 +7,7 @@ from typing import assert_never
 
 import click
 from click_option_group import optgroup
+from loguru import logger
 
 from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
@@ -20,6 +21,7 @@ from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.destroy import get_agent_name_from_session
+from imbue.mngr.cli.exit_codes import exit_code_for_failures
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.label import apply_labels
@@ -36,6 +38,8 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
@@ -55,6 +59,7 @@ class StopCliOptions(CommonCliOptions):
     archive: bool
     sessions: tuple[str, ...]
     stop_host: bool
+    dry_run: bool
     # Planned features (not yet implemented)
     snapshot_mode: str | None
     graceful: bool
@@ -162,13 +167,29 @@ def _output(message: str, output_opts: OutputOptions) -> None:
         write_human_line(message)
 
 
-def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) -> None:
-    """Output the final result."""
+def _output_result(
+    stopped_agents: Sequence[str],
+    failures: Sequence[CleanupFailure],
+    output_opts: OutputOptions,
+) -> None:
+    """Output the final result, including any real cleanup failures.
+
+    Mirrors ``destroy._output_result``: JSON/JSONL output carries the structured
+    ``failures`` list and the cause-specific ``exit_code`` so non-interactive
+    consumers can see which resources were left behind (see
+    specs/cleanup-error-aggregation.md), not just the process exit code.
+    """
     if output_opts.format_template is not None:
         items = [{"name": name} for name in stopped_agents]
         emit_format_template_lines(output_opts.format_template, items)
         return
-    result_data = {"stopped_agents": stopped_agents, "count": len(stopped_agents)}
+    result_data = {
+        "stopped_agents": list(stopped_agents),
+        "count": len(stopped_agents),
+        "failures": [failure.model_dump(mode="json") for failure in failures],
+        "failure_count": len(failures),
+        "exit_code": exit_code_for_failures(failures),
+    }
     match output_opts.output_format:
         case OutputFormat.JSON:
             write_json_line(result_data)
@@ -177,6 +198,10 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
         case OutputFormat.HUMAN:
             if stopped_agents:
                 write_human_line("Successfully stopped {} agent(s)", len(stopped_agents))
+            if failures:
+                logger.warning("{} cleanup failure(s) -- resources may remain:", len(failures))
+                for failure in failures:
+                    logger.warning("  - [{}] {}", failure.category.value, failure.message)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -208,6 +233,11 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
     "--stop-host",
     is_flag=True,
     help="Stop the agent's entire host (all agents on it) instead of just the named agent",
+)
+@optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be stopped without actually stopping anything",
 )
 @optgroup.option(
     "--snapshot-mode",
@@ -277,8 +307,15 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
     # --stop-host stops the agent's whole host directly, without the
     # agent-enumeration scan (see _stop_hosts_for_addresses).
     if opts.stop_host:
+        if opts.dry_run:
+            _output("Would stop the host(s) of:", output_opts)
+            for address in agent_addresses:
+                _output(f"  - {address.agent}", output_opts)
+            return
         stopped_host_agents = _stop_hosts_for_addresses(agent_addresses, mngr_ctx, output_opts)
-        _output_result(stopped_host_agents, output_opts)
+        # The --stop-host path raises on a real failure (it does not aggregate
+        # CleanupFailures), so there are never any failures to report here.
+        _output_result(stopped_host_agents, [], output_opts)
         return
 
     # Find agents to stop (RUNNING agents)
@@ -293,9 +330,18 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         _output("No running agents found to stop", output_opts)
         return
 
+    # Dry-run: report what would be stopped without touching any agent.
+    if opts.dry_run:
+        _output("Would stop:", output_opts)
+        for match in agents_to_stop:
+            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
+        return
+
     # Stop each agent
     stopped_agents: list[str] = []
     stopped_matches: list[AgentMatch] = []
+    # Real cleanup failures (resources left behind); drives the process exit code.
+    failures: list[CleanupFailure] = []
 
     # Group agents by host to stop them together
     agents_by_host = group_agents_by_host(agents_to_stop)
@@ -311,9 +357,14 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         # Ensure host is online (can't stop agents on offline hosts)
         match host:
             case OnlineHostInterface() as online_host:
-                # Stop each named agent on this host
+                # Stop each named agent on this host. stop_agents is best-effort: it raises a
+                # CleanupFailedGroup carrying the real failures (resources left behind) rather
+                # than failing fast.
                 agent_ids_to_stop = [m.agent_id for m in agent_list]
-                online_host.stop_agents(agent_ids_to_stop)
+                try:
+                    online_host.stop_agents(agent_ids_to_stop)
+                except CleanupFailedGroup as group:
+                    failures.extend(group.failures)
 
                 for m in agent_list:
                     stopped_agents.append(str(m.agent_name))
@@ -332,15 +383,17 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         now = datetime.now(timezone.utc).isoformat()
         apply_labels(stopped_matches, {"archived_at": now}, mngr_ctx, output_opts)
 
-    # Output final result
-    _output_result(stopped_agents, output_opts)
+    # Output final result (including any real cleanup failures), then exit with a
+    # cause-specific code (see specs/cleanup-error-aggregation.md).
+    _output_result(stopped_agents, failures, output_opts)
+    ctx.exit(exit_code_for_failures(failures))
 
 
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="stop",
     one_line_description="Stop running agent(s)",
-    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--stop-host] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
+    synopsis="mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--stop-host] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]",
     description="""For remote hosts, this stops the agent's tmux session. The host remains
 running unless idle detection stops it automatically.
 
@@ -357,6 +410,9 @@ This marks the agent as archived without destroying it, allowing it to
 be filtered out of listings while preserving its state. The 'mngr archive'
 command is a shorthand for 'mngr stop --archive'.
 
+Use --dry-run to preview which agents (or hosts, with --stop-host) would be
+stopped without actually stopping anything.
+
 Use '-' in place of agent names to read them from stdin, one per line.
 
 Supports custom format templates via --format. Available fields: name.""",
@@ -367,6 +423,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Stop all running agents", "mngr list --ids | mngr stop -"),
         ("Stop and archive an agent", "mngr stop my-agent --archive"),
         ("Stop the agent's whole host", "mngr stop my-agent --stop-host"),
+        ("Preview what would be stopped", "mngr list --ids | mngr stop - --dry-run"),
         ("Stop by tmux session name", "mngr stop --session mngr-my-agent"),
         ("Custom format template output", "mngr stop agent1 agent2 --format '{name}'"),
     ),

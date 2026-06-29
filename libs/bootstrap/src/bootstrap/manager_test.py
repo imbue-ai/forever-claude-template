@@ -1,170 +1,65 @@
-"""Unit tests for the bootstrap service manager's reconciliation logic."""
+"""Unit tests for the bootstrap first-boot setup helpers."""
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
+from imbue.mngr.cli.output_helpers import write_json_line
 from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from bootstrap.manager import (
-    DEFAULT_RESTART_POLICY,
-    SVC_EXIT_STATUS_OPTION,
+    INITIAL_CHAT_AGENT_ID_FILENAME,
     _build_create_chat_command,
-    _build_service_keystrokes,
-    _compute_actions,
-    _compute_restarts,
+    _configure_git_global,
+    _create_orphan_runtime_worktree,
     _ensure_host_claude_config_dir,
     _format_env_file,
     _initialize_workspace_main_branch,
     _maybe_create_initial_chat,
-    _normalize_restart_policy,
+    _parse_created_agent_id,
     _parse_env_file,
+    _persist_initial_chat_agent_id,
     _read_host_name,
     _read_main_agent_labels,
     _resolve_services_claude_config_dir,
 )
 
-
-def test_compute_actions_no_changes_when_in_sync() -> None:
-    desired = {"a": {"command": "cmd-a", "restart": "never"}}
-    current = {"a": {"window_name": "svc-a", "command": "cmd-a"}}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == []
-    assert starts == []
+# --- _configure_git_global ---
 
 
-def test_compute_actions_starts_missing_service() -> None:
-    desired = {"a": {"command": "cmd-a", "restart": "never"}}
-    current: dict[str, dict[str, str]] = {}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == []
-    assert starts == [("a", "cmd-a")]
+def test_configure_git_global_sets_insteadof_and_hookspath(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Isolate the global git config to a tmp file so the test does not touch the
+    # developer's real ~/.gitconfig. _configure_git_global should set both
+    # insteadOf rewrites (git@ and ssh://) plus core.hooksPath.
+    gitconfig = tmp_path / ".gitconfig"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
 
+    _configure_git_global()
 
-def test_compute_actions_stops_removed_service() -> None:
-    desired: dict[str, dict] = {}
-    current = {"a": {"window_name": "svc-a", "command": "cmd-a"}}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == ["a"]
-    assert starts == []
+    insteadof = subprocess.run(
+        ["git", "config", "--global", "--get-all", "url.https://github.com/.insteadOf"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+    assert "git@github.com:" in insteadof
+    assert "ssh://git@github.com/" in insteadof
 
-
-def test_compute_actions_restarts_on_command_change() -> None:
-    desired = {"a": {"command": "cmd-a-new", "restart": "never"}}
-    current = {"a": {"window_name": "svc-a", "command": "cmd-a-old"}}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == ["a"]
-    assert starts == [("a", "cmd-a-new")]
-
-
-def test_compute_actions_treats_unknown_recorded_command_as_change() -> None:
-    # A window created by an older manager has no recorded command; reading the
-    # user-option yields "". That mismatch should trigger a restart so the new
-    # manager takes ownership of the window with a known command.
-    desired = {"a": {"command": "cmd-a", "restart": "never"}}
-    current = {"a": {"window_name": "svc-a", "command": ""}}
-    stops, starts = _compute_actions(desired, current)
-    assert stops == ["a"]
-    assert starts == [("a", "cmd-a")]
-
-
-def test_compute_actions_handles_mixed_add_remove_change() -> None:
-    desired = {
-        "keep": {"command": "k", "restart": "never"},
-        "change": {"command": "new", "restart": "never"},
-        "add": {"command": "added", "restart": "never"},
-    }
-    current = {
-        "keep": {"window_name": "svc-keep", "command": "k"},
-        "change": {"window_name": "svc-change", "command": "old"},
-        "remove": {"window_name": "svc-remove", "command": "r"},
-    }
-    stops, starts = _compute_actions(desired, current)
-    assert sorted(stops) == ["change", "remove"]
-    assert sorted(starts) == [("add", "added"), ("change", "new")]
-
-
-# --- Restart policy: _build_service_keystrokes ---
-
-
-def test_build_service_keystrokes_runs_command_then_records_exit_status() -> None:
-    # The service command must run first, then its exit status be recorded so
-    # the manager can detect the service exiting. `$?` must be captured right
-    # after the command so it reflects the service's own status.
-    keys = _build_service_keystrokes("my-server --flag", "sess:svc-foo")
-    assert keys.startswith("my-server --flag;")
-    assert SVC_EXIT_STATUS_OPTION in keys
-    assert '"$?"' in keys
-
-
-def test_build_service_keystrokes_targets_its_own_window_explicitly() -> None:
-    # Regression: a service window runs in the background, so a `set-option -w`
-    # with no target lands on the session's *active* window, not the service's.
-    # The recorder must pass an explicit `-t <window_target>` so the exit status
-    # is written to the window the manager actually polls.
-    keys = _build_service_keystrokes("my-server", "sess:svc-foo")
-    assert "-t sess:svc-foo" in keys
-
-
-# --- Restart policy: _compute_restarts ---
-
-
-def test_compute_restarts_restarts_on_failure_after_nonzero_exit() -> None:
-    desired = {"a": {"command": "cmd", "restart": "on-failure"}}
-    assert _compute_restarts(desired, {"a": "1"}) == ["a"]
-
-
-def test_compute_restarts_skips_on_failure_after_clean_exit() -> None:
-    desired = {"a": {"command": "cmd", "restart": "on-failure"}}
-    assert _compute_restarts(desired, {"a": "0"}) == []
-
-
-def test_compute_restarts_never_policy_is_left_dead() -> None:
-    desired = {"a": {"command": "cmd", "restart": "never"}}
-    assert _compute_restarts(desired, {"a": "1"}) == []
-
-
-def test_compute_restarts_defaults_to_never_when_policy_absent() -> None:
-    desired = {"a": {"command": "cmd"}}
-    assert _compute_restarts(desired, {"a": "1"}) == []
-
-
-def test_compute_restarts_skips_service_removed_from_desired() -> None:
-    # A service that exited but is no longer in services.toml must not be
-    # restarted -- the mtime-driven reconcile removes its window instead.
-    assert _compute_restarts({}, {"gone": "1"}) == []
-
-
-def test_compute_restarts_handles_mixed_services() -> None:
-    desired = {
-        "crash": {"command": "c", "restart": "on-failure"},
-        "clean": {"command": "c", "restart": "on-failure"},
-        "oneshot": {"command": "c", "restart": "never"},
-    }
-    exited = {"crash": "2", "clean": "0", "oneshot": "1"}
-    assert _compute_restarts(desired, exited) == ["crash"]
-
-
-# --- Restart policy: _normalize_restart_policy ---
-
-
-def test_normalize_restart_policy_passes_through_valid_values() -> None:
-    assert _normalize_restart_policy("svc", "never") == "never"
-    assert _normalize_restart_policy("svc", "on-failure") == "on-failure"
-
-
-def test_normalize_restart_policy_defaults_when_absent() -> None:
-    assert _normalize_restart_policy("svc", None) == DEFAULT_RESTART_POLICY
-
-
-def test_normalize_restart_policy_warns_and_defaults_on_unknown_value() -> None:
-    # A typo'd policy must not silently disable restarts; it falls back to the
-    # default so the misconfiguration is visible (warning) and safe.
-    assert _normalize_restart_policy("svc", "on_failure") == DEFAULT_RESTART_POLICY
-    assert _normalize_restart_policy("svc", "always") == DEFAULT_RESTART_POLICY
+    hooks_path = subprocess.run(
+        ["git", "config", "--global", "core.hooksPath"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    assert hooks_path == "/mngr/code/scripts/git_hooks"
 
 
 # --- Env-file helpers ---
@@ -384,14 +279,72 @@ def test_build_create_chat_command_argv_accepted_by_live_cli() -> None:
     assert_mngr_argv_valid(argv)
 
 
+def test_build_create_chat_command_requests_json_output() -> None:
+    """`--format json` lets the create step read back the new agent's id."""
+    cmd = _build_create_chat_command("ws", {"workspace": "ws"})
+    assert "--format" in cmd
+    assert cmd[cmd.index("--format") + 1] == "json"
+
+
+# --- _parse_created_agent_id ---
+
+
+def test_parse_created_agent_id_reads_agent_id_from_json_object() -> None:
+    stdout = '{"agent_id": "agent-abc", "host_id": "host-1", "host_name": "ws"}\n'
+    assert _parse_created_agent_id(stdout) == "agent-abc"
+
+
+def test_parse_created_agent_id_returns_none_when_absent() -> None:
+    assert _parse_created_agent_id('{"host_id": "host-1"}') is None
+    assert _parse_created_agent_id("not json at all") is None
+    assert _parse_created_agent_id("") is None
+
+
+def test_parse_created_agent_id_reads_live_mngr_json_output() -> None:
+    """Confront the parser with mngr's real `--format json` serializer, so a
+    vendor/mngr switch to pretty-printed or JSONL create output fails here at
+    merge time rather than only at host boot. `write_json_line` is exactly what
+    `mngr create`'s JSON branch calls (one compact object on stdout)."""
+    result_data = {
+        "agent_id": "agent-0123456789abcdef0123456789abcdef",
+        "host_id": "host-1",
+        "host_name": "my-workspace",
+    }
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        write_json_line(result_data)
+    assert _parse_created_agent_id(buffer.getvalue()) == result_data["agent_id"]
+
+
+# --- _persist_initial_chat_agent_id ---
+
+
+def test_persist_initial_chat_agent_id_writes_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    _persist_initial_chat_agent_id("agent-abc")
+    assert (tmp_path / INITIAL_CHAT_AGENT_ID_FILENAME).read_text() == "agent-abc"
+
+
+def test_persist_initial_chat_agent_id_skips_when_host_dir_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _persist_initial_chat_agent_id("agent-abc")
+    assert not (tmp_path / INITIAL_CHAT_AGENT_ID_FILENAME).exists()
+
+
 # --- _maybe_create_initial_chat ---
 
 
 class _StubSubprocess:
     """Capture-and-replay double for subprocess.run used by the chat-create call."""
 
-    def __init__(self, returncode: int = 0) -> None:
+    def __init__(self, returncode: int = 0, stdout: str = "") -> None:
         self.returncode = returncode
+        self.stdout = stdout
         self.calls: list[list[str]] = []
 
     def run(
@@ -404,7 +357,7 @@ class _StubSubprocess:
         del capture_output, text, check  # keyword-only signature mirrors stdlib.
         self.calls.append(cmd)
         return subprocess.CompletedProcess(
-            args=cmd, returncode=self.returncode, stdout="", stderr=""
+            args=cmd, returncode=self.returncode, stdout=self.stdout, stderr=""
         )
 
 
@@ -438,6 +391,18 @@ def test_maybe_create_initial_chat_creates_and_writes_signal(
     _maybe_create_initial_chat()
     assert len(stub.calls) == 1
     assert (_bootstrap_env / "runtime" / "initial_chat_created").exists()
+
+
+def test_maybe_create_initial_chat_persists_created_agent_id(
+    monkeypatch: pytest.MonkeyPatch, _bootstrap_env: Path
+) -> None:
+    """A successful create writes the parsed agent id to the welcome-resend sidecar."""
+    stub = _StubSubprocess(returncode=0, stdout='{"agent_id": "agent-created"}\n')
+    monkeypatch.setattr("bootstrap.manager.subprocess.run", stub.run)
+    _maybe_create_initial_chat()
+    assert (
+        _bootstrap_env / INITIAL_CHAT_AGENT_ID_FILENAME
+    ).read_text() == "agent-created"
 
 
 def test_maybe_create_initial_chat_skips_when_signal_present(
@@ -545,6 +510,38 @@ def test_initialize_workspace_main_branch_is_idempotent_on_clean_main(
     _initialize_workspace_main_branch()
     branch = _git_in(work_dir, "branch", "--show-current").stdout.strip()
     assert branch == "main"
+
+
+# --- _create_orphan_runtime_worktree ---
+
+
+def test_create_orphan_runtime_worktree_creates_empty_orphan_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The helper must add runtime/ as a worktree on a brand-new orphan branch
+    (no parent, empty tree) using only plumbing that works on old git -- no
+    `git worktree add --orphan` (git >= 2.42), which Lima's Debian 12 lacks."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_in(repo, "init", "-q", "--initial-branch=main")
+    _git_in(repo, "config", "user.email", "seed@test.local")
+    _git_in(repo, "config", "user.name", "seed")
+    (repo / "README.md").write_text("seed\n")
+    _git_in(repo, "add", "-A")
+    _git_in(repo, "commit", "-qm", "seed")
+
+    monkeypatch.chdir(repo)
+    result = _create_orphan_runtime_worktree("mindsbackup/agent-test")
+    assert result.returncode == 0, result.stderr
+
+    runtime = repo / "runtime"
+    assert (runtime / ".git").exists()
+    # The branch is an orphan: its tip commit has no parents.
+    parents = _git_in(runtime, "rev-list", "--parents", "-1", "HEAD").stdout.split()
+    assert len(parents) == 1  # just the commit sha, no parent sha
+    # Nothing is tracked yet (empty tree); the worktree has no repo content.
+    assert _git_in(runtime, "ls-files").stdout.strip() == ""
+    assert not (runtime / "README.md").exists()
 
 
 # --- detect_snapshot_settings / init_backup_config_with_settings ---

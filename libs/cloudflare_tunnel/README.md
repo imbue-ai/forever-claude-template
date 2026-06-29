@@ -7,5 +7,5 @@ is provided, so local-only agents don't need Cloudflare configured; removing
 the file stops `cloudflared`.
 
 `runtime/secrets/` is a directory of per-secret `*.env` files -- each writer
-(this token, `restic.env` for backups, `telegram.env` for the bot) owns its
+(this token, `restic.env` for backups) owns its
 own file, so they never clobber one another.

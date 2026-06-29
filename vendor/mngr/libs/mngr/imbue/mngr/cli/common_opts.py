@@ -26,11 +26,6 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.config.data_types import detect_settings_narrowing
-from imbue.mngr.config.data_types import would_assignment_narrow
-from imbue.mngr.config.key_resolver import bare_key
-from imbue.mngr.config.key_resolver import is_extend_key
-from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.loader import block_disabled_plugins
@@ -45,6 +40,12 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+from imbue.overlay.errors import OverlayError
+from imbue.overlay.narrowing import would_assignment_narrow
+from imbue.overlay.node_merge import extend_plain_value
+from imbue.overlay.operators import bare_key
+from imbue.overlay.operators import is_extend_key
+from imbue.overlay.operators import parse_scalar_value
 
 # The set of built-in format names (case-insensitive). Any --format value not
 # matching one of these is treated as a format template string.
@@ -176,7 +177,10 @@ def setup_command_context(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load config (is_interactive will be resolved below)
+    # Load config (is_interactive will be resolved below). The ``mngr config`` command is
+    # exempt from the settings-narrowing guard: it must be able to load a config that would
+    # otherwise narrow in order to *edit* it (otherwise `mngr config set`/`unset` -- the way
+    # to fix a narrowing config -- would themselves fail with the narrowing error).
     pm = ctx.obj
     mngr_ctx = load_config(
         pm,
@@ -186,6 +190,7 @@ def setup_command_context(
         is_interactive=False,
         strict=strict,
         silent_unknown_fields=silent_unknown_fields,
+        enforce_narrowing_guard=command_name != "config",
     )
 
     # Resolve is_interactive from all sources.
@@ -205,7 +210,16 @@ def setup_command_context(
         to_update(mngr_ctx.field_ref().is_full_discovery, initial_opts.safe),
     )
 
-    # Apply --setting overrides to config (right before CLI defaults are applied)
+    # Capture the originally-loaded config before any --setting is applied. The
+    # end-of-pipeline re-application (which folds in create-template-contributed
+    # settings) runs against this pristine base so it never double-applies an
+    # ``__extend`` operator.
+    base_config = mngr_ctx.config
+
+    # Apply --setting overrides to config (right before CLI defaults are applied).
+    # This uses the CLI -S flags only; config-default and create-template
+    # ``setting`` entries are folded in later via the end-of-pipeline pass so they
+    # can affect command-default resolution and template resolution first.
     if initial_opts.setting:
         updated_config = apply_settings_to_config(
             mngr_ctx.config,
@@ -236,6 +250,21 @@ def setup_command_context(
     # 4. Append CLI tuple/list values to the template result so CLI ends up at
     #    the tail of the merged list (config_base + template_result + CLI).
     updated_params = restore_cli_list_values(updated_params, cli_list_values)
+
+    # 5. Fold create-template (and config-default) ``setting`` entries into the
+    #    config. apply_create_template appends them to ``updated_params["setting"]``,
+    #    but the only --setting application above used the CLI flags, so without
+    #    this pass template-provided settings would never reach the resolved
+    #    config (e.g. providers.<name>.docker_runtime). Re-apply against the
+    #    pristine base config so CLI -S still wins and no ``__extend`` is doubled.
+    if command_name == "create":
+        mngr_ctx = _apply_template_contributed_settings(
+            mngr_ctx,
+            base_config=base_config,
+            combined_settings=updated_params.get("setting", ()),
+            cli_settings=initial_opts.setting,
+            template_names=updated_params.get("template", ()),
+        )
 
     # Block plugins that were disabled via command defaults or create templates
     # (e.g. disable_plugin from [commands.create] in settings.toml). load_config
@@ -458,11 +487,90 @@ def apply_settings_to_config(
     # ``--setting`` cannot silently drop entries from the merged config either.
     # Honor the existing setting on ``config``, since ``--setting`` runs after
     # config-file loading, so the resolved value is already known here.
-    if not config.allow_settings_key_assignment_narrowing:
-        violations = detect_settings_narrowing(config, settings_config)
-        if violations:
-            raise _build_setting_narrowing_error(violations)
-    return config.merge_with(settings_config)
+    merged, violations = config.merge_with(settings_config)
+    if violations and not config.allow_settings_key_assignment_narrowing:
+        raise _build_setting_narrowing_error(violations)
+    return merged
+
+
+# Top-level setting key segments whose effect is consumed earlier in
+# setup_command_context than the point where create-template ``setting`` entries
+# are folded into the config. A template (or command-default) ``setting``
+# targeting these can never take effect, so we reject it rather than dropping it
+# silently. Direct CLI ``-S`` for these keys is unaffected -- it is applied
+# before those phases run.
+_INEFFECTIVE_TEMPLATE_SETTING_PREFIXES: frozenset[str] = frozenset({"commands", "create_templates"})
+
+
+def _apply_template_contributed_settings(
+    mngr_ctx: MngrContext,
+    *,
+    base_config: MngrConfig,
+    combined_settings: Sequence[str],
+    cli_settings: Sequence[str],
+    template_names: Sequence[str],
+) -> MngrContext:
+    """Re-apply the post-template ``setting`` list to the config and return the updated context.
+
+    After the create pipeline runs, ``combined_settings`` is
+    ``config_default_settings + template_settings + cli_settings`` (the CLI flags
+    are appended last by ``restore_cli_list_values``). Only the CLI flags were
+    already merged into the config; the config-default and template-contributed
+    entries were not. Re-apply the whole list against the pristine ``base_config``
+    so those entries reach the resolved config, preserving "CLI wins" precedence
+    (CLI entries are last, and later same-key entries win) and avoiding
+    double-applying ``__extend`` operators.
+    """
+    combined = tuple(combined_settings)
+    cli = tuple(cli_settings)
+
+    # The CLI flags are the tail of the combined list; everything before them is
+    # contributed by config defaults or create templates and has not yet been
+    # applied to the config.
+    non_cli_count = len(combined) - len(cli)
+    if non_cli_count <= 0:
+        return mngr_ctx
+    assert combined[non_cli_count:] == cli, (
+        "Expected the CLI --setting flags to be the tail of the resolved setting list; "
+        f"got combined={combined!r}, cli={cli!r}"
+    )
+
+    non_cli_settings = combined[:non_cli_count]
+    _reject_ineffective_template_setting_keys(non_cli_settings, template_names)
+
+    final_config = apply_settings_to_config(base_config, combined, base_config.disabled_plugins)
+    return mngr_ctx.model_copy_update(
+        to_update(mngr_ctx.field_ref().config, final_config),
+    )
+
+
+def _reject_ineffective_template_setting_keys(settings: Sequence[str], template_names: Sequence[str]) -> None:
+    """Raise ``ConfigParseError`` if a non-CLI ``setting`` entry targets a key that cannot take effect.
+
+    ``commands.*`` (command defaults) and ``create_templates.*`` are resolved
+    earlier in setup_command_context than the point where create-template
+    ``setting`` entries are folded into the config, so such entries would be
+    silently ignored.
+    """
+    for setting_str in settings:
+        if "=" not in setting_str:
+            continue
+        key_path = setting_str.split("=", 1)[0].strip()
+        if not key_path:
+            continue
+        # Normalize hyphens to underscores so ``create-templates.*`` is caught
+        # the same way ``create_templates.*`` is (config key parsing treats them
+        # as equivalent).
+        first_segment = key_path.split(".", 1)[0].replace("-", "_")
+        if first_segment in _INEFFECTIVE_TEMPLATE_SETTING_PREFIXES:
+            template_hint = f" (from create template(s): {', '.join(template_names)})" if template_names else ""
+            raise ConfigParseError(
+                f"A create-template (or command-default) `setting` entry targets `{key_path}`{template_hint}, "
+                f"which cannot take effect: `commands.*` and `create_templates.*` are resolved before "
+                f"template settings are applied to the config, so the value would be silently ignored.\n"
+                f"Set this directly under the matching `[{first_segment}.*]` config section instead, or pass "
+                f"it as a direct CLI `-S {key_path}=...` (which is applied early enough to take effect)."
+            )
 
 
 def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseError:
@@ -480,9 +588,7 @@ def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseErro
         "To opt into this assign-by-default behavior (and silence this error), set "
         "`allow_settings_key_assignment_narrowing = true` in your settings.toml.\n"
         "To keep the additive behavior for a specific key, switch to the `__extend` suffix on "
-        "the --setting key (e.g. `--setting commands.create.env__extend='[\"X=5\"]'`).\n"
-        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        "in a future version, and support for False may be removed entirely."
+        "the --setting key (e.g. `--setting commands.create.env__extend='[\"X=5\"]'`)."
     )
 
 
@@ -742,45 +848,20 @@ def _apply_template_extend(
     param_name: str,
 ) -> Any:
     """Apply a single template's ``<key>__extend = ...`` against the existing
-    parameter value.
+    parameter value, delegating to the shared ``extend_plain_value`` algebra.
 
-    Mirrors the leaf semantics of ``_apply_extend`` in the key resolver -- list/
-    tuple/set/dict shape rules are the same -- but operates against in-flight
-    click param values rather than against parsed pydantic models, so the
-    coercion bias is toward the click-native tuple shape.
+    Operates against in-flight click param values rather than parsed pydantic
+    models; ``extend_plain_value`` preserves tuple-ness when the base is a tuple, which
+    keeps the click-native tuple shape downstream code expects. The dict branch is
+    recursive (a nested ``key__extend`` extends rather than replaces). Re-raise the
+    overlay's ``OverlayError`` as a ``ConfigParseError`` so the template-specific
+    ``field_path`` still appears in the message.
     """
     field_path = f"create_templates.{template_name}.{param_name}__extend"
-    if not isinstance(extend_value, (list, tuple, dict, set, frozenset)):
-        raise ConfigParseError(
-            f"{field_path} requires a list, tuple, dict, set, or frozenset value; got: {type(extend_value).__name__}"
-        )
-    if existing_value is None:
-        # Field unset in base. Extend acts like assign, matching ``_apply_extend``.
-        return extend_value
-    if isinstance(existing_value, (list, tuple)):
-        if not isinstance(extend_value, (list, tuple)):
-            raise ConfigParseError(
-                f"{field_path} (list/tuple) requires a JSON array value; got: {type(extend_value).__name__}"
-            )
-        merged = list(existing_value) + list(extend_value)
-        return tuple(merged) if isinstance(existing_value, tuple) else merged
-    if isinstance(existing_value, (set, frozenset)):
-        if not isinstance(extend_value, (set, frozenset, list, tuple)):
-            raise ConfigParseError(
-                f"{field_path} (set) requires a JSON array value; got: {type(extend_value).__name__}"
-            )
-        merged_set = set(existing_value) | set(extend_value)
-        return frozenset(merged_set) if isinstance(existing_value, frozenset) else merged_set
-    if isinstance(existing_value, dict):
-        if not isinstance(extend_value, dict):
-            raise ConfigParseError(
-                f"{field_path} (dict) requires a JSON object value; got: {type(extend_value).__name__}"
-            )
-        return {**existing_value, **extend_value}
-    raise ConfigParseError(
-        f"{field_path} is not valid: target field is a scalar "
-        f"({type(existing_value).__name__}); use bare assignment instead."
-    )
+    try:
+        return extend_plain_value(existing_value, extend_value, field_path)
+    except OverlayError as e:
+        raise ConfigParseError(str(e)) from e
 
 
 def _build_template_narrowing_message(template_name: str, param_name: str) -> str:
@@ -797,25 +878,13 @@ def _build_template_narrowing_message(template_name: str, param_name: str) -> st
         f"To opt into this assign-by-default behavior (and silence this error), set "
         f"`allow_settings_key_assignment_narrowing = true` in your settings.toml.\n"
         f"To keep the additive behavior for this specific key, switch the template entry to "
-        f"`{param_name}__extend = [...]`.\n"
-        f"NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
-        f"in a future version, and support for False may be removed entirely."
+        f"`{param_name}__extend = [...]`."
     )
 
 
 def is_param_explicit(ctx: click.Context, param_name: str) -> bool:
     """Check whether a CLI parameter was explicitly set on the command line."""
     return ctx.get_parameter_source(param_name) == ParameterSource.COMMANDLINE
-
-
-def error_if_param_explicit(ctx: click.Context, param_name: str, error_message: str) -> None:
-    """Raise UserInputError if the user explicitly set this parameter on the command line.
-
-    Use this when another flag implies a specific value for this parameter, and the
-    user explicitly chose a conflicting value.
-    """
-    if is_param_explicit(ctx, param_name):
-        raise UserInputError(error_message)
 
 
 @pure

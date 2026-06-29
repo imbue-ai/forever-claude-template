@@ -1,27 +1,32 @@
 """End-to-end tests for System Interface using Playwright.
 
-These tests start a real FastAPI server with mocked agent discovery,
-then use Playwright to interact with the web UI.
+These tests start a real Flask server (threaded Werkzeug) with mocked agent
+discovery, then use Playwright to interact with the web UI.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 from typing import Generator
 from unittest.mock import patch
 
 import pytest
-import uvicorn
 
 from imbue.system_interface.agent_discovery import AgentInfo
+from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
+from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
+from imbue.system_interface.wsgi import make_threaded_server
 
 try:
     from playwright.sync_api import Page
@@ -97,6 +102,11 @@ def _make_agent_fixture(
 
     session_id = "e2e-session-001"
     (agent_state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
+    # The session endpoint (_find_agent) resolves an agent's CLAUDE_CONFIG_DIR
+    # from this per-agent env file (step 1 of read_claude_config_dir_from_env_file),
+    # so pin it at the fixture's config dir. Without this the watcher falls back to
+    # the real ~/.claude and the fixture transcript never loads.
+    (agent_state_dir / "env").write_text(f"CLAUDE_CONFIG_DIR={claude_config_dir}\n")
 
     if session_events is None:
         session_events = [
@@ -138,26 +148,47 @@ def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], N
     agent_info, session_file = _make_agent_fixture(tmp_path)
     agents = [agent_info]
 
-    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
-    app = create_application(config)
+    # Isolate the workspace environment: point MNGR_HOST_DIR at the fixture's
+    # tmp tree so the session endpoint (_find_agent) resolves the fixture agent's
+    # state dir + env file, and clear MNGR_AGENT_ID so the layout endpoint has no
+    # primary-agent dir to read from (returns 404 -> the UI auto-opens the fixture
+    # chat) and never reads or writes the real workspace's layout.json. This
+    # overrides the autouse _isolate_system_interface_tests fixture's env for the
+    # duration of the test.
+    env_patcher = patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""})
+    env_patcher.start()
 
-    # Patch discover_agents globally to return our mock agents
-    patcher = patch("imbue.system_interface.server.discover_agents", return_value=agents)
-    patcher.start()
-
-    # Patch send_message to succeed
-    send_patcher = patch("imbue.system_interface.server.send_message", return_value=True)
+    send_patcher = patch("imbue.system_interface.agent_manager.send_message", return_value=True)
     send_patcher.start()
+    discover_patcher = patch("imbue.system_interface.server.discover_agents", return_value=agents)
+    discover_patcher.start()
 
-    server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT, log_level="error"))
-    thread = threading.Thread(target=server.run, daemon=True)
+    # The autouse conftest fixture no-ops AgentManager.start (so background mngr
+    # discovery never runs in tests), so seed the agent into the manager directly
+    # and inject it. The UI renders its agent list from the WebSocket
+    # agents_updated snapshot, which the server sends from this manager on connect.
+    broadcaster = WebSocketBroadcaster()
+    manager = AgentManager.build(broadcaster)
+    with manager._lock:
+        manager._agents[agent_info.id] = AgentStateItem(
+            id=agent_info.id,
+            name=agent_info.name,
+            state="RUNNING",
+            labels={},
+            work_dir=str(tmp_path / "work"),
+        )
+    manager._ensure_activity_tracking(agent_info.id)
+
+    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
+    app = create_application(config, agent_manager=manager)
+
+    server = make_threaded_server("127.0.0.1", _PORT, app)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     # Wait for server to start
     for _ in range(50):
         try:
-            import urllib.request
-
             urllib.request.urlopen(f"{_BASE_URL}/api/agents", timeout=0.5)
             break
         except Exception:
@@ -165,9 +196,10 @@ def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], N
 
     yield _BASE_URL, agents, session_file
 
-    patcher.stop()
+    discover_patcher.stop()
     send_patcher.stop()
-    server.should_exit = True
+    env_patcher.stop()
+    server.shutdown()
     thread.join(timeout=5.0)
 
 
@@ -309,16 +341,14 @@ def test_tool_calls_render_as_collapsible(tmp_path: Path, page: Page) -> None:
 
     with (
         patch("imbue.system_interface.server.discover_agents", return_value=agents),
-        patch("imbue.system_interface.server.send_message", return_value=True),
+        patch("imbue.system_interface.agent_manager.send_message", return_value=True),
     ):
-        server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT + 1, log_level="error"))
-        thread = threading.Thread(target=server.run, daemon=True)
+        server = make_threaded_server("127.0.0.1", _PORT + 1, app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         for _ in range(50):
             try:
-                import urllib.request
-
                 urllib.request.urlopen(f"http://127.0.0.1:{_PORT + 1}/api/agents", timeout=0.5)
                 break
             except Exception:
@@ -347,7 +377,7 @@ def test_tool_calls_render_as_collapsible(tmp_path: Path, page: Page) -> None:
             expect(tool_details.first).to_be_visible()
             expect(tool_details.first).to_contain_text("file contents here")
         finally:
-            server.should_exit = True
+            server.shutdown()
             thread.join(timeout=5.0)
 
 
@@ -375,6 +405,111 @@ def test_sse_stream_delivers_new_events(e2e_server: tuple[str, list[AgentInfo], 
     expect(new_message).to_be_visible(timeout=10000)
 
 
+_TRIGGER_TIMEOUT_MS = 20000
+
+
+def _broadcast_layout_op(base_url: str, op: str, args: dict[str, Any], agent_id: str) -> None:
+    """POST a layout op to the loopback ``/api/layout/broadcast`` endpoint.
+
+    This is the same path ``scripts/layout.py`` drives, so issuing a ``split``
+    here exercises the real frontend ``handleSplit`` handler (which carves the
+    second group) rather than reaching into dockview internals from the test.
+    """
+    payload = json.dumps({"op": op, "args": args, "agent_id": agent_id}).encode()
+    request = urllib.request.Request(
+        f"{base_url}/api/layout/broadcast",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200, f"layout broadcast failed: {response.status}"
+
+
+@pytest.mark.timeout(120)
+def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
+    """The header "+" opens the new tab in the split whose header was clicked.
+
+    Regression test for the bug where clicking "+" in a right-hand split opened
+    the tab in the (active) left split instead. We split the layout into two
+    groups, make the LEFT group active (so dockview's default "add to the
+    active group" would land a new tab on the left), then click the RIGHT
+    split's "+" and add a URL tab. It must land in the RIGHT split.
+    """
+    base_url, _, _ = e2e_server
+    page.goto(base_url)
+
+    # The fixture auto-opens the chat for "test-agent" as the sole group.
+    expect(page.locator(".dv-default-tab-content", has_text="test-agent").first).to_be_visible(
+        timeout=_TRIGGER_TIMEOUT_MS
+    )
+    add_buttons = page.locator(".dockview-add-tab-button")
+    expect(add_buttons).to_have_count(1)
+
+    # Carve a second group to the right of the chat by opening a URL iframe in
+    # a fresh column. Driven through the real layout-op broadcast path.
+    _broadcast_layout_op(
+        base_url,
+        "split",
+        {
+            "ref": "https://placement-split.example/",
+            "relative_to": "chat:test-agent",
+            "direction": "right",
+            "new_group": True,
+        },
+        agent_id="agent-test-123",
+    )
+
+    # Two groups now, each header carrying its own "+".
+    expect(add_buttons).to_have_count(2, timeout=10000)
+    expect(page.locator(".dv-default-tab-content", has_text="placement-split.example").first).to_be_visible(
+        timeout=10000
+    )
+
+    # Activate the LEFT (chat) split. Without the fix, the new tab would follow
+    # the active group and wrongly land here.
+    chat_tab = page.locator(".dv-default-tab-content", has_text="test-agent").first
+    chat_tab.click()
+    left_group = page.locator(".dv-groupview", has=page.locator(".dv-default-tab-content", has_text="test-agent"))
+    expect(left_group).to_have_class(re.compile(r"\bdv-active-group\b"))
+
+    # Click the "+" in the RIGHT split's header (the geometrically rightmost one).
+    boxes = [add_buttons.nth(i).bounding_box() for i in range(2)]
+    assert boxes[0] is not None and boxes[1] is not None
+    right_index = 0 if boxes[0]["x"] > boxes[1]["x"] else 1
+    add_buttons.nth(right_index).click()
+
+    # Choose "New URL" from the (right split's) dropdown and submit a URL.
+    page.locator(".dockview-add-tab-dropdown-item:visible", has_text="New URL").click()
+    page.locator(".custom-url-dialog-input").first.fill("https://newtab-target.example/")
+    page.locator(".custom-url-dialog-open").click()
+
+    # The new tab must render in the RIGHT split, not the left, and must tab
+    # into the existing right group rather than carving a third.
+    expect(page.locator(".dv-default-tab-content", has_text="newtab-target.example").first).to_be_visible(
+        timeout=10000
+    )
+    placement = page.evaluate(
+        """
+        (title) => {
+          const groups = Array.from(document.querySelectorAll('.dv-groupview'))
+            .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+          const has = (g) => Array.from(g.querySelectorAll('.dv-default-tab-content'))
+            .some((e) => (e.textContent || '').includes(title));
+          return {
+            count: groups.length,
+            inLeft: groups.length > 0 ? has(groups[0]) : false,
+            inRight: groups.length > 0 ? has(groups[groups.length - 1]) : false,
+          };
+        }
+        """,
+        "newtab-target.example",
+    )
+    assert placement["count"] == 2, f"new tab should join the right split, not create a third group: {placement}"
+    assert placement["inRight"], f"new tab should be in the right split: {placement}"
+    assert not placement["inLeft"], f"new tab leaked into the left split: {placement}"
+
+
 @_STALE_DOCKVIEW_SKIP
 def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
     """When there are no agents, the sidebar shows an empty message."""
@@ -383,16 +518,14 @@ def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
 
     with (
         patch("imbue.system_interface.server.discover_agents", return_value=[]),
-        patch("imbue.system_interface.server.send_message", return_value=True),
+        patch("imbue.system_interface.agent_manager.send_message", return_value=True),
     ):
-        server = uvicorn.Server(uvicorn.Config(app=app, host="127.0.0.1", port=_PORT + 2, log_level="error"))
-        thread = threading.Thread(target=server.run, daemon=True)
+        server = make_threaded_server("127.0.0.1", _PORT + 2, app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
         for _ in range(50):
             try:
-                import urllib.request
-
                 urllib.request.urlopen(f"http://127.0.0.1:{_PORT + 2}/api/agents", timeout=0.5)
                 break
             except Exception:
@@ -404,5 +537,5 @@ def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
             expect(empty_msg).to_be_visible(timeout=5000)
             expect(empty_msg).to_contain_text("No agents found")
         finally:
-            server.should_exit = True
+            server.shutdown()
             thread.join(timeout=5.0)

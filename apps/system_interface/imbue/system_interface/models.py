@@ -151,3 +151,26 @@ class ClaudeAuthApiKeyRequest(FrozenModel):
     """Request body for POST /api/claude-auth/submit-api-key."""
 
     api_key: SecretStr = Field(description="A raw `sk-ant-...` API key")
+
+
+class LatchkeyPermissionInfo(FrozenModel):
+    """A grantable permission within a latchkey scope, from the gateway catalog."""
+
+    name: str = Field(description="Permission schema name, e.g. 'slack-read-all'")
+    description: str | None = Field(default=None, description="Plain-English summary of the permission")
+
+
+class LatchkeyScopeInfo(FrozenModel):
+    """Display info for a latchkey permission scope, from the gateway catalog.
+
+    Returned by GET /api/latchkey/scopes/{scope}; the frontend uses
+    `display_name` to label a permission-request card and the per-permission
+    descriptions for hover tooltips.
+    """
+
+    scope: str = Field(description="Detent scope schema name, e.g. 'slack-api'")
+    display_name: str = Field(description="Human-readable service name, e.g. 'Slack'")
+    description: str | None = Field(default=None, description="Plain-English summary of the scope")
+    permissions: tuple[LatchkeyPermissionInfo, ...] = Field(
+        default=(), description="Permissions grantable under the scope"
+    )
