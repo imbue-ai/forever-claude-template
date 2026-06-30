@@ -48,6 +48,36 @@ The `--command` is arbitrary shell, run from the repo root (`/mngr/code`). Use
 repo-relative paths (`scripts/...`, `runtime/...`) just as you would in
 `supervisord.conf`.
 
+## Set up an agent task (run a skill on a schedule)
+
+A **task agent** is a special kind of scheduled task: instead of running a plain
+script, it wakes a dedicated agent that runs one skill on a cadence, in its own
+chat tab. The nightly Caretaker is the built-in example. To add your own -- say a
+morning news digest:
+
+1. **Write the skill** at `.agents/skills/<name>/SKILL.md` -- the instructions the
+   agent follows on each run (see the existing skills for the shape).
+2. **Schedule it** with the shared runner, passing the skill name as its argument:
+
+   ```bash
+   scheduler add \
+       --name news \
+       --schedule "0 7 * * *" \
+       --command "bash scripts/run_task_agent.sh news" \
+       --description "Morning news digest agent."
+   ```
+
+That is all -- no new agent template is required. `scripts/run_task_agent.sh
+<skill>` creates a persistent singleton agent (labelled `task_agent=<skill>`),
+keeps it alive across runs, and on each run clears its chat and re-sends
+`/<skill>`, so the skill runs fresh in an empty conversation. The agent surfaces
+as a tab in the minds UI and re-flashes on each run.
+
+The Caretaker is just this pattern with a tailored agent template:
+`bash scripts/run_task_agent.sh caretaker --template caretaker`. Pass
+`--template <t>` only when you want a custom agent template; otherwise the generic
+`task_agent` template (which orients the agent to run the named skill) is used.
+
 ## Remove a task
 
 ```bash
