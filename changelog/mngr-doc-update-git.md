@@ -1,0 +1,3 @@
+Corrected the `vendor/` guidance in `CLAUDE.md`: it told agents to add external read-only dependencies as a `git subtree`, but `vendor/mngr` and `vendor/tk` are plain copied-in snapshots, not subtrees or submodules. The instruction now states the real model -- `vendor/mngr` is re-synced from the mngr monorepo (`just sync-vendor-mngr` / the release flow), `vendor/tk` is a manually-maintained fork with no upstream pull -- and tells agents not to run `git subtree` / `git submodule` against `vendor/`.
+
+Updated `README.md` to note how each vendored dependency is maintained: `vendor/mngr` is a snapshot synced from the mngr monorepo (`git archive` for releases, `rsync` for dev iteration), and `vendor/tk` is a hand-upgraded fork.

@@ -20,8 +20,8 @@ mngr create my-workspace main -t local \
 - `event-processor/` - Pre-configured directory for creating persistent sub-agents
 - `supervisord.conf` - Supervisord config defining the background services
 - `libs/bootstrap/` - First-boot setup, then launches supervisord to supervise the services
-- `vendor/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command
-- `vendor/tk/` - A vendored copy of the [tk](https://github.com/wedow/ticket) ticket tracker. The `ticket` script (also callable as `tk`) manages tickets stored as markdown. We point `TICKETS_DIR` at `runtime/tickets/` (set in `.mngr/settings.toml`'s `host_env`) so tickets are backed up alongside the rest of `runtime/` on the `mindsbackup/$MNGR_AGENT_ID` branch.
+- `vendor/mngr/` - A vendored, mutable copy of mngr, synced in from the mngr monorepo as a plain snapshot (via `git archive` for releases, `rsync` for dev iteration -- not a git subtree or submodule). Note that making changes here *will* affect the behavior of the `mngr` command.
+- `vendor/tk/` - A vendored, manually-maintained fork of the [tk](https://github.com/wedow/ticket) ticket tracker (upgraded by hand; we don't pull from upstream). The `ticket` script (also callable as `tk`) manages tickets stored as markdown. We point `TICKETS_DIR` at `runtime/tickets/` (set in `.mngr/settings.toml`'s `host_env`) so tickets are backed up alongside the rest of `runtime/` on the `mindsbackup/$MNGR_AGENT_ID` branch.
 
 ## Create templates
 
