@@ -1463,6 +1463,26 @@ body {
   background: #ca8a04;
 }
 
+/* Hover tooltip for the liveness dot, appended to <body> and positioned (fixed)
+   just below the dot by attachHoverTooltip. It lives on the body rather than as
+   a ::after bubble because the tab strip clips overflow, and as a JS element
+   rather than a native title because dockview's draggable tabs suppress those. */
+.dv-tab-hover-tooltip {
+  position: fixed;
+  z-index: 1000;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--color-text-primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
 .dv-custom-tab-actions {
   display: flex;
   align-items: center;

@@ -20,6 +20,7 @@ import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
 import { livenessCategoryForState } from "./agentLiveness";
+import { attachHoverTooltip } from "./hoverTooltip";
 import { reloadInterface } from "../reload";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
@@ -250,25 +251,29 @@ function createCustomTab(options: { id: string; name: string }): {
         // while it is idle and waiting on the user (WAITING), grey while it is
         // dormant (DONE/STOPPED/etc.; revives on the next message). Driven by
         // the ``state`` field on the agent WS payload; hidden until that state
-        // is known. Hovering shows the exact lifecycle state.
+        // is known. Hovering shows the exact lifecycle state via a body-level
+        // tooltip (a native ``title`` is suppressed on dockview's draggable
+        // tabs -- see ``attachHoverTooltip``).
         const processDot = document.createElement("span");
         processDot.className = "dv-tab-process-dot";
+        const processDotTooltip = attachHoverTooltip(processDot);
         const updateProcessDot = (): void => {
           const state = getAgentById(chatAgentId)?.state;
           if (!state) {
             processDot.style.display = "none";
-            processDot.removeAttribute("title");
+            processDotTooltip.setText(null);
             return;
           }
           processDot.style.display = "";
           processDot.setAttribute("data-liveness", livenessCategoryForState(state));
-          processDot.title = state;
+          processDotTooltip.setText(state);
         };
         updateProcessDot();
         element.insertBefore(processDot, element.firstChild);
         const processDotListener: AgentsUpdatedListener = () => updateProcessDot();
         addAgentsUpdatedListener(processDotListener);
         disposables.push({ dispose: () => removeAgentsUpdatedListener(processDotListener) });
+        disposables.push(processDotTooltip);
 
         const destroyBtn = createTabActionButton(
           isPrimary ? "Cannot destroy the primary agent" : "Destroy agent",
