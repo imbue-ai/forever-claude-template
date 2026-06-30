@@ -319,6 +319,42 @@ extra_provision_command__extend = [
     "bash /mngr/code/scripts/minds_lima_autostart.sh",
 ]
 
+# template for the Modal sandbox provider (the "modal" compute provider).
+# Like Lima, Modal has no Dockerfile build -- the toolchain is provisioned over SSH
+# after the sandbox boots, reusing the exact scripts the Dockerfile RUNs. There is
+# no autostart unit: Modal sandboxes are ephemeral (~1 day) and do not survive a
+# reboot, so the minds desktop app re-creates them rather than relying on systemd
+# (the lima-autostart step is intentionally absent). Sizing + timeouts are set in
+# this template's setting__extend (below), not in the mngr_modal provider defaults.
+[create_templates.modal]
+provider = "modal"
+target_path = "/mngr/code/"
+# Disable idle detection entirely -- the host should never auto-shutdown. The
+# sandbox instead runs until the 24h max-age timeout set in setting__extend below
+# (matching how the vultr/aws/imbue_cloud templates disable idle).
+idle_mode = "disabled"
+# Enable the (default-disabled) modal provider for this create, and set the
+# minds-facing sizing + timeouts HERE rather than in the mngr_modal provider
+# defaults: 2 CPU / 4 GB (matching the lima/docker convention) and a 24h sandbox
+# + idle timeout. The sandbox timeout (86310) plus the provider's 90s shutdown
+# buffer lands exactly at Modal's 86400s (24h) hard cap.
+setting__extend = [
+    "providers.modal.is_enabled=true",
+    "providers.modal.default_cpu=2.0",
+    "providers.modal.default_memory=4.0",
+    "providers.modal.default_sandbox_timeout=86310",
+    "providers.modal.default_idle_timeout=86400",
+]
+# Same forwarding as the docker/lima templates so the agent inherits its creds.
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Modal has no Dockerfile build (like lima): run the same setup a Dockerfile-built
+# workspace would, directly in the sandbox over SSH.
+extra_provision_command__extend = [
+    "bash /mngr/code/scripts/setup_system.sh",
+    "bash /mngr/code/scripts/install_dependencies.sh",
+    "bash /mngr/code/scripts/build_workspace.sh",
+]
+
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]
 provider = "vultr"
