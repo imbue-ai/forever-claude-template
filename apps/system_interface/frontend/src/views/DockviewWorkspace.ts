@@ -19,6 +19,7 @@ import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
+import { livenessCategoryForState } from "./agentLiveness";
 import { reloadInterface } from "../reload";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
@@ -243,23 +244,25 @@ function createCustomTab(options: { id: string; name: string }): {
         const primaryAgentId = getPrimaryAgentId();
         const isPrimary = chatAgentId === primaryAgentId;
 
-        // Process-liveness dot, to the left of the title. Distinct from the
-        // chat's activity indicator: this tracks whether the agent's claude
-        // process is alive (green) or gone (red) -- e.g. it flips to red when
-        // the OOM handler sheds the process. Driven by ``is_process_running``
-        // on the agent WS payload; hidden until the agent's state is known.
+        // Per-agent liveness dot, to the left of the title. Distinct from the
+        // chat's activity indicator: this tracks the agent's mngr lifecycle
+        // state -- green while its claude process is working (RUNNING), yellow
+        // while it is idle and waiting on the user (WAITING), grey while it is
+        // dormant (DONE/STOPPED/etc.; revives on the next message). Driven by
+        // the ``state`` field on the agent WS payload; hidden until that state
+        // is known. Hovering shows the exact lifecycle state.
         const processDot = document.createElement("span");
         processDot.className = "dv-tab-process-dot";
         const updateProcessDot = (): void => {
-          const running = getAgentById(chatAgentId)?.is_process_running;
-          if (running === undefined) {
+          const state = getAgentById(chatAgentId)?.state;
+          if (!state) {
             processDot.style.display = "none";
             processDot.removeAttribute("title");
             return;
           }
           processDot.style.display = "";
-          processDot.setAttribute("data-running", running ? "true" : "false");
-          processDot.title = running ? "Agent process running" : "Agent process stopped";
+          processDot.setAttribute("data-liveness", livenessCategoryForState(state));
+          processDot.title = state;
         };
         updateProcessDot();
         element.insertBefore(processDot, element.firstChild);

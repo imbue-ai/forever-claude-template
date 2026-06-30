@@ -19,12 +19,6 @@ export interface AgentState {
   // remote agents whose state directory is not present on this host,
   // proto-agents, non-Claude agent types).
   activity_state?: string | null;
-  // Whether the agent's claude *process* is alive (derived server-side from the
-  // mngr lifecycle state; idle-but-up WAITING counts as running). Distinct from
-  // activity_state: this tracks the process, not whether it is working. Flips to
-  // false when the process exits -- including when the OOM handler sheds it.
-  // Optional for forward/backward compatibility with payloads that omit it.
-  is_process_running?: boolean;
 }
 
 export interface ApplicationEntry {

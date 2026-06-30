@@ -488,7 +488,6 @@ class AgentManager:
                     "labels": a.labels,
                     "work_dir": a.work_dir,
                     "activity_state": a.activity_state,
-                    "is_process_running": is_lifecycle_process_running(a.state),
                 }
                 for a in self._agents.values()
             ]

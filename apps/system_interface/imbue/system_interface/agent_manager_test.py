@@ -176,9 +176,9 @@ def test_get_agents_serialized(agent_manager: AgentManager) -> None:
     assert by_id["a1"]["name"] == "agent-one"
     assert by_id["a1"]["labels"] == {"user_created": "true"}
     assert by_id["a1"]["activity_state"] is None
-    # The process indicator is driven off the lifecycle state in the WS payload.
-    assert by_id["a1"]["is_process_running"] is True
-    assert by_id["a2"]["is_process_running"] is False
+    # The tab's liveness dot is driven off the lifecycle state in the WS payload.
+    assert by_id["a1"]["state"] == "RUNNING"
+    assert by_id["a2"]["state"] == "DONE"
 
 
 def test_get_applications_serialized(agent_manager: AgentManager) -> None:
@@ -319,11 +319,11 @@ def test_handle_agent_discovered(agent_manager: AgentManager, broadcaster: WebSo
     assert msg["type"] == "agents_updated"
 
 
-def test_full_snapshot_lifecycle_state_drives_is_process_running(agent_manager: AgentManager) -> None:
+def test_full_snapshot_lifecycle_state_reaches_payload(agent_manager: AgentManager) -> None:
     """The live lifecycle state carried on a discovery snapshot must reach the
-    serialized payload's ``is_process_running`` -- this is what lets the tab's
-    process dot flip to "stopped" when an agent's claude process dies (e.g. an
-    OOM shed) rather than staying green forever."""
+    serialized payload's ``state`` -- this is what lets the tab's liveness dot
+    reflect reality (e.g. drop from green to grey when an agent's claude process
+    dies in an OOM shed) rather than staying green forever."""
     alive = DiscoveredAgent(
         host_id=HostId(),
         agent_id=MngrAgentId(),
@@ -344,8 +344,8 @@ def test_full_snapshot_lifecycle_state_drives_is_process_running(agent_manager: 
     agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([alive, dead], []))
 
     by_name = {a["name"]: a for a in agent_manager.get_agents_serialized()}
-    assert by_name["alive"]["is_process_running"] is True
-    assert by_name["dead"]["is_process_running"] is False
+    assert by_name["alive"]["state"] == "WAITING"
+    assert by_name["dead"]["state"] == "DONE"
 
 
 def test_discovered_agent_without_state_defaults_to_running(agent_manager: AgentManager) -> None:
@@ -360,7 +360,7 @@ def test_discovered_agent_without_state_defaults_to_running(agent_manager: Agent
         certified_data={"labels": {}, "work_dir": None},
     )
     agent_manager._handle_agent_discovered(make_agent_discovery_event(agent))
-    assert agent_manager.get_agents_serialized()[0]["is_process_running"] is True
+    assert agent_manager.get_agents_serialized()[0]["state"] == "RUNNING"
 
 
 def test_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:

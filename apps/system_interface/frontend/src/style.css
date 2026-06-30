@@ -1441,10 +1441,10 @@ body {
   gap: 4px;
 }
 
-/* Per-agent process-liveness dot on chat tabs. Green when the agent's claude
-   process is alive, red when it has stopped (e.g. shed by the OOM handler).
-   Distinct from the chat's activity indicator, which tracks whether the agent
-   is actively working. */
+/* Per-agent liveness dot on chat tabs, reflecting the agent's mngr lifecycle
+   state. Distinct from the chat's activity indicator, which tracks work within
+   a running process. Grey (the default) is "dormant" -- the process is not
+   running (DONE/STOPPED/etc.) but revives on the next message. */
 .dv-tab-process-dot {
   width: 7px;
   height: 7px;
@@ -1453,12 +1453,14 @@ body {
   background: var(--color-text-secondary);
 }
 
-.dv-tab-process-dot[data-running="true"] {
+/* Process up and working (RUNNING) -- green, matching the activity indicator. */
+.dv-tab-process-dot[data-liveness="active"] {
   background: var(--color-accent);
 }
 
-.dv-tab-process-dot[data-running="false"] {
-  background: #dc2626;
+/* Process up but idle, waiting on the user (WAITING) -- yellow. */
+.dv-tab-process-dot[data-liveness="waiting"] {
+  background: #ca8a04;
 }
 
 .dv-custom-tab-actions {
