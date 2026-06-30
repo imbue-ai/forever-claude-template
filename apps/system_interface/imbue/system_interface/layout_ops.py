@@ -34,6 +34,14 @@ from loguru import logger as _loguru_logger
 # terminal" path uses ``arg=workdir`` instead and is left as ``terminal:<hash>``.
 _TERMINAL_SERVICE_URL_PATH = "/service/terminal/"
 
+# Query parameter that distinguishes individual browsers in the per-workspace
+# browser fleet. The viewer is served at ``/service/browser/?session=<id>``;
+# each id is a separately-addressable pane. When a service iframe's URL carries
+# this query, ``_resolve_ref`` projects it to ``service:browser?session=<id>``
+# (rather than the bare ``service:browser``) so the CLI and frontend can
+# address, dedup, and focus each browser independently.
+_BROWSER_SESSION_QUERY_KEY = "session"
+
 # Set of op names the endpoint dispatches on. Anything else is a 400.
 _KNOWN_OPS: frozenset[str] = frozenset(
     {
@@ -222,6 +230,29 @@ def _extract_agent_terminal_name(url: str) -> str | None:
     return name or None
 
 
+def _service_session_suffix(url: Any) -> str:
+    """Return ``?session=<id>`` for a browser-fleet iframe URL, else ``""``.
+
+    The browser viewer is served at ``/service/browser/?session=<id>`` and
+    each id is a separately-addressable pane. ``_resolve_ref`` appends this
+    suffix to the ``service:browser`` ref so the CLI and frontend can
+    address / dedup / focus each browser independently. Only the
+    ``session`` query is carried through (mirroring how the agent ref
+    ``service:browser?session=<id>`` is written); every other service
+    iframe URL yields the empty suffix and stays a bare ``service:<name>``
+    ref. Tolerates a non-string / unparsable ``url`` by returning ``""``.
+    """
+    if not isinstance(url, str):
+        return ""
+    query = urllib.parse.urlparse(url).query
+    if not query:
+        return ""
+    session_values = urllib.parse.parse_qs(query).get(_BROWSER_SESSION_QUERY_KEY, [])
+    if not session_values:
+        return ""
+    return f"?{_BROWSER_SESSION_QUERY_KEY}={session_values[0]}"
+
+
 def _resolve_ref(
     panel_id: str,
     params: dict[str, Any] | None,
@@ -250,7 +281,15 @@ def _resolve_ref(
     elif panel_type == "subagent":
         ref = f"subagent:{subagent_session_id or _short_hash(panel_id)}"
     elif panel_type == "iframe" and service_name:
-        ref = f"service:{service_name}"
+        # A service iframe is normally addressed as ``service:<name>``. The
+        # browser fleet is the exception: each browser pane points at
+        # ``/service/browser/?session=<id>`` and must be separately
+        # addressable, so we carry the ``?session=<id>`` query into the ref
+        # (``service:browser?session=2``). Two browser panes with different
+        # session ids thus get distinct refs and never collide in inspect /
+        # dedup / focus. Any other service iframe stays ``service:<name>``.
+        session_suffix = _service_session_suffix(url)
+        ref = f"service:{service_name}{session_suffix}"
     elif panel_type == "iframe" and isinstance(url, str) and (agent_terminal_name := _extract_agent_terminal_name(url)) is not None:
         # Per-agent terminals get the symmetric ``chat-terminal:<name>``
         # form so they're addressable by name (parallel to ``chat:<name>``)

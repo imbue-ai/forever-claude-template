@@ -492,14 +492,15 @@ def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], 
     right_index = 0 if boxes[0]["x"] > boxes[1]["x"] else 1
     add_buttons.nth(right_index).click()
 
-    # Choose "New URL" from the (right split's) dropdown and submit a URL.
-    page.locator(".dockview-add-tab-dropdown-item:visible", has_text="New URL").click()
-    page.locator(".custom-url-dialog-input").first.fill("https://newtab-target.example/")
-    page.locator(".custom-url-dialog-open").click()
+    # Choose "New terminal" from the (right split's) dropdown. The old "New URL" item this
+    # test used was intentionally removed from the "+" menu ("New browser" replaces the
+    # ad-hoc-URL flow); "New terminal" opens a tab through the SAME openIframeTab +
+    # targetGroup placement path, so it still exercises the clicked-split placement.
+    page.locator(".dockview-add-tab-dropdown-item:visible", has_text="New terminal").click()
 
     # The new tab must render in the RIGHT split, not the left, and must tab
     # into the existing right group rather than carving a third.
-    expect(page.locator(".dv-default-tab-content", has_text="newtab-target.example").first).to_be_visible(
+    expect(page.locator(".dv-default-tab-content", has_text="terminal").first).to_be_visible(
         timeout=10000
     )
     placement = page.evaluate(
@@ -516,7 +517,7 @@ def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], 
           };
         }
         """,
-        "newtab-target.example",
+        "terminal",
     )
     assert placement["count"] == 2, f"new tab should join the right split, not create a third group: {placement}"
     assert placement["inRight"], f"new tab should be in the right split: {placement}"

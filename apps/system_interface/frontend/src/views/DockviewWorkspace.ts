@@ -17,6 +17,7 @@ import { AgentTerminalPanel } from "./AgentTerminalPanel";
 import { IframePanel, IFRAME_PANEL_PANEL_ID_ATTR, reloadIframesForService } from "./IframePanel";
 import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
+import { CreateBrowserModal } from "./CreateBrowserModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
 import { reloadInterface } from "../reload";
@@ -50,6 +51,38 @@ const SVG_REFRESH =
 // dispatcher handles the proxying, SW bootstrap, and header rewriting.
 function getServiceUrl(serviceName: string): string {
   return `/service/${serviceName}/`;
+}
+
+/** Split the body of a ``service:`` ref into its service name and an
+ *  optional ``?query`` suffix. Plain ``service:web`` yields
+ *  ``{name: "web", query: ""}``; ``service:browser?session=2`` yields
+ *  ``{name: "browser", query: "?session=2"}``. The browser fleet is the one
+ *  case that uses the query: each browser pane is addressed as
+ *  ``service:browser?session=<id>`` so distinct sessions resolve to distinct
+ *  panels. The query is preserved verbatim so the resolved iframe URL and
+ *  the dedup key both include it. */
+function parseServiceRefBody(body: string): { name: string; query: string } {
+  const queryIndex = body.indexOf("?");
+  if (queryIndex === -1) return { name: body, query: "" };
+  return { name: body.substring(0, queryIndex), query: body.substring(queryIndex) };
+}
+
+/** Resolve a ``service:`` ref body to its on-origin iframe URL. The query
+ *  (e.g. ``?session=2``) is appended after the service base URL so a
+ *  browser-session ref resolves to ``/service/browser/?session=2`` -- the
+ *  viewer's per-session entrypoint. Plain refs resolve to
+ *  ``/service/<name>/``. */
+function serviceRefUrl(body: string): string {
+  const { name, query } = parseServiceRefBody(body);
+  return `${getServiceUrl(name)}${query}`;
+}
+
+/** Extract the ``session`` id from a service ref ``?query`` for use in a tab
+ *  title (``?session=2`` -> ``"2"``). Falls back to the raw query (minus the
+ *  leading ``?``) when there is no ``session`` param. */
+function serviceSessionLabel(query: string): string {
+  const params = new URLSearchParams(query.startsWith("?") ? query.substring(1) : query);
+  return params.get("session") ?? query.replace(/^\?/, "");
 }
 
 export function getTerminalUrl(): string {
@@ -89,6 +122,13 @@ interface PanelParams {
 // Modal state
 let showNewChatModal = false;
 let showNewAgentModal = false;
+let showNewBrowserModal = false;
+// When a background create POST fails, the New-browser modal is re-opened
+// pre-filled with the name the user typed and the daemon's reason, so the user
+// always learns WHY the browser didn't open (rather than the optimistic pane
+// silently vanishing). Both are cleared on a clean open / cancel.
+let newBrowserPrefillName: string | null = null;
+let newBrowserError: string | null = null;
 
 // The dockview group whose header "+" button opened the New chat / New agent
 // modal. Captured at click time because those modals create their chat panel
@@ -344,10 +384,13 @@ function createCustomTab(options: { id: string; name: string }): {
       // attribute, which is populated only when the tab is tied to a real
       // workspace service. For tabs without an explicit serviceName
       // (terminals, custom URLs, agent-owned iframes), suppress the Refresh
-      // button since there is nothing to match against.
+      // button since there is nothing to match against. Browser panes are
+      // also excluded: reloading the pane just reconnects the live view (which
+      // confuses people into thinking it restarts the browser) -- the viewer
+      // has its own in-page Reload button for the actual page.
       if (panelType === "iframe") {
         const shareName = pp?.serviceName ?? pp?.title ?? "web";
-        if (pp?.serviceName) {
+        if (pp?.serviceName && pp.serviceName !== "browser") {
           const serviceName = pp.serviceName;
           actions.appendChild(
             createTabActionButton("Refresh", SVG_REFRESH, () => {
@@ -490,20 +533,133 @@ function placementForGroup(
   return {};
 }
 
+// A single browser in the per-workspace fleet, as returned by
+// ``GET /service/browser/browsers``. Each is a separately-addressable pane
+// (viewer at ``/service/browser/?session=<name>``). The ``id`` is the
+// browser's NAME (a random ~2-word english name, or a user-chosen one) -- the
+// addressing key everywhere; there is no numeric id and no default browser.
+interface BrowserInfo {
+  id: string;
+  controller: "human" | "agent";
+  owner_agent_id?: string | null;
+  owner_name?: string | null;
+  human_pinned?: boolean;
+}
+
+// Cached snapshot of the browser fleet, refreshed each time the "+" dropdown
+// opens so it reflects browsers created since boot. The list drives one
+// dropdown item per active browser.
+//
+// Note: we no longer gate the "New browser" button on the daemon's
+// ``can_create``. A create is accepted even during startup/restore (it queues
+// behind the serialized restore on the daemon's shared launch lock) and the
+// fleet cap / duplicate-name rejections come back as inline errors in the
+// New-browser modal, so the button stays always clickable.
+let browserFleet: BrowserInfo[] = [];
+
+/** Fetch the live browser fleet for the dropdown listing. ``onUpdate`` runs
+ *  after the cache is refreshed so an already-open dropdown can re-render with
+ *  the browsers that the (async) fetch just returned -- the dropdown is built
+ *  synchronously from the cache, so without this callback a freshly-opened
+ *  menu would show a stale fleet until the next open. */
+function refreshBrowserFleet(onUpdate?: () => void): void {
+  fetch(getServiceUrl("browser") + "browsers")
+    .then((r) => (r.ok ? r.json() : { browsers: [] }))
+    .then((data) => {
+      browserFleet = Array.isArray(data.browsers) ? (data.browsers as BrowserInfo[]) : [];
+    })
+    .catch(() => {
+      browserFleet = [];
+    })
+    .finally(() => {
+      onUpdate?.();
+    });
+}
+refreshBrowserFleet();
+
+/** Human-readable owner suffix for a browser dropdown item:
+ *  "(you took control)" when a human holds it, "(agent <name> has control)"
+ *  when an agent does, or "" when it's free. */
+function browserOwnerLabel(browser: BrowserInfo): string {
+  if (browser.controller === "human") return browser.human_pinned ? " (you took control)" : " (free)";
+  if (browser.controller === "agent") {
+    const name = browser.owner_name ?? browser.owner_agent_id ?? "agent";
+    return ` (agent ${name} has control)`;
+  }
+  return "";
+}
+
+/** Open (or focus, via ``addPanelForRef`` dedup) the pane for browser
+ *  ``name``. Routed through the same ``service:browser?session=<name>`` ref the
+ *  agent CLI uses so the two surfaces share dedup/focus and on-disk shape.
+ *  If the pane is already open, ``addPanelForRef`` focuses it; opening a new
+ *  pane activates it (the user explicitly asked for this browser from the
+ *  "+" menu, so taking focus is the intended behavior, matching every other
+ *  "+" menu action). Tabs into ``targetGroup`` when it's a live group.
+ *
+ *  This is also the optimistic 'starting' pane: when called right after the
+ *  user accepts a name in the New-browser modal (before the launch finishes),
+ *  the viewer shows "Browser starting…" and retries the cast connection until
+ *  the daemon registers the name.
+ *
+ *  Returns ``true`` when this call CREATED a new pane, ``false`` when it merely
+ *  deduped onto (focused) a pane that was already open for the same browser.
+ *  The optimistic-create flow uses this to decide whether a later failure may
+ *  close the pane: it must only tear down a pane THIS flow created, never one
+ *  that was already showing a healthy, pre-existing browser. */
+function openBrowserSessionTab(name: string, targetGroup?: DockviewGroupPanel | null): boolean {
+  if (!dockview) return false;
+  // Was a pane already open for this browser? If so, ``addPanelForRef`` will
+  // dedup/focus it rather than create a new one -- report that to the caller.
+  const alreadyOpen = findIframePanelIdForServiceRef(`browser?session=${name}`) !== null;
+  const placement =
+    targetGroup && dockview.groups.some((g) => g.id === targetGroup.id)
+      ? { position: { referenceGroup: targetGroup.id } }
+      : {};
+  addPanelForRef(`service:browser?session=${name}`, getPrimaryAgentId(), placement);
+  return !alreadyOpen;
+}
+
+/** Close the (optimistic) pane for browser ``name`` if it is open. Used when a
+ *  create POST fails after the pane was opened on modal-accept: the launch
+ *  never registered the name, so the pane would otherwise sit on a stale
+ *  "Browser starting…" / "browser closed" banner forever. Dedup keys panes on
+ *  the resolved ``service:browser?session=<name>`` URL, so the lookup mirrors
+ *  ``openBrowserSessionTab``'s ref. */
+function closeBrowserSessionTab(name: string): void {
+  if (!dockview) return;
+  const panelId = findIframePanelIdForServiceRef(`browser?session=${name}`);
+  if (panelId === null) return;
+  const panel = dockview.panels.find((p) => p.id === panelId);
+  if (panel) dockview.removePanel(panel);
+}
+
 function buildDropdownItems(
   targetGroup?: DockviewGroupPanel,
-): Array<{ label: string; action: () => void; dividerAfter?: boolean }> {
-  const items: Array<{ label: string; action: () => void; dividerAfter?: boolean }> = [];
+): Array<{ label: string; action: () => void; dividerAfter?: boolean; disabled?: boolean; disabledReason?: string }> {
+  const items: Array<{
+    label: string;
+    action: () => void;
+    dividerAfter?: boolean;
+    disabled?: boolean;
+    disabledReason?: string;
+  }> = [];
   const openChatIds = getOpenChatAgentIds();
   const openAppNames = getOpenAppNames();
 
   // --- Existing items section ---
 
   // Applications that don't have open tabs. Exclude "system_interface"
-  // (that's the surrounding chrome UI, not a tab-able app) and "terminal"
-  // (reachable via the "New terminal" menu item further down). Everything
-  // else, including the default "web" example server, is openable.
-  const apps = getApplications().filter((app) => app.name !== "system_interface" && app.name !== "terminal");
+  // (that's the surrounding chrome UI, not a tab-able app), "terminal"
+  // (reachable via the "New terminal" menu item further down), "browser"
+  // (the fleet has its own per-session items + "New browser" below; the bare
+  // ``/service/browser/`` app entry would open a session-less viewer that
+  // doesn't dedup against the fleet panes), and "web" (the placeholder example
+  // server -- the browser fleet is the real web surface, so it's just noise).
+  const apps = getApplications().filter(
+    (app) =>
+      app.name !== "system_interface" && app.name !== "terminal" && app.name !== "browser" && app.name !== "web",
+  );
   for (const app of apps) {
     if (!openAppNames.has(app.name)) {
       const proxyUrl = getServiceUrl(app.name);
@@ -536,6 +692,17 @@ function buildDropdownItems(
     }
   }
 
+  // Active browsers in the fleet -- one item each, labeled with the owner.
+  // Clicking focuses the pane if it's already open (``openBrowserSessionTab``
+  // dedups on the ``?session=<id>`` URL) or opens it otherwise. Built from
+  // the cached fleet snapshot the dropdown open-handler refreshed.
+  for (const browser of browserFleet) {
+    items.push({
+      label: `Browser ${browser.id}${browserOwnerLabel(browser)}`,
+      action: () => openBrowserSessionTab(browser.id, targetGroup),
+    });
+  }
+
   // Add divider if we had existing items
   if (items.length > 0) {
     items[items.length - 1].dividerAfter = true;
@@ -558,9 +725,24 @@ function buildDropdownItems(
     action: () => openIframeTab(buildTerminalUrl(), "terminal", "iframe", undefined, targetGroup),
   });
 
+  // Direct control is keyless -- the agent (and you) drive the browser by hand.
+  // The item stays ALWAYS clickable: a create is accepted even during
+  // startup/restore (it queues behind the serialized restore on the daemon's
+  // shared launch lock and just takes longer), so the button must not be
+  // gated on init. Cap (3) and duplicate names are enforced server-side and
+  // surfaced as inline errors in the New-browser modal. Clicking opens that
+  // modal pre-filled with a random name, mirroring "New agent".
   items.push({
-    label: "New URL",
-    action: () => showCustomUrlDialog(targetGroup),
+    label: "New browser",
+    action: () => {
+      newTabTargetGroup = targetGroup ?? null;
+      // Clean open: drop any leftover failure pre-fill so the modal fetches a
+      // fresh random name and shows no error.
+      newBrowserPrefillName = null;
+      newBrowserError = null;
+      showNewBrowserModal = true;
+      m.redraw();
+    },
   });
 
   items.push({
@@ -573,6 +755,46 @@ function buildDropdownItems(
   });
 
   return items;
+}
+
+/** Render ``buildDropdownItems(targetGroup)`` into ``dropdown`` (clearing it
+ *  first). Shared by the header "+" button and the empty-state overlay so
+ *  the item markup + click wiring live in one place. Re-invoked when the
+ *  async browser-fleet fetch resolves so a freshly-opened menu picks up the
+ *  live browser list. */
+function renderDropdownItems(dropdown: HTMLElement, targetGroup?: DockviewGroupPanel): void {
+  dropdown.innerHTML = "";
+  const items = buildDropdownItems(targetGroup);
+  for (const item of items) {
+    const menuItem = document.createElement("div");
+    menuItem.className = "dockview-add-tab-dropdown-item";
+    menuItem.textContent = item.label;
+    if (item.disabled) {
+      menuItem.style.opacity = "0.5";
+      menuItem.style.cursor = "not-allowed";
+    }
+    menuItem.addEventListener("click", (clickEvent) => {
+      clickEvent.stopPropagation();
+      dropdown.style.display = "none";
+      // A disabled item doesn't run its action; if it has a reason, surface it (the
+      // "click pops a modal explaining why" path). Without this a disabled item would
+      // still fire -- only visually greyed.
+      if (item.disabled) {
+        if (item.disabledReason) alert(item.disabledReason);
+        return;
+      }
+      item.action();
+    });
+    dropdown.appendChild(menuItem);
+
+    if (item.dividerAfter) {
+      const divider = document.createElement("div");
+      divider.className = "dockview-add-tab-dropdown-divider";
+      divider.style.borderTop = "1px solid #e5e7eb";
+      divider.style.margin = "4px 0";
+      dropdown.appendChild(divider);
+    }
+  }
 }
 
 function createAddTabButton(group: DockviewGroupPanel): IHeaderActionsRenderer {
@@ -597,27 +819,14 @@ function createAddTabButton(group: DockviewGroupPanel): IHeaderActionsRenderer {
     if (isVisible) {
       dropdown.style.display = "none";
     } else {
-      dropdown.innerHTML = "";
-      const items = buildDropdownItems(group);
-      for (const item of items) {
-        const menuItem = document.createElement("div");
-        menuItem.className = "dockview-add-tab-dropdown-item";
-        menuItem.textContent = item.label;
-        menuItem.addEventListener("click", (clickEvent) => {
-          clickEvent.stopPropagation();
-          dropdown.style.display = "none";
-          item.action();
-        });
-        dropdown.appendChild(menuItem);
-
-        if (item.dividerAfter) {
-          const divider = document.createElement("div");
-          divider.className = "dockview-add-tab-dropdown-divider";
-          divider.style.borderTop = "1px solid #e5e7eb";
-          divider.style.margin = "4px 0";
-          dropdown.appendChild(divider);
-        }
-      }
+      // Build from current state, then refresh the browser fleet and
+      // re-render once it resolves (only if the menu is still open) so the
+      // active-browser items reflect the live fleet rather than a stale
+      // snapshot from a previous open.
+      renderDropdownItems(dropdown, group);
+      refreshBrowserFleet(() => {
+        if (dropdown.style.display !== "none") renderDropdownItems(dropdown, group);
+      });
       dropdown.style.display = "block";
     }
   });
@@ -843,6 +1052,24 @@ function findIframePanelIdForService(serviceName: string): string | null {
   return null;
 }
 
+/** Find an existing iframe panel for a ``service:`` ref body, or null.
+ *
+ *  Dedup is keyed on what makes the pane unique:
+ *   - A ref with no query (``web``) dedups by ``serviceName`` -- the
+ *     existing single-pane-per-service behavior.
+ *   - A ref with a query (``browser?session=2``) dedups by the resolved
+ *     URL, which embeds the query. Two browser panes with different
+ *     ``?session=`` therefore resolve to different panels and never collide:
+ *     opening ``service:browser?session=2`` focuses session 2's pane (or
+ *     creates it) without touching session 0's. */
+function findIframePanelIdForServiceRef(body: string): string | null {
+  const { name, query } = parseServiceRefBody(body);
+  if (query === "") {
+    return findIframePanelIdForService(name);
+  }
+  return findIframePanelIdForUrl(serviceRefUrl(body));
+}
+
 /** Derive a tab title from an external URL: its hostname, falling back to
  *  the raw string when the URL can't be parsed. */
 function externalUrlTitle(url: string): string {
@@ -895,6 +1122,8 @@ function buildTerminalUrl(): string {
  *  Shared by ``handleSplit`` and ``handleOpenPanelRequest`` so that the
  *  panelParams bookkeeping + addPanel invocation only exist in one place.
  *  When a panel already exists for the ref (service: dedup by serviceName,
+ *  except a ``service:browser?session=<id>`` browser-fleet ref which dedups
+ *  by its ``?session=<id>`` URL so distinct sessions stay distinct panels;
  *  chat: dedup by deterministic ``chat-<agent-id>``, https:// dedup by
  *  URL), focuses it and returns its id. Otherwise creates the panel with
  *  the supplied positioning and returns the new id. A bare ``https://``
@@ -937,27 +1166,40 @@ function addPanelForRef(ref: string, requesterAgentId: string, addOptions: AddPa
   }
 
   if (ref.startsWith("service:")) {
-    const serviceName = ref.substring("service:".length);
-    const existingPanelId = findIframePanelIdForService(serviceName);
+    const body = ref.substring("service:".length);
+    // Dedup distinguishes browser sessions: ``service:browser?session=2``
+    // resolves to a different panel than ``service:browser?session=0`` (or
+    // the bare ``service:browser``) because the query is part of the URL we
+    // dedup on. Plain service refs still dedup by serviceName.
+    const existingPanelId = findIframePanelIdForServiceRef(body);
     if (existingPanelId !== null) {
       const existing = dockview.panels.find((p) => p.id === existingPanelId);
       if (existing) dockview.setActivePanel(existing);
       return existingPanelId;
     }
+    const { name: serviceName, query } = parseServiceRefBody(body);
     const ownerId = requesterAgentId || getPrimaryAgentId();
     const panelId = `iframe-${ownerId}-${Date.now()}`;
+    // ``serviceName`` is the bare name (no query) so the per-tab Refresh
+    // button and service-wide reload still match every browser pane. The
+    // ``url`` carries the ``?session=`` query so the viewer selects the
+    // right browser and so URL-based dedup keeps sessions distinct. The
+    // title gets the session id appended (``browser?session=2`` ->
+    // "browser 2") so multiple browser tabs are tellable apart.
+    const url = serviceRefUrl(body);
+    const title = query === "" ? serviceName : `${serviceName} ${serviceSessionLabel(query)}`;
     const params: PanelParams = {
       panelType: "iframe",
       agentId: ownerId,
-      url: getServiceUrl(serviceName),
-      title: serviceName,
+      url,
+      title,
       serviceName,
     };
     panelParams.set(panelId, params);
     dockview.addPanel({
       id: panelId,
       component: "iframe",
-      title: serviceName,
+      title,
       params,
       ...placement,
     });
@@ -1209,69 +1451,6 @@ export function openSubagentTab(agentId: string, subagentSessionId: string, desc
   });
 }
 
-function showCustomUrlDialog(targetGroup?: DockviewGroupPanel | null): void {
-  const overlay = document.createElement("div");
-  overlay.className = "custom-url-dialog-overlay";
-
-  const dialog = document.createElement("div");
-  dialog.className = "custom-url-dialog";
-
-  dialog.innerHTML = `
-    <h3 class="custom-url-dialog-title">Open Custom URL</h3>
-    <label class="custom-url-dialog-label">URL</label>
-    <input type="url" class="custom-url-dialog-input" placeholder="https://example.com" autofocus />
-    <label class="custom-url-dialog-label">Title (optional)</label>
-    <input type="text" class="custom-url-dialog-input" placeholder="Tab title" />
-    <div class="custom-url-dialog-actions">
-      <button class="custom-url-dialog-cancel">Cancel</button>
-      <button class="custom-url-dialog-open">Open</button>
-    </div>
-  `;
-
-  overlay.appendChild(dialog);
-  document.body.appendChild(overlay);
-
-  const inputs = dialog.querySelectorAll("input");
-  const urlInput = inputs[0] as HTMLInputElement;
-  const titleInput = inputs[1] as HTMLInputElement;
-
-  function close(): void {
-    document.body.removeChild(overlay);
-  }
-
-  function open(): void {
-    const url = urlInput.value.trim();
-    if (!url) return;
-
-    let title = titleInput.value.trim();
-    if (!title) {
-      try {
-        title = new URL(url).hostname;
-      } catch {
-        title = url;
-      }
-    }
-    close();
-    openIframeTab(url, title, "iframe", undefined, targetGroup);
-  }
-
-  dialog.querySelector(".custom-url-dialog-cancel")!.addEventListener("click", close);
-  dialog.querySelector(".custom-url-dialog-open")!.addEventListener("click", open);
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
-  });
-  urlInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") open();
-    if (e.key === "Escape") close();
-  });
-  titleInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") open();
-    if (e.key === "Escape") close();
-  });
-
-  urlInput.focus();
-}
-
 async function saveLayout(): Promise<void> {
   if (!dockview) return;
 
@@ -1363,7 +1542,9 @@ async function resolveRefToPanelId(ref: string, requesterAgentId: string): Promi
     return dockview.panels.find((p) => p.id === candidate) ? candidate : null;
   }
   if (ref.startsWith("service:")) {
-    return findIframePanelIdForService(ref.substring("service:".length));
+    // Handles both the bare ``service:web`` (dedup by serviceName) and the
+    // session-specific ``service:browser?session=2`` (dedup by URL) forms.
+    return findIframePanelIdForServiceRef(ref.substring("service:".length));
   }
   if (ref.startsWith("https://")) {
     // An external-URL ref resolves to whichever ad-hoc iframe tab is
@@ -1487,7 +1668,9 @@ async function handleOpen(args: Record<string, unknown>, requesterAgentId: strin
   if (ref.startsWith("service:")) {
     // Drop silently if the service isn't registered in ``applications``
     // yet -- the script polls registration, but the broadcast races it.
-    const serviceName = ref.substring("service:".length);
+    // Strip any ``?session=`` suffix (browser fleet) before the lookup:
+    // registration is per-service, not per-session.
+    const serviceName = parseServiceRefBody(ref.substring("service:".length)).name;
     if (!getApplications().find((a) => a.name === serviceName)) return;
     handleOpenPanelRequest(ref, requesterAgentId, args.new_group === true);
     return;
@@ -1885,25 +2068,13 @@ function createEmptyStateOverlay(): HTMLElement {
       dropdown.style.display = "none";
       return;
     }
-    dropdown.innerHTML = "";
-    const items = buildDropdownItems();
-    for (const item of items) {
-      const menuItem = document.createElement("div");
-      menuItem.className = "dockview-add-tab-dropdown-item";
-      menuItem.textContent = item.label;
-      menuItem.addEventListener("click", (clickEvent) => {
-        clickEvent.stopPropagation();
-        dropdown.style.display = "none";
-        item.action();
-      });
-      dropdown.appendChild(menuItem);
-      if (item.dividerAfter) {
-        const divider = document.createElement("div");
-        divider.style.borderTop = "1px solid #e5e7eb";
-        divider.style.margin = "4px 0";
-        dropdown.appendChild(divider);
-      }
-    }
+    // Same build-now-then-refresh pattern as the header "+" dropdown: render
+    // from the cached fleet immediately, then re-render once the live fetch
+    // resolves (if still open) so active browsers show up here too.
+    renderDropdownItems(dropdown);
+    refreshBrowserFleet(() => {
+      if (dropdown.style.display !== "none") renderDropdownItems(dropdown);
+    });
     dropdown.style.display = "block";
   });
 
@@ -2210,6 +2381,77 @@ export const DockviewWorkspace: m.Component = {
               onCancel() {
                 showNewAgentModal = false;
                 newTabTargetGroup = null;
+              },
+            })
+          : null,
+
+        showNewBrowserModal
+          ? m(CreateBrowserModal, {
+              // NO `key` here. This modal sits in a children array among unkeyed
+              // sibling vnodes (the other modals/dialogs); Mithril throws "vnodes must
+              // either all have keys or none" if one child is keyed and the rest aren't,
+              // which silently kills the entire render so the modal never appears. A key
+              // isn't needed anyway: onAccept sets showNewBrowserModal=false before the
+              // POST, so a failure re-open (showNewBrowserModal back to true) is a fresh
+              // mount and oninit re-reads initialName/initialError on its own.
+              browserServiceUrl: getServiceUrl("browser"),
+              // Names of browsers already in the fleet, so the modal can
+              // pre-validate a typed name and reject a duplicate inline BEFORE
+              // opening a pane or calling create -- never optimistically
+              // touching the pane of the browser that already owns that name.
+              existingBrowserNames: browserFleet.map((b) => b.id),
+              // Set only when re-opened after a background create failed: the
+              // modal pre-fills the input with this name and shows the error
+              // inline (instead of fetching a fresh random name).
+              initialName: newBrowserPrefillName ?? undefined,
+              initialError: newBrowserError,
+              // Fires the instant the user accepts a name: open the optimistic
+              // 'starting' pane (which shows the full "Starting browser…" overlay
+              // and flips to the live page on its own when the daemon broadcasts
+              // ``running``) AND close the modal immediately -- we don't wait for
+              // the create POST. Returns whether THIS call created a new pane (vs
+              // deduped onto an existing one) so a later failure only tears down a
+              // pane this flow created. ``newTabTargetGroup`` is cleared here too
+              // since the modal is done; the background POST's success/failure
+              // callbacks reference the pane by name, not the group.
+              onAccept(browserName: string): boolean {
+                const createdPane = openBrowserSessionTab(browserName, newTabTargetGroup);
+                showNewBrowserModal = false;
+                newTabTargetGroup = null;
+                // The accept succeeded optimistically; clear any leftover failure
+                // pre-fill so a subsequent clean open starts fresh.
+                newBrowserPrefillName = null;
+                newBrowserError = null;
+                return createdPane;
+              },
+              // The background create POST succeeded: the modal is already closed
+              // and the pane already open, so just refresh the fleet so the next
+              // dropdown lists the new browser.
+              onCreated() {
+                refreshBrowserFleet();
+              },
+              // Create failed (400 invalid / 409 duplicate-or-full / 503
+              // installing / network). Two things must happen so the user always
+              // learns WHY the browser didn't open: (1) tear down the optimistic
+              // pane ONLY if this flow created it (``createdPane``) -- if the open
+              // deduped onto a pre-existing browser's healthy pane, leave it
+              // alone; and (2) RE-OPEN this modal pre-filled with the typed name
+              // and the daemon's ``reason`` shown inline, so the failure is
+              // surfaced rather than the pane silently vanishing.
+              onFailed(browserName: string, createdPane: boolean, reason: string) {
+                if (createdPane) {
+                  closeBrowserSessionTab(browserName);
+                }
+                newBrowserPrefillName = browserName;
+                newBrowserError = reason;
+                showNewBrowserModal = true;
+                m.redraw();
+              },
+              onCancel() {
+                showNewBrowserModal = false;
+                newTabTargetGroup = null;
+                newBrowserPrefillName = null;
+                newBrowserError = null;
               },
             })
           : null,
