@@ -2,7 +2,7 @@ import { llmApi } from "./llm-api";
 import type { LlmApi } from "./llm-api";
 import { runHook } from "./hooks";
 import { getPluginRouteMithrilComponents } from "./plugin-routes";
-import { getBasePath } from "./base-path";
+import { getBasePath, getWorkspaceAccentColor } from "./base-path";
 import { initAgentManager } from "./models/AgentManager";
 import { initQueuedMessageIdleClearing } from "./models/PendingMessages";
 import m from "mithril";
@@ -33,8 +33,20 @@ function getEffectiveRoutePrefix(): string {
   return getBasePath();
 }
 
+// Publish this workspace's accent color as a CSS custom property so styling
+// (e.g. the new-tab blink) can flash in the per-workspace accent rather than
+// the generic default. Left unset when no accent is configured, in which case
+// dependent styles fall back to --color-accent.
+function applyWorkspaceAccent(): void {
+  const accent = getWorkspaceAccentColor();
+  if (accent) {
+    document.documentElement.style.setProperty("--workspace-accent", accent);
+  }
+}
+
 async function bootstrap(): Promise<void> {
   m.route.prefix = getEffectiveRoutePrefix();
+  applyWorkspaceAccent();
   initAgentManager();
   // Backstop that drops an optimistic "queued" bubble once its agent returns to
   // idle (the message was edited away or dropped, so it will never reconcile).

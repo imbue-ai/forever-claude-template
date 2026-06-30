@@ -160,11 +160,116 @@ const panelParams = new Map<string, PanelParams>();
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let _layoutOpListener: LayoutOpListener | null = null;
 let initialized = false;
+// Set true once loadLayout() has restored the saved layout, so the
+// agents_updated listener never auto-opens an auto-created tab before the saved
+// layout (which may already contain that tab) has been applied.
+let layoutLoaded = false;
 
 // Target fraction of horizontal space that the newly-opened service panel
 // takes when it splits alongside the primary agent's chat. Picked so the
 // just-built view dominates while the chat stays legible.
 const OPEN_TAB_SPLIT_FRACTION = 0.6;
+
+// --- Highlighted agent tabs (e.g. the nightly Caretaker) ----------------
+// An agent carrying a non-empty ``highlight`` label gets its own tab surfaced
+// automatically whenever it is not already open, flashing in the workspace accent
+// color until the user opens it. The VALUE of the ``highlight`` label is a key
+// that mngr bumps whenever the agent has something new to show (e.g. each
+// Caretaker run); when that key changes we re-surface the tab if it is closed, or
+// re-flash it if it is open in the background -- so the tab blinks again on every
+// new run, not only the first. ``seen`` (which tab the user has opened, so the
+// flash stops) is remembered in localStorage; the last-seen key per agent is
+// in-memory only.
+const HIGHLIGHT_ACK_STORAGE_KEY = "si.highlightAck.v1";
+
+function loadStoredStringMap(key: string): Map<string, string> {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const entries = Object.entries(parsed).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        );
+        return new Map(entries);
+      }
+    }
+  } catch {
+    // localStorage unavailable or corrupt -- degrade to in-memory only.
+  }
+  return new Map();
+}
+
+function persistStringMap(key: string, map: Map<string, string>): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(Object.fromEntries(map)));
+  } catch {
+    // In-memory only; nothing to persist.
+  }
+}
+
+// Persisted: agent id -> the highlight key the user last acknowledged by viewing
+// that tab. The flash is derived from this: a tab flashes iff the agent's current
+// highlight key differs from its acknowledged key. Storing the *key* (not a mere
+// "seen" boolean) is what makes a new run flash again even after the user has
+// already opened the tab once -- including a tab restored open at startup, which
+// is evaluated at render time and so does not depend on any in-memory timing.
+const acknowledgedHighlightByAgent = loadStoredStringMap(HIGHLIGHT_ACK_STORAGE_KEY);
+
+// In-memory: agent id -> the highlight key for which we last auto-OPENED a closed
+// tab this session. Stops us from re-opening a tab the user has closed until the
+// agent produces a genuinely new highlight. Reset per page load, so a reload
+// re-surfaces a closed tab once.
+const lastOpenedKeyByAgent = new Map<string, string>();
+
+// In-memory: agent id -> the highlight key we last re-flashed an already-OPEN tab
+// for. surfaceHighlightedAgents() runs on every agents_updated event (~1/s), so
+// without this gate an unacknowledged highlighted tab would re-arm its flash on
+// every poll -- the tab would blink continuously rather than once per run. Gating
+// on the key flashes exactly once per genuinely new highlight. Reset per page
+// load, mirroring lastOpenedKeyByAgent.
+const lastFlashedKeyByAgent = new Map<string, string>();
+
+// In-memory: highlighted agents we have observed present at least once, so we can
+// detect when one is destroyed and close its now-dead tab. Scoped to highlighted
+// agents so a transient snapshot that briefly omits one of the user's own agents
+// can never close their chat.
+const knownHighlightAgentIds = new Set<string>();
+
+// In-memory: per highlighted agent, a callback its open tab registers to re-arm
+// the flash on the tab's existing DOM element -- lets us blink an already-open
+// (background) tab on a new highlight without recreating it.
+const reflashByAgentId = new Map<string, () => void>();
+
+// True for an agent that should get an auto-surfaced, flashing tab: any agent
+// carrying a non-empty ``highlight`` label. Generalized from the Caretaker-only
+// ``auto_created`` / ``caretaker`` labels, so anything can opt a tab into the
+// highlight behavior.
+function isHighlightedAgent(agent: { labels?: Record<string, string> } | undefined): boolean {
+  const value = agent?.labels?.highlight;
+  return value !== undefined && value !== "";
+}
+
+// The agent's current highlight key: the value of its ``highlight`` label, which
+// mngr bumps whenever the agent has something new to show.
+function highlightKey(agent: { labels?: Record<string, string> }): string {
+  return agent.labels?.highlight ?? "";
+}
+
+// Whether this agent's tab should be flashing right now: it is a highlighted
+// agent whose current highlight key the user has not yet acknowledged.
+function shouldFlashHighlight(agent: { id: string; labels?: Record<string, string> } | undefined): boolean {
+  if (!agent || !isHighlightedAgent(agent)) return false;
+  return acknowledgedHighlightByAgent.get(agent.id) !== highlightKey(agent);
+}
+
+// Record that the user acknowledged this agent's current highlight (by viewing
+// its tab), so it stops flashing until the agent produces a newer highlight.
+function acknowledgeHighlight(agentId: string, key: string): void {
+  if (acknowledgedHighlightByAgent.get(agentId) === key) return;
+  acknowledgedHighlightByAgent.set(agentId, key);
+  persistStringMap(HIGHLIGHT_ACK_STORAGE_KEY, acknowledgedHighlightByAgent);
+}
 
 function createMithrilRenderer(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -335,16 +440,52 @@ function createCustomTab(options: { id: string; name: string }): {
         }),
       );
 
-      // Show/hide actions based on active state
-      function updateActionsVisibility(isActive: boolean): void {
-        actions.style.display = isActive ? "flex" : "none";
+      // Show/hide actions based on active state. A highlighted agent tab
+      // (e.g. the nightly Caretaker) blinks in the accent color whenever the
+      // agent has an unacknowledged highlight; viewing the tab acknowledges the
+      // current highlight and stops the blink. Evaluating shouldFlashHighlight at
+      // render time is what makes a restored-open tab blink again for a new run.
+      const chatAgentForTab = pp?.chatAgentId ?? pp?.agentId;
+      const isHighlightTab =
+        panelType === "chat" && !!chatAgentForTab && isHighlightedAgent(getAgentById(chatAgentForTab));
+      if (isHighlightTab && chatAgentForTab && shouldFlashHighlight(getAgentById(chatAgentForTab))) {
+        element.classList.add("dv-tab-new");
       }
-      updateActionsVisibility(params.api.isActive);
+
+      function handleActiveChange(isActive: boolean): void {
+        actions.style.display = isActive ? "flex" : "none";
+        if (isActive && isHighlightTab && chatAgentForTab) {
+          const agent = getAgentById(chatAgentForTab);
+          acknowledgeHighlight(chatAgentForTab, agent ? highlightKey(agent) : "");
+          element.classList.remove("dv-tab-new");
+        }
+      }
+      handleActiveChange(params.api.isActive);
       disposables.push(
         params.api.onDidActiveChange((event) => {
-          updateActionsVisibility(event.isActive);
+          handleActiveChange(event.isActive);
         }),
       );
+
+      // Let surfaceHighlightedAgents() re-blink this tab in place when the agent
+      // gets a new highlight (e.g. a new Caretaker run) while the tab is already
+      // open in the background. Re-armed unless the user is currently viewing this
+      // tab -- no point blinking what they're already looking at.
+      if (isHighlightTab && chatAgentForTab) {
+        const reflashAgentId = chatAgentForTab;
+        const reflash = (): void => {
+          if (params.api.isActive) return;
+          element.classList.add("dv-tab-new");
+        };
+        reflashByAgentId.set(reflashAgentId, reflash);
+        disposables.push({
+          dispose: () => {
+            if (reflashByAgentId.get(reflashAgentId) === reflash) {
+              reflashByAgentId.delete(reflashAgentId);
+            }
+          },
+        });
+      }
     },
     dispose() {
       for (const d of disposables) {
@@ -723,7 +864,12 @@ function focusOrCreateChatPanel(
   addChatPanel(chatAgentId, chatAgentName, targetGroup);
 }
 
-function addChatPanel(chatAgentId: string, chatAgentName: string, targetGroup?: DockviewGroupPanel | null): void {
+function addChatPanel(
+  chatAgentId: string,
+  chatAgentName: string,
+  targetGroup?: DockviewGroupPanel | null,
+  options?: { inactive?: boolean },
+): void {
   if (!dockview) return;
   const panelId = `chat-${chatAgentId}`;
   const params: PanelParams = { panelType: "chat", agentId: chatAgentId, chatAgentId };
@@ -734,8 +880,100 @@ function addChatPanel(chatAgentId: string, chatAgentName: string, targetGroup?: 
     title: chatAgentName,
     params,
     renderer: "always",
+    // Auto-opened tabs (the Caretaker) are added inactive so they appear as a
+    // blinking new tab in the background without stealing the user's focus.
+    ...(options?.inactive ? { inactive: true } : {}),
     ...placementForGroup(targetGroup),
   });
+}
+
+/** The dockview group holding the workspace's main chat -- the first open chat
+ *  tab (the initial bootstrap chat), ignoring ``excludeAgentId``. Highlighted
+ *  tabs (the Caretaker) are tabbed into this group so they appear in the main
+ *  window alongside the initial chat, instead of landing in whichever group
+ *  happens to be active (or a fresh split). Returns null when no other chat tab
+ *  is open, so the caller falls back to default placement. */
+function mainChatGroup(excludeAgentId: string): DockviewGroupPanel | null {
+  if (!dockview) return null;
+  for (const panel of dockview.panels) {
+    const pp = panelParams.get(panel.id);
+    if (pp?.panelType !== "chat") continue;
+    if ((pp.chatAgentId ?? pp.agentId) === excludeAgentId) continue;
+    return panel.api.group ?? null;
+  }
+  return null;
+}
+
+/** Surface and flash a highlighted agent's tab (e.g. the Caretaker) whenever it
+ *  has an unacknowledged highlight (its current ``highlight`` key differs from the
+ *  key the user last acknowledged by viewing the tab). Runs on every agents_updated:
+ *    - tab already open  -> re-blink it in place (no-op if the user is viewing it),
+ *    - tab closed        -> open it once for this key (createCustomTab flashes it),
+ *  so the tab blinks again on every new run -- including a run that fired while the
+ *  workspace was down, picked up at startup. Auto-opened tabs are added inactive so
+ *  they don't steal focus. */
+function surfaceHighlightedAgents(): void {
+  if (!dockview) return;
+  const openChatIds = getOpenChatAgentIds();
+  for (const agent of getAgents()) {
+    if (!shouldFlashHighlight(agent)) continue;
+
+    if (openChatIds.has(agent.id)) {
+      // Tab already open -- re-blink it in place ONCE per new highlight key. This
+      // runs on every agents_updated poll, so without the key gate an
+      // unacknowledged tab would re-arm its flash every poll and blink
+      // continuously; we flash only when the agent produces a genuinely new
+      // highlight. (The callback also no-ops if the user is viewing the tab.)
+      if (lastFlashedKeyByAgent.get(agent.id) !== highlightKey(agent)) {
+        lastFlashedKeyByAgent.set(agent.id, highlightKey(agent));
+        reflashByAgentId.get(agent.id)?.();
+      }
+    } else if (lastOpenedKeyByAgent.get(agent.id) !== highlightKey(agent)) {
+      // Tab closed and we have not auto-opened it for this highlight yet -- open
+      // it once, tabbed into the main chat group (where the initial chat lives)
+      // so it shows up in the main window, not a separate/active split. Closing
+      // it will not re-open it until the agent produces a newer highlight. The
+      // freshly opened tab flashes once at render (createCustomTab), so record the
+      // key as flashed too, or the open branch above would flash it again next poll.
+      lastOpenedKeyByAgent.set(agent.id, highlightKey(agent));
+      lastFlashedKeyByAgent.set(agent.id, highlightKey(agent));
+      addChatPanel(agent.id, agent.name, mainChatGroup(agent.id), { inactive: true });
+    }
+  }
+}
+
+/** Close any chat tab(s) pointing at ``agentId``. Used to drop a dead tab whose
+ *  agent has been destroyed. */
+function closeChatTabsForAgent(agentId: string): void {
+  if (!dockview) return;
+  for (const panel of dockview.panels.slice()) {
+    const pp = panelParams.get(panel.id);
+    if (pp?.panelType !== "chat") continue;
+    if ((pp.chatAgentId ?? pp.agentId) === agentId) {
+      dockview.removePanel(panel);
+    }
+  }
+}
+
+/** Close the dead tab of a highlighted agent once it disappears (is destroyed).
+ *  Today's Caretaker is persistent so this rarely fires, but a highlighted agent
+ *  that is removed should not leave a dead tab behind. Scoped to highlighted
+ *  agents we have actually seen present, so a user's own chat tab is never at
+ *  risk from a transient snapshot. */
+function pruneDestroyedHighlightTabs(): void {
+  if (!dockview) return;
+  const present = new Set(getAgents().map((agent) => agent.id));
+  for (const agent of getAgents()) {
+    if (isHighlightedAgent(agent)) knownHighlightAgentIds.add(agent.id);
+  }
+  for (const agentId of [...knownHighlightAgentIds]) {
+    if (present.has(agentId)) continue;
+    closeChatTabsForAgent(agentId);
+    knownHighlightAgentIds.delete(agentId);
+    // Allow a future agent (a new highlight) to re-surface and re-flash cleanly.
+    lastOpenedKeyByAgent.delete(agentId);
+    lastFlashedKeyByAgent.delete(agentId);
+  }
 }
 
 /**
@@ -1985,6 +2223,10 @@ function initializeDockview(parentElement: HTMLElement): void {
       awaitingInitialChat = false;
       updateEmptyState();
     }
+    if (layoutLoaded) {
+      pruneDestroyedHighlightTabs();
+      surfaceHighlightedAgents();
+    }
   };
   addAgentsUpdatedListener(agentsUpdatedListener);
 
@@ -2046,6 +2288,10 @@ function initializeDockview(parentElement: HTMLElement): void {
         awaitingInitialChat = true;
       }
     }
+    // The saved layout (if any) is now applied; from here it is safe to
+    // auto-open tabs for any auto-created agents we already know about.
+    layoutLoaded = true;
+    surfaceHighlightedAgents();
     updateEmptyState();
   });
 }

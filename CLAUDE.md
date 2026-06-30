@@ -387,6 +387,22 @@ Supervisord (launched by `bootstrap` after first-boot setup) supervises them; ea
 To add, change, or remove a service, edit `supervisord.conf` and run `supervisorctl reread && supervisorctl update` (and `supervisorctl restart <name>` to bounce one). Inspect with `supervisorctl status` / `supervisorctl tail -f <name> stderr`.
 See the `edit-services` skill for details.
 
+After building or editing any app or service, proactively check `/var/log/supervisor/` for errors -- a clean exit code does not mean the service is healthy. Use the `check-app-errors` skill to survey `supervisorctl status` and scan the relevant logs for tracebacks before considering the work done.
+
+Supervisord is for **long-running** processes (the mind's apps and always-on daemons). For **routine jobs that run on a schedule and then exit**, use the scheduler instead (see below) -- do not write a sleep-loop supervisord program for periodic work.
+
+# Scheduled tasks
+
+For recurring routines that are part of *the mind itself* -- backups, health checks, daily messages to the user, the nightly Caretaker (on by default), and anything else that should happen on a cadence rather than run continuously -- use the **scheduler**, not supervisord. (Apps and services *within* the mind, which stay running, are supervisord programs; routines the mind performs *on a cadence* are scheduled tasks.)
+
+The scheduler (`libs/scheduler`, itself run as the `[program:scheduler]` supervisord program) reads `runtime/scheduled_tasks.toml`, runs each due task's command from the repo root, and -- unlike plain cron -- **catches up on tasks missed while the mind was offline**: a job that came due while the container was down runs once on next boot, and multiple misses coalesce into a single run. Per-task run state lives in `runtime/scheduler/state.toml`.
+
+Manage tasks with the **`manage-scheduled-tasks`** skill (or the `scheduler list|add|remove|show` CLI). Each task is a 5-field cron schedule plus a shell command, with `enabled` and `catch_up` flags.
+
+**Scheduled *agent* tasks.** A scheduled task can do more than run a script -- it can wake an agent that runs a skill on a cadence, in its own chat tab. Use **`scripts/run_task_agent.sh <skill>`** as the task command: it spawns a persistent singleton agent for that skill (labelled `task_agent=<skill>`), and on each run clears its chat and re-sends `/<skill>` so the skill runs fresh. The nightly Caretaker is the built-in example (`scripts/run_task_agent.sh caretaker --template caretaker`); a new one (e.g. a morning news agent) needs only a skill at `.agents/skills/<name>/SKILL.md` plus a scheduler entry running `bash scripts/run_task_agent.sh <name>` -- no new agent template required. When the user wants something done on a regular cadence by an agent, reach for this. See the `manage-scheduled-tasks` skill for the full recipe.
+
+Rule of thumb: if it's an *app or service the mind exposes* (a web app, an always-listening bot), make it a supervisord program. If it's a *routine the mind performs on a cadence* (back something up, run a check, message the user each morning, the Caretaker's nightly run), make it a scheduled task.
+
 # Git
 
 Commit your changes locally.

@@ -45,3 +45,19 @@ export function getPrimaryAgentId(): string {
   cachedPrimaryAgentId = metaElement?.getAttribute("content") ?? "";
   return cachedPrimaryAgentId;
 }
+
+let cachedAccentColor: string | null = null;
+
+/**
+ * This workspace's accent color (a hex string, e.g. "#9fbbd3"), read from the
+ * meta tag the backend injects from the primary agent's ``color`` label.
+ * Returns "" when no per-workspace accent is configured.
+ */
+export function getWorkspaceAccentColor(): string {
+  if (cachedAccentColor !== null) {
+    return cachedAccentColor;
+  }
+  const metaElement = document.querySelector('meta[name="system-interface-accent-color"]');
+  cachedAccentColor = metaElement?.getAttribute("content") ?? "";
+  return cachedAccentColor;
+}

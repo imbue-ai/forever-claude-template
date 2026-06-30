@@ -157,6 +157,22 @@ def _inject_agent_id_meta_tag(html_content: str) -> str:
     return html_content.replace("</head>", f"{meta_tag}\n</head>")
 
 
+def _inject_accent_color_meta_tag(html_content: str) -> str:
+    """Inject this workspace's accent color as a meta tag for the frontend.
+
+    The accent is the hex ``color`` label on the primary agent (this server's
+    own agent). It is omitted when unset so the frontend falls back to the
+    built-in default accent.
+    """
+    agent_id = os.environ.get("MNGR_AGENT_ID", "")
+    primary_agent = get_state().agent_manager.get_agent_by_id(agent_id)
+    accent_color = primary_agent.labels.get("color", "") if primary_agent else ""
+    if not accent_color:
+        return html_content
+    meta_tag = f'<meta name="system-interface-accent-color" content="{accent_color}">'
+    return html_content.replace("</head>", f"{meta_tag}\n</head>")
+
+
 def _index() -> Response:
     index_path = STATIC_DIRECTORY / "index.html"
     if index_path.exists():
@@ -166,6 +182,7 @@ def _index() -> Response:
         html_content = _inject_base_path_meta_tag(html_content, root_path)
         html_content = _inject_hostname_meta_tag(html_content)
         html_content = _inject_agent_id_meta_tag(html_content)
+        html_content = _inject_accent_color_meta_tag(html_content)
         if config.javascript_plugin_basenames:
             html_content = _inject_plugin_script_tags(html_content, config.javascript_plugin_basenames, root_path)
         return _html_response(html_content)

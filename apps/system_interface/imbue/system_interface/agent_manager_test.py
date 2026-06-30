@@ -307,6 +307,52 @@ def test_handle_agent_discovered(agent_manager: AgentManager, broadcaster: WebSo
     assert msg["type"] == "agents_updated"
 
 
+def test_discovered_agent_labels_come_from_discovery(agent_manager: AgentManager) -> None:
+    """An agent's labels are taken straight from its discovery event.
+
+    Discovery re-reads each agent's data.json into ``certified_data`` on every
+    poll (see DiscoveredAgent.labels), so the snapshot already carries current
+    labels -- including the ``highlight`` run-key that run_task_agent.sh bumps on
+    each task-agent run to re-flash its tab. The web UI keys its is_primary hiding
+    and its tab-blink off these, so they must pass straight through.
+    """
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("caretaker"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={
+            "work_dir": "/tmp/work",
+            "labels": {"task_agent": "caretaker", "highlight": "1700000042", "workspace": "ws"},
+        },
+    )
+
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].labels == {"task_agent": "caretaker", "highlight": "1700000042", "workspace": "ws"}
+
+
+def test_discovered_agent_with_no_labels_has_empty_labels(
+    agent_manager: AgentManager,
+) -> None:
+    """An agent whose discovery event carries no labels gets empty labels (no error)."""
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("remote-agent"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"work_dir": None},
+    )
+
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    assert agents[0].labels == {}
+
+
 def _layout_ops(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [message for message in messages if message.get("type") == "layout_op"]
 

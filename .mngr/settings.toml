@@ -575,6 +575,37 @@ post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 [create_templates.chat]
 type = "claude"
 
+# Caretaker template: the nightly maintenance agent (the "Caretaker") -- the
+# tailored example of the generic `task_agent` template below. Like `chat`, it is
+# a plain `claude` agent sharing the services agent's CLAUDE_CONFIG_DIR via the
+# inherited host env, but it is oriented by an appended system prompt to run the
+# `caretaker` skill. It is spawned (and re-woken) once a night by the scheduler
+# service via scripts/run_task_agent.sh, and is
+# labelled task_agent=caretaker + highlight=<run-key> so it can be found as a
+# singleton and surfaced/re-flashed as a tab in the minds UI.
+[create_templates.caretaker]
+type = "claude"
+env = ["MNGR_AGENT_ROLE=caretaker"]
+agent_args = [
+    "--append-system-prompt",
+    "You are the Caretaker: a once-a-night maintenance agent for this workspace. When you are messaged to run, follow the `caretaker` skill (.agents/skills/caretaker/SKILL.md) exactly. Always speak to the user in plain, non-technical, user-experience terms. Apart from one look-only scan on your very first night -- which you always do to introduce yourself, and which never changes anything -- never scan logs or apply fixes without the permission recorded in runtime/caretaker/permissions.md, and never apply a fix on that first night.",
+]
+
+# Task-agent template: the reusable base for any skill run on a cadence (the
+# Caretaker above is a tailored instance). scripts/run_task_agent.sh <skill>
+# spawns one of these per skill, labels it task_agent=<skill> + highlight, and
+# messages it `/<skill>` on every run -- so a new scheduled agent (e.g. a morning
+# news digest) needs only a skill plus a scheduler entry, no new template. It is a
+# plain `claude` agent oriented, by an appended system prompt, to run whatever
+# skill the slash-command it receives names.
+[create_templates.task_agent]
+type = "claude"
+env = ["MNGR_AGENT_ROLE=task_agent"]
+agent_args = [
+    "--append-system-prompt",
+    "You are a scheduled task agent for this workspace. You are woken on a schedule and sent a slash-command naming the skill to run; follow that skill's instructions in .agents/skills/<name>/SKILL.md exactly. Speak to the user in plain, non-technical, user-experience terms, and do your work via tool calls rather than narrating it.",
+]
+
 # Worktree template: agent in a new git worktree, no services by default --
 # creates its own as needed. Uses the plain `claude` type (not `main`), so
 # worktree agents run a real claude binary and share the services agent's

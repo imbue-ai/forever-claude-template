@@ -449,6 +449,51 @@ def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
         assert "system-interface-hostname" in response.text
 
 
+def test_index_injects_accent_color_meta_tag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The index page includes the primary agent's color label as an accent meta tag."""
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-primary")
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html><head></head><body>test</body></html>")
+
+    app = create_application()
+    state_of(app).agent_manager._agents["agent-primary"] = AgentStateItem(
+        id="agent-primary",
+        name="primary",
+        state="RUNNING",
+        labels={"is_primary": "true", "color": "#9fbbd3"},
+        work_dir="/code",
+    )
+
+    with patch("imbue.system_interface.server.STATIC_DIRECTORY", static_dir):
+        response = app.test_client().get("/")
+        assert response.status_code == 200
+        assert 'name="system-interface-accent-color"' in response.text
+        assert "#9fbbd3" in response.text
+
+
+def test_index_omits_accent_color_meta_tag_when_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The accent meta tag is omitted when the primary agent has no color label."""
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-primary")
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html><head></head><body>test</body></html>")
+
+    app = create_application()
+    state_of(app).agent_manager._agents["agent-primary"] = AgentStateItem(
+        id="agent-primary",
+        name="primary",
+        state="RUNNING",
+        labels={"is_primary": "true"},
+        work_dir="/code",
+    )
+
+    with patch("imbue.system_interface.server.STATIC_DIRECTORY", static_dir):
+        response = app.test_client().get("/")
+        assert response.status_code == 200
+        assert "system-interface-accent-color" not in response.text
+
+
 def test_random_name_endpoint(client: FlaskClient) -> None:
     """The random name endpoint returns a non-empty name."""
     response = client.get("/api/random-name")
