@@ -224,6 +224,70 @@ def _read_finish_report_path(task_file: Path) -> Path:
     return Path(value)
 
 
+def _set_frontmatter_field(text: str, key: str, value: str) -> str:
+    """Return ``text`` with frontmatter ``key`` set to ``value``.
+
+    Replaces the existing ``key:`` line in place (preserving the rest of the
+    file verbatim) or, if absent, inserts it just after the opening ``---``.
+    Returns ``text`` unchanged when there is no frontmatter block.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return text
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return text
+    for i in range(1, end):
+        if lines[i].split(":", 1)[0].strip() == key:
+            lines[i] = f"{key}: {value}"
+            return "\n".join(lines)
+    lines.insert(1, f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def _ensure_lead_agent(task_file: Path) -> int | None:
+    """Make sure the task file names a real lead agent to send reports to.
+
+    The launching agent *is* the lead that polls for the worker's report, so
+    ``lead_agent`` must be its ``mngr`` name. Task files authored without shell
+    expansion can carry a literal ``$MNGR_AGENT_NAME`` (or omit the field),
+    which leaves the worker with no valid address -- it cannot rsync its report
+    back and the lead's poll waits forever. We detect that unresolved state and
+    substitute the launcher's real name from the environment.
+
+    A value that already looks resolved (a plain name, no ``$``) is trusted and
+    left untouched. Returns exit code ``2`` when the value is unresolved but the
+    launcher cannot determine its own name; otherwise ``None``.
+    """
+    try:
+        frontmatter, _body = _split_frontmatter(task_file.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return None  # malformed YAML surfaces later via _read_source_artifacts_dir
+    if frontmatter is None:
+        return None
+    current = frontmatter.get("lead_agent")
+    resolved = isinstance(current, str) and current.strip() and "$" not in current
+    if resolved:
+        return None
+    lead_name = os.environ.get("MNGR_AGENT_NAME")
+    if not lead_name:
+        print(
+            "create_worker: lead_agent is unresolved "
+            f"({current!r}) and MNGR_AGENT_NAME is unset -- the worker would have "
+            "no address to send its report to. Set lead_agent to the launching "
+            "agent's name in the task file.",
+            file=sys.stderr,
+        )
+        return 2
+    fixed = _set_frontmatter_field(task_file.read_text(encoding="utf-8"), "lead_agent", lead_name)
+    task_file.write_text(fixed, encoding="utf-8")
+    print(
+        f"create_worker: resolved lead_agent to {lead_name!r} (was {current!r})",
+        file=sys.stderr,
+    )
+    return None
+
+
 class Runner:
     """Indirection over ``subprocess.run`` so tests can intercept commands.
 
@@ -347,6 +411,12 @@ def launch(
             file=sys.stderr,
         )
         return 2
+
+    # Resolve lead_agent before creating the worker so an unaddressable report
+    # path fails fast rather than after provisioning.
+    lead_rc = _ensure_lead_agent(task_file)
+    if lead_rc is not None:
+        return lead_rc
 
     runner.run(
         [
