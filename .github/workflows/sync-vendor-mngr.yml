@@ -20,7 +20,9 @@ on:
 
 concurrency:
   group: sync-vendor-mngr
-  cancel-in-progress: false
+  # Drop a superseded in-flight sync: a newer run resyncs to the latest mngr
+  # main anyway, and cancelling mid-run is safe (git push is atomic server-side).
+  cancel-in-progress: true
 
 permissions:
   contents: write
