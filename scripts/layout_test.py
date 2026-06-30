@@ -1303,3 +1303,12 @@ def test_resolve_replace_url_matches_frontend_resolver() -> None:
     assert layout._resolve_replace_url("service:api/health") == "/service/api/health"
     assert layout._resolve_replace_url("service:api/v1/users") == "/service/api/v1/users"
     assert layout._resolve_replace_url("https://example.com/") == "https://example.com/"
+
+
+def test_service_name_from_ref_strips_query_and_path() -> None:
+    # The registration check polls applications.toml for the SERVICE, so a
+    # browser-session ref (service:browser?session=2) or a path ref must reduce
+    # to the bare service name before lookup.
+    assert layout._service_name_from_ref("service:browser?session=2") == "browser"
+    assert layout._service_name_from_ref("service:web/health") == "web"
+    assert layout._service_name_from_ref("service:web") == "web"
