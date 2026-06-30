@@ -922,16 +922,10 @@ class AgentManager:
         """Handle a full discovery snapshot."""
         new_agents: dict[str, AgentStateItem] = {}
         for agent in event.agents:
-            agent_id = str(agent.agent_id)
-            new_agents[agent_id] = AgentStateItem(
-                id=agent_id,
+            new_agents[str(agent.agent_id)] = AgentStateItem(
+                id=str(agent.agent_id),
                 name=str(agent.agent_name),
                 state="RUNNING",
-                # Labels come straight from discovery. Every discovery poll re-reads
-                # each agent's data.json into certified_data (see
-                # DiscoveredAgent.labels), so the snapshot already carries the current
-                # labels -- including the ``highlight`` run-key bumped on each
-                # task-agent run -- within one poll interval (~10s).
                 labels=dict(agent.labels),
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
             )
@@ -974,7 +968,6 @@ class AgentManager:
             id=agent_id,
             name=str(agent.agent_name),
             state="RUNNING",
-            # Labels come straight from discovery -- see _handle_full_snapshot.
             labels=dict(agent.labels),
             work_dir=str(agent.work_dir) if agent.work_dir else None,
         )
