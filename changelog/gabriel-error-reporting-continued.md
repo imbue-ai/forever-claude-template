@@ -8,6 +8,14 @@
   Issues that need a new desktop-app build (`apps/minds`, `mngr_forward`,
   `mngr_latchkey`, the outer vendored mngr) are reported but not fixed in place.
 
+- When reporting, the `assist` skill now resolves the workspace's primary
+  (`is_primary`) agent id and reports under that, rather than under the
+  reporting agent's own `$MNGR_AGENT_ID`. The desktop app keys the report window
+  on the primary agent id, so an `/assist` chat (a sub-agent spawned in the
+  workspace) reporting under its own id made the pre-filled modal pop in whatever
+  window was focused instead of the one showing its workspace; reporting under
+  the primary id pops it in the right window.
+
 - The `assist` skill applies fixes via the matching lifecycle path rather than
   hand-editing in place: a `apps/system_interface` (workspace UI) fix is routed
   through the `update-system-interface` skill (preview + safe reveal) and is

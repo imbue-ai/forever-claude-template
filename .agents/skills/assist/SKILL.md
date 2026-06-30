@@ -99,8 +99,20 @@ Fix: <what you changed, or why it cannot be fixed from here>
 EOF
 )"
 
+# Report against the workspace's PRIMARY agent id, not your own ($MNGR_AGENT_ID).
+# The desktop app pops the modal in the window showing that workspace, and it
+# identifies the window by the primary (is_primary) agent id. If you are an
+# /assist chat (a sub-agent spawned in this workspace), $MNGR_AGENT_ID is your
+# own id, not the workspace's -- reporting under it would pop the modal in
+# whatever window is focused instead of this one. Resolve the primary id from
+# the local agent list (only this workspace's agents are visible from here, so
+# exactly one agent carries is_primary); fall back to your own id if the lookup
+# comes up empty.
+WORKSPACE_AGENT_ID="$(mngr ls --include 'has(labels.is_primary) && has(labels.workspace)' --ids)"
+WORKSPACE_AGENT_ID="${WORKSPACE_AGENT_ID:-$MNGR_AGENT_ID}"
+
 latchkey curl -sS -X POST \
-  "http://latchkey-self.invalid/minds-api-proxy/api/v1/agents/$MNGR_AGENT_ID/report" \
+  "http://latchkey-self.invalid/minds-api-proxy/api/v1/agents/$WORKSPACE_AGENT_ID/report" \
   -H "Content-Type: application/json" \
   -d "$(jq -n --arg d "$DESCRIPTION" '{description: $d}')"
 ```
