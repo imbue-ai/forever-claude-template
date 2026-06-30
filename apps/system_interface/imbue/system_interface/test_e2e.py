@@ -6,6 +6,7 @@ discovery, then use Playwright to interact with the web UI.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -144,10 +145,20 @@ def _make_agent_fixture(
     return agent_info, session_file
 
 
-@pytest.fixture
-def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], None, None]:
-    """Start the web server with mock agents for e2e testing."""
-    agent_info, session_file = _make_agent_fixture(tmp_path)
+@contextlib.contextmanager
+def _running_e2e_server(
+    tmp_path: Path,
+    port: int,
+    session_events: list[dict[str, Any]] | None = None,
+) -> Generator[tuple[str, AgentInfo, Path], None, None]:
+    """Run the web server with a single mock agent, ready for Playwright + layout ops.
+
+    Yields ``(base_url, agent_info, session_file)``. Shared by the default
+    ``e2e_server`` fixture and any test that needs a bespoke conversation
+    (e.g. a long transcript) or a distinct port.
+    """
+    base_url = f"http://127.0.0.1:{port}"
+    agent_info, session_file = _make_agent_fixture(tmp_path, session_events=session_events)
     agents = [agent_info]
 
     # Isolate the workspace environment: point MNGR_HOST_DIR at the fixture's
@@ -157,50 +168,54 @@ def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], N
     # chat) and never reads or writes the real workspace's layout.json. This
     # overrides the autouse _isolate_system_interface_tests fixture's env for the
     # duration of the test.
-    env_patcher = patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""})
-    env_patcher.start()
+    with (
+        patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""}),
+        patch("imbue.system_interface.server.discover_agents", return_value=agents),
+    ):
+        # Seed the agent into a manager and inject it; the manager is never started,
+        # so no background mngr discovery runs. Its messenger is a recording fake so
+        # message sends succeed without contacting mngr. The UI renders its agent
+        # list from the WebSocket agents_updated snapshot, which the server sends
+        # from this manager on connect.
+        broadcaster = WebSocketBroadcaster()
+        manager = AgentManager.build(broadcaster, messenger=RecordingMngrMessenger())
+        with manager._lock:
+            manager._agents[agent_info.id] = AgentStateItem(
+                id=agent_info.id,
+                name=agent_info.name,
+                state="RUNNING",
+                labels={},
+                work_dir=str(tmp_path / "work"),
+            )
+        manager._ensure_activity_tracking(agent_info.id)
 
-    discover_patcher = patch("imbue.system_interface.server.discover_agents", return_value=agents)
-    discover_patcher.start()
+        config = Config(system_interface_host="127.0.0.1", system_interface_port=port)
+        app = create_application(build_test_state(config=config, agent_manager=manager))
 
-    # Seed the agent into a manager and inject it; the manager is never started,
-    # so no background mngr discovery runs. Its messenger is a recording fake so
-    # message sends succeed without contacting mngr. The UI renders its agent
-    # list from the WebSocket agents_updated snapshot, which the server sends
-    # from this manager on connect.
-    broadcaster = WebSocketBroadcaster()
-    manager = AgentManager.build(broadcaster, messenger=RecordingMngrMessenger())
-    with manager._lock:
-        manager._agents[agent_info.id] = AgentStateItem(
-            id=agent_info.id,
-            name=agent_info.name,
-            state="RUNNING",
-            labels={},
-            work_dir=str(tmp_path / "work"),
-        )
-    manager._ensure_activity_tracking(agent_info.id)
+        server = make_threaded_server("127.0.0.1", port, app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
 
-    config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
-    app = create_application(build_test_state(config=config, agent_manager=manager))
+        # Wait for server to start
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"{base_url}/api/agents", timeout=0.5)
+                break
+            except Exception:
+                time.sleep(0.1)
 
-    server = make_threaded_server("127.0.0.1", _PORT, app)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    # Wait for server to start
-    for _ in range(50):
         try:
-            urllib.request.urlopen(f"{_BASE_URL}/api/agents", timeout=0.5)
-            break
-        except Exception:
-            time.sleep(0.1)
+            yield base_url, agent_info, session_file
+        finally:
+            server.shutdown()
+            thread.join(timeout=5.0)
 
-    yield _BASE_URL, agents, session_file
 
-    discover_patcher.stop()
-    env_patcher.stop()
-    server.shutdown()
-    thread.join(timeout=5.0)
+@pytest.fixture
+def e2e_server(tmp_path: Path) -> Generator[tuple[str, list[AgentInfo], Path], None, None]:
+    """Start the web server with mock agents for e2e testing."""
+    with _running_e2e_server(tmp_path, _PORT) as (base_url, agent_info, session_file):
+        yield base_url, [agent_info], session_file
 
 
 def test_page_loads_and_shows_title(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
@@ -506,6 +521,187 @@ def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], 
     assert placement["count"] == 2, f"new tab should join the right split, not create a third group: {placement}"
     assert placement["inRight"], f"new tab should be in the right split: {placement}"
     assert not placement["inLeft"], f"new tab leaked into the left split: {placement}"
+
+
+def _make_long_conversation_events(pair_count: int) -> list[dict[str, Any]]:
+    """Build ``pair_count`` user/assistant pairs with content ``msg-i`` / ``reply-i``.
+
+    Each user message is uniquely identifiable so a test can tell which slice of
+    the transcript the loaded window currently covers.
+    """
+    events: list[dict[str, Any]] = []
+    for i in range(pair_count):
+        events.append(
+            {
+                "type": "user",
+                "uuid": f"long-u-{i}",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": f"msg-{i}"},
+            }
+        )
+        events.append(
+            {
+                "type": "assistant",
+                "uuid": f"long-a-{i}",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [{"type": "text", "text": f"reply-{i}"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            }
+        )
+    return events
+
+
+def _visible_user_messages(page: Page) -> list[str]:
+    """Text of every rendered user-message bubble, in document order."""
+    return page.evaluate(
+        "() => Array.from(document.querySelectorAll('.message-user')).map((e) => (e.textContent || '').trim())"
+    )
+
+
+def _min_message_index(messages: list[str]) -> int:
+    """Smallest ``i`` among rendered ``msg-i`` bubbles (proxy for the window's top).
+
+    A jump to the start of the conversation drags this toward 0; staying in
+    history keeps it high. Non-``msg-i`` bubbles (e.g. the streamed marker) are
+    ignored.
+    """
+    indices = [int(m[len("msg-") :]) for m in messages if m.startswith("msg-") and m[len("msg-") :].isdigit()]
+    return min(indices) if indices else -1
+
+
+@pytest.mark.timeout(120)
+def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
+    """Hiding a chat tab (and showing it again) must not move its loaded window.
+
+    Regression test for the scroll-jump bug. Dockview is configured with
+    ``defaultRenderer: "always"``, so an inactive tab stays mounted while an
+    ancestor is hidden with ``display: none``; the ChatPanel keeps receiving
+    global ``m.redraw()`` calls while hidden, but its scroll element then reports
+    ``scrollTop``/``scrollHeight``/``clientHeight`` all as ``0``. Before the fix,
+    ``maybePage()`` mapped that zero scroll position to event 0 and fired a JUMP
+    that replaced the loaded window with the very start of the conversation -- so
+    a user who had scrolled up to read history came back to the beginning.
+
+    We load a long conversation, scroll up into the middle, hide the chat by
+    maximizing a sibling panel while a new event streams in (forcing redraws
+    while hidden), and assert the loaded window still covers the same place --
+    both while hidden and after the tab is restored.
+    """
+    port = _PORT + 5
+    # 150 pairs -> 300 events. The initial load holds only the tail 50, so the
+    # first held offset (~250) is far larger than JUMP_GAP_EVENTS (120): exactly
+    # the condition under which the hidden-redraw bug fired a jump to offset 0.
+    events = _make_long_conversation_events(150)
+
+    probe_url = "https://hidden-probe.example/"
+    with _running_e2e_server(tmp_path, port, session_events=events) as (base_url, _, session_file):
+        page.goto(base_url)
+        page.wait_for_selector(".message-list", timeout=15000)
+        page.wait_for_function(
+            "() => { const el = document.querySelector('.app-content'); return el && el.scrollHeight > el.clientHeight * 2; }",
+            timeout=15000,
+        )
+
+        # Put a second tab in the SAME dockview group as the chat, so hiding the
+        # chat is a pure tab switch (no resize): open a URL in a fresh group, then
+        # move it back into the chat's group as a sibling tab. This mirrors the
+        # real "switch away from a chat tab and back" scenario and, unlike
+        # maximize, leaves the chat at full width so its layout never reflows.
+        _broadcast_layout_op(base_url, "open", {"ref": probe_url, "new_group": True}, agent_id="agent-test-123")
+        expect(page.locator(".dv-default-tab-content", has_text="hidden-probe.example").first).to_be_visible(
+            timeout=_TRIGGER_TIMEOUT_MS
+        )
+        _broadcast_layout_op(
+            base_url,
+            "move",
+            {"ref": probe_url, "relative_to": "chat:test-agent", "direction": "within"},
+            agent_id="agent-test-123",
+        )
+        # One group again (the URL tabbed in beside the chat).
+        page.wait_for_function(
+            "() => document.querySelectorAll('.dv-groupview').length === 1",
+            timeout=_TRIGGER_TIMEOUT_MS,
+        )
+        # Make the chat the active tab and let its full-width layout settle.
+        _broadcast_layout_op(base_url, "focus", {"ref": "chat:test-agent"}, agent_id="agent-test-123")
+        page.wait_for_function(
+            "() => { const el = document.querySelector('.app-content'); return el && el.clientHeight > 0; }",
+            timeout=_TRIGGER_TIMEOUT_MS,
+        )
+        page.wait_for_timeout(1000)
+
+        # Scroll up into the middle of the loaded window to read history (well off
+        # the live tail, but not so far that a backfill to offset 0 is triggered).
+        page.evaluate(
+            "() => { const el = document.querySelector('.app-content'); el.scrollTop = el.scrollHeight - el.clientHeight - 1500; }"
+        )
+        page.wait_for_timeout(1000)
+        before_hidden = _visible_user_messages(page)
+        scroll_top_before = page.evaluate("() => document.querySelector('.app-content').scrollTop")
+        # Sanity: we are reading history, not parked at the start or the tail.
+        assert before_hidden, "expected user messages to be rendered after scrolling up"
+        assert "msg-0" not in before_hidden, f"setup should not be at the start: {before_hidden[:3]}"
+        anchor_message = before_hidden[0]
+        assert _min_message_index(before_hidden) >= 50, f"setup should be reading mid-history: {before_hidden[:3]}"
+
+        # Hide the chat by switching to the sibling tab.
+        _broadcast_layout_op(base_url, "focus", {"ref": probe_url}, agent_id="agent-test-123")
+        page.wait_for_function(
+            "() => { const el = document.querySelector('.app-content'); return el && el.clientHeight === 0; }",
+            timeout=_TRIGGER_TIMEOUT_MS,
+        )
+
+        # Stream a new event in while the chat is hidden -- this drives the global
+        # redraws that, before the fix, corrupted the hidden panel's window.
+        with open(session_file, "a") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "uuid": "long-u-streamed",
+                        "timestamp": "2026-01-01T00:02:00Z",
+                        "message": {"role": "user", "content": "streamed-while-hidden"},
+                    }
+                )
+                + "\n"
+            )
+        # Give the watcher (polls ~1s) time to deliver the event and fire redraws.
+        page.wait_for_timeout(3000)
+
+        # While hidden, the loaded window must not have jumped to the start: the
+        # reader's anchor row is still rendered and event 0 is nowhere in sight.
+        during_hidden = _visible_user_messages(page)
+        assert anchor_message in during_hidden, (
+            f"hidden tab lost its place: anchor {anchor_message!r} no longer rendered ({during_hidden[:3]}...)"
+        )
+        assert "msg-0" not in during_hidden, f"hidden tab jumped to the start of the conversation: {during_hidden[:3]}"
+
+        # Show the chat tab again; the user must be exactly where they left off.
+        _broadcast_layout_op(base_url, "focus", {"ref": "chat:test-agent"}, agent_id="agent-test-123")
+        page.wait_for_function(
+            "() => { const el = document.querySelector('.app-content'); return el && el.clientHeight > 0; }",
+            timeout=_TRIGGER_TIMEOUT_MS,
+        )
+        page.wait_for_timeout(1000)
+        after_restore = _visible_user_messages(page)
+        scroll_top_after = page.evaluate("() => document.querySelector('.app-content').scrollTop")
+        assert "msg-0" not in after_restore, (
+            f"after showing the tab again the window jumped to the start: {after_restore[:3]}"
+        )
+        # The same anchor row is rendered again and -- because the tab switch never
+        # resized the chat -- the native scroll position is preserved exactly (no
+        # re-pin churn to a different offset).
+        assert anchor_message in after_restore, (
+            f"after showing the tab again the reader was not returned to their place: {after_restore[:3]}"
+        )
+        assert abs(scroll_top_after - scroll_top_before) < 50, (
+            f"scroll position drifted across hide/show: {scroll_top_before} -> {scroll_top_after}"
+        )
 
 
 @_STALE_DOCKVIEW_SKIP

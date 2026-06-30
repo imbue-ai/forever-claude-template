@@ -1,12 +1,7 @@
-{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={} #}
+{#def agent_id, ws_name, current_account, accounts, servers, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={} #}
 {#
   Workspace settings page. Color picker, account section, sharing servers
-  list, optional Telegram setup, and the danger-zone destroy flow.
-
-  telegram_state controls the Telegram section:
-    - None        : no Telegram orchestrator; section hidden
-    - "active"    : Telegram already set up for this workspace
-    - "pending"   : show the setup button
+  list, and the danger-zone destroy flow.
 
   is_leased_imbue_cloud is True for workspaces running on a host leased from
   Imbue Cloud. Such hosts are permanently bound to the leasing account to avoid
@@ -48,7 +43,7 @@
       // settings-page navigation, and the landing page renders a
       // "Destroying..." marker on the row from on-disk state. No more
       // polling here.
-      fetch('/api/destroy-agent/' + agentId, { method: 'POST' })
+      fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/destroy', { method: 'POST' })
         .then(function(resp) {
           if (resp.ok) {
             window.location.href = '/';
@@ -150,22 +145,13 @@
         <p class="text-secondary">No servers discovered for this workspace.</p>
       {% endif %}
 
-      {% if telegram_state %}
-        <SectionHeader divider>Telegram</SectionHeader>
-        {% if telegram_state == 'active' %}
-          <p class="text-success">Telegram is active for this workspace.</p>
-        {% elif telegram_state == 'pending' %}
-          <Button variant="primary" id="tg-btn">Setup Telegram</Button>
-        {% endif %}
-      {% endif %}
-
       <SectionHeader divider>Danger zone</SectionHeader>
-      <p class="type-body text-secondary mb-3">Permanently destroy this project and release any associated resources.</p>
-      <Button variant="danger" id="destroy-btn">Destroy project</Button>
+      <p class="type-body text-secondary mb-3">Permanently destroy this workspace and release any associated resources.</p>
+      <Button variant="danger" id="destroy-btn">Destroy workspace</Button>
       <p id="destroy-error" class="hidden type-body text-important mt-2"></p>
 
       <Modal id="destroy-dialog">
-        <h2 class="type-heading text-primary mb-3">Destroy project?</h2>
+        <h2 class="type-heading text-primary mb-3">Destroy workspace?</h2>
         <p class="type-body text-primary mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
         <div class="flex justify-end gap-3">
           <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
@@ -174,7 +160,7 @@
       </Modal>
 
       <div class="mt-8">
-        <Link href="/" extra="type-helper">&larr; Back to projects</Link>
+        <Link href="/" extra="type-helper">&larr; Back to workspaces</Link>
       </div>
     </div>
   </PageContainer>
