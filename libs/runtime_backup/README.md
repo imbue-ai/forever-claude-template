@@ -1,8 +1,8 @@
 # runtime_backup
 
 Background service that periodically commits and pushes the contents of
-`runtime/` (which holds Claude memory, ticket state, transcripts, telegram
-history, app port registry, etc.) to a per-agent orphan branch named
+`runtime/` (which holds Claude memory, ticket state, transcripts, app port
+registry, etc.) to a per-agent orphan branch named
 `mindsbackup/$MNGR_AGENT_ID` on the same `origin` as the main checkout.
 
 The branch and the worktree at `runtime/` itself are created by

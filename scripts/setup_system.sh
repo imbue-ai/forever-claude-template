@@ -9,6 +9,10 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# Skip if this exact repo tree was already provisioned (e.g. baked into the image).
+. "$(dirname "$0")/_provision_guard.sh"
+provision_skip_if_done setup_system
+
 # Pinned versions (single source of truth; override via env if needed). Keep
 # CLAUDE_CODE_VERSION in sync with agent_types.claude.version in .mngr/settings.toml.
 : "${TTYD_VERSION:=1.7.7}"
@@ -116,3 +120,5 @@ uv tool install "modal==${MODAL_VERSION}"
 
 # Playwright + Chromium is deliberately NOT installed here; the deferred-install
 # service installs it idempotently on first boot.
+
+provision_mark_done setup_system

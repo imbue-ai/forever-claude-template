@@ -130,8 +130,9 @@ def test_main_extra_provision_command_present_for_docker_mode() -> None:
 def test_docker_template_hardens_start_args_and_drops_sys_ptrace() -> None:
     """`main` + `docker`: hardened for untrusted agents -- blocks privilege
     escalation and no longer grants the SYS_PTRACE capability. (The gVisor
-    runtime itself is selected via `docker_runtime` in the [providers.docker]
-    block, not a create-template setting, so it's not asserted here.)"""
+    runtime is opt-in via the separate `docker_runsc` template overlay -- which
+    flips the provider's `docker_runtime` to runsc through a template setting --
+    rather than this base `docker` template, so it's not asserted here.)"""
     result = _apply(("main", "docker"))
     # no-new-privileges hardening rides on start_arg (a `docker run` flag).
     assert "--security-opt=no-new-privileges" in result["start_arg"]
