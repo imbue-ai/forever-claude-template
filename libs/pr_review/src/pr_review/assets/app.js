@@ -622,6 +622,7 @@ function detailActionsHTML(pr) {
     const blocked = mergeBlockedReason(pr);
     parts.push(`<button class="btn primary sm" id="actMerge"${blocked ? ` disabled title="${attr(blocked)}"` : ""}>Merge</button>`);
   }
+  parts.push('<button class="btn ghost sm" id="actCopyLink">Copy link</button>');
   parts.push('<button class="btn danger sm" id="actClose">Close</button>');
   return `<span class="detail-actions">${parts.join("")}</span>`;
 }
@@ -629,6 +630,8 @@ function detailActionsHTML(pr) {
 function bindDetailActions(pr) {
   const merge = document.getElementById("actMerge");
   if (merge) merge.addEventListener("click", async () => { if (await actionMerge(pr.repo, pr.number, pr)) closeDetail(); });
+  const copy = document.getElementById("actCopyLink");
+  if (copy) copy.addEventListener("click", () => copyText(pr.url));
   const close = document.getElementById("actClose");
   if (close) close.addEventListener("click", async () => { if (await actionClose(pr.repo, pr.number)) closeDetail(); });
 }
