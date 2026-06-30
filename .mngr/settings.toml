@@ -571,10 +571,20 @@ type = "claude"
 [create_templates.worker]
 type = "worker"
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]
+# The stop hook stays enabled (REVIEWER_STOP_HOOK_ENABLE=1) for a single
+# purpose: its uncommitted-changes gate, which keeps a worker from ending a
+# turn with uncommitted work (that work is silently lost when the branch is
+# merged back). The review gates are turned OFF -- REVIEWER_AUTOFIX_ENABLE=0
+# and REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0 -- because the worker skills already
+# prompt for /autofix and the architecture gate at the single right moment (the
+# hardening pass), and having the hook re-demand them on every commit fought
+# that. Clearing the flags only stops the hook from gating on them; the worker
+# still runs both commands by hand (the autofix / verify-architecture skills
+# don't read these flags -- only the stop hook's gate checker does).
 # REVIEWER_CI_ENABLE=0: repos created from this template are isolated units --
 # the stop hook must never auto-create PRs or push to origin (the repo-level
 # .reviewer/settings.json likewise disables ci + stop_hook.fetch_and_merge).
-env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
+env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
 agent_args = [
     "--dangerously-skip-permissions",
     "--append-system-prompt",
@@ -593,8 +603,9 @@ agent_args = [
 [create_templates.subskill-worker]
 type = "worker"
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]
-# REVIEWER_CI_ENABLE=0: same isolated-unit rationale as the worker template.
-env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
+# Same rationale as the worker template: stop hook on for commit enforcement
+# only, autofix + architecture gates off (handled by skill prompting), CI off.
+env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
 extra_provision_command = [
     "bash .agents/shared/scripts/install_worker_skills.sh .agents/skills",
 ]
