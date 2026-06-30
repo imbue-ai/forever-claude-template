@@ -1,3 +1,0 @@
-The nightly Caretaker (and any agent the scheduler auto-creates) now opens as its **own tab** in the workspace, and that tab **blinks in the accent color until you open it**.
-
-Previously an auto-created agent appeared only in the "+" tab menu and never surfaced on its own, so a new Caretaker could be easy to miss. Now, the first time the workspace sees an agent labelled `auto_created` / `caretaker`, it opens a tab for it in the background (without stealing focus from your current tab) and highlights it until you click it. Whether a tab was already surfaced, and whether you've opened it, are remembered per browser so it is neither re-opened after you close it nor left blinking after you've seen it.

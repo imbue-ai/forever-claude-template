@@ -1,5 +1,0 @@
-The new-tab indicator for auto-created agents (e.g. the nightly Caretaker) now flashes in **this workspace's own accent color** and is much more visible.
-
-Previously the unopened tab pulsed gently in the generic green accent, which was easy to overlook. Now the workspace's per-workspace accent (the `color` label on the primary agent) is injected into the page and exposed as a `--workspace-accent` CSS variable, and the tab uses it for a sharp flash-then-fade animation: each cycle snaps bright in the accent color, then eases out to the normal idle tab look before flashing again, repeating until you open the tab. When no per-workspace accent is configured it falls back to the default accent.
-
-Only the tab's background pulses; its label keeps its normal color between flashes, so the faded state is exactly the regular tab gray rather than a slightly-off forced one.
