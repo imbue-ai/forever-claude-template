@@ -56,16 +56,27 @@ export function isSkillExpansionUserMessage(content: string): boolean {
 }
 
 export function isHiddenUserMessage(content: string): boolean {
-  // The chat shows the full raw stream: every seed/trigger command (/welcome,
-  // /clear, /caretaker) and Claude Code's local-command caveat all render inline,
-  // rather than being filtered out into a curated view.
-  //
-  // The one exception is a skill expansion -- the "Base directory for this skill:
-  // .../SKILL.md" body Claude Code injects when a skill runs. It is folded into the
-  // corresponding "Tool: Skill" tool-call block (see buildToolResultsWithSkillExpansions),
-  // where it stays visible and expandable, so it does not ALSO render inline as a
-  // separate multi-hundred-line chip.
-  return isSkillExpansionUserMessage(content);
+  // The minds desktop client seeds every new agent with "/welcome" as its
+  // initial message so the welcome skill can produce a friendly greeting.
+  // Claude Code expands that invocation into TWO transcript events:
+  //   1. the invocation itself -- the session parser normalizes Claude Code's
+  //      slash-command expansion (<command-name>/welcome</command-name> + args)
+  //      back to the typed "/welcome" text (see _normalize_slash_command), so it
+  //      arrives here as exactly "/welcome",
+  //   2. the skill expansion, which starts with
+  //      "Base directory for this skill: .../skills/welcome/..." and
+  //      carries the SKILL.md body.
+  // Hide both so the first visible turn is just the assistant's greeting.
+  if (content.trim() === "/welcome") {
+    return true;
+  }
+  // Other skill expansions are folded into the corresponding "Tool: Skill"
+  // tool-call block (see buildToolResultsWithSkillExpansions) so they
+  // don't need to render inline as a separate chip.
+  if (isSkillExpansionUserMessage(content)) {
+    return true;
+  }
+  return false;
 }
 
 /** The reserved latchkey host an agent POSTs to when asking the user to approve
