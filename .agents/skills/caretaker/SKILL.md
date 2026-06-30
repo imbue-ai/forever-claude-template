@@ -48,7 +48,11 @@ conversation, there is no other channel -- so:
 - **Working notes go in your run log file, never the chat.**
 - The only things the user ever sees from you are your **welcome** (first run),
   your **hello**, and your **closing summary** -- clean, direct messages, with
-  nothing else before, between, or after them.
+  nothing else before, between, or after them. Each of these is an ordinary
+  **chat message**, never a `tk` step, ticket, or step caption -- put them in the
+  conversation itself, not in the progress timeline. Send the **hello** as your
+  opening reply *before* you create or start any `tk` step; write the **closing
+  summary** as your final reply *after* every step is closed.
 
 ## First run: send the welcome
 
@@ -112,9 +116,11 @@ tonight.
 
 ## The run
 
-1. **Say hello first.** Before any real work, send the user one short, friendly
-   opening message -- who you are and what you're about to do -- shaped by their
-   saved preferences (`preferences.py get auto_scan`):
+1. **Say hello first -- as a chat message, before any `tk` step.** Send the hello
+   as your opening reply *before* you create or start any step, so it lands in the
+   conversation and never as a step title, caption, or ticket. It is one short,
+   friendly opening message -- who you are and what you're about to do -- shaped by
+   their saved preferences (`preferences.py get auto_scan`):
    - allowed to check (`auto_scan` = `true`): something like "Hi, I'm the
      Caretaker for your Mind. Since you've said I can check for problems, I'm
      going to take a look now."
