@@ -39,9 +39,40 @@ System-interface specifics:
   agent/session fixtures via `_make_agent_fixture`, and drives it with Playwright
   (auto-skips when browsers aren't installed). Extend it -- and use it as the
   same instance you screenshot.
-- To drive the UI manually, launch a **throwaway** instance on an alternate port
-  against fixture data, e.g. `SYSTEM_INTERFACE_PORT=8137 uv run system-interface`
-  from `apps/system_interface/`.
+- To drive the UI manually, launch a **throwaway** instance on an alternate port,
+  e.g. `SYSTEM_INTERFACE_PORT=8137 uv run system-interface` from
+  `apps/system_interface/`. With `MNGR_HOST_DIR` left at its default it discovers
+  the **real** agents (this is how you open the motivating conversation named in
+  `## Real scenario` -- see below); point it at fixture data instead when you want
+  an isolated, reproducible scene for a committed test.
+
+## Real scenario: look at it firsthand, do not imagine it
+
+If the task names a real motivating conversation under `## Real scenario`, **LOOK
+AT IT before you touch anything.** You are *not* cut off from that conversation.
+Boot your built instance with `MNGR_HOST_DIR` left at its default (see "Running
+and testing" above): the system interface then discovers the same real agents the
+user sees, so you can drive Playwright (`--no-sandbox`) to the named agent's
+conversation and **screenshot the actual thing the user complained about** (use
+the tab bar's add-tab `+` dropdown to switch to the agent, or navigate to it
+directly). Open the screenshot and study the real rendering. Fix against *that*,
+then re-render the same conversation and confirm with your own eyes that it now
+looks right. This is the whole point: you see the real case rather than
+reconstructing it from the brief.
+
+Only after you have seen and fixed the real case do you crystallize a committed
+regression test. A CI test can't depend on a user's conversation existing, so its
+fixture is necessarily synthetic -- but shape it from the **real DOM you just
+observed** (same element nesting, same classes present), not from imagination,
+assert the DOM actually has that shape (so the test can't silently pass against
+the wrong tree), and confirm it **fails before your fix and passes after** by
+reverting the change. If you genuinely cannot reach the named agent (it isn't
+discoverable from your instance), raise a `question` gate rather than falling back
+to a guessed fixture.
+
+If the task says there is **no real scenario** (net-new work with no precedent in
+any existing conversation), build a representative synthetic fixture as usual --
+there is nothing real to point at, so a faithful fixture is correct here.
 
 ## Working in isolation
 

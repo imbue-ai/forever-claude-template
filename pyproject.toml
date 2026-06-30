@@ -15,6 +15,7 @@ dependencies = [
     "tomlkit>=0.12",
     "playwright==1.58.0",
     "litellm>=1.88.1",
+    "browser",
 ]
 
 [dependency-groups]
@@ -48,9 +49,13 @@ dev = [
 
 [tool.uv]
 package = false
+# browser-use pins openai==2.16.0 but litellm needs openai>=2.20.0. We drive
+# browser-use with ChatAnthropic (not the OpenAI path), so its openai pin is
+# unused at runtime; override it so the single workspace lock resolves. See libs/browser.
+override-dependencies = ["openai>=2.20.0"]
 
 [tool.uv.workspace]
-members = ["libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "libs/tk_command_parsing", "libs/oom_priority", "apps/system_interface"]
+members = ["libs/bootstrap", "libs/cloudflare_tunnel", "libs/app_watcher", "libs/web_server", "libs/runtime_backup", "libs/host_backup", "libs/mngr_cli_contract", "libs/tk_command_parsing", "libs/oom_priority", "apps/system_interface", "libs/browser"]
 
 [tool.uv.sources]
 bootstrap = { workspace = true }
@@ -62,6 +67,7 @@ host-backup = { workspace = true }
 mngr-cli-contract = { workspace = true }
 tk-command-parsing = { workspace = true }
 oom-priority = { workspace = true }
+browser = { workspace = true }
 imbue-common = { path = "vendor/mngr/libs/imbue_common", editable = true }
 imbue-mngr = { path = "vendor/mngr/libs/mngr", editable = true }
 imbue-mngr-claude = { path = "vendor/mngr/libs/mngr_claude", editable = true }

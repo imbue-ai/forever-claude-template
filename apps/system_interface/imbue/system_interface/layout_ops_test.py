@@ -6,6 +6,7 @@ from typing import Any
 
 from imbue.mngr.utils.polling import wait_for
 from imbue.system_interface.layout_ops import LayoutMutex
+from imbue.system_interface.layout_ops import _service_session_suffix
 from imbue.system_interface.layout_ops import allocate_terminal_panel_id
 from imbue.system_interface.layout_ops import is_broadcasting_op
 from imbue.system_interface.layout_ops import is_known_op
@@ -476,3 +477,13 @@ def test_list_chat_terminal_marks_open_when_url_is_mounted(tmp_path: Path) -> No
     by_ref = {e["ref"]: e for e in entries}
     assert by_ref["chat-terminal:alice"]["is_open"] is True
     assert by_ref["chat-terminal:bob"]["is_open"] is False
+
+
+def test_service_session_suffix_distinguishes_browser_panes() -> None:
+    # A browser-fleet iframe carries ?session=<id> so each browser is a distinct
+    # ref (service:browser?session=2); every other service iframe stays bare.
+    assert _service_session_suffix("/service/browser/?session=2") == "?session=2"
+    assert _service_session_suffix("/service/browser/?session=0") == "?session=0"
+    assert _service_session_suffix("/service/browser/") == ""
+    assert _service_session_suffix("/service/web/") == ""
+    assert _service_session_suffix(None) == ""

@@ -230,6 +230,24 @@ def _validate_ref(ref: str) -> None:
         raise SystemExit(EXIT_ERROR)
 
 
+def _service_name_from_ref(ref: str) -> str:
+    """Extract the bare service name from a ``service:<name>...`` ref.
+
+    A service ref may carry a query (``service:browser?session=2``, used to
+    address a specific browser in the fleet) or a path
+    (``service:web/health``). The registration check polls
+    ``applications.toml`` for the *service*, so we strip anything after the
+    name -- the first ``?`` or ``/`` -- before looking it up. Plain
+    ``service:web`` is returned unchanged.
+    """
+    remainder = ref.removeprefix("service:")
+    for separator in ("?", "/"):
+        index = remainder.find(separator)
+        if index != -1:
+            remainder = remainder[:index]
+    return remainder
+
+
 def _validate_replace_url(url: str) -> None:
     """Reject anything that isn't ``service:<name>[/<path>]`` or ``https://...``."""
     if url.startswith("service:") or url.startswith("https://"):
@@ -977,7 +995,7 @@ def _cmd_open(args: argparse.Namespace) -> int:
     # polling for an obviously-bogus service name.
     _validate_ref(ref)
     if ref.startswith("service:"):
-        service_name = ref.removeprefix("service:")
+        service_name = _service_name_from_ref(ref)
         if not _wait_for_registration(service_name, _REGISTRATION_TIMEOUT_SECONDS):
             sys.stderr.write(
                 f"error: service {service_name!r} is not registered in {_applications_file()} "
@@ -1060,7 +1078,7 @@ def _cmd_split(args: argparse.Namespace) -> int:
     # rationale).
     _validate_ref(ref)
     if ref.startswith("service:"):
-        service_name = ref.removeprefix("service:")
+        service_name = _service_name_from_ref(ref)
         if not _wait_for_registration(service_name, _REGISTRATION_TIMEOUT_SECONDS):
             sys.stderr.write(
                 f"error: service {service_name!r} is not registered in {_applications_file()} "
