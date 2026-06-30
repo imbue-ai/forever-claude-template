@@ -7,14 +7,21 @@ A code-aware web interface for reviewing your GitHub pull requests, served at
 
 1. **PR list.** Lists the authenticated viewer's open PRs (authored +
    review-requested) with status signals -- CI verdict, review decision,
-   merge-conflict state, and diffstat -- enriched lazily per row.
+   merge-conflict state, and diffstat -- enriched lazily per row. A left status
+   strip (with a legend and per-row tooltip) summarizes each PR at a glance, and
+   a toolbar offers repo grouping (or a flat list), sorting, and a title/repo
+   search; the filter / grouping / sort choices persist in `localStorage`.
 2. **Code-aware diff view.** On opening a PR it fetches the full repo source at
    the PR head commit (GitHub tarball) and caches it under
    `runtime/pr-review/repos/`, then renders changed files as full-file diffs in a
    Monaco editor. You can open any file in the repo, find-usages across the whole
    tree (ripgrep), and get type-aware hover / go-to-definition for Python (Jedi).
 3. **Write-back.** Post general comments, submit line-comment reviews
-   (comment / approve / request-changes), and edit the PR title/description.
+   (comment / approve / request-changes), edit the PR title/description, and
+   close / reopen or merge a PR (merge / squash / rebase) -- from the detail
+   page or a home-page right-click menu, behind a confirm step. Marking a draft
+   "ready for review" is not offered: GitHub exposes that only through its
+   GraphQL API, which this tool's REST-only credentialed access cannot reach.
 
 ## How GitHub access works
 
