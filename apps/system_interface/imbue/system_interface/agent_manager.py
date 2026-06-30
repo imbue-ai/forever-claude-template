@@ -892,7 +892,14 @@ class AgentManager:
                 id=agent_id,
                 name=str(agent.agent_name),
                 state="RUNNING",
-                labels=dict(agent.labels) or self._local_agent_labels(agent_id),
+                # Merge the live local labels OVER the discovery (certified) labels.
+                # ``certified_data`` labels are frozen at create, so any label
+                # updated after create is stale there -- notably the ``highlight``
+                # run-key that run_task_agent.sh bumps on every run (via ``mngr
+                # label``, which rewrites data.json) to re-flash the agent's tab.
+                # data.json is the live source of truth, so it wins; discovery-only
+                # labels (e.g. for remote agents with no local data.json) are kept.
+                labels={**dict(agent.labels), **self._local_agent_labels(agent_id)},
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
             )
 
@@ -924,7 +931,9 @@ class AgentManager:
             id=agent_id,
             name=str(agent.agent_name),
             state="RUNNING",
-            labels=dict(agent.labels) or self._local_agent_labels(agent_id),
+            # Live local labels win over the (possibly stale, create-time)
+            # discovery labels -- see _handle_full_snapshot for why.
+            labels={**dict(agent.labels), **self._local_agent_labels(agent_id)},
             work_dir=str(agent.work_dir) if agent.work_dir else None,
         )
 
@@ -1022,16 +1031,20 @@ class AgentManager:
         return self._host_dir / "agents" / agent_id
 
     def _local_agent_labels(self, agent_id: str) -> dict[str, str]:
-        """Read an agent's labels from its local ``data.json``.
+        """Read an agent's *live* labels from its local ``data.json``.
 
-        ``mngr observe --discovery-only`` events carry no labels (the discovery
-        ``certified_data`` omits them), so the observe-driven snapshot handlers
-        would otherwise replace the label-bearing entries from the initial
-        ``list_agents`` discovery with label-less ones. The web UI needs labels
-        to hide the ``is_primary`` services agent and to surface auto-created
-        (Caretaker) tabs, so we re-read them from the agent's local state dir,
-        which ``mngr`` writes on create. Returns an empty dict for agents with
-        no local ``data.json`` (e.g. ones tracked on a remote host).
+        These are the source of truth for labels in the web UI, so the snapshot
+        handlers merge them OVER the discovery labels. The discovery
+        (``certified_data``) labels are frozen at create time: a label updated
+        after create is stale there -- and depending on the mngr version,
+        ``mngr observe`` may carry those frozen labels or none at all, so we
+        cannot rely on the discovery labels being either present or current. The
+        clearest case is the ``highlight`` run-key, which run_task_agent.sh bumps
+        on every run via ``mngr label`` (which rewrites data.json) to re-flash the
+        agent's tab; the certified labels never see the bump. ``mngr`` writes
+        data.json on create and updates it on ``mngr label``. Returns an empty
+        dict for agents with no local ``data.json`` (e.g. ones tracked on a
+        remote host), which then fall back to the discovery labels.
         """
         data_path = self._get_agent_state_dir(agent_id) / "data.json"
         try:

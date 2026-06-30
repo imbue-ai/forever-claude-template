@@ -340,6 +340,45 @@ def test_discovered_agent_labels_read_from_local_data_json(
     assert agents[0].labels == {"caretaker": "true", "highlight": "1700000000"}
 
 
+def test_local_data_json_labels_win_over_stale_discovery_labels(
+    agent_manager: AgentManager, tmp_path: Path
+) -> None:
+    """Live data.json labels override stale create-time discovery labels.
+
+    Discovery ``certified_data`` labels are frozen at create, so the ``highlight``
+    run-key that run_task_agent.sh bumps on each task-agent run (via ``mngr
+    label``, which rewrites data.json) is stale in the discovery event. The web
+    UI's tab-blink keys off the *current* ``highlight``, so the snapshot handler
+    must surface data.json's value, not the frozen one -- otherwise a re-triggered
+    task agent never re-flashes its tab. This pins that the live value wins.
+    """
+    agent_id = MngrAgentId()
+    # Discovery carries the CREATE-TIME labels (highlight=1, the original run-key).
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=agent_id,
+        agent_name=MngrAgentName("caretaker"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"work_dir": "/tmp/work", "labels": {"task_agent": "caretaker", "highlight": "1"}},
+    )
+    # data.json holds the LIVE labels after a re-trigger bumped highlight to 2.
+    data_dir = tmp_path / "agents" / str(agent_id)
+    data_dir.mkdir(parents=True)
+    (data_dir / "data.json").write_text(
+        json.dumps({"labels": {"task_agent": "caretaker", "highlight": "2", "workspace": "ws"}})
+    )
+
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([agent], []))
+
+    agents = agent_manager.get_agents()
+    assert len(agents) == 1
+    # The bumped highlight (2) wins over the stale certified one (1), and the
+    # data.json-only ``workspace`` label is still present.
+    assert agents[0].labels["highlight"] == "2"
+    assert agents[0].labels["workspace"] == "ws"
+    assert agents[0].labels["task_agent"] == "caretaker"
+
+
 def test_discovered_agent_without_local_data_json_has_empty_labels(
     agent_manager: AgentManager,
 ) -> None:
