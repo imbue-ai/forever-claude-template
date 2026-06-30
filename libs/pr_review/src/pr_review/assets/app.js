@@ -957,6 +957,10 @@ function openCommentComposer(editor, line, side) {
     <textarea class="composer" id="cdText" placeholder="Comment on this line…"></textarea>
     <div class="composer-actions"><button class="btn primary sm" id="cdAdd">Add to review</button></div>`;
   document.querySelector(".editor-wrap").appendChild(dock);
+  // The pending-review bar is fixed to the bottom of the editor area; lift the
+  // dock above it so its "Add to review" button isn't hidden behind the bar.
+  const reviewBar = document.getElementById("reviewBar");
+  if (reviewBar) dock.style.marginBottom = reviewBar.offsetHeight + 10 + "px";
   const ta = dock.querySelector("#cdText");
   ta.focus();
   dock.querySelector("#cdCancel").onclick = closeCommentDock;
