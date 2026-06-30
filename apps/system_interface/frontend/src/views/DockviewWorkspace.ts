@@ -19,8 +19,13 @@ import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { ShareModal } from "./ShareModal";
-import { livenessCategoryForState } from "./agentLiveness";
+import { effectiveLifecycleState, livenessCategoryForState } from "./agentLiveness";
 import { attachHoverTooltip } from "./hoverTooltip";
+import {
+  addActivityOverlayListener,
+  getEffectiveActivityState,
+  removeActivityOverlayListener,
+} from "../models/PendingMessages";
 import { reloadInterface } from "../reload";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
@@ -249,11 +254,18 @@ function createCustomTab(options: { id: string; name: string }): {
         // chat's activity indicator: this tracks the agent's mngr lifecycle
         // state -- green while its claude process is working (RUNNING), yellow
         // while it is idle and waiting on the user (WAITING), grey while it is
-        // dormant (DONE/STOPPED/etc.; revives on the next message). Driven by
-        // the ``state`` field on the agent WS payload; hidden until that state
-        // is known. Hovering shows the exact lifecycle state via a body-level
-        // tooltip (a native ``title`` is suppressed on dockview's draggable
-        // tabs -- see ``attachHoverTooltip``).
+        // dormant (DONE/STOPPED/etc.; revives on the next message). Hovering
+        // shows the exact lifecycle state via a body-level tooltip (a native
+        // ``title`` is suppressed on dockview's draggable tabs -- see
+        // ``attachHoverTooltip``). Hidden until the agent's state is known.
+        //
+        // The lifecycle RUNNING/WAITING split comes only from mngr's discovery
+        // poll and lags a sent message by ~10s, so the color is resolved through
+        // ``effectiveLifecycleState`` against the prompt activity signal
+        // (transcript-derived, plus the optimistic forced-THINKING the send
+        // applies). That makes the dot turn green the instant a message is sent,
+        // in step with the activity indicator -- hence the second listener below
+        // on the activity overlay, since an optimistic send is not a WS update.
         const processDot = document.createElement("span");
         processDot.className = "dv-tab-process-dot";
         const processDotTooltip = attachHoverTooltip(processDot);
@@ -264,15 +276,18 @@ function createCustomTab(options: { id: string; name: string }): {
             processDotTooltip.setText(null);
             return;
           }
+          const effective = effectiveLifecycleState(state, getEffectiveActivityState(chatAgentId));
           processDot.style.display = "";
-          processDot.setAttribute("data-liveness", livenessCategoryForState(state));
-          processDotTooltip.setText(state);
+          processDot.setAttribute("data-liveness", livenessCategoryForState(effective));
+          processDotTooltip.setText(effective);
         };
         updateProcessDot();
         element.insertBefore(processDot, element.firstChild);
         const processDotListener: AgentsUpdatedListener = () => updateProcessDot();
         addAgentsUpdatedListener(processDotListener);
+        addActivityOverlayListener(updateProcessDot);
         disposables.push({ dispose: () => removeAgentsUpdatedListener(processDotListener) });
+        disposables.push({ dispose: () => removeActivityOverlayListener(updateProcessDot) });
         disposables.push(processDotTooltip);
 
         const destroyBtn = createTabActionButton(
