@@ -12,10 +12,13 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # ============================================================================
 # System toolchain (repo-independent). Shared verbatim with the Lima provider,
-# which runs this exact script in the VM. Copied alone so this expensive, stable
-# layer caches against the script + pinned versions, not application source.
+# which runs this exact script in the VM. Copied with its sibling
+# _provision_guard.sh (which setup_system.sh sources via `dirname "$0"`) and
+# nothing else, so this expensive, stable layer caches against the scripts +
+# pinned versions, not application source.
 # ============================================================================
 COPY scripts/setup_system.sh /usr/local/bin/fct-setup-system
+COPY scripts/_provision_guard.sh /usr/local/bin/_provision_guard.sh
 RUN chmod +x /usr/local/bin/fct-setup-system && fct-setup-system
 
 # Safety-net symlinks: /code -> /mngr/code and /worktree -> /mngr/worktree.

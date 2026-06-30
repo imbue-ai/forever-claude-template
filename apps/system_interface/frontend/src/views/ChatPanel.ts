@@ -100,7 +100,7 @@ function isProtoAgent(agentId: string): boolean {
   return getProtoAgents().some((p) => p.agent_id === agentId);
 }
 
-export function ChatPanel(): m.Component<{ agentId: string }> {
+export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean }> {
   let loading = false;
   let loadingError: string | null = null;
   let currentAgentId: string | null = null;
@@ -115,6 +115,15 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   let previousScrollTop = 0;
   const rowMeasurer = createRowMeasurer();
   let viewportResizeObserver: ResizeObserver | null = null;
+  // Whether this panel is the visible (selected) tab in its dockview group.
+  // dockview keeps an inactive tab mounted (defaultRenderer: "always") and
+  // mithril redraws globally, so the component keeps running while hidden
+  // against an element collapsed to zero size; running scroll work then would
+  // corrupt the retained scroll position. The renderer feeds dockview's
+  // authoritative visibility in via the ``isVisible`` attr (see
+  // createMithrilRenderer); the scroll hooks below skip while it is false.
+  // Defaults to true so the panel works before the first render sets it.
+  let panelVisible = true;
   // Memoized turn-grouping output. buildSections walks the whole held
   // transcript, so it is recomputed only when the data actually changes (keyed
   // on the render version + idle flag), not on every scroll-driven redraw.
@@ -400,6 +409,12 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
    *     after a jump moved the window off the live tail): page one newer worth.
    */
   function maybePage(agentId: string, element: HTMLElement): void {
+    // While the panel is hidden (an inactive dockview tab) the element is
+    // zero-sized: scrollTop/scrollHeight read 0, which would map the viewport to
+    // event 0 and fire a spurious jump to the start of the conversation. Skip.
+    if (!panelVisible) {
+      return;
+    }
     // A fetch is already outstanding (only one at a time), or a just-completed jump
     // still needs its one-shot pin applied -- in both cases the window is about to
     // change, so don't act on the current (transient) scroll position.
@@ -455,6 +470,16 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   }
 
   function applyScrollPosition(element: HTMLElement): void {
+    // While the panel is hidden (an inactive dockview tab) the element is
+    // zero-sized. Re-pinning or scrolling-to-bottom now would set scrollTop from
+    // a 0 scrollHeight and clobber the retained scrollTop/previousScrollTop to 0,
+    // losing the user's place. The browser preserves the native scrollTop across
+    // a hide/show, so skipping here keeps the position intact; dockview fires a
+    // visibility change on show that forces a redraw (see createMithrilRenderer),
+    // so this runs again then and restores the tail / scrolled-up position.
+    if (!panelVisible) {
+      return;
+    }
     // After an offset jump, pin the viewport once to the top of the freshly loaded
     // rows (just below the top reserved spacer) so the user lands on the jumped-to
     // content rather than in the reserved (blank) region above it. The reserved
@@ -525,7 +550,11 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
   // so the viewport height (used by the window math below) stays current; the
   // measure/cache mechanics themselves live in the shared row measurer.
   function scheduleMeasure(): void {
-    if (scrollEl !== null) {
+    // While the panel is hidden the element measures 0; don't overwrite the
+    // retained viewportHeight with 0 (the windowing math would then fall back to
+    // a wrong height). The row measurer already ignores zero-height rows, so it
+    // is safe to schedule regardless.
+    if (scrollEl !== null && panelVisible) {
       viewportHeight = scrollEl.clientHeight;
     }
     rowMeasurer.scheduleMeasure(() => scrollEl);
@@ -713,6 +742,11 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
 
     view(vnode) {
       const agentId = vnode.attrs.agentId;
+      // dockview's live visibility for this panel, fed in by the renderer. Read
+      // it before building content / running lifecycle hooks so the scroll hooks
+      // (which read this closure variable) see the current value. Undefined for a
+      // mount without a panel api -- treat that as visible.
+      panelVisible = vnode.attrs.isVisible ?? true;
 
       // renderMessages sets the reserved heights, so build the content first, then
       // decide whether the viewport currently sits over a reserved region (above
@@ -754,9 +788,16 @@ export function ChatPanel(): m.Component<{ agentId: string }> {
                 scrollEl = mainVnode.dom as HTMLElement;
                 viewportHeight = scrollEl.clientHeight;
                 // Recompute the window when the panel itself resizes (dockview
-                // splits, window resize) since that changes the visible range.
+                // splits, window resize) since that changes the visible range. Skip
+                // while hidden: dockview collapses an inactive tab's element to 0,
+                // and updating viewportHeight from that 0 would break the windowing
+                // math. Restoring the position on show is driven by the visibility
+                // change forcing a redraw (see createMithrilRenderer), not here.
                 viewportResizeObserver = new ResizeObserver(() => {
-                  if (scrollEl !== null && scrollEl.clientHeight !== viewportHeight) {
+                  if (scrollEl === null || !panelVisible) {
+                    return;
+                  }
+                  if (scrollEl.clientHeight !== viewportHeight) {
                     viewportHeight = scrollEl.clientHeight;
                     m.redraw();
                   }
