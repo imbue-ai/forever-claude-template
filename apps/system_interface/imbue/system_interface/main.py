@@ -9,6 +9,7 @@ from flask import Flask
 from imbue.system_interface.app_context import get_state
 from imbue.system_interface.config import Config
 from imbue.system_interface.config import load_config
+from imbue.system_interface.hang_watchdog import start_hang_watchdog
 from imbue.system_interface.server import create_application
 from imbue.system_interface.wsgi import make_threaded_server
 
@@ -67,6 +68,8 @@ def main() -> None:
         config.system_interface_port,
         application,
     )
+    # Diagnostic: dump all thread stacks if the server stops answering its port.
+    start_hang_watchdog(config.system_interface_host, config.system_interface_port)
     server.serve_forever()
 
 

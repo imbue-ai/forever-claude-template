@@ -2,6 +2,8 @@ import json
 import os
 import queue
 import socket
+import sys
+import threading
 import traceback
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -172,6 +174,35 @@ def _index() -> Response:
     return _html_response(_FRONTEND_NOT_BUILT_HTML)
 
 
+def _diag_threads() -> Response:
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    sections: list[str] = []
+    for ident, frame in sys._current_frames().items():
+        stack = "".join(traceback.format_stack(frame))
+        sections.append(f"--- thread {names.get(ident, '?')} (id={ident}) ---\n{stack}")
+    return Response("\n".join(sections), mimetype="text/plain")
+
+
+def _diag_sessions(agent_id: str) -> Response:
+    agent_info = _find_agent(agent_id)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+    watcher = get_state().get_or_create_watcher(agent_info)
+    watcher._discover_sessions()
+    with watcher._lock:
+        states = list(watcher._session_states.items())
+        main_ids = set(watcher._main_session_ids)
+    sections: list[str] = []
+    for session_id, state in states:
+        kind = "main" if session_id in main_ids else "subagent"
+        sections.append(f"\n===== {kind} session {session_id} file={state.file_path} =====")
+        try:
+            sections.append(state.file_path.read_text()[-40000:])
+        except OSError as exc:
+            sections.append(f"(read error: {exc})")
+    return Response("\n".join(sections), mimetype="text/plain")
+
+
 def _index_catch_all(path: str) -> Response:
     return _index()
 
@@ -261,8 +292,29 @@ def _get_events(agent_id: str) -> Response:
     # conversation, so the client sizes the scrollbar for the full length and
     # derives whether more history exists above (offset > 0) and below
     # (offset + len < total) -- no separate has_more flag needed.
-    total = watcher.get_total_event_count()
-    offset = watcher.get_event_offset(events[0]["event_id"]) if events else total
+    offset = watcher.get_event_offset(events[0]["event_id"]) if events else watcher.get_total_event_count()
+    is_tail_load = before_event_id is None and after_event_id is None and offset_str is None
+    if is_tail_load:
+        # A tail (live) load defines the live end AS OF THIS READ: any newer event
+        # arrives over the SSE stream (buffered during this fetch by the client's
+        # loadSnapshotWithStream), so ``total`` MUST be ``offset + len(events)`` to
+        # keep the client tail-anchored. Reading ``get_total_event_count()``
+        # separately races with a concurrent append during active streaming --
+        # total then exceeds offset+len, the client's ``TranscriptStore.append``
+        # treats the window as "not at the tail", and silently drops every
+        # subsequent live event (the intermittent launch-to-msg chat freeze).
+        naive_total = watcher.get_total_event_count()
+        total = offset + len(events)
+        if naive_total != total:
+            logger.warning(
+                "[diag-tail] tail snapshot race avoided: offset={} len={} total={} (naive get_total={})",
+                offset,
+                len(events),
+                total,
+                naive_total,
+            )
+    else:
+        total = watcher.get_total_event_count()
     return _json_response({"events": events, "offset": offset, "total": total})
 
 
@@ -289,7 +341,16 @@ def _stream_filtered_events(
                 event = event_queue.get(timeout=1)
                 if event is None:
                     break
-                if not should_forward(event):
+                forwarded = should_forward(event)
+                logger.info(
+                    "[diag-gen] agent={} got event_id={} type={} session={} forward={}",
+                    agent_id,
+                    event.get("event_id"),
+                    event.get("type"),
+                    event.get("session_id"),
+                    forwarded,
+                )
+                if not forwarded:
                     continue
                 keepalive_counter = 0
                 yield f"data: {json.dumps(event)}\n\n"
@@ -297,7 +358,11 @@ def _stream_filtered_events(
                 keepalive_counter += 1
                 if keepalive_counter >= 8:
                     keepalive_counter = 0
-                    yield ": keepalive\n\n"
+                    # A real ``data:`` event (not an SSE ``:`` comment, which
+                    # EventSource silently swallows) so the client's staleness
+                    # watchdog can see the stream is alive and distinguish a quiet
+                    # connection from a half-open/zombie one that never reconnects.
+                    yield 'data: {"type": "keepalive"}\n\n'
     except GeneratorExit:
         pass
     finally:
@@ -967,6 +1032,8 @@ def create_application(
     sock = Sock(application)
 
     application.add_url_rule("/", view_func=_index, methods=["GET"])
+    application.add_url_rule("/diag/threads", view_func=_diag_threads, methods=["GET"])
+    application.add_url_rule("/diag/sessions/<agent_id>", view_func=_diag_sessions, methods=["GET"])
     application.add_url_rule("/favicon.ico", view_func=_favicon, methods=["GET"])
     application.add_url_rule("/api/agents", view_func=_list_agents_endpoint, methods=["GET"])
     application.add_url_rule("/api/agents/create-worktree", view_func=_create_worktree_agent, methods=["POST"])

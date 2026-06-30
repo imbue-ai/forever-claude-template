@@ -466,7 +466,26 @@ class AgentSessionWatcher:
         if session_id is None:
             return True
         with self._lock:
-            return session_id in self._main_session_ids
+            if session_id in self._main_session_ids:
+                return True
+            # Drop only KNOWN subagent sessions (registered in _session_states by
+            # _discover_subagent_sessions). An unknown session_id is almost always a
+            # main session id Claude just rotated to that this hot path has not yet
+            # re-discovered -- get_tail_events re-discovers before reading, this live
+            # filter does not. Defaulting it to "main" keeps its events on the live
+            # stream; dropping it silently froze the chat (the rotated main turn,
+            # e.g. the reply after a skill/subagent runs, only reappeared on reload).
+            # Worst case a truly-stray event renders once inline; far better than
+            # hanging the whole conversation.
+            if session_id in self._session_states:
+                return False
+            logger.warning(
+                "[diag-mainsess] session_id={} not in main_ids (n={}) and not a known session "
+                "-> default MAIN (this was dropped before the fix)",
+                session_id,
+                len(self._main_session_ids),
+            )
+            return True
 
     def _selected_states_current(self, session_id: str | None) -> list[SessionFileState]:
         """Discover sessions, bring the selected files' caches current, return them.
@@ -826,6 +845,8 @@ class AgentSessionWatcher:
         self._setup_watchers()
         self._prime_caches()
 
+        tick = 0
+        last_signature: tuple[int, int] | None = None
         while not self._stop_event.is_set():
             self._wake_event.wait(timeout=POLL_INTERVAL_SECONDS)
             self._wake_event.clear()
@@ -833,14 +854,29 @@ class AgentSessionWatcher:
             if self._stop_event.is_set():
                 break
 
+            tick += 1
             # Order matters: discover refreshes the meta.json/toolUseId caches, poll
             # reads new events (accumulating tool_result linkage and caching new unlinked
             # parents), and rebroadcast runs last so it re-links cached parents against the
             # caches as they stand after BOTH -- letting a tool_result that lands this cycle
             # upgrade an older parent's card in the same cycle.
-            self._discover_sessions()
-            self._poll_for_changes()
-            self._rebroadcast_relinked_parents()
+            try:
+                self._discover_sessions()
+                self._poll_for_changes()
+                self._rebroadcast_relinked_parents()
+            except Exception:
+                with self._lock:
+                    main_ids = list(self._main_session_ids)
+                logger.exception("[diag-poll] CRASH tick={} main_sessions={}", tick, main_ids)
+                raise
+            with self._lock:
+                signature = (len(self._main_session_ids), len(self._session_states))
+                main_ids = list(self._main_session_ids)
+            if signature != last_signature:
+                logger.info("[diag-poll] sessions changed tick={} main_sessions={} state_count={}", tick, main_ids, signature[1])
+                last_signature = signature
+            elif tick % 30 == 0:
+                logger.info("[diag-poll] alive tick={} main_session_count={}", tick, signature[0])
 
         if self._observer is not None:
             self._observer.stop()

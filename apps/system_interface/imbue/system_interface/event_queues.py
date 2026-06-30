@@ -3,6 +3,8 @@ import threading
 from collections import defaultdict
 from typing import Any
 
+from loguru import logger as _diag_logger
+
 from imbue.system_interface.events import BufferBehavior
 
 
@@ -40,6 +42,12 @@ class AgentEventQueues:
             for event in buffered_events:
                 event_queue.put_nowait(event)
             self._queues[agent_id].append(event_queue)
+            _diag_logger.info(
+                "[diag-sse] REGISTER agent={} now_clients={} replayed={}",
+                agent_id,
+                len(self._queues[agent_id]),
+                len(buffered_events),
+            )
         return event_queue
 
     def unregister(self, agent_id: str, event_queue: queue.Queue[dict[str, Any] | None]) -> None:
@@ -50,6 +58,9 @@ class AgentEventQueues:
                     queues.remove(event_queue)
                 except ValueError:
                     pass
+                _diag_logger.info(
+                    "[diag-sse] UNREGISTER agent={} now_clients={}", agent_id, len(queues)
+                )
                 if not queues:
                     del self._queues[agent_id]
 
@@ -64,6 +75,14 @@ class AgentEventQueues:
             elif behavior is BufferBehavior.FLUSH:
                 self._event_buffers.pop(agent_id, None)
             queues = list(self._queues.get(agent_id, []))
+        _diag_logger.info(
+            "[diag-sse] BROADCAST agent={} event_id={} type={} session={} -> {} clients",
+            agent_id,
+            clean_event.get("event_id"),
+            clean_event.get("type") or clean_event.get("event_type") or "?",
+            clean_event.get("session_id"),
+            len(queues),
+        )
         for event_queue in queues:
             event_queue.put_nowait(clean_event)
 

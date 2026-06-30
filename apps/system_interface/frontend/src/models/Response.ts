@@ -437,13 +437,15 @@ function mergeLateSubagentMetadata(prior: TranscriptEvent, incoming: TranscriptE
   return changed;
 }
 
-export function appendEvents(agentId: string, newEvents: TranscriptEvent[]): void {
-  if (storeFor(agentId).append(newEvents)) {
+export function appendEvents(agentId: string, newEvents: TranscriptEvent[]): boolean {
+  const changed = storeFor(agentId).append(newEvents);
+  if (changed) {
     // A live transcript event may be the real counterpart of an optimistic
     // message the user just sent; drop any such bubble now that it has landed.
     reconcilePendingMessages(agentId, getEventsForAgent(agentId));
     m.redraw();
   }
+  return changed;
 }
 
 export function prependEvents(agentId: string, olderEvents: TranscriptEvent[], offset?: number, total?: number): void {
