@@ -137,12 +137,35 @@ function createMithrilRenderer(
   element.style.display = "flex";
   element.style.flexDirection = "column";
 
+  // dockview keeps inactive tabs mounted (defaultRenderer: "always"), and
+  // mithril's m.redraw() is global, so a hidden panel's component keeps
+  // redrawing while its element is collapsed to zero size. Thread dockview's
+  // authoritative panel-visibility signal into the component (as the
+  // ``isVisible`` attr) so it can skip work that must not run while hidden --
+  // e.g. ChatPanel's scroll management, which would otherwise corrupt the
+  // retained scroll position against the zero-sized element. Defaults to true
+  // so a component mounted without a panel api behaves as before.
+  let panelVisible = true;
+  let visibilityDisposable: { dispose: () => void } | null = null;
+
   return {
     element,
-    init() {
-      m.mount(element, { view: () => m(component, attrs) });
+    init(parameters) {
+      panelVisible = parameters.api.isVisible;
+      visibilityDisposable = parameters.api.onDidVisibilityChange((event) => {
+        panelVisible = event.isVisible;
+        // Redraw so the component re-runs its lifecycle hooks with the new
+        // visibility -- in particular so ChatPanel restores its scroll position
+        // on the first redraw after the tab is shown again.
+        m.redraw();
+      });
+      m.mount(element, { view: () => m(component, { ...attrs, isVisible: panelVisible }) });
     },
     dispose() {
+      if (visibilityDisposable !== null) {
+        visibilityDisposable.dispose();
+        visibilityDisposable = null;
+      }
       m.mount(element, null);
     },
   };
