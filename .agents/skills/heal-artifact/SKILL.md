@@ -58,7 +58,6 @@ transcript.
 ```bash
 cat > runtime/harden/heal-$TARGET/task.md << TASK_EOF
 ---
-lead_agent: $MNGR_AGENT_NAME
 finish_report_path: runtime/harden/heal-$TARGET/reports/report.md
 operation: heal
 artifact: skill

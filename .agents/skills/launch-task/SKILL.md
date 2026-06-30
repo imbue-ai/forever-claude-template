@@ -30,16 +30,15 @@ tk close cod-step-XXXX "Briefed a sub-agent on the <task> and reviewed its resul
 
 ## 1. Write the task file
 
-Write a clear task file with YAML frontmatter (so the worker can address
-reports back to you) followed by the human-readable task description.
-The frontmatter contains `lead_agent` and `finish_report_path`.
+Write a clear task file with YAML frontmatter followed by the human-readable
+task description. The frontmatter contains `finish_report_path` (where the
+worker writes its report).
 
 ```bash
 mkdir -p runtime/launch-task/$NAME
 {
 cat << FRONTMATTER_EOF
 ---
-lead_agent: $MNGR_AGENT_NAME
 finish_report_path: runtime/launch-task/$NAME/reports/report.md
 ---
 FRONTMATTER_EOF
