@@ -1,0 +1,76 @@
+name: sync vendor/mngr
+
+# Keeps vendor/mngr tracking mngr main. The minds binary is built from mngr
+# main, but the in-VM agent imports this committed vendor/mngr; left alone the
+# snapshot only moves at release time and drifts hundreds of commits behind, so
+# the minds-launch-to-msg health check (which creates the agent from this repo's
+# main) risks a vendor-skew wedge. Daily, re-archive mngr main into vendor/mngr
+# and push the refresh to main. No-ops when mngr main has not moved.
+#
+# mngr is public, so reading it needs no credential; the push to this repo's own
+# main uses the built-in GITHUB_TOKEN (contents: write below). Runs an hour
+# before each minds-launch-to-msg.yml cron (16:00 / 04:00 UTC) so that check
+# sees a fresh, coherent (binary, vendor) pair.
+
+on:
+  schedule:
+    - cron: '0 15 * * *'  # 1h before the 16:00 UTC launch-to-msg cron
+    - cron: '0 3 * * *'   # 1h before the 04:00 UTC launch-to-msg cron
+  workflow_dispatch:
+
+concurrency:
+  group: sync-vendor-mngr
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout this repo @ main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: clone mngr main (public, no credential)
+        run: git clone --depth 1 https://github.com/imbue-ai/mngr.git "$RUNNER_TEMP/mngr"
+      - name: re-archive mngr main into vendor/mngr
+        run: |
+          set -euo pipefail
+          MNGR_SHA=$(git -C "$RUNNER_TEMP/mngr" rev-parse HEAD)
+          MNGR_SHORT=$(git -C "$RUNNER_TEMP/mngr" rev-parse --short HEAD)
+          # Replace vendor/mngr wholesale with mngr HEAD's tree, mirroring mngr's
+          # `just sync-vendor-mngr`. This repo's `**/.minds/` gitignore strips
+          # those paths on `git add`, the one expected, tracked delta from a full
+          # `git ls-tree` of the mngr SHA.
+          tarball=$(mktemp)
+          git -C "$RUNNER_TEMP/mngr" archive --format=tar HEAD > "$tarball"
+          rm -rf vendor/mngr/* vendor/mngr/.[!.]*
+          tar -xf "$tarball" -C vendor/mngr
+          rm -f "$tarball"
+          {
+            echo "MNGR_SHA=$MNGR_SHA"
+            echo "MNGR_SHORT=$MNGR_SHORT"
+          } >> "$GITHUB_ENV"
+      - name: commit + push to main if changed
+        run: |
+          set -euo pipefail
+          git add -A vendor/mngr/
+          if git diff --cached --quiet -- vendor/mngr/; then
+            echo "vendor/mngr already at mngr ${MNGR_SHORT}; nothing to push"
+            echo "- vendor/mngr already at mngr \`${MNGR_SHORT}\`; no-op" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git -c user.name='minds-vendor-sync' \
+              -c user.email='minds-vendor-sync@users.noreply.github.com' \
+              commit -m "Sync vendor/mngr to mngr main (${MNGR_SHORT})" \
+                     -m "Tracks ${MNGR_SHA} in mngr."
+          git push origin HEAD:main
+          {
+            echo "## Synced vendor/mngr"
+            echo ""
+            echo "- mngr main: \`${MNGR_SHA}\`"
+            echo "- pushed to \`main\`"
+          } >> "$GITHUB_STEP_SUMMARY"
