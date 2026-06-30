@@ -17,9 +17,8 @@ into one of a few bands.
   positive-only: a negative value (true "never kill") needs `CAP_SYS_RESOURCE`,
   which the container does not have, so protected processes simply keep the
   inherited default of 0 and are additionally shielded by earlyoom `--avoid`.
-- **`process_tree`** / **`agent_identity`** -- used by the agent-tagging
-  SessionStart hook to find the agent's `claude` process among its ancestors and
-  decide whether it is a user or worker agent (from its label).
+- **`agent_identity`** -- decides whether an agent is a user or worker agent
+  (from its label), used by the launch wrapper to pick the band.
 - **`registry`** -- one file per agent recording its main-process pid, so a
   killed pid can be mapped back to "which agent" (earlyoom's after-kill hook is
   handed only a pid that is already gone).
@@ -30,11 +29,16 @@ Tagging happens at three startup points, none of which re-scans the process tree
 | What | When | Band | Set by |
 |---|---|---|---|
 | supervisord services | (inherited) | protected (0) | nothing -- 0 is the default |
-| an agent's main process | session start | user / worker agent | `scripts/claude_oom_tag_agent.py` |
+| an agent's main process | launch | user / worker agent | `scripts/claude_oom_launch.py` |
 | an agent's subprocesses | each Bash tool call | agent subprocess (most expendable) | `scripts/claude_oom_tag_subprocess.py` (PreToolUse) |
 
-A subprocess inherits its agent's band by default; the PreToolUse hook raises it
-the rest of the way so a runaway build/test/browser is always shed first.
+The agent's main process tags *itself*: the claude agent type's `command` (in
+`.mngr/settings.toml`) runs `scripts/claude_oom_launch.py`, which sets its own
+`oom_score_adj` to the agent band, records its pid, then `exec`s claude in place.
+Because the band and pid survive `execve`, the tagged process *is* the claude
+process -- no after-the-fact ancestor crawl needed. A subprocess inherits its
+agent's band by default; the PreToolUse hook raises it the rest of the way so a
+runaway build/test/browser is always shed first.
 
 ## Outputs
 
@@ -44,7 +48,7 @@ the rest of the way so a runaway build/test/browser is always shed first.
   *own* process was shed. Read by the revival-notice hook
   (`scripts/claude_shed_notice_hook.py`) and the launch-task report poll.
 - **Agent-pid registry** (`runtime/oom_priority/agent_pids/<pid>.json`): written
-  by the agent-tagging hook, read by the kill hook.
+  by the launch wrapper (`scripts/claude_oom_launch.py`), read by the kill hook.
 
 Both live under `runtime/` so they ride the runtime-backup branch. Their absolute
 location is pinned via `OOM_PRIORITY_RUNTIME_DIR` (see `.mngr/settings.toml`) so

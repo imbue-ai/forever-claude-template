@@ -21,10 +21,6 @@
           },
           {
             "type": "command",
-            "command": "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_oom_tag_agent.py 2>/dev/null || true"
-          },
-          {
-            "type": "command",
             "command": "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_shed_notice_hook.py 2>/dev/null || true"
           }
         ]

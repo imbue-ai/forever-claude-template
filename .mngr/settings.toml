@@ -83,6 +83,19 @@ auto_dismiss_dialogs = true
 auto_allow_permissions = true
 cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode,TodoWrite,TaskCreate,TaskList,TaskUpdate"""
 settings_overrides__extend = {model = "opus[1m]", fastMode = true}
+# Launch every claude agent through the OOM band wrapper instead of `claude`
+# directly. The wrapper (scripts/claude_oom_launch.py) sets its own
+# oom_score_adj to the user- or worker-agent band, records its pid in the
+# agent-pid registry, then execs the real claude with the args mngr appends
+# (assemble_command splices --settings / --resume / --session-id after this
+# base). Because it execs in place, the band-tagged process IS the claude
+# process and its subprocesses inherit the band -- so earlyoom sheds an agent's
+# subprocesses, then worker agents, then user agents, before any protected
+# service. This replaces the old SessionStart hook that crawled the process tree
+# to find the claude process after the fact. ${MNGR_AGENT_WORK_DIR:-.} mirrors
+# the OOM Claude hooks' path form; the "main" type overrides command below so
+# its sleeping window-0 is unaffected.
+command = "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_oom_launch.py"
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
