@@ -134,13 +134,17 @@ command = "sleep infinity && claude"
 # the "worker" agent type -- the default for delegated tasks
 [agent_types.worker]
 parent_type = "claude"
-# Repeat the OOM wrapper command here even though worker inherits from claude:
-# mngr's parent_type merge lets a child type's *defaulted* command ("claude")
-# clobber the value inherited from the parent, so a child type that does not set
-# command itself launches plain claude. Without this line workers -- the band
-# that must be shed first after subprocesses -- would never be tagged. Verified
-# on a live worker launch: with it, the worker's claude sits at the worker band
-# and its subprocesses at the most-expendable band. See scripts/claude_oom_launch.py.
+# Set the OOM wrapper command explicitly here too, not only on [agent_types.claude].
+# Empirically, a worker created via `mngr create -t worker` launched plain claude
+# (its resolved command had base `claude`, so the wrapper never ran and the worker
+# sat at the default band) until this line was added -- and workers are the band
+# that must be shed first after subprocesses. NOTE: this is belt-and-suspenders,
+# not a fully-understood requirement -- resolve_agent_type() in isolation *does*
+# inherit the parent claude command to the worker child, so the live gap is
+# somewhere in the create/launch path we have not root-caused. Setting it here is
+# a reliable fix regardless. Verified live: with this line the worker's claude
+# sits at the worker band (600) and its Bash subprocesses at 900.
+# See scripts/claude_oom_launch.py.
 command = "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_oom_launch.py"
 
 # --- Provider configurations ---
