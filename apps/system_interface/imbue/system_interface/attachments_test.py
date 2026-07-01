@@ -23,7 +23,7 @@ def test_get_uploads_directory_is_under_agent_work_dir(monkeypatch: pytest.Monke
 
     uploads_directory = get_uploads_directory()
 
-    assert uploads_directory == tmp_path / "runtime" / "uploads"
+    assert uploads_directory == tmp_path / "uploads"
 
 
 def test_sanitize_upload_filename_keeps_safe_names() -> None:

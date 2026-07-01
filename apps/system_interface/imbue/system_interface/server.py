@@ -355,7 +355,7 @@ def _send_message_endpoint(agent_id: str) -> Response:
 
 
 def _upload_attachment() -> Response:
-    """Store a file the user attached to a chat message under runtime/uploads/.
+    """Store a file the user attached to a chat message under uploads/.
 
     The frontend uploads each attachment here as soon as the user drops, pastes,
     or picks it, then appends the returned absolute path to the message text it
@@ -380,7 +380,7 @@ def _upload_attachment() -> Response:
 
 
 def _serve_attachment(relative_path: str) -> Response:
-    """Serve a stored attachment for inline preview, confined to runtime/uploads/."""
+    """Serve a stored attachment for inline preview, confined to uploads/."""
     resolved_path = resolve_upload_path(get_uploads_directory(), relative_path)
     if resolved_path is None:
         error = ErrorResponse(detail=f"Attachment '{relative_path}' not found")

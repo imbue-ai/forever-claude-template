@@ -11,7 +11,7 @@ vi.mock("../markdown", () => ({ MarkdownContent: () => null }));
 
 import { StableUserMessage } from "./message-renderers";
 
-const IMAGE_PATH = "/code/runtime/uploads/aaa/diagram.png";
+const IMAGE_PATH = "/code/uploads/aaa/diagram.png";
 
 interface CollectedTag {
   tag: string;

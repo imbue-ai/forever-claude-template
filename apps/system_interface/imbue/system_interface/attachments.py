@@ -8,10 +8,11 @@ from werkzeug.utils import secure_filename
 
 from imbue.system_interface.models import AttachmentError
 
-# Chat attachments live under the gitignored, runtime-backed-up ``runtime/``
-# tree so they inherit its tracked-ness (never committed to the main branch)
-# and survive container loss alongside conversation transcripts.
-_UPLOADS_SUBPATH = Path("runtime") / "uploads"
+# Chat attachments live under a top-level, gitignored ``uploads/`` directory.
+# They are kept OUT of ``runtime/`` because a user upload can be arbitrarily
+# large and of any format, which does not belong in the runtime-backed content;
+# the directory is gitignored so uploads are never committed to the main branch.
+_UPLOADS_SUBPATH = Path("uploads")
 
 _DEFAULT_UPLOAD_FILENAME = "upload"
 

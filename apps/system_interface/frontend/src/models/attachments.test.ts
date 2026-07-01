@@ -15,8 +15,8 @@ import {
   parseMessageAttachments,
 } from "./attachments";
 
-const IMAGE_PATH = "/code/runtime/uploads/aaa/diagram.png";
-const FILE_PATH = "/code/runtime/uploads/bbb/notes.txt";
+const IMAGE_PATH = "/code/uploads/aaa/diagram.png";
+const FILE_PATH = "/code/uploads/bbb/notes.txt";
 
 describe("isImagePath", () => {
   it("recognizes common image extensions", () => {
@@ -37,7 +37,7 @@ describe("isImagePath", () => {
 
 describe("attachmentBasename", () => {
   it("returns the final path segment", () => {
-    expect(attachmentBasename("/code/runtime/uploads/x/diagram.png")).toBe("diagram.png");
+    expect(attachmentBasename("/code/uploads/x/diagram.png")).toBe("diagram.png");
     expect(attachmentBasename("lonely")).toBe("lonely");
   });
 });
@@ -48,7 +48,7 @@ describe("attachmentServeUrl", () => {
   });
 
   it("percent-encodes each path segment", () => {
-    expect(attachmentServeUrl("/x/runtime/uploads/id/na me.png")).toBe("/api/uploads/id/na%20me.png");
+    expect(attachmentServeUrl("/x/uploads/id/na me.png")).toBe("/api/uploads/id/na%20me.png");
   });
 });
 
@@ -116,8 +116,8 @@ describe("formatFileSize", () => {
 
 describe("attachment size cache", () => {
   it("stores and returns a cached size", () => {
-    expect(getCachedAttachmentSize("/code/runtime/uploads/zzz/cached.bin")).toBeUndefined();
-    cacheAttachmentSize("/code/runtime/uploads/zzz/cached.bin", 4096);
-    expect(getCachedAttachmentSize("/code/runtime/uploads/zzz/cached.bin")).toBe(4096);
+    expect(getCachedAttachmentSize("/code/uploads/zzz/cached.bin")).toBeUndefined();
+    cacheAttachmentSize("/code/uploads/zzz/cached.bin", 4096);
+    expect(getCachedAttachmentSize("/code/uploads/zzz/cached.bin")).toBe(4096);
   });
 });

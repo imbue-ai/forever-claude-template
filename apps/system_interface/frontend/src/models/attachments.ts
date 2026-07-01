@@ -3,8 +3,8 @@
  * transcript renderer, plus the upload/serve/delete client.
  *
  * The composer appends a human-readable line naming each uploaded file by its
- * absolute path on the agent VM (e.g. "See attachment here: /code/runtime/
- * uploads/<id>/<name>") to the message it sends. Because the agent records that
+ * absolute path on the agent VM (e.g. "See attachment here: /code/uploads/<id>/
+ * <name>") to the message it sends. Because the agent records that
  * text in its session transcript, the block is persisted for free: on render we
  * strip it back off (so the raw path never shows in the bubble) and rebuild the
  * image thumbnails / file chips from the parsed paths, whose preview URLs serve
@@ -18,7 +18,7 @@ import { apiUrl } from "../base-path";
 /** Marker segment present in every stored-attachment path. Used to detect the
  *  appended attachment block in persisted message content and to derive a
  *  preview URL from an absolute path. */
-export const UPLOADS_PATH_MARKER = "/runtime/uploads/";
+export const UPLOADS_PATH_MARKER = "/uploads/";
 
 /** A file the user uploaded to the agent VM and attached to the current draft. */
 export interface UploadedAttachment {

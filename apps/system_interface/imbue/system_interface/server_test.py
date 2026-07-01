@@ -110,11 +110,11 @@ def test_send_message_for_unknown_agent(client: FlaskClient) -> None:
 
 def _upload_relative_path(stored_path: str) -> str:
     """Extract the ``<subdir>/<name>`` part of an absolute upload path."""
-    return stored_path.split("/runtime/uploads/", 1)[1]
+    return stored_path.split("/uploads/", 1)[1]
 
 
 def test_upload_attachment_stores_file_and_returns_path(client: FlaskClient) -> None:
-    """Uploading a file stores it under runtime/uploads/ and returns its path and size."""
+    """Uploading a file stores it under uploads/ and returns its path and size."""
     response = client.post(
         "/api/uploads",
         data={"file": (io.BytesIO(b"image-bytes"), "diagram.png")},
@@ -123,7 +123,7 @@ def test_upload_attachment_stores_file_and_returns_path(client: FlaskClient) -> 
 
     assert response.status_code == 201
     data = response.get_json()
-    assert "/runtime/uploads/" in data["path"]
+    assert "/uploads/" in data["path"]
     assert data["path"].endswith("/diagram.png")
     assert data["size"] == len(b"image-bytes")
     assert Path(data["path"]).read_bytes() == b"image-bytes"
