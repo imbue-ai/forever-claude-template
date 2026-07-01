@@ -4,6 +4,7 @@ import json
 import queue
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import quote
 
 import pytest
 from flask import Flask
@@ -989,3 +990,166 @@ def test_destroy_argv_accepted_by_live_cli() -> None:
     tree, so a vendor/mngr rename of that subcommand/flag fails here at merge
     time rather than only surfacing at runtime."""
     assert_mngr_argv_valid(_build_destroy_command("demo"))
+
+
+# -- Agent file serving (markdown images + download links) --------------------
+#
+# An agent writes a file and references its absolute on-disk path in markdown;
+# the catch-all serves that file -- images inline so they render, any other file
+# as a download. These exercise the catch-all dispatch end to end via the Flask
+# test client.
+
+
+def test_serves_image_at_its_absolute_path(client: FlaskClient, tmp_path: Path) -> None:
+    """A request for an existing image file's absolute path streams its bytes inline."""
+    image_path = tmp_path / "chart.png"
+    image_bytes = b"fake-png-bytes"
+    image_path.write_bytes(image_bytes)
+
+    response = client.get(str(image_path))
+
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+    assert response.data == image_bytes
+    # Inline (rendered), not a forced download.
+    assert "attachment" not in response.headers.get("Content-Disposition", "")
+    # Cached aggressively: filenames are unique per image by convention.
+    assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+
+
+def test_serves_image_in_nested_subdirectory(client: FlaskClient, tmp_path: Path) -> None:
+    """Nested paths under the write directory are served (agents may organize per run)."""
+    nested_dir = tmp_path / "chat-images" / "run-3"
+    nested_dir.mkdir(parents=True)
+    image_path = nested_dir / "diagram.webp"
+    image_path.write_bytes(b"fake-webp-bytes")
+
+    response = client.get(str(image_path))
+
+    assert response.status_code == 200
+    assert response.content_type == "image/webp"
+
+
+def test_serves_image_with_uppercase_extension(client: FlaskClient, tmp_path: Path) -> None:
+    """Image extensions are matched case-insensitively."""
+    image_path = tmp_path / "SHOT.PNG"
+    image_path.write_bytes(b"fake-png-bytes")
+
+    response = client.get(str(image_path))
+
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+
+
+def test_serves_svg_with_hardened_headers(client: FlaskClient, tmp_path: Path) -> None:
+    """SVG is served as an image but locked down for direct navigation."""
+    image_path = tmp_path / "plot.svg"
+    image_path.write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+
+    response = client.get(str(image_path))
+
+    assert response.status_code == 200
+    # Werkzeug appends "; charset=utf-8" to the XML-based svg type; harmless.
+    assert response.content_type.startswith("image/svg+xml")
+    assert response.headers["Content-Security-Policy"] == "default-src 'none'; style-src 'unsafe-inline'"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_missing_image_path_returns_404_not_app_shell(client: FlaskClient, tmp_path: Path) -> None:
+    """A typo'd image path renders a broken image (404), never the SPA shell."""
+    missing_path = tmp_path / "nope.png"
+
+    response = client.get(str(missing_path))
+
+    assert response.status_code == 404
+
+
+def test_directory_with_image_extension_returns_404(client: FlaskClient, tmp_path: Path) -> None:
+    """A directory whose name ends in an image extension is not a servable file."""
+    directory = tmp_path / "weird.png"
+    directory.mkdir()
+
+    response = client.get(str(directory))
+
+    assert response.status_code == 404
+
+
+def test_nonexistent_path_falls_through_to_app_shell(client: FlaskClient, tmp_path: Path) -> None:
+    """A path matching no file is a client-side route: it returns the app shell, not a 404.
+
+    Only paths that resolve to a real file are served; everything else falls
+    through so the single-page-app's client-side routing keeps working.
+    """
+    response = client.get(str(tmp_path / "some" / "client" / "route"))
+
+    assert response.status_code == 200
+    assert "text/html" in response.content_type
+
+
+def test_serves_image_with_spaces_in_filename(client: FlaskClient, tmp_path: Path) -> None:
+    """A descriptive filename with spaces (percent-encoded in the URL) still serves.
+
+    The whole feature relies on the framework percent-decoding the catch-all path
+    before the handler reconstructs the on-disk path; pin that for a filename an
+    agent told to use 'descriptive' names could realistically produce.
+    """
+    image_path = tmp_path / "my chart 2026.png"
+    image_bytes = b"fake-png-bytes"
+    image_path.write_bytes(image_bytes)
+
+    response = client.get(quote(str(image_path)))
+
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+    assert response.data == image_bytes
+
+
+def test_serves_image_with_unicode_filename(client: FlaskClient, tmp_path: Path) -> None:
+    """A non-ASCII filename (percent-encoded in the URL) serves the right bytes."""
+    image_path = tmp_path / "gráfico.png"
+    image_bytes = b"fake-png-bytes"
+    image_path.write_bytes(image_bytes)
+
+    response = client.get(quote(str(image_path)))
+
+    assert response.status_code == 200
+    assert response.data == image_bytes
+
+
+def test_serves_non_image_file_as_download(client: FlaskClient, tmp_path: Path) -> None:
+    """A non-image file is served as an attachment (download), not rendered inline."""
+    file_path = tmp_path / "q4-report.pdf"
+    file_bytes = b"%PDF-1.4 fake-pdf-bytes"
+    file_path.write_bytes(file_bytes)
+
+    response = client.get(str(file_path))
+
+    assert response.status_code == 200
+    assert response.data == file_bytes
+    disposition = response.headers.get("Content-Disposition", "")
+    assert "attachment" in disposition
+    assert "q4-report.pdf" in disposition
+    # Downloaded, not sniffed into an inline-executable type.
+    assert response.headers.get("X-Content-Type-Options") == "nosniff"
+
+
+def test_serves_extensionless_file_as_download(client: FlaskClient, tmp_path: Path) -> None:
+    """A file with no extension is still served as a download when it exists."""
+    file_path = tmp_path / "server-log"
+    file_bytes = b"line one\nline two\n"
+    file_path.write_bytes(file_bytes)
+
+    response = client.get(str(file_path))
+
+    assert response.status_code == 200
+    assert response.data == file_bytes
+    assert "attachment" in response.headers.get("Content-Disposition", "")
+
+
+def test_missing_non_image_path_is_not_a_download(client: FlaskClient, tmp_path: Path) -> None:
+    """A non-image path with no file behind it falls through to the app shell, not a download."""
+    response = client.get(str(tmp_path / "does-not-exist.pdf"))
+
+    assert response.status_code == 200
+    assert "text/html" in response.content_type
+    assert "attachment" not in response.headers.get("Content-Disposition", "")

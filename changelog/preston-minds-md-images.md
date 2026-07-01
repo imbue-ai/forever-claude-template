@@ -1,0 +1,1 @@
+Added a `show-files-in-chat` skill that tells an agent how to put a file in front of the user in chat: display an image inline (write it to `runtime/chat-images/` and reference its absolute on-disk path with markdown image syntax), offer any other file as a download (link its absolute path normally), or embed a public image URL directly.

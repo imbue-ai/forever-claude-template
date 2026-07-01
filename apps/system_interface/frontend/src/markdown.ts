@@ -1,6 +1,7 @@
 import m from "mithril";
 import DOMPurify from "dompurify";
 import { Marked } from "marked";
+import { openImageLightbox } from "./lightbox";
 
 const marked = new Marked({
   breaks: true,
@@ -74,11 +75,23 @@ function restoreExpandedState(container: HTMLElement, expanded: Set<number>): vo
   });
 }
 
+function handleMarkdownImageClick(event: MouseEvent): void {
+  const target = event.target;
+  if (target instanceof HTMLImageElement) {
+    event.preventDefault();
+    openImageLightbox(target.src, target.alt);
+  }
+}
+
 export const MarkdownContent: m.Component<{ content: string }> = {
   oncreate(vnode) {
     const element = vnode.dom as HTMLElement;
     element.innerHTML = renderMarkdown(vnode.attrs.content);
     wrapToolCallBlocks(element);
+    // Clicking an inline image opens it full-screen. The listener is delegated
+    // on the container, which mithril reuses across redraws, so it survives the
+    // innerHTML resets in onupdate without needing to be re-attached.
+    element.addEventListener("click", handleMarkdownImageClick);
   },
   onupdate(vnode) {
     const element = vnode.dom as HTMLElement;
