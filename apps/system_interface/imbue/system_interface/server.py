@@ -569,12 +569,23 @@ def _destroy_terminal(session_name: str) -> Response:
         return _json_response(error.model_dump(), status_code=400)
     # ``=`` forces an exact session-name match so tmux's prefix fallback can't
     # target a different session.
-    run_local_command_modern_version(
+    result = run_local_command_modern_version(
         command=["tmux", "kill-session", "-t", f"={session_name}"],
         cwd=None,
         is_checked=False,
         timeout=5.0,
     )
+    # tmux returns non-zero both for a genuine failure and for an already-absent
+    # session (nothing to kill). Distinguish the two by re-listing: if the
+    # session is gone, the destroy succeeded (or was idempotent); if it is still
+    # present, the kill really failed and we must surface it rather than telling
+    # the UI the terminal is gone when it is still running.
+    if result.returncode != 0:
+        still_live = any(session.session_name == session_name for session in _list_tmux_sessions())
+        if still_live:
+            _loguru_logger.warning("Failed to kill terminal session {}: {}", session_name, result.stderr.strip())
+            error = ErrorResponse(detail=f"Failed to destroy terminal {session_name!r}: {result.stderr.strip()}")
+            return _json_response(error.model_dump(), status_code=500)
     with _terminal_allocate_lock:
         _recently_allocated_terminal_names.discard(session_name)
     return _json_response({"status": "ok"})
