@@ -61,7 +61,7 @@ and syncs the directory alongside the runtime dir -- no extra CLI flag.
 
 Launch lifecycle commands:
 
-    mngr create <NAME> -t <TEMPLATE>
+    mngr create <NAME> -t <TEMPLATE> --label workspace=<MINDS_WORKSPACE_NAME>
     mngr rsync  ./<RUNTIME_DIR>/   <NAME>:<RUNTIME_DIR>/   --uncommitted-changes=merge
     mngr rsync  ./<ARTIFACTS_DIR>/ <NAME>:<ARTIFACTS_DIR>/ --uncommitted-changes=merge
                 (when frontmatter declares it)
@@ -306,6 +306,7 @@ def launch(
     template: str,
     runtime_dir: Path,
     task_file: Path,
+    workspace: str,
     state_dir: Path | None = None,
     runner: Runner | None = None,
 ) -> int:
@@ -354,6 +355,8 @@ def launch(
             name,
             "-t",
             template,
+            "--label",
+            f"workspace={workspace}",
         ],
         check=True,
     )
@@ -491,6 +494,7 @@ def launch_sync(
     template: str,
     runtime_dir: Path,
     task_file: Path,
+    workspace: str,
     timeout_seconds: float,
     poll_interval_seconds: float,
     destroy_on_finish: bool = True,
@@ -526,6 +530,7 @@ def launch_sync(
         template=template,
         runtime_dir=runtime_dir,
         task_file=task_file,
+        workspace=workspace,
         state_dir=state_dir,
         runner=runner,
     )
@@ -577,6 +582,7 @@ def launch_sync(
 
 
 def _run_launch(args: argparse.Namespace, runner: Runner | None) -> int:
+    workspace = os.environ.get("MINDS_WORKSPACE_NAME", "default")
     state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR")
     state_dir = Path(state_dir_env) if state_dir_env else None
     return launch(
@@ -584,6 +590,7 @@ def _run_launch(args: argparse.Namespace, runner: Runner | None) -> int:
         template=args.template,
         runtime_dir=args.runtime_dir,
         task_file=args.task_file,
+        workspace=workspace,
         state_dir=state_dir,
         runner=runner,
     )
@@ -606,6 +613,7 @@ def _run_launch_sync(args: argparse.Namespace, runner: Runner | None) -> int:
     # await -- a ValueError here is an authoring bug, so let it raise with a full
     # traceback rather than swallowing it.
     _read_finish_report_path(args.task_file)
+    workspace = os.environ.get("MINDS_WORKSPACE_NAME", "default")
     state_dir_env = os.environ.get("MNGR_AGENT_STATE_DIR")
     state_dir = Path(state_dir_env) if state_dir_env else None
     return launch_sync(
@@ -613,6 +621,7 @@ def _run_launch_sync(args: argparse.Namespace, runner: Runner | None) -> int:
         template=args.template,
         runtime_dir=args.runtime_dir,
         task_file=args.task_file,
+        workspace=workspace,
         timeout_seconds=args.timeout,
         poll_interval_seconds=args.poll_interval,
         destroy_on_finish=not args.keep_agent,
