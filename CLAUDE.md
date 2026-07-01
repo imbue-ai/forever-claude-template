@@ -293,16 +293,10 @@ Use your judgment on when to do work directly vs delegating. Delegation is usefu
 
 # Finding past work
 
-Every agent that has run on this host keeps its conversation transcript locally:
-under `/mngr/agents/<id>/` while the agent still exists (running, or **STOPPED** --
-e.g. a finished `launch-task` sub-agent, which is usually left stopped rather than
-destroyed), and under `/mngr/preserved/<name>--<id>/` once it has been destroyed.
-**So past and deleted chats on this host are recoverable: never tell the user you
-can't access an earlier, previous, or deleted conversation without first checking
-both places.** When the user asks about a past, earlier, or deleted chat or agent
-(e.g. "what did I say in that chat I deleted", "what did the sub-agent that set up
-auth do?"), use the `find-past-transcripts` skill -- it checks both
-`/mngr/agents/` and `/mngr/preserved/`.
+Chats from agents that have run on this host -- current or past, including ones
+that were destroyed -- are stored locally on this host and are recoverable, so
+never tell the user you can't access an earlier or deleted conversation without
+checking first. Use the `find-past-transcripts` skill to find and read them.
 
 # Self-modification
 
