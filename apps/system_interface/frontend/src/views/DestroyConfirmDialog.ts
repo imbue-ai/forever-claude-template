@@ -6,6 +6,9 @@ import m from "mithril";
 
 interface DestroyConfirmDialogAttrs {
   agentName: string;
+  // Dialog heading. Defaults to "Destroy Agent"; terminal tabs pass
+  // "Destroy terminal" so the same dialog serves both.
+  title?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -13,6 +16,7 @@ interface DestroyConfirmDialogAttrs {
 export const DestroyConfirmDialog: m.Component<DestroyConfirmDialogAttrs> = {
   view(vnode) {
     const { agentName, onConfirm, onCancel } = vnode.attrs;
+    const title = vnode.attrs.title ?? "Destroy Agent";
 
     return m(
       "div.destroy-dialog-overlay",
@@ -23,7 +27,7 @@ export const DestroyConfirmDialog: m.Component<DestroyConfirmDialogAttrs> = {
       },
       [
         m("div.destroy-dialog", [
-          m("h3.destroy-dialog-title", "Destroy Agent"),
+          m("h3.destroy-dialog-title", title),
           m("p.destroy-dialog-message", [
             `Are you sure you want to destroy `,
             m("strong", agentName),

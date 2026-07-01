@@ -73,6 +73,14 @@ class ApplicationEntry(FrozenModel):
     url: str = Field(description="Local URL where the application is accessible")
 
 
+class TerminalSessionInfo(FrozenModel):
+    """A live user-terminal tmux session (one per ad-hoc dockview terminal tab)."""
+
+    session_name: str = Field(description="The tmux session name (e.g. 'terminal-1')")
+    session_id: str = Field(description="The immutable tmux session id (e.g. '$3'), stable across rename")
+    cwd: str = Field(description="The session's current working directory (tmux session_path)")
+
+
 class CreateWorktreeRequest(FrozenModel):
     """Request body for creating a worktree agent."""
 
