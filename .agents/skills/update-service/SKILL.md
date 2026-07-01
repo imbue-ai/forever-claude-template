@@ -1,6 +1,6 @@
 ---
 name: update-service
-description: "Use whenever you are about to change an existing service -- edit, fix, restyle, extend, or restart its backend or frontend logic, or change how it runs. Covers both user-facing web services (a tab the user can open) and background daemons (telegram-bot, runtime-backup, and other supervisord programs with no tab). This is the front door for service edits: it owns the live change loop (apply the change so it takes effect, refresh the user's view, verify) and hands the change to the turn-end hardening flow. For creating a brand-new web view use build-web-service; for the workspace UI itself use update-system-interface."
+description: "Use whenever you are about to change an existing service -- edit, fix, restyle, extend, or restart its backend or frontend logic, or change how it runs. Covers both user-facing web services (a tab the user can open) and background daemons (runtime-backup, cloudflared, and other supervisord programs with no tab). This is the front door for service edits: it owns the live change loop (apply the change so it takes effect, refresh the user's view, verify) and hands the change to the turn-end hardening flow. For creating a brand-new web view use build-web-service; for the workspace UI itself use update-system-interface."
 ---
 
 # Changing an existing service
@@ -14,7 +14,7 @@ whether there's a tab to refresh:
   Changing it means the open tab is showing the *old* page until you
   refresh it.
 - **Background daemon** -- a supervisord program with no tab
-  (`telegram-bot`, `runtime-backup`, forwarders, cron-like jobs). There's
+  (`runtime-backup`, `cloudflared`, forwarders, cron-like jobs). There's
   nothing to refresh; the change takes effect when the process restarts.
 
 **This skill is the front door for editing a service's code.** You do not
