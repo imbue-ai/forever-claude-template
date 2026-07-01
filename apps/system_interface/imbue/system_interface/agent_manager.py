@@ -94,11 +94,10 @@ def _build_worktree_create_command(
         "worktree",
         "--label",
         "user_created=true",
-        "--label",
-        f"workspace={name}",
         "--no-connect",
     ]
-    # Inherit the project label from the parent agent.
+    # Inherit the project label from the parent agent. The worker belongs to its
+    # workspace by sharing the host; it carries no workspace label.
     if "project" in parent_labels:
         cmd.extend(["--label", f"project={parent_labels['project']}"])
     return cmd
@@ -123,10 +122,10 @@ def _build_chat_create_command(
         "chat",
         "--no-connect",
     ]
-    # Inherit workspace and project labels from the primary agent.
-    for key in ("workspace", "project"):
-        if key in primary_labels:
-            cmd.extend(["--label", f"{key}={primary_labels[key]}"])
+    # Inherit the project label from the primary agent. The chat agent belongs to
+    # its workspace by sharing the host; it carries no workspace label.
+    if "project" in primary_labels:
+        cmd.extend(["--label", f"project={primary_labels['project']}"])
     return cmd
 
 
@@ -541,7 +540,7 @@ class AgentManager:
             parent_agent_id=None,
         )
 
-        labels = {"user_created": "true", "workspace": name}
+        labels = {"user_created": "true"}
         if "project" in parent_labels:
             labels["project"] = parent_labels["project"]
         self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
@@ -583,9 +582,8 @@ class AgentManager:
         )
 
         labels: dict[str, str] = {}
-        for key in ("workspace", "project"):
-            if key in primary_labels:
-                labels[key] = primary_labels[key]
+        if "project" in primary_labels:
+            labels["project"] = primary_labels["project"]
         self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id

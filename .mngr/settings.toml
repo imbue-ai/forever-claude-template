@@ -63,10 +63,6 @@ worktree_base_folder = "/mngr/worktree/"
 disable_plugin__extend = ["recursive", "ttyd", "claude_subagent_proxy"]
 yes = true
 
-# for the list command -- ensures that we don't see other agents when we're listing, even if we happen to list remote agents
-[commands.list]
-include__extend = ["""has(labels.workspace)"""]
-
 # --- Agent types ---
 
 # Agent type defaults -- apply to all claude agents created from this repo
