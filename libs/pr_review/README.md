@@ -1,7 +1,7 @@
 # pr-review
 
 A code-aware web interface for reviewing your GitHub pull requests, served at
-`/service/pr-review/` (port 8081).
+`/service/pr-review/` (port 8082).
 
 ## What it does
 

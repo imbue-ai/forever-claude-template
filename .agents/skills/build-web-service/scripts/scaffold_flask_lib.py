@@ -43,7 +43,6 @@ RESERVED_NAMES = frozenset(
         "cloudflare-tunnel",
         "app-watcher",
         "bootstrap",
-        "telegram-bot",
         "runtime-backup",
         "host-backup",
         "terminal",

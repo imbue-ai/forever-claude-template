@@ -254,11 +254,11 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     m.redraw();
   }
 
-  // Surface a failure inline within the form the user was filling, instead
-  // of swapping to the full-screen `error` view. Used for submit failures
-  // (OAuth code / API key) where the user should stay on the form and
-  // retry; `setError` remains for `startOAuth` failures, which have no
-  // form to return to.
+  // Surface a failure inline within the API-key form, where the user can
+  // simply re-submit the same key in place, instead of swapping to the
+  // full-screen `error` view. OAuth code failures do NOT use this: a submitted
+  // code consumes the single-use OAuth session, so they route to `setError`
+  // (the full "Start over" screen), which also covers `startOAuth` failures.
   function setInlineError(message: string, formMode: "awaiting_oauth_code" | "api_key_form"): void {
     errorMessage = message;
     mode = formMode;
@@ -322,11 +322,20 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
         mode = "success";
         m.redraw();
       } else {
-        setInlineError("Authentication did not succeed. Please try again.", "awaiting_oauth_code");
+        // A submitted code consumes the single-use OAuth session -- the backend
+        // terminates its `claude auth login` subprocess unconditionally, and
+        // `sessionId` was cleared above -- so there is nothing left to retry in
+        // place. Route to the full error screen, whose only action is "Start
+        // over" (a fresh sign-in flow); a code-entry form here would be a dead
+        // end (its submit would no-op on the now-null session).
+        setError("Authentication did not succeed.");
       }
     } catch (error) {
       const errResp = (error as { response?: { detail?: string } }).response;
-      setInlineError(errResp?.detail ?? "Failed to verify code", "awaiting_oauth_code");
+      // Same single-use-session reasoning as the branch above: the OAuth
+      // session is already gone, so there is no in-place retry -- send the user
+      // to the "Start over" error screen rather than back to the code form.
+      setError(errResp?.detail ?? "Failed to verify code");
     }
   }
 
@@ -652,16 +661,16 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
       ]);
     }
     if (mode === "error") {
-      return m("div.claude-login-footer.claude-login-footer--spread", [
+      // A sign-in failure (failed OAuth start, or a submitted OAuth code that
+      // consumed the single-use session) leaves no live session to retry
+      // against, so the only forward action is to start the whole flow over.
+      // The header close button and backdrop click still dismiss the modal, so
+      // a single primary action here is not a dead end.
+      return m("div.claude-login-footer", [
         m(
-          "button.claude-login-button.claude-login-button--ghost",
-          { type: "button", onclick: () => attrsRef?.onDismiss() },
-          "Close",
-        ),
-        m(
-          "button.claude-login-button.claude-login-button--primary",
+          "button.claude-login-button.claude-login-button--primary.claude-login-button--block",
           { type: "button", onclick: () => goBackToProviderSelection() },
-          "Try again",
+          "Start over",
         ),
       ]);
     }

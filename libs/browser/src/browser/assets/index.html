@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Browser</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; }
+  #app { display: flex; flex-direction: column; height: 100vh; min-width: 0; }
+
+  #tabbar { display: flex; align-items: center; gap: 4px; padding: 4px 6px; background: #252525; border-bottom: 1px solid #333; overflow-x: auto; }
+  .tab { padding: 4px 8px; background: #333; border-radius: 4px 4px 0 0; font-size: 12px; white-space: nowrap; cursor: pointer; max-width: 180px; overflow: hidden; text-overflow: ellipsis; display: flex; gap: 6px; align-items: center; }
+  .tab.active { background: #0e639c; }
+  .tab .close { opacity: .6; }
+  .tab .close:hover { opacity: 1; }
+  #newtab { padding: 4px 9px; background: #333; border: none; color: #ddd; border-radius: 4px; cursor: pointer; }
+  #newtab:disabled { opacity: .5; cursor: not-allowed; }
+
+  #navbar { display: flex; gap: 6px; padding: 6px; background: #252525; border-bottom: 1px solid #333; align-items: center; }
+  .navbtn { padding: 4px 9px; background: #333; border: none; color: #ddd; border-radius: 4px; cursor: pointer; font-size: 15px; line-height: 1; }
+  .navbtn:hover:not(:disabled) { background: #3d3d3d; }
+  .navbtn:disabled { opacity: .4; cursor: not-allowed; }
+  #url { flex: 1; padding: 5px 8px; background: #1e1e1e; border: 1px solid #444; color: #ddd; border-radius: 4px; }
+  #url:disabled { opacity: .5; }
+
+  /* A small persistent status bar shown whenever the human can drive the browser
+     (resting/AI-untouched OR explicitly taken). Always-on "You have control"
+     indicator; the hand-back button appears only when an agent is queued for it. */
+  #returnbar { display: none; align-items: center; gap: 10px; padding: 6px 10px; background: #2a2a2a; border-bottom: 1px solid #333; font-size: 12px; color: #4ec9b0; }
+  #returnbar.show { display: flex; }
+  #returnbar.handoff { background: #5a3a1a; color: #ffcc66; }
+  #returnbtn { padding: 5px 12px; background: #0e639c; border: none; color: #fff; border-radius: 4px; cursor: pointer; }
+
+  #stage { flex: 1; position: relative; background: #000; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  #screen { max-width: 100%; max-height: 100%; cursor: default; }
+  #screen:focus { outline: none; }
+  #placeholder { position: absolute; color: #777; font-size: 13px; text-align: center; padding: 0 20px; }
+
+  /* Full-stage grey overlay shown while an agent has control. It sits above the
+     canvas and swallows pointer events, so the human cannot click through to the
+     live page (the server also drops input, but this blocks it locally too). */
+  #overlay { display: none; position: absolute; inset: 0; z-index: 10; background: rgba(30, 30, 30, 0.72); flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 20px; }
+  #overlay.show { display: flex; }
+  #overlay .msg { font-size: 15px; color: #e2b340; font-weight: 600; max-width: 80%; word-break: break-word; }
+  #overlay .sub { font-size: 12px; color: #aaa; max-width: 80%; min-height: 14px; }
+  #takecontrol { padding: 8px 16px; background: #b5462b; border: none; color: #fff; border-radius: 4px; cursor: pointer; font-size: 14px; }
+  #takecontrol:disabled { opacity: .6; cursor: default; }
+
+  /* Full-stage near-opaque cover for a crashed/OOM-killed browser. Distinct from
+     the agent-control #overlay: it sits above everything, covers the WHOLE pane,
+     and reads clearly with large white text -- so a dead browser is unmistakable,
+     not a subtle line of grey text on a black canvas. Terminal: this browser is
+     gone, a new one opens as a separate tab. */
+  #crashoverlay { display: none; position: absolute; inset: 0; z-index: 20; background: rgba(20, 20, 20, 0.92); flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; padding: 24px; }
+  #crashoverlay.show { display: flex; }
+  #crashoverlay .msg { font-size: 19px; line-height: 1.4; color: #fff; font-weight: 700; max-width: 90%; }
+  #crashoverlay .sub { font-size: 14px; color: rgba(255, 255, 255, 0.75); max-width: 90%; }
+
+  /* Full-stage cover shown while the browser is in the `init` lifecycle state:
+     registered, but Chromium isn't up yet. It covers the WHOLE pane (above the
+     canvas) so the user never sees a half-built browser; the chrome (tab/nav bars)
+     is hidden too while it shows. Removed deterministically on the init->running
+     control message, not on "a frame arrived". A spinner gives a sense of progress. */
+  #initoverlay { display: none; position: absolute; inset: 0; z-index: 15; background: #1e1e1e; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 24px; }
+  #initoverlay.show { display: flex; }
+  #initoverlay .spinner { width: 28px; height: 28px; border: 3px solid #444; border-top-color: #0e639c; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  #initoverlay .msg { font-size: 15px; color: #ccc; font-weight: 600; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* While init/crashed cover the pane, hide the tab + nav chrome so a half-built
+     browser never peeks through. Toggled by the `chrome-hidden` class on #app. */
+  #app.chrome-hidden #tabbar, #app.chrome-hidden #navbar, #app.chrome-hidden #returnbar { display: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="tabbar"><button id="newtab" title="New tab">+</button></div>
+  <div id="navbar">
+    <button id="back" class="navbtn" title="Back">&#8592;</button>
+    <button id="forward" class="navbtn" title="Forward">&#8594;</button>
+    <button id="reload" class="navbtn" title="Reload this page">&#8635;</button>
+    <input id="url" placeholder="Enter URL and press Enter" />
+  </div>
+  <div id="returnbar">
+    <span id="returnqueue">You have control.</span>
+    <button id="returnbtn">Return control to agents</button>
+  </div>
+  <div id="stage">
+    <canvas id="screen" tabindex="0"></canvas>
+    <div id="placeholder">Starting browser…</div>
+    <div id="overlay">
+      <div class="msg" id="overlaymsg">An agent has control.</div>
+      <div class="sub" id="overlaysub"></div>
+      <button id="takecontrol">Take control</button>
+    </div>
+    <div id="crashoverlay">
+      <div class="msg">This browser crashed.<br />Chromium was killed (for example, out of memory).</div>
+      <div class="sub">Open a new browser from the + menu.</div>
+    </div>
+    <div id="initoverlay">
+      <div class="spinner"></div>
+      <div class="msg">Starting browser…</div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  "use strict";
+  const app = document.getElementById("app");
+  const canvas = document.getElementById("screen");
+  const ctx = canvas.getContext("2d");
+  const placeholder = document.getElementById("placeholder");
+  const tabbar = document.getElementById("tabbar");
+  const newtabBtn = document.getElementById("newtab");
+  const backBtn = document.getElementById("back");
+  const forwardBtn = document.getElementById("forward");
+  const reloadBtn = document.getElementById("reload");
+  const urlInput = document.getElementById("url");
+  const overlay = document.getElementById("overlay");
+  const crashOverlay = document.getElementById("crashoverlay");
+  const initOverlay = document.getElementById("initoverlay");
+  const overlayMsg = document.getElementById("overlaymsg");
+  const overlaySub = document.getElementById("overlaysub");
+  const takeControlBtn = document.getElementById("takecontrol");
+  const returnBar = document.getElementById("returnbar");
+  const returnBtn = document.getElementById("returnbtn");
+  const returnQueue = document.getElementById("returnqueue");
+
+  // Latest control state from the server's {type:"control"} broadcast. The
+  // human can only drive the page while owner === "human".
+  let controlOwner = "human";
+  let castWs = null;
+  let hasFrame = false;
+  let lastMove = 0;
+  let browserId = null;
+  let reconnectTimer = null;
+  let closedForGood = false;  // set on a 1008 close: the browser is gone, stop reconnecting.
+  let crashed = false;        // set on a {type:"crashed"} message: Chromium died; show a dead state.
+  // The explicit per-browser lifecycle ("init" | "running" | "crashed"), carried on
+  // every {type:"control"} broadcast and the register-time seed. The viewer renders
+  // DETERMINISTICALLY off this -- init shows the full "Starting browser…" overlay (chrome
+  // hidden), running shows the live page, crashed shows the crashed overlay -- rather than
+  // guessing state from whether a frame arrived. Starts "init": until the first control
+  // message we assume the browser is still coming up and show the starting overlay.
+  let lifecycle = "init";
+  // Latched when an agent hands off for a CAPTCHA/verification ({type:"handoff_request"}):
+  // the return bar shows what the human must do, until control goes back to an agent.
+  let handoffReason = null, handoffAgent = null;
+  let lastControlState = { owner: "human", human_pinned: false, waiting: [] };
+
+  function wsUrl(path) {
+    const u = new URL(path, document.baseURI);
+    u.protocol = (u.protocol === "https:") ? "wss:" : "ws:";
+    return u.toString();
+  }
+
+  // Idle-countdown + queue line under the "Agent has control" overlay. The server
+  // pushes idle_seconds / idle_release_seconds (and the waiting queue) on each
+  // control message + every keepalive tick; we interpolate by the second in between.
+  let idleTimer = null, idleSeconds = 0, releaseSeconds = null, waitingList = [];
+  function renderOverlaySub() {
+    const parts = [];
+    if (releaseSeconds !== null) parts.push("idle " + idleSeconds + "s · releases control in " + releaseSeconds + "s");
+    if (waitingList.length) parts.push(waitingList.length + " waiting: " + waitingList.join(", "));
+    overlaySub.textContent = parts.join("   ·   ");
+  }
+  function startIdleTimer() {
+    if (idleTimer) return;
+    idleTimer = setInterval(() => {
+      idleSeconds += 1;
+      if (releaseSeconds !== null) releaseSeconds = Math.max(0, releaseSeconds - 1);
+      renderOverlaySub();
+    }, 1000);
+  }
+  function stopIdleTimer() { if (idleTimer) { clearInterval(idleTimer); idleTimer = null; } }
+
+  // Drive the overlay / return-bar / input lock from the latest control message.
+  // owner == "agent":                      grey overlay + "Take control".
+  // owner == "human" && human_pinned:      no overlay, persistent "Return to agents" bar.
+  // owner == "human" && !human_pinned:     resting state, fully interactive, no chrome.
+  function setControl(state) {
+    lastControlState = state;
+    controlOwner = state.owner;
+    const agentDriving = state.owner === "agent";
+    const humanPinned = state.owner === "human" && !!state.human_pinned;
+    if (agentDriving) { handoffReason = null; handoffAgent = null; }  // resumed -> clear the ask
+
+    tabbar.style.opacity = agentDriving ? "0.5" : "1";
+    tabbar.style.pointerEvents = agentDriving ? "none" : "auto";
+    urlInput.disabled = agentDriving;
+    newtabBtn.disabled = agentDriving;
+    backBtn.disabled = agentDriving;
+    forwardBtn.disabled = agentDriving;
+    reloadBtn.disabled = agentDriving;
+
+    if (agentDriving) {
+      const who = state.owner_name || state.owner_agent_id || "an agent";
+      overlayMsg.textContent = "Agent has control: " + who;
+      overlay.classList.add("show");
+      takeControlBtn.disabled = false;
+      waitingList = Array.isArray(state.waiting) ? state.waiting : [];
+      if (typeof state.idle_release_seconds === "number") {
+        idleSeconds = state.idle_seconds || 0;
+        releaseSeconds = state.idle_release_seconds;
+        startIdleTimer();
+      } else {
+        releaseSeconds = null;
+        stopIdleTimer();
+      }
+      renderOverlaySub();
+    } else {
+      overlay.classList.remove("show");
+      stopIdleTimer();
+      releaseSeconds = null;
+      waitingList = [];
+    }
+    // Control-status bar: ALWAYS visible whenever the human can drive -- whether the
+    // browser is freshly opened and AI-untouched (resting) or the human explicitly took
+    // it (pinned). There is always a clear "You have control" indicator; only when an
+    // agent is queued for this browser does the "Return control to agents" button show
+    // (otherwise there's nobody to hand back to -- the next agent just takes it).
+    if (!agentDriving) {
+      const waiting = Array.isArray(state.waiting) ? state.waiting : [];
+      if (humanPinned && handoffReason) {
+        returnQueue.textContent = (handoffAgent || "An agent") + " needs your help: " + handoffReason +
+          ". Do it in this pane, then click “Return to agent” to hand control back.";
+        returnBtn.style.display = "";
+      } else {
+        returnQueue.textContent = waiting.length
+          ? "You have control. Agents waiting to use this browser: " + waiting.join(", ")
+          : "You have control.";
+        returnBtn.style.display = waiting.length ? "" : "none";
+      }
+    }
+    returnBar.classList.toggle("show", !agentDriving);
+    returnBar.classList.toggle("handoff", !agentDriving && !!handoffReason);
+  }
+
+  function showLoading(msg) {
+    hasFrame = false;
+    placeholder.textContent = msg || "Loading…";
+    placeholder.style.display = "block";
+  }
+
+  // Render DETERMINISTICALLY from the explicit lifecycle on each control message.
+  // This is the single source of truth for the init/running overlays:
+  //   init    -> full "Starting browser…" overlay covering the pane; chrome hidden;
+  //              canvas/frames suppressed (don't show a half-built browser).
+  //   running -> overlays down, chrome shown; the live canvas + frames are visible.
+  //   crashed -> handed off to showCrashed() (the terminal dead state).
+  // Driven off the lifecycle field, NOT off "did a frame arrive", so init->running is
+  // exact: the moment the daemon broadcasts running, the starting overlay comes down.
+  function setLifecycle(next) {
+    if (!next || next === lifecycle) return;
+    lifecycle = next;
+    if (next === "crashed") { showCrashed(); return; }
+    if (next === "init") {
+      initOverlay.classList.add("show");
+      app.classList.add("chrome-hidden");
+      placeholder.style.display = "none";  // the full overlay covers the pane instead
+    } else if (next === "running") {
+      initOverlay.classList.remove("show");
+      app.classList.remove("chrome-hidden");
+      placeholder.style.display = "none";
+    }
+  }
+
+  // The browser's Chromium died (OS/OOM kill, crash). Show a clear, terminal dead
+  // state -- distinct from the agent-control overlay and the "reconnecting" state --
+  // and lock the controls. This browser is gone; a new one opens as a separate tab.
+  function showCrashed() {
+    crashed = true;
+    lifecycle = "crashed";  // keep the explicit lifecycle consistent with the overlay
+    hasFrame = false;
+    stopIdleTimer();
+    overlay.classList.remove("show");
+    returnBar.classList.remove("show");
+    initOverlay.classList.remove("show");  // a crash from init replaces the starting overlay
+    app.classList.remove("chrome-hidden");  // the crashed overlay covers the pane on its own
+    // Full near-opaque cover over the whole pane (see #crashoverlay) -- the dead
+    // state must read at a glance, not as faint text on the black canvas. Hide the
+    // small placeholder so the two don't both show.
+    placeholder.style.display = "none";
+    crashOverlay.classList.add("show");
+    tabbar.style.opacity = "0.5";
+    tabbar.style.pointerEvents = "none";
+    [urlInput, newtabBtn, backBtn, forwardBtn, reloadBtn].forEach((el) => (el.disabled = true));
+  }
+
+  function renderTabs(tabs) {
+    [...tabbar.querySelectorAll(".tab")].forEach((t) => t.remove());
+    tabs.forEach((tab) => {
+      const el = document.createElement("div");
+      el.className = "tab" + (tab.active ? " active" : "");
+      el.title = tab.url;
+      const label = document.createElement("span");
+      label.textContent = tab.title || tab.url || "tab";
+      el.appendChild(label);
+      const close = document.createElement("span");
+      close.className = "close";
+      close.textContent = "x";
+      close.onclick = (e) => { e.stopPropagation(); sendCast({ type: "tab", action: "close", index: tab.index }); };
+      el.appendChild(close);
+      el.onclick = () => { showLoading(); sendCast({ type: "tab", action: "activate", index: tab.index }); };
+      tabbar.insertBefore(el, newtabBtn);
+      // Don't clobber the URL while the user is typing in it.
+      if (tab.active && document.activeElement !== urlInput) urlInput.value = tab.url || "";
+    });
+  }
+
+  function drawFrame(b64) {
+    const img = new Image();
+    img.onload = () => {
+      if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+      }
+      ctx.drawImage(img, 0, 0);
+      placeholder.style.display = "none";
+      hasFrame = true;
+    };
+    img.src = "data:image/jpeg;base64," + b64;
+  }
+
+  function sendCast(obj) { if (castWs && castWs.readyState === 1) castWs.send(JSON.stringify(obj)); }
+
+  // --- coordinate scaling: canvas CSS px -> frame device px ---
+  function scaled(e) {
+    const r = canvas.getBoundingClientRect();
+    const sx = canvas.width / r.width;
+    const sy = canvas.height / r.height;
+    return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+  }
+  function modifiers(e) {
+    return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  }
+  const BUTTONS = ["left", "middle", "right"];
+
+  function mouse(type, e) {
+    if (controlOwner === "agent" || !hasFrame) return;
+    if (type === "mouseMoved") {
+      const now = performance.now();
+      if (now - lastMove < 30) return;  // throttle moves so they don't starve the frame stream
+      lastMove = now;
+    }
+    const p = scaled(e);
+    const button = BUTTONS[e.button] || "left";
+    sendCast({ type: "mouse", event: {
+      type: type, x: p.x, y: p.y,
+      button: (type === "mouseMoved") ? "none" : button,
+      buttons: e.buttons, clickCount: (type === "mousePressed" || type === "mouseReleased") ? 1 : 0,
+      modifiers: modifiers(e),
+    }});
+  }
+  canvas.addEventListener("mousedown", (e) => { canvas.focus(); mouse("mousePressed", e); });
+  canvas.addEventListener("mouseup", (e) => mouse("mouseReleased", e));
+  canvas.addEventListener("mousemove", (e) => mouse("mouseMoved", e));
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  canvas.addEventListener("wheel", (e) => {
+    if (controlOwner === "agent" || !hasFrame) return;
+    e.preventDefault();
+    const p = scaled(e);
+    sendCast({ type: "mouse", event: { type: "mouseWheel", x: p.x, y: p.y, button: "none", deltaX: e.deltaX, deltaY: e.deltaY, modifiers: modifiers(e) } });
+  }, { passive: false });
+
+  function key(type, e) {
+    if (controlOwner === "agent" || !hasFrame) return;
+    e.preventDefault();
+    const isChar = type === "keyDown" && e.key.length === 1;
+    sendCast({ type: "key", event: {
+      type: type, key: e.key, code: e.code,
+      windowsVirtualKeyCode: e.keyCode, text: isChar ? e.key : undefined,
+      autoRepeat: e.repeat, modifiers: modifiers(e),
+    }});
+  }
+  // Listen on the canvas (focused by a click), so host/browser shortcuts still
+  // work when the browser pane isn't focused, and typing in the URL input is
+  // unaffected.
+  canvas.addEventListener("keydown", (e) => key("keyDown", e));
+  canvas.addEventListener("keyup", (e) => key("keyUp", e));
+
+  // --- controls ---
+  newtabBtn.onclick = () => { showLoading(); sendCast({ type: "tab", action: "new" }); };  // server opens the home page
+  // Page navigation (only active while the human has control; the server also
+  // gates on that). These drive the live page's own history, not the pane.
+  backBtn.onclick = () => sendCast({ type: "back" });
+  forwardBtn.onclick = () => sendCast({ type: "forward" });
+  reloadBtn.onclick = () => sendCast({ type: "reload" });
+  urlInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      let u = urlInput.value.trim();
+      if (u && !/^https?:\/\//.test(u)) u = "https://" + u;
+      if (u) { showLoading(); sendCast({ type: "navigate", url: u }); }
+    }
+  });
+  // Take control: optimistically hide the overlay so a laggy round-trip can't
+  // invite a double-click; the authoritative {type:"control"} broadcast reconciles.
+  takeControlBtn.onclick = () => {
+    takeControlBtn.disabled = true;
+    overlay.classList.remove("show");
+    sendCast({ type: "take_control" });
+  };
+  returnBtn.onclick = () => { returnBar.classList.remove("show"); sendCast({ type: "return_to_agents" }); };
+
+  // --- connect ---
+  function connect(id) {
+    browserId = id;
+    castWs = new WebSocket(wsUrl("browsers/" + id + "/cast"));
+    castWs.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+      if (m.type === "crashed") showCrashed();
+      else if (crashed) return;  // once crashed, ignore any late frames/control/tabs
+      else if (m.type === "launch_failed") {
+        // The serialized launch failed and the daemon removed the browser -- this name
+        // is gone for good. Treat it like the terminal 1008 "closed" state: stop
+        // retrying and tell the user to reopen.
+        closedForGood = true;
+        initOverlay.classList.remove("show");
+        showLoading("Browser failed to start — open a new one from the + menu.");
+      }
+      else if (m.type === "initializing") {
+        // GLOBAL "fleet still restoring" signal -- NOT this browser's own lifecycle.
+        // The per-browser {type:"control"} lifecycle is authoritative: once THIS
+        // browser has reached running, never downgrade it back to init (that would
+        // re-show the full "Starting browser…" overlay over a live page until reload).
+        // Only show the starting overlay when this browser hasn't reached running yet.
+        if (lifecycle !== "running") setLifecycle("init");
+      }
+      else if (m.type === "control") { setLifecycle(m.lifecycle); setControl(m); }  // explicit lifecycle drives the overlays
+      else if (m.type === "frame") { if (lifecycle === "running") drawFrame(m.data); }  // only paint once running
+      else if (m.type === "handoff_request") {
+        // An agent handed us the browser for a CAPTCHA/verification it can't do. Latch
+        // the ask and re-render the bar (the preceding control message left us pinned).
+        handoffReason = m.reason || "human verification needed";
+        handoffAgent = m.agent_name || "An agent";
+        setControl(lastControlState);
+      }
+      else if (m.type === "tabs") { if (lifecycle === "running") renderTabs(m.tabs); }  // tabs only meaningful once running
+      // m.type === "ping" -> ignore; it only keeps the proxy stream alive.
+    };
+    castWs.onclose = (ev) => {
+      hasFrame = false;
+      // 1008: the browser/session no longer exists (daemon restarted or closed, or the
+      // name is invalid). Terminal -- show a clear message and stop reconnecting.
+      if (ev.code === 1008) {
+        closedForGood = true;
+        overlay.classList.remove("show");
+        returnBar.classList.remove("show");
+        initOverlay.classList.remove("show");
+        showLoading("Browser closed — reopen it from the + menu.");
+        return;
+      }
+      // 1013 ("Try Again Later"): the name is valid but the browser hasn't registered
+      // YET -- the narrow pre-registration window before create()'s loop insert is
+      // visible. With register-init-immediately this is now rare/brief. Keep the full
+      // "Starting browser…" overlay up and retry with backoff; we connect (and get the
+      // init/running lifecycle) once the name registers. NOT terminal.
+      if (ev.code === 1013) {
+        setLifecycle("init");
+        initOverlay.classList.add("show");
+        app.classList.add("chrome-hidden");
+        scheduleReconnect();
+        return;
+      }
+      // An unexpected drop (daemon bounce, network blip) while we WERE running: keep the
+      // page as-is under a "Reconnecting…" note and retry. During init, keep the
+      // starting overlay rather than flashing a reconnect banner.
+      if (lifecycle === "init") {
+        initOverlay.classList.add("show");
+        app.classList.add("chrome-hidden");
+      } else {
+        placeholder.style.display = "block";
+        placeholder.textContent = "Reconnecting…";
+      }
+      scheduleReconnect();
+    };
+    castWs.onerror = () => { try { castWs.close(); } catch (_) {} };
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer || browserId === null || closedForGood) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connect(browserId);
+    }, 1000);
+  }
+
+  function boot() {
+    // Which browser to show comes from the URL (?session=<name>). Browsers are
+    // addressed by NAME (e.g. "alex-smith"), not a number, and there is no default
+    // browser -- the pane is always opened for a specific name. Pass the raw name
+    // straight through to connect(); the server 404s an unknown name (the viewer then
+    // shows the closed / retrying banner).
+    const params = new URLSearchParams(location.search);
+    const name = params.get("session");
+    if (!name) { showLoading("Open a browser from the + menu."); return; }
+    // Show the full "Starting browser…" overlay up front (lifecycle starts "init"):
+    // the optimistic pane opens before the browser is registered/running, so the user
+    // sees the starting state until the first control message resolves the lifecycle.
+    initOverlay.classList.add("show");
+    app.classList.add("chrome-hidden");
+    connect(name);
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

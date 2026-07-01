@@ -1,0 +1,5 @@
+Added a content-addressed skip guard for the global system-setup provisioning step (`scripts/setup_system.sh`), so a Lima create that boots a pre-baked image whose bake already ran that step on the identical workspace tree skips it instead of re-running its ~25-30s of (mostly network: apt-get update + binary downloads) idempotent work.
+
+- `scripts/_provision_guard.sh` fingerprints the workspace by its git tree hash and drops a marker under `/var/lib/minds/provision/` once a guarded step completes; a later run whose tree matches the marker skips that step. It never skips without a matching marker, so the Docker build path, a first run, and any content change all run normally.
+
+- Only `setup_system.sh` is guarded, because its effects are global (system packages, `/usr/local/bin` binaries, `/root/.local` tools) and survive into a create. `install_dependencies.sh` and `build_workspace.sh` are intentionally NOT guarded (documented inline): they write outputs into the workspace repo (`.venv`, `node_modules`, frontend `dist`) which the create re-materializes from a git-mirror push (tracked files only), so they must run on every create to regenerate those outputs.

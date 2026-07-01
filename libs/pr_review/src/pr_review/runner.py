@@ -274,7 +274,7 @@ def api_repo_file(owner: str, repo: str, sha: str) -> Response:
 
 
 def main() -> None:
-    run_simple("127.0.0.1", 8081, app, threaded=True, use_reloader=False, use_debugger=False)
+    run_simple("127.0.0.1", 8082, app, threaded=True, use_reloader=False, use_debugger=False)
 
 
 if __name__ == "__main__":

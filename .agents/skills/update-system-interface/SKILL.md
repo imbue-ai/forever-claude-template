@@ -70,12 +70,41 @@ the worker, background-poll the report) with these system-interface specifics:
   exception in `op-update.md`, there is **no `## Change origin` marker** -- the
   body is a plain change brief, not an absorb/verify incident.
 - **Task-file body:** `## What to do` (the actual UI change the user asked for),
-  `## Context` (which panel, desired behavior, constraints), and `## Success
-  criteria` (what "done" looks like, plus the standing line: *follow the
-  installed `harden-worker` sub-skill; it composes `harden-artifact.md`,
-  `op-update.md`, and `artifact-system-interface.md` for how to run, test,
-  verify, and what not to touch; report `done` only when its testing contract
-  and the review gates all pass*).
+  `## Context` (which panel, desired behavior, constraints), `## Real scenario`
+  when a real conversation motivates the change (the motivating agent id + what
+  looks wrong in plain words -- see the next bullet; omit it, or write "no real
+  scenario", for net-new work), and `## Success criteria` (what "done" looks
+  like, plus the standing line: *follow the installed `harden-worker` sub-skill;
+  it composes `harden-artifact.md`, `op-update.md`, and
+  `artifact-system-interface.md` for how to run, test, verify, and what not to
+  touch; report `done` only when its testing contract and the review gates all
+  pass*).
+- **Judge whether a real scenario motivates the change, and if so point the
+  worker straight at it -- don't transcribe it.** Most UI fixes come from how
+  something *actually* renders in a specific real conversation -- "this gap looks
+  wrong *here*", or "I don't like how permission requests render" said in a
+  conversation where a permission request happened (the discontent is with *that*
+  rendering, in *that* conversation). The worker is **not** cut off from that
+  conversation: the system interface discovers agents from the shared
+  `MNGR_HOST_DIR`, so an instance the worker boots in its own worktree renders
+  the very same real conversations the user is looking at. So do **not** measure
+  the DOM and write it into the brief -- that is a lossy game of telephone (you
+  look at the real thing, transcribe it, and the worker reconstructs it from your
+  prose, losing fidelity at each hop). Instead, just decide which case you are in
+  and say so:
+  - **A real conversation motivated it** (the usual case for a bug report): name
+    the motivating agent -- usually your own `$MNGR_AGENT_ID`, or whichever agent
+    the user was looking at when they complained -- in the `## Real scenario`
+    section, and describe in plain words what looks wrong about it. Tell the
+    worker to open *that* conversation in its own instance and look at it before
+    changing anything. The worker sees the real thing firsthand; it does not
+    reconstruct it from your description.
+  - **No real scenario** (e.g. a net-new control or layout with no precedent in
+    any existing conversation): say so in the brief and let the worker build a
+    representative fixture as usual. Don't manufacture a fake "real scenario."
+  A change can be partly both -- anchored in a real conversation but adding
+  something new -- in which case name the real anchor and call out the new part.
+  Use your judgment.
 - **Launch** with `--template subskill-worker` (installs the generic
   `harden-worker`) per `update-artifact` Step 3, then background-poll per
   `.agents/shared/references/lead-proxy.md`.
@@ -120,6 +149,24 @@ Open it as a tab and ask the user to explore:
 ```bash
 python3 scripts/layout.py open si-preview
 ```
+
+**Self-verify against the real scenario before you ask the user.** The preview's
+inner instance opens on its server's *primary* agent -- the worker's own (empty)
+agent, not the motivating conversation -- so the real case isn't on screen by
+default. If a real conversation motivated the change:
+
+- Open the **motivating** conversation in the preview's inner app with Playwright
+  (`--no-sandbox`): use the tab bar's add-tab (`+`) dropdown and pick the real
+  agent (its `.dockview-add-tab-dropdown-item`), or otherwise navigate to it.
+- Look at it and **confirm the change actually fixed the real case**, comparing
+  it against what looked wrong in the original complaint. A worker reporting
+  `done` with passing tests is not proof the real case is fixed -- you have the
+  real conversation right in front of you, so confirm it with your own eyes. If
+  it still looks wrong, the fix missed the real DOM: re-brief the worker rather
+  than merging.
+- Tell the user how to see the real case themselves (the preview opens on the
+  worker's empty agent; they switch via the `+` dropdown to the motivating
+  agent).
 
 Then confirm with the user via `send-user-message`: a binary keep/discard *and*
 room for free-form notes (what looks off, what they'd change). Wait for their
@@ -197,12 +244,22 @@ rejection where nothing was merged), tear it down:
 python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.py unpreview --slug update-<slug>
 ```
 
-`unpreview` kills both preview servers (the inner instance and the wrapper) and
-deregisters both their services (there is no worktree to remove -- the preview
-served the worker's folder in place). It is idempotent, so it is also the safe
-way to clean up after a `preview` that failed partway. Once the preview is down,
-the worker can be destroyed per `launch-task`. Close the `update-$SLUG` ticket
-the orchestration opened.
+way to clean up after a `preview` that failed partway.
+
+`unpreview` only handles the *service* side; it does **not** touch the workspace
+layout. The `si-preview` tab you opened earlier with `layout.py open` is a
+separate concern (a layout panel, not a service), so you must close it yourself
+-- otherwise the user is left with a stale tab pointing at a now-deregistered
+service:
+
+```bash
+python3 scripts/layout.py close si-preview
+```
+
+Do this whenever you tear the preview down -- after a successful reveal *or*
+after a rejection where nothing was merged. Once the preview is down and its tab
+is closed, the worker can be destroyed per `launch-task`. Close the
+`update-$SLUG` ticket the orchestration opened.
 
 Why this exists as a script and not a checklist: if the backend fails to start,
 the user loses their entire chat UI -- there is nowhere left to surface an error
