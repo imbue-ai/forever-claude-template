@@ -1,14 +1,14 @@
 ---
 name: find-past-transcripts
-description: "Use whenever the user wants to recall, recover, or look up a PAST, earlier, previous, or DELETED chat / conversation / session / agent on this workspace -- e.g. 'what did I say in that chat I deleted', 'what did the sub-agent that set up auth do', 'find the conversation where we worked on X', 'pull up that earlier session', 'don't you remember what we discussed?'. Do NOT answer that you can't access other conversations: agents that ran on this host keep their transcripts locally under /mngr/agents/ (still present) or /mngr/preserved/ (destroyed), and this skill reads them. (This is for reading PAST chats on THIS host; acting on OTHER live workspaces is the separate minds-api skill.)"
-compatibility: Covers agents that ran on this host (sub-agents you launched, prior sessions). Uses find/cat/jq.
+description: "Use whenever the user wants to find, read, or search through any chat message, transcript, or conversation content -- whether from an active agent, a past session, a deleted agent, a sub-agent, or a worker. e.g. 'what did I say to that agent', 'find the conversation where we worked on X', 'what did the sub-agent that set up auth do', 'pull up that earlier session', 'don't you remember what we discussed?'. Do NOT answer that you can't access conversations: every agent that has run on this host stores its transcript locally, and this skill reads them. NOTE: this skill only covers agents on THIS host -- not other services (ChatGPT, claude.ai, etc.) or other Minds workspaces."
+compatibility: Covers agents that ran on this host (active, stopped, or destroyed). Uses find/cat/jq/mngr.
 ---
 
-# Find past transcripts
+# Find transcripts
 
-**Do not tell the user you can't see earlier or deleted conversations before you
-check.** Every agent that ran on this host leaves its transcript behind locally,
-so past chats on this host are recoverable -- refusing without looking is wrong.
+**Do not tell the user you can't see a conversation before you check.** Every
+agent that has run on this host leaves its transcript behind locally -- past,
+active, or destroyed. Refusing without looking is wrong.
 
 An agent's conversation is stored under its state dir as
 `events/<source>/common_transcript/events.jsonl` (source is the agent type, e.g.
@@ -25,9 +25,22 @@ whether the agent still exists:
 (Use `$MNGR_HOST_DIR` in place of `/mngr` if this host's mngr root is elsewhere.)
 **Always check both** -- a past agent could be in either.
 
-**Scope:** this only covers agents that lived on **this** host. Agents from
-*other* workspaces are preserved on the user's machine, not here, and are not
-reachable from this skill.
+**Note on agent types:** transcripts here include the user-facing chat agent
+*and* any worker/sub-agents launched via `launch-task` or similar. Workers often
+have short, task-focused transcripts. `mngr list` shows agent names and labels to
+help you identify which is which.
+
+## What this skill does NOT cover
+
+- **Other services** (ChatGPT, claude.ai, other AI tools): their chats are not
+  stored on this host. To access them you'd need to pull in that data separately
+  via their own export features.
+
+- **Other Minds workspaces**: each workspace is a separate host with its own
+  `/mngr/`. Transcripts from agents in another workspace live there, not here.
+  To read them, SSH into that workspace via the Minds API: use the `minds-api`
+  skill to request the `minds-workspaces-ssh` latchkey permission, then run this
+  skill's read commands over SSH on that host.
 
 ## 1. See what's on this host
 
@@ -75,13 +88,9 @@ jq -r '
 
 ## Notes
 
-- **`launch-task` workers:** a worker is only moved to `/mngr/preserved/` when it
-  is destroyed (`mngr destroy`). Interactively-launched workers are often left
-  STOPPED instead, so look in `/mngr/agents/` first; `mngr transcript <name>`
-  reads a stopped worker fine.
-- `<source>` in the path is the agent type (`claude`); the `events/*/...` glob in
-  step 2 covers other types.
 - `system-services--*` and infra agents may have no common transcript -- look at
   the named agents.
 - A transcript only exists if that agent actually produced one; a brand-new agent
   with no turns won't have one.
+- `mngr transcript` does NOT work for destroyed agents (they're no longer in
+  mngr's live index); read the file directly instead.
