@@ -32,6 +32,7 @@ import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { openLoginModal } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
+import { uploadFilesToComposer } from "../models/ComposerAttachments";
 import { MessageInput } from "./MessageInput";
 import { buildAgentTerminalUrl, getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
 import { buildConversationRows, type RowDescriptor } from "./conversation-rows";
@@ -149,6 +150,65 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
   // meantime do not consume (and discard) the captured pre-prepend height.
   let scrollHeightBeforePrepend = 0;
   let prependCompensationPending = false;
+
+  // File drag-and-drop: dropping a file anywhere over the chat stages it as a
+  // composer attachment. ``dragDepth`` counts dragenter minus dragleave across
+  // nested children so the overlay does not flicker as the cursor moves between
+  // transcript rows; the overlay is shown while the depth is positive.
+  let dragDepth = 0;
+  let isFileDragActive = false;
+
+  function isFileDrag(event: DragEvent): boolean {
+    const types = event.dataTransfer?.types;
+    return types !== undefined && Array.from(types).includes("Files");
+  }
+
+  function handleDragEnter(event: DragEvent): void {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    dragDepth = dragDepth + 1;
+    if (!isFileDragActive) {
+      isFileDragActive = true;
+      m.redraw();
+    }
+  }
+
+  function handleDragOver(event: DragEvent): void {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    // Required so the element is a valid drop target (the browser otherwise
+    // rejects the drop).
+    event.preventDefault();
+  }
+
+  function handleDragLeave(event: DragEvent): void {
+    if (!isFileDrag(event) || dragDepth === 0) {
+      return;
+    }
+    dragDepth = dragDepth - 1;
+    if (dragDepth === 0 && isFileDragActive) {
+      isFileDragActive = false;
+      m.redraw();
+    }
+  }
+
+  function handleDrop(event: DragEvent, agentId: string): void {
+    dragDepth = 0;
+    const wasActive = isFileDragActive;
+    isFileDragActive = false;
+    if (!isFileDrag(event)) {
+      if (wasActive) {
+        m.redraw();
+      }
+      return;
+    }
+    event.preventDefault();
+    uploadFilesToComposer(agentId, event.dataTransfer?.files);
+    m.redraw();
+  }
 
   // Snapshot-load path: SSE only carries events emitted after subscription,
   // so an auth-error that happened before the user opened the panel (e.g.
@@ -700,89 +760,108 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
         (phantomTopHeight > 0 && scrollTop < loadedTop) ||
         (phantomBottomHeight > 0 && scrollTop + viewportPx > loadedBottom);
 
-      return m("div", { class: "chat-panel flex flex-col h-full relative" }, [
-        m(
-          "main",
-          {
-            class: "app-content flex-1 overflow-y-auto px-8 py-6",
-            onscroll: handleScrollEvent,
-            oncreate: (mainVnode: m.VnodeDOM) => {
-              scrollEl = mainVnode.dom as HTMLElement;
-              viewportHeight = scrollEl.clientHeight;
-              // Recompute the window when the panel itself resizes (dockview
-              // splits, window resize) since that changes the visible range. Skip
-              // while hidden: dockview collapses an inactive tab's element to 0,
-              // and updating viewportHeight from that 0 would break the windowing
-              // math. Restoring the position on show is driven by the visibility
-              // change forcing a redraw (see createMithrilRenderer), not here.
-              viewportResizeObserver = new ResizeObserver(() => {
-                if (scrollEl === null || !panelVisible) {
-                  return;
+      const acceptsFileDrops = !isProtoAgent(agentId) && !isConversationNotFound(agentId);
+
+      return m(
+        "div",
+        {
+          class: "chat-panel flex flex-col h-full relative",
+          ondragenter: acceptsFileDrops ? handleDragEnter : undefined,
+          ondragover: acceptsFileDrops ? handleDragOver : undefined,
+          ondragleave: acceptsFileDrops ? handleDragLeave : undefined,
+          ondrop: acceptsFileDrops ? (event: DragEvent) => handleDrop(event, agentId) : undefined,
+        },
+        [
+          isFileDragActive && acceptsFileDrops
+            ? m(
+                "div",
+                { class: "chat-drop-overlay absolute inset-0 flex items-center justify-center pointer-events-none" },
+                m("div", { class: "chat-drop-overlay-label" }, "Drop files to attach"),
+              )
+            : null,
+          m(
+            "main",
+            {
+              class: "app-content flex-1 overflow-y-auto px-8 py-6",
+              onscroll: handleScrollEvent,
+              oncreate: (mainVnode: m.VnodeDOM) => {
+                scrollEl = mainVnode.dom as HTMLElement;
+                viewportHeight = scrollEl.clientHeight;
+                // Recompute the window when the panel itself resizes (dockview
+                // splits, window resize) since that changes the visible range. Skip
+                // while hidden: dockview collapses an inactive tab's element to 0,
+                // and updating viewportHeight from that 0 would break the windowing
+                // math. Restoring the position on show is driven by the visibility
+                // change forcing a redraw (see createMithrilRenderer), not here.
+                viewportResizeObserver = new ResizeObserver(() => {
+                  if (scrollEl === null || !panelVisible) {
+                    return;
+                  }
+                  if (scrollEl.clientHeight !== viewportHeight) {
+                    viewportHeight = scrollEl.clientHeight;
+                    m.redraw();
+                  }
+                });
+                viewportResizeObserver.observe(scrollEl);
+                applyScrollPosition(scrollEl);
+                scheduleMeasure();
+                if (currentAgentId !== null) {
+                  maybePage(currentAgentId, scrollEl);
                 }
-                if (scrollEl.clientHeight !== viewportHeight) {
-                  viewportHeight = scrollEl.clientHeight;
-                  m.redraw();
-                }
-              });
-              viewportResizeObserver.observe(scrollEl);
-              applyScrollPosition(scrollEl);
-              scheduleMeasure();
-              if (currentAgentId !== null) {
-                maybePage(currentAgentId, scrollEl);
-              }
-            },
-            onupdate: (mainVnode: m.VnodeDOM) => {
-              scrollEl = mainVnode.dom as HTMLElement;
-              applyScrollPosition(scrollEl);
-              scheduleMeasure();
-              // Drive paging from the render loop, not only from scroll events, so
-              // the viewport sitting over a reserved region always triggers (or
-              // already has in flight) the fetch to cover it. Without this a drag
-              // that ends in a reserved region -- with the triggering scroll event
-              // suppressed by an in-flight fetch -- could strand the loading overlay
-              // with nothing actually loading.
-              if (currentAgentId !== null) {
-                maybePage(currentAgentId, scrollEl);
-              }
-            },
-          },
-          content,
-        ),
-        // While the viewport is over reserved space for not-yet-loaded history
-        // (e.g. the scrollbar was dragged into a region the loaded window doesn't
-        // cover yet), overlay a loading indicator centered in the viewport so the
-        // user never sees a blank area. pointer-events:none so it never blocks scroll.
-        inReservedRegion
-          ? m(
-              "div",
-              {
-                class:
-                  "message-list-window-loading absolute inset-0 flex items-center justify-center p-6 pointer-events-none",
               },
-              m("p", { class: "text-text-secondary" }, "Loading messages..."),
-            )
-          : null,
-        // Only show message input when not in proto-agent mode
-        isProtoAgent(agentId)
-          ? null
-          : m("footer", { class: "app-footer" }, [
-              m(EmptySlot, { name: "conversation-before-input" }),
-              isConversationNotFound(agentId)
-                ? null
-                : m(ActivityIndicator, { agentId, events: getEventsForAgent(agentId) }),
-              m(MessageInput, { agentId }),
-              m("div", { class: "chat-agent-terminal-link" }, [
-                m(
-                  "button",
-                  {
-                    type: "button",
-                    onclick: () => openAgentTerminalTab(agentId),
-                  },
-                  "Open agent terminal",
-                ),
+              onupdate: (mainVnode: m.VnodeDOM) => {
+                scrollEl = mainVnode.dom as HTMLElement;
+                applyScrollPosition(scrollEl);
+                scheduleMeasure();
+                // Drive paging from the render loop, not only from scroll events, so
+                // the viewport sitting over a reserved region always triggers (or
+                // already has in flight) the fetch to cover it. Without this a drag
+                // that ends in a reserved region -- with the triggering scroll event
+                // suppressed by an in-flight fetch -- could strand the loading overlay
+                // with nothing actually loading.
+                if (currentAgentId !== null) {
+                  maybePage(currentAgentId, scrollEl);
+                }
+              },
+            },
+            content,
+          ),
+          // While the viewport is over reserved space for not-yet-loaded history
+          // (e.g. the scrollbar was dragged into a region the loaded window doesn't
+          // cover yet), overlay a loading indicator centered in the viewport so the
+          // user never sees a blank area. pointer-events:none so it never blocks scroll.
+          inReservedRegion
+            ? m(
+                "div",
+                {
+                  class:
+                    "message-list-window-loading absolute inset-0 flex items-center justify-center p-6 pointer-events-none",
+                },
+                m("p", { class: "text-text-secondary" }, "Loading messages..."),
+              )
+            : null,
+          // Only show message input when not in proto-agent mode
+          isProtoAgent(agentId)
+            ? null
+            : m("footer", { class: "app-footer" }, [
+                m(EmptySlot, { name: "conversation-before-input" }),
+                isConversationNotFound(agentId)
+                  ? null
+                  : m(ActivityIndicator, { agentId, events: getEventsForAgent(agentId) }),
+                m(MessageInput, { agentId }),
+                m("div", { class: "chat-agent-terminal-link" }, [
+                  m(
+                    "button",
+                    {
+                      type: "button",
+                      onclick: () => openAgentTerminalTab(agentId),
+                    },
+                    "Open agent terminal",
+                  ),
+                ]),
               ]),
-            ]),
-      ]);
+        ],
+      );
     },
   };
 }

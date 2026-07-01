@@ -5,6 +5,7 @@
 
 import m from "mithril";
 import { MarkdownContent } from "../markdown";
+import { parseMessageAttachments } from "../models/attachments";
 import type {
   TranscriptEvent,
   AssistantMessageEvent,
@@ -12,6 +13,7 @@ import type {
   ToolResultEvent,
   ToolCall,
 } from "../models/Response";
+import { renderMessageAttachments } from "./attachment-views";
 import { openSubagentTab } from "./DockviewWorkspace";
 import type { PermissionResolution } from "./message-classification";
 import {
@@ -129,7 +131,10 @@ export function StableUserMessage(): m.Component<{ event: UserMessageEvent }> {
       const event = vnode.attrs.event;
       renderedEventId = event.event_id;
       const content = event.content || "";
-      const collapsible = isCollapsibleUserMessage(content);
+      // The trailing "See attachment here: <path>" block is delivered to the
+      // agent but stripped from the bubble; its paths render as previews below.
+      const { visibleText, attachments } = parseMessageAttachments(content);
+      const collapsible = isCollapsibleUserMessage(visibleText);
 
       if (collapsible) {
         return m("div", { class: "tool-call-block" }, [
@@ -147,24 +152,33 @@ export function StableUserMessage(): m.Component<{ event: UserMessageEvent }> {
             [m("span", { class: "tool-call-chevron" }, "\u25B8"), m("span", collapsible.label)],
           ),
           m("div", { class: "tool-call-details" }, [
-            m("div", { class: "tool-call-input" }, [m("pre", m("code", content))]),
+            m("div", { class: "tool-call-input" }, [m("pre", m("code", visibleText))]),
           ]),
         ]);
       }
 
-      return m("div", { class: "message-user-bubble" }, [
-        m("div", { class: "message-content whitespace-pre-wrap" }, content),
-      ]);
+      const bubbleChildren: m.Children[] = [];
+      if (visibleText.length > 0) {
+        bubbleChildren.push(m("div", { class: "message-content whitespace-pre-wrap" }, visibleText));
+      }
+      const attachmentsNode = renderMessageAttachments(attachments);
+      if (attachmentsNode !== null) {
+        bubbleChildren.push(attachmentsNode);
+      }
+      return m("div", { class: "message-user-bubble" }, bubbleChildren);
     },
   };
 }
 
 export function renderUserMessage(event: UserMessageEvent): m.Vnode | null {
   const content = event.content || "";
-  if (isHiddenUserMessage(content)) {
+  // Classify on the user-visible text so an appended attachment block never
+  // changes whether a message is hidden (e.g. "/welcome") or collapsible.
+  const { visibleText } = parseMessageAttachments(content);
+  if (isHiddenUserMessage(visibleText)) {
     return null;
   }
-  const collapsible = isCollapsibleUserMessage(content);
+  const collapsible = isCollapsibleUserMessage(visibleText);
   const messageClass = collapsible ? "message message-system-collapsed" : "message message-user";
   // id mirrors the assistant rows so the virtualized list can measure every
   // rendered row's height by querying ``.message-list > [id]``.
