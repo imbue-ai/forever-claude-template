@@ -13,7 +13,7 @@ through the system_interface.
 
 There is one canonical path (scaffold a new Flask lib) and one
 escape hatch (wrap a pre-existing third-party server). Modify/remove
-flows go through the `edit-services` skill.
+flows go through the `update-service` skill.
 
 ## This is the web specialization of the interactive-delivery shape
 
@@ -440,8 +440,8 @@ The `forward_port.py` call MUST come first in the command -- the port
 must be registered before the app starts listening, otherwise the
 app-watcher races with the backend coming up.
 
-For the full program schema and logging knobs, see the `edit-services`
-skill.
+For the full program schema and logging knobs, see the `update-service`
+skill's [service-processes reference](../update-service/references/service-processes.md).
 
 Verification and gotchas references apply identically to this path.
 

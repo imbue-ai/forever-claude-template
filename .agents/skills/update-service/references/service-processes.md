@@ -1,16 +1,17 @@
----
-name: edit-services
-description: Add, modify, or remove background services managed by supervisord. Use this when you want to run a long-lived (or one-shot) process alongside your main agent.
----
+# Service process mechanics (supervisord)
 
-# Managing services
+Reference for the `update-service` skill: the supervisord layer beneath a
+service -- its `[program:<name>]` definition, and how to add, remove,
+modify, or inspect a program. Reach for this when a change touches *how a
+service runs* (its port, command, logs) or adds/removes a program, rather
+than only its code.
 
 Background services are defined as `[program:<name>]` sections in
-`supervisord.conf` at the repo root. `uv run bootstrap` runs first-boot setup
-and then `exec`s `supervisord` in the foreground (in the `bootstrap` tmux
-window); supervisord starts and supervises every program. Unlike the old
-service manager, supervisord does **not** watch the config file -- you apply
-changes with `supervisorctl`.
+`supervisord.conf` at the repo root. `uv run bootstrap` runs first-boot
+setup and then `exec`s `supervisord` in the foreground (in the `bootstrap`
+tmux window); supervisord starts and supervises every program. supervisord
+does **not** watch the config file -- you apply changes with
+`supervisorctl`.
 
 ## Program format
 
@@ -78,6 +79,11 @@ that launched supervisord -- you do not need a per-program `environment=`.
 1. Delete the `[program:<name>]` section from `supervisord.conf`.
 2. `supervisorctl reread && supervisorctl update` -- supervisord stops and
    forgets the removed program.
+
+For a web service, also drop its `runtime/applications.toml` entry with
+`python3 scripts/forward_port.py --name <name> --remove`; for a scaffolded
+web lib, `build-web-service`'s `cleanup.md` reference covers the full
+teardown (reverting the lib and the root `pyproject.toml` edits).
 
 ## Modifying a service
 
