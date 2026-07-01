@@ -65,7 +65,7 @@ the worker, background-poll the report) with these system-interface specifics:
   `update-$SLUG` / `mngr/update-$SLUG`; the runtime dir is
   `runtime/harden/update-$SLUG/`.
 - **Task-file frontmatter:** `operation: update`, `artifact: system-interface`,
-  plus the standard `lead_agent` / `finish_report_path`
+  plus the standard `finish_report_path`
   (`runtime/harden/update-$SLUG/reports/report.md`). Per the system-interface
   exception in `op-update.md`, there is **no `## Change origin` marker** -- the
   body is a plain change brief, not an absorb/verify incident.
