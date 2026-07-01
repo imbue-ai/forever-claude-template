@@ -31,6 +31,7 @@ members = [
     "forever-claude-template",
     "host-backup",
     "mngr-cli-contract",
+    "oom-priority",
     "runtime-backup",
     "system-interface",
     "tk-command-parsing",
@@ -2416,6 +2417,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/9d/5a/652dac4b7affc2b37
 wheels = [
     { url = "https://files.pythonhosted.org/packages/47/4f/4a617ee93d8208d2bcf26b2d8b9402ceaed03e3853c754940e2290fed063/ollama-0.6.1-py3-none-any.whl", hash = "sha256:fc4c984b345735c5486faeee67d8a265214a31cbb828167782dc642ce0a2bf8c", size = 14354, upload-time = "2025-11-13T23:02:16.292Z" },
 ]
+
+[[package]]
+name = "oom-priority"
+version = "0.1.0"
+source = { editable = "libs/oom_priority" }
 
 [[package]]
 name = "openai"

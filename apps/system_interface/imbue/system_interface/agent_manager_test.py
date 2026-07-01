@@ -20,6 +20,7 @@ from imbue.mngr.api.discovery_events import HostDestroyedEvent
 from imbue.mngr.api.discovery_events import make_agent_discovery_event
 from imbue.mngr.api.discovery_events import make_full_discovery_snapshot_event
 from imbue.mngr.primitives import AgentId as MngrAgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName as MngrAgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
@@ -160,13 +161,24 @@ def test_get_agents_serialized(agent_manager: AgentManager) -> None:
             labels={"user_created": "true"},
             work_dir="/tmp/work",
         )
+        # A shed/stopped agent: its claude process is gone (e.g. OOM-killed), so
+        # mngr reports a non-running lifecycle state.
+        agent_manager._agents["a2"] = AgentStateItem(
+            id="a2",
+            name="agent-two",
+            state="DONE",
+            labels={},
+            work_dir="/tmp/work2",
+        )
 
     serialized = agent_manager.get_agents_serialized()
-    assert len(serialized) == 1
-    assert serialized[0]["id"] == "a1"
-    assert serialized[0]["name"] == "agent-one"
-    assert serialized[0]["labels"] == {"user_created": "true"}
-    assert serialized[0]["activity_state"] is None
+    by_id = {item["id"]: item for item in serialized}
+    assert by_id["a1"]["name"] == "agent-one"
+    assert by_id["a1"]["labels"] == {"user_created": "true"}
+    assert by_id["a1"]["activity_state"] is None
+    # The tab's liveness dot is driven off the lifecycle state in the WS payload.
+    assert by_id["a1"]["state"] == "RUNNING"
+    assert by_id["a2"]["state"] == "DONE"
 
 
 def test_get_applications_serialized(agent_manager: AgentManager) -> None:
@@ -305,6 +317,50 @@ def test_handle_agent_discovered(agent_manager: AgentManager, broadcaster: WebSo
     assert raw is not None
     msg = json.loads(raw)
     assert msg["type"] == "agents_updated"
+
+
+def test_full_snapshot_lifecycle_state_reaches_payload(agent_manager: AgentManager) -> None:
+    """The live lifecycle state carried on a discovery snapshot must reach the
+    serialized payload's ``state`` -- this is what lets the tab's liveness dot
+    reflect reality (e.g. drop from green to grey when an agent's claude process
+    dies in an OOM shed) rather than staying green forever."""
+    alive = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("alive"),
+        provider_name=ProviderInstanceName("local"),
+        # WAITING = process up but idle; still "running" for the liveness dot.
+        state=AgentLifecycleState.WAITING,
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    dead = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("dead"),
+        provider_name=ProviderInstanceName("local"),
+        state=AgentLifecycleState.DONE,
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    agent_manager._handle_full_snapshot(make_full_discovery_snapshot_event([alive, dead], []))
+
+    by_name = {a["name"]: a for a in agent_manager.get_agents_serialized()}
+    assert by_name["alive"]["state"] == "WAITING"
+    assert by_name["dead"]["state"] == "DONE"
+
+
+def test_discovered_agent_without_state_defaults_to_running(agent_manager: AgentManager) -> None:
+    """An incremental ``agent_discovered`` event (built from data.json, no live
+    probe) carries no state; the agent was just seen as present, so it defaults
+    to running until the next full snapshot can correct it."""
+    agent = DiscoveredAgent(
+        host_id=HostId(),
+        agent_id=MngrAgentId(),
+        agent_name=MngrAgentName("fresh"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data={"labels": {}, "work_dir": None},
+    )
+    agent_manager._handle_agent_discovered(make_agent_discovery_event(agent))
+    assert agent_manager.get_agents_serialized()[0]["state"] == "RUNNING"
 
 
 def _layout_ops(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1051,6 +1107,20 @@ def test_chat_create_argv_accepted_by_live_cli() -> None:
         primary_labels={"workspace": "ws", "project": "proj"},
     )
     assert_mngr_argv_valid(argv)
+
+
+def test_chat_create_tags_user_created() -> None:
+    """A user-created chat agent is tagged ``user_created=true`` so the OOM
+    agent-tagging hook places it in the protected user-agent band (shed only as a
+    last resort, after worker agents and every agent's subprocesses)."""
+    argv = _build_chat_create_command(
+        mngr_binary="mngr",
+        name="demo",
+        agent_id="agent-123",
+        primary_labels={"workspace": "ws"},
+    )
+    labels = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--label"]
+    assert "user_created=true" in labels
 
 
 def test_observe_argv_accepted_by_live_cli() -> None:

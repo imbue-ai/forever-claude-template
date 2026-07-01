@@ -260,6 +260,11 @@ def _build_create_chat_command(host_name: str, labels: dict[str, str]) -> list[s
         "chat",
         "--message",
         "/welcome",
+        # Tags the initial chat as a user-created agent so the OOM agent-tagging
+        # hook puts it in the protected user-agent band (matching the New Chat /
+        # New Agent paths in apps/system_interface).
+        "--label",
+        "user_created=true",
         "--no-connect",
         "--format",
         "json",

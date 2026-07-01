@@ -37,9 +37,9 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.system_interface.activity_state import ActivityState
-from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
+from imbue.system_interface.activity_state import is_lifecycle_process_running
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
@@ -121,6 +121,11 @@ def _build_chat_create_command(
         "none",
         "--template",
         "chat",
+        # Tags this as a user-created agent so the OOM agent-tagging hook puts it
+        # in the protected user-agent band (shed only as a last resort, after
+        # worker agents and every agent's subprocesses).
+        "--label",
+        "user_created=true",
         "--no-connect",
     ]
     # Inherit workspace and project labels from the primary agent.
@@ -166,6 +171,20 @@ def _build_agent_match(agent: DiscoveredAgent) -> AgentMatch:
         host_name=_UNUSED_HOST_NAME,
         provider_name=agent.provider_name,
     )
+
+
+def _discovered_agent_state(agent: DiscoveredAgent) -> str:
+    """Lifecycle-state string to record for an agent seen in the discovery stream.
+
+    A full discovery snapshot carries the live lifecycle state (mngr probes every
+    agent's process when it lists them), so we use it directly -- that is what
+    lets the process-liveness indicator flip to "stopped" when an agent's claude
+    process dies. It is ``None`` only for an agent surfaced by an incremental
+    ``agent_discovered`` event (built from data.json without a liveness probe);
+    such an agent was just seen as present, so we default it to RUNNING and let
+    the next full snapshot correct the guess.
+    """
+    return agent.state.value if agent.state is not None else "RUNNING"
 
 
 def _safe_log_put(log_queue: queue.Queue[str | None], message: str | None) -> None:
@@ -925,7 +944,7 @@ class AgentManager:
             new_agents[str(agent.agent_id)] = AgentStateItem(
                 id=str(agent.agent_id),
                 name=str(agent.agent_name),
-                state="RUNNING",
+                state=_discovered_agent_state(agent),
                 labels=dict(agent.labels),
                 work_dir=str(agent.work_dir) if agent.work_dir else None,
             )
@@ -967,7 +986,7 @@ class AgentManager:
         agent_state = AgentStateItem(
             id=agent_id,
             name=str(agent.agent_name),
-            state="RUNNING",
+            state=_discovered_agent_state(agent),
             labels=dict(agent.labels),
             work_dir=str(agent.work_dir) if agent.work_dir else None,
         )
@@ -1140,7 +1159,14 @@ class AgentManager:
             cached_last_event_type = self._last_event_type_by_agent.get(agent_id)
             tail_event_at = parse_iso_timestamp_to_epoch(self._last_event_timestamp_by_agent.get(agent_id))
             new_state = derive_activity_state(
-                is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
+                # "Running" here means the process is alive (RUNNING or idle
+                # WAITING), not the narrower "mid-turn" sense: an idle agent is
+                # WAITING, and gating on the narrow set would suppress
+                # "Thinking..." for up to one discovery-poll interval after a
+                # message is sent (the snapshot lags the transcript). The
+                # transcript signals below decide working-vs-idle among live
+                # agents; this flag only forces IDLE once the process is gone.
+                is_agent_running=is_lifecycle_process_running(agent_state.state),
                 has_pending_tool_use=has_pending_tool,
                 tail_event_type=cached_last_event_type,
                 tail_event_at=tail_event_at,

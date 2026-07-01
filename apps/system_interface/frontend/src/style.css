@@ -1441,6 +1441,48 @@ body {
   gap: 4px;
 }
 
+/* Per-agent liveness dot on chat tabs, reflecting the agent's mngr lifecycle
+   state. Distinct from the chat's activity indicator, which tracks work within
+   a running process. Grey (the default) is "dormant" -- the process is not
+   running (DONE/STOPPED/etc.) but revives on the next message. */
+.dv-tab-process-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--color-text-secondary);
+}
+
+/* Process up and working (RUNNING) -- green, matching the activity indicator. */
+.dv-tab-process-dot[data-liveness="active"] {
+  background: var(--color-accent);
+}
+
+/* Process up but idle, waiting on the user (WAITING) -- yellow. */
+.dv-tab-process-dot[data-liveness="waiting"] {
+  background: #ca8a04;
+}
+
+/* Hover tooltip for the liveness dot, appended to <body> and positioned (fixed)
+   just below the dot by attachHoverTooltip. It lives on the body rather than as
+   a ::after bubble because the tab strip clips overflow, and as a JS element
+   rather than a native title because dockview's draggable tabs suppress those. */
+.dv-tab-hover-tooltip {
+  position: fixed;
+  z-index: 1000;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--color-text-primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
 .dv-custom-tab-actions {
   display: flex;
   align-items: center;

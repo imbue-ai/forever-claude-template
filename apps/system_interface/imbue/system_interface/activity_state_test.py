@@ -6,6 +6,7 @@ from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
+from imbue.system_interface.activity_state import is_lifecycle_process_running
 from imbue.system_interface.activity_state import is_transcript_tail_stale
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
@@ -233,3 +234,32 @@ def test_derive_activity_state_fresh_tail_still_reports_working() -> None:
         process_started_at=200.0,
     )
     assert state == ActivityState.TOOL_RUNNING
+
+
+@pytest.mark.parametrize(
+    "lifecycle_state, expected_running",
+    [
+        pytest.param("RUNNING", True, id="running"),
+        pytest.param("RUNNING_UNKNOWN_AGENT_TYPE", True, id="running_unknown_type"),
+        # WAITING is the key case: the claude process is alive but idle, so it is
+        # "running" for the process indicator even though it is not "active".
+        pytest.param("WAITING", True, id="waiting_counts_as_running"),
+        pytest.param("STOPPED", False, id="stopped"),
+        pytest.param("DONE", False, id="done"),
+        pytest.param("REPLACED", False, id="replaced"),
+        pytest.param("UNKNOWN", False, id="unknown"),
+    ],
+)
+def test_is_lifecycle_process_running(lifecycle_state: str, expected_running: bool) -> None:
+    assert is_lifecycle_process_running(lifecycle_state) is expected_running
+
+
+def test_process_running_set_extends_activity_running_set_by_waiting_only() -> None:
+    """The process-liveness set is exactly the activity-running set plus WAITING.
+
+    This pins the one intended difference between the two indicators: an idle
+    (WAITING) agent reads as running for process liveness but not as active.
+    """
+    process_running = {s for s in ("RUNNING", "RUNNING_UNKNOWN_AGENT_TYPE", "WAITING") if is_lifecycle_process_running(s)}
+    assert process_running == set(RUNNING_LIFECYCLE_STATES) | {"WAITING"}
+    assert "WAITING" not in RUNNING_LIFECYCLE_STATES
