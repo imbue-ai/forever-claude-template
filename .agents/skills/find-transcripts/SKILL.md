@@ -1,6 +1,6 @@
 ---
-name: find-past-transcripts
-description: "Use whenever the user wants to find, read, or search through any chat message, transcript, or conversation content -- whether from an active agent, a past session, a deleted agent, a sub-agent, or a worker. e.g. 'what did I say to that agent', 'find the conversation where we worked on X', 'what did the sub-agent that set up auth do', 'pull up that earlier session', 'don't you remember what we discussed?'. Do NOT answer that you can't access conversations: every agent that has run on this host stores its transcript locally, and this skill reads them. NOTE: this skill only covers agents on THIS host -- not other services (ChatGPT, claude.ai, etc.) or other Minds workspaces."
+name: find-transcripts
+description: "Find, read, or search through any chat message, transcript, or conversation content from this host -- whether from an active agent, a past session, a deleted agent, a sub-agent, or a worker. Use this skill any time a user asks about chat histories or you otherwise want to access them. NOTE: this skill only covers agents on THIS host -- not other services (ChatGPT, claude.ai, etc.) or other Minds workspaces."
 compatibility: Covers agents that ran on this host (active, stopped, or destroyed). Uses find/cat/jq/mngr.
 ---
 
