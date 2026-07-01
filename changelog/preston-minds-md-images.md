@@ -1,1 +1,1 @@
-Documented in `CLAUDE.md` how an agent shows an image inline in chat: write the file (recommended `runtime/chat-images/`) and reference its absolute on-disk path with markdown image syntax, or embed a public image URL directly.
+Added a `show-image-in-chat` skill that tells an agent how to display an image inline in chat: write the file (recommended `runtime/chat-images/`) and reference its absolute on-disk path with markdown image syntax, or embed a public image URL directly.

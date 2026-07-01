@@ -281,35 +281,6 @@ unless context indicates otherwise, assume they mean their local
 disk, not the one in your sandbox. (Use the file-sharing skill to
 bridge the two if needed.)
 
-# Showing images in chat
-
-Your chat replies are rendered as markdown, so a standard markdown image renders
-inline -- no upload step. To show an image you generated (a chart, screenshot,
-diagram, etc.):
-
-1. Write the image file to disk. Use `runtime/chat-images/` (create it with
-   `mkdir -p runtime/chat-images` if needed) -- it is gitignored and backed up
-   with the rest of `runtime/`. Give each image a unique, descriptive filename
-   (e.g. `revenue-by-quarter-2026.png`); served image URLs are cached
-   immutably, so reusing a name would show the stale image.
-
-2. Reference it by its **absolute** on-disk path in markdown:
-
-   ```
-   ![Revenue by quarter](/mngr/code/runtime/chat-images/revenue-by-quarter-2026.png)
-   ```
-
-   The absolute path doubles as the URL -- the system interface serves the file
-   at that path so it renders inline. A relative path will not work; the path
-   must be absolute and start with `/`.
-
-Supported formats: `.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`, `.svg`.
-
-Alternatively, to show an image that already lives at a public URL, embed that
-URL directly: `![alt](https://example.com/image.png)`. Use a public URL for
-images you are referencing from the web, and the local absolute-path form for
-images you generated on this machine.
-
 # Work delegation
 
 You can delegate larger tasks to sub-agents using the `launch-task` skill.
