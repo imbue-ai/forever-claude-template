@@ -24,6 +24,8 @@ from imbue.system_interface.server import _DEFAULT_TAIL_COUNT
 from imbue.system_interface.server import _build_destroy_command
 from imbue.system_interface.server import _stream_filtered_events
 from imbue.system_interface.server import create_application
+from imbue.system_interface.testing import RecordingMngrMessenger
+from imbue.system_interface.testing import build_test_state
 from imbue.system_interface.testing import close_ws
 from imbue.system_interface.testing import open_ws
 from imbue.system_interface.testing import serve_app
@@ -39,7 +41,7 @@ def config() -> Config:
 
 @pytest.fixture
 def app(config: Config) -> Flask:
-    return create_application(config)
+    return create_application(build_test_state(config=config))
 
 
 @pytest.fixture
@@ -54,7 +56,7 @@ def test_index_returns_html_when_static_exists(client: FlaskClient, tmp_path: Pa
     (static_dir / "index.html").write_text("<html><body>test</body></html>")
 
     with patch("imbue.system_interface.server.STATIC_DIRECTORY", static_dir):
-        test_client = create_application().test_client()
+        test_client = create_application(build_test_state()).test_client()
         response = test_client.get("/")
         assert response.status_code == 200
         assert "test" in response.text
@@ -66,7 +68,7 @@ def test_index_returns_not_built_when_no_static(client: FlaskClient, tmp_path: P
     empty_dir.mkdir()
 
     with patch("imbue.system_interface.server.STATIC_DIRECTORY", empty_dir):
-        test_client = create_application().test_client()
+        test_client = create_application(build_test_state()).test_client()
         response = test_client.get("/")
         assert response.status_code == 200
         assert "npm run build" in response.text
@@ -257,7 +259,7 @@ def test_get_events_caps_initial_load_to_tail(client: FlaskClient, tmp_path: Pat
         assert len(zero_limit.get_json()["events"]) == _DEFAULT_TAIL_COUNT
 
 
-def test_send_message_success(client: FlaskClient) -> None:
+def test_send_message_success() -> None:
     """Sending a message to a known agent addresses it by id and succeeds."""
     agent_id = "agent-00000000000000000000000000000001"
     agent_info = AgentInfo(
@@ -267,19 +269,17 @@ def test_send_message_success(client: FlaskClient) -> None:
         agent_state_dir=Path("/tmp/test"),
         claude_config_dir=Path("/tmp/.claude"),
     )
-    with (
-        patch("imbue.system_interface.server._find_agent", return_value=agent_info),
-        patch("imbue.system_interface.agent_manager.send_message", return_value=True) as mock_send,
-    ):
+    messenger = RecordingMngrMessenger()
+    manager = AgentManager.build(WebSocketBroadcaster(), messenger=messenger)
+    client = create_application(build_test_state(agent_manager=manager)).test_client()
+    with patch("imbue.system_interface.server._find_agent", return_value=agent_info):
         response = client.post(f"/api/agents/{agent_id}/message", json={"message": "hello"})
 
     assert response.status_code == 200
     assert response.get_json()["status"] == "ok"
-    assert mock_send.call_count == 1
     # The endpoint routes through AgentManager.send_message_to_agent, which addresses
-    # the agent by id and supplies the live cache's known location as the 3rd arg.
-    assert mock_send.call_args.args[0] == agent_id
-    assert mock_send.call_args.args[1] == "hello"
+    # the agent by id (the live cache supplies the known location as the 3rd arg).
+    assert messenger.sent == [(agent_id, "hello")]
 
 
 def test_interrupt_agent_returns_404_for_unknown_agent(client: FlaskClient) -> None:
@@ -443,7 +443,7 @@ def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
     (static_dir / "index.html").write_text("<html><head></head><body>test</body></html>")
 
     with patch("imbue.system_interface.server.STATIC_DIRECTORY", static_dir):
-        test_client = create_application().test_client()
+        test_client = create_application(build_test_state()).test_client()
         response = test_client.get("/")
         assert response.status_code == 200
         assert "system-interface-hostname" in response.text
@@ -462,7 +462,7 @@ def test_create_chat_agent_without_work_dir(monkeypatch: pytest.MonkeyPatch) -> 
     """Creating a chat agent without a primary agent work dir returns 400."""
     monkeypatch.delenv("MNGR_AGENT_WORK_DIR", raising=False)
     monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
-    test_client = create_application().test_client()
+    test_client = create_application(build_test_state()).test_client()
     response = test_client.post(
         "/api/agents/create-chat",
         json={"name": "test-chat"},
@@ -697,7 +697,7 @@ def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest
         )
     manager._ensure_activity_tracking(agent_id)
 
-    app = create_application(agent_manager=manager)
+    app = create_application(build_test_state(agent_manager=manager))
     agent_info = AgentInfo(
         id=agent_id,
         name="seed-agent",

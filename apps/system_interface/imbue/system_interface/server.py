@@ -8,7 +8,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
 from flask import Flask
 from flask import Response
 from flask import request
@@ -32,7 +31,6 @@ from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.app_context import SystemInterfaceState
 from imbue.system_interface.app_context import attach_state
 from imbue.system_interface.app_context import get_state
-from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.layout_ops import LayoutMutex
@@ -57,7 +55,6 @@ from imbue.system_interface.models import SendMessageResponse
 from imbue.system_interface.models import StartAgentResponse
 from imbue.system_interface.plugins import get_plugin_manager
 from imbue.system_interface.service_dispatcher import register_service_routes
-from imbue.system_interface.welcome_resend import WelcomeResender
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 _LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -888,17 +885,16 @@ def _handle_unhandled_exception(exc: Exception) -> Response:
     return _json_response({"detail": f"Internal server error: {exc}"}, status_code=500)
 
 
-def create_application(
-    config: Config | None = None,
-    provider_names: tuple[str, ...] | None = None,
-    include_filters: tuple[str, ...] = (),
-    exclude_filters: tuple[str, ...] = (),
-    agent_manager: AgentManager | None = None,
-    claude_auth_service: ClaudeAuthService | None = None,
-    welcome_resender: WelcomeResender | None = None,
-    http_client: httpx.Client | None = None,
-    latchkey_http_client: httpx.Client | None = None,
-) -> Flask:
+def create_application(state: SystemInterfaceState) -> Flask:
+    """Assemble the Flask app around an already-built ``SystemInterfaceState``.
+
+    Pure assembler: it wires routes, plugins, and error handling onto the app
+    and attaches the injected ``state``. It constructs no collaborators and
+    starts nothing. The composition root (``main.build_production_state`` plus
+    ``main.main``) builds the real object graph and starts the agent manager;
+    tests build a ``SystemInterfaceState`` with fakes via
+    ``testing.build_test_state`` and pass it here.
+    """
     # static_folder=None disables Flask's default /static route; the system
     # interface serves its own static assets explicitly below.
     application = Flask(__name__, static_folder=None)
@@ -908,57 +904,10 @@ def create_application(
         # transparent (e.g. ttyd's ``tty``); see ``_ReflectClientSubprotocols``.
         "subprotocols": _ReflectClientSubprotocols(),
     }
-
-    # Event queues back the SSE streams; the broadcaster backs the WebSockets.
-    event_queues = AgentEventQueues()
-
-    # When a preconfigured agent manager is injected (tests), reuse it and its
-    # broadcaster, and do not own its lifecycle. Otherwise build a fresh manager
-    # and start the ``mngr observe`` pipeline.
-    if agent_manager is None:
-        broadcaster = WebSocketBroadcaster()
-        resolved_agent_manager = AgentManager.build(broadcaster)
-        resolved_agent_manager.start()
-        is_agent_manager_owned = True
-    else:
-        resolved_agent_manager = agent_manager
-        broadcaster = agent_manager.broadcaster
-        is_agent_manager_owned = False
-
-    # Single shared synchronous httpx client for the /service/<name>/ forwarding
-    # layer; a separate one for the latchkey catalog proxy. Tests can inject
-    # clients with mock transports.
-    resolved_http_client = http_client or httpx.Client(follow_redirects=False, timeout=30.0)
-    resolved_latchkey_http_client = latchkey_http_client or httpx.Client(timeout=30.0)
-
-    state = SystemInterfaceState(
-        config=config or Config(),
-        provider_names=provider_names,
-        include_filters=include_filters,
-        exclude_filters=exclude_filters,
-        agent_manager=resolved_agent_manager,
-        broadcaster=broadcaster,
-        event_queues=event_queues,
-        # Advisory in-process mutex serializing layout-mutating ops. The agent
-        # script never auto-retries on contention -- it surfaces the 409 to the
-        # agent along with the in-flight holder's metadata.
-        layout_mutex=LayoutMutex(),
-        # One long-lived ClaudeAuthService per app so the in-flight OAuth
-        # subprocess survives between the /start and /submit-code requests.
-        claude_auth_service=claude_auth_service or ClaudeAuthService(),
-        welcome_resender=welcome_resender
-        or WelcomeResender(
-            resolve_agent=resolved_agent_manager.get_agent_info_by_id,
-            send_message_fn=resolved_agent_manager.send_message_to_agent,
-        ),
-        http_client=resolved_http_client,
-        latchkey_http_client=resolved_latchkey_http_client,
-        is_agent_manager_owned=is_agent_manager_owned,
-    )
     attach_state(application, state)
 
     plugin_manager = get_plugin_manager()
-    plugin_manager.hook.register_event_broadcaster(broadcaster=event_queues.broadcast)
+    plugin_manager.hook.register_event_broadcaster(broadcaster=state.event_queues.broadcast)
 
     application.register_error_handler(Exception, _handle_unhandled_exception)
 

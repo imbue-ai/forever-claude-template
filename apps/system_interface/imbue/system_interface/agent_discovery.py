@@ -201,50 +201,42 @@ def _send_to(matches: Sequence[AgentMatch], message: str, mngr_ctx: MngrContext)
     )
 
 
-def _send_message_to_agent(
-    agent_id: AgentId,
-    message: str,
-    mngr_ctx: MngrContext,
-    known_locations: Sequence[AgentMatch],
-    *,
-    discover: DiscoverFn = _discover_locations,
-    send: SendFn = _send_to,
-) -> bool:
-    """Send to the agent with ``agent_id`` at ``known_locations``, else discovery.
+class MngrMessenger(FrozenModel):
+    """Sends a message to an agent, preferring a known location over discovery.
 
-    ``known_locations`` (the caller's already-resolved location, from the live
-    observe cache) is messaged directly -- no discovery. On a miss, or if that send
-    reaches no agent (the location just went stale: destroyed, recreated, or moved
-    hosts), it falls back to a full mngr discovery. The id is globally unique, so it
-    resolves to exactly the intended agent, never fanning out across same-named
-    agents on other hosts.
+    Holds the two side-effecting mngr collaborators (`discover`, `send`) as
+    injected fields so tests can substitute deterministic fakes without
+    monkeypatching. `AgentManager` owns one instance with the real defaults.
     """
-    if known_locations and send(known_locations, message, mngr_ctx).successful_agents:
-        return True
-    matches = discover(agent_id, mngr_ctx)
-    return bool(send(matches, message, mngr_ctx).successful_agents)
 
+    discover: DiscoverFn = _discover_locations
+    send: SendFn = _send_to
 
-def send_message(agent_id: AgentId, message: str, known_locations: Sequence[AgentMatch]) -> bool:
-    """Send a message to the agent with ``agent_id``. Returns True on success.
+    def send_to_agent(self, agent_id: AgentId, message: str, known_locations: Sequence[AgentMatch]) -> bool:
+        """Send to the agent with ``agent_id`` at ``known_locations``, else discovery.
 
-    ``known_locations`` is the agent's already-resolved location (the caller passes
-    its live observe cache) so a message skips discovery; an empty/stale value falls
-    back to discovery. STOPPED agents are auto-started (`is_start_desired=True`).
-    Callers go through ``AgentManager.send_message_to_agent``, which supplies the cache.
-    """
-    mngr_ctx, cg = _get_mngr_context()
-    try:
-        return _send_message_to_agent(agent_id, message, mngr_ctx, known_locations)
-    finally:
-        cg.__exit__(None, None, None)
+        ``known_locations`` (the caller's already-resolved location, from the live
+        observe cache) is messaged directly -- no discovery. On a miss, or if that send
+        reaches no agent (the location just went stale: destroyed, recreated, or moved
+        hosts), it falls back to a full mngr discovery. The id is globally unique, so it
+        resolves to exactly the intended agent, never fanning out across same-named
+        agents on other hosts. STOPPED agents are auto-started (`is_start_desired=True`).
+        """
+        mngr_ctx, cg = _get_mngr_context()
+        try:
+            if known_locations and self.send(known_locations, message, mngr_ctx).successful_agents:
+                return True
+            matches = self.discover(agent_id, mngr_ctx)
+            return bool(self.send(matches, message, mngr_ctx).successful_agents)
+        finally:
+            cg.__exit__(None, None, None)
 
 
 def start_agent(agent_name: str) -> None:
     """Ensure an agent is running, starting it if it is STOPPED.
 
     This deliberately goes through the *same* in-process mngr path that
-    ``send_message`` uses to auto-start a STOPPED agent: it loads the mngr
+    ``MngrMessenger.send_to_agent`` uses to auto-start a STOPPED agent: it loads the mngr
     context exactly the same way (so the same config, env, and cwd apply),
     then resolves the agent and runs mngr's own ``ensure_agent_started``
     (via ``resolve_to_started_host_and_running_agent(..., allow_auto_start=

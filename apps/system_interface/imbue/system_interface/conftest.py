@@ -27,45 +27,26 @@ def _isolate_system_interface_tests(
 ) -> Path | None:
     """Isolate server_test.py-style tests from the developer's live mngr state.
 
-    Two pieces of isolation, both needed for the common-case test that
-    spins up a real Flask app via ``create_application().test_client()``:
+    Overrides MNGR_HOST_DIR / MNGR_AGENT_ID / MNGR_AGENT_WORK_DIR /
+    MNGR_AGENT_STATE_DIR to point at a fresh tmp dir, so anything that reads
+    these (e.g. system_interface endpoints, ``AgentManager.build``) gets an
+    empty world rather than the developer's running agents.
 
-    1. Override MNGR_HOST_DIR / MNGR_AGENT_ID / MNGR_AGENT_WORK_DIR /
-       MNGR_AGENT_STATE_DIR to point at a fresh tmp dir. Anything that
-       reads these (e.g. system_interface endpoints) gets an empty world.
+    No ``observe`` pipeline runs in tests because nothing calls
+    ``AgentManager.start``: ``create_application`` takes an already-built state
+    and never starts the manager, and ``testing.build_test_state`` only builds
+    one. ``main`` is the sole caller of ``start``. So this fixture no longer
+    needs to neuter ``start``.
 
-    2. Replace ``AgentManager.start`` with a no-op. ``create_application``
-       calls ``AgentManager.build(...).start()`` for an owned manager,
-       which spawns ``mngr observe`` as a subprocess. The docker provider
-       inside observe reads ``docker ps`` directly (NOT honoring
-       MNGR_HOST_DIR), so if the developer has any running mngr-prefixed
-       container, observe walks it and invokes tmux during agent
-       discovery. The resource_guards plugin then fires "RESOURCE GUARD:
-       Test invoked 'tmux' without @pytest.mark.tmux" on tests that have
-       nothing to do with tmux. Tests that need a populated agent_manager
-       set ``_agents`` directly (see e.g.
-       ``test_destroy_rejects_is_primary_agent``), so skipping observe
-       doesn't lose any test functionality -- it just shortcuts the
-       discovery side-effect.
-
-    Skipped for ``agent_manager_test.py``: those tests deliberately
-    exercise ``AgentManager.start`` / ``_start_observe`` (long-lived
-    subprocess behavior, watchdog behavior, etc.) and need the real
-    observe semantics with the developer's actual MNGR_HOST_DIR. They
-    do their own per-test ``monkeypatch.setenv`` for the cases they care
-    about.
+    Skipped for ``agent_manager_test.py``: those tests deliberately exercise
+    ``AgentManager.start`` / ``_start_observe`` (long-lived subprocess behavior,
+    watchdog behavior, etc.) and need the real observe semantics with the
+    developer's actual MNGR_HOST_DIR. They do their own per-test
+    ``monkeypatch.setenv`` for the cases they care about.
 
     CI doesn't have MNGR_HOST_DIR set and doesn't have running docker
-    containers, so this only bites local developer runs; the fixture
-    closes that gap.
-
-    The PREVENT_MONKEYPATCH_SETATTR ratchet flags the ``setattr`` below.
-    The spirit of the ratchet is "prefer DI over patching"; the
-    alternative here would be to plumb an injectable
-    ``should_start_observe`` flag through every call site of
-    ``create_application``, which is a much larger blast radius for a
-    test-only workaround. We accept the patch and bump the ratchet
-    counter.
+    containers, so this only bites local developer runs; the fixture closes
+    that gap.
     """
     if "agent_manager_test.py" in request.node.nodeid:
         return None
@@ -74,11 +55,6 @@ def _isolate_system_interface_tests(
     monkeypatch.setenv("MNGR_AGENT_ID", "test-agent")
     monkeypatch.setenv("MNGR_AGENT_WORK_DIR", str(isolated / "work"))
     monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(isolated / "agents" / "test-agent"))
-
-    def _noop_start(_self: AgentManager) -> None:
-        return None
-
-    monkeypatch.setattr(AgentManager, "start", _noop_start)
     return isolated
 
 
