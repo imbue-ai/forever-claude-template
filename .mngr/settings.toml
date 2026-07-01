@@ -217,8 +217,13 @@ extra_window = ["bootstrap='uv run bootstrap'"]
 # and the copy-mode bindings copy-and-emit on drag-release. This relies on the
 # mngr_ttyd plugin serving an OSC 52-capable web client (the stock ttyd client
 # drops these escapes); see libs/mngr_ttyd in the mngr repo.
+#
+# The final `if-shell ... source-file` line pulls in scripts/terminal_tmux.conf
+# (committed to /mngr/code), which holds the in-memory-persistent-terminals
+# settings: a larger history-limit, window-size latest, and the tab-title
+# tracking hooks. It lives in its own file so those hook lines stay readable.
 extra_provision_command__extend = [
-    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' 'set -g set-clipboard on' 'set -as terminal-features ,*:clipboard' 'bind -T copy-mode MouseDragEnd1Pane send -X copy-pipe-and-cancel' 'bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-and-cancel' > "$HOME/.tmux.conf"''',
+    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' 'set -g set-clipboard on' 'set -as terminal-features ,*:clipboard' 'bind -T copy-mode MouseDragEnd1Pane send -X copy-pipe-and-cancel' 'bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-and-cancel' 'if-shell "test -f /mngr/code/scripts/terminal_tmux.conf" "source-file /mngr/code/scripts/terminal_tmux.conf"' > "$HOME/.tmux.conf"''',
 ]
 
 # Shared base template for the local docker provider. Used on its own for the

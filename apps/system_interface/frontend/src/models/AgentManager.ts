@@ -26,6 +26,19 @@ export interface ApplicationEntry {
   url: string;
 }
 
+// A live tmux terminal session (any tmux session whose name does NOT start
+// with the mngr agent prefix). tmux is the source of truth for terminals:
+// these are enumerated straight from ``tmux ls`` by the backend, so a session
+// created from the UI, an agent, or a raw ``tmux new-session`` all show up
+// identically here.
+export interface TerminalSessionInfo {
+  session_name: string;
+  // The immutable tmux ``#{session_id}`` (e.g. ``$3``); survives a rename, so
+  // it's the stable key for reflecting a renamed session back onto its tab.
+  session_id: string;
+  cwd: string;
+}
+
 export interface ProtoAgent {
   agent_id: string;
   name: string;
@@ -77,10 +90,27 @@ type WsEvent =
       op: LayoutOpName;
       args: Record<string, unknown>;
       requester_agent_id?: string;
+    }
+  | {
+      // A terminal tab's underlying tmux session changed: the client attached
+      // to a different session (``terminal_id`` set, tmux client-session-changed
+      // hook) or a session was renamed (``terminal_id`` null, tmux
+      // session-renamed hook -- match on ``session_id`` instead).
+      type: "terminal_session";
+      terminal_id: string | null;
+      session_id: string;
+      session_name: string;
     };
 
 export type LayoutOpListener = (event: LayoutOpEvent) => void;
 export type AgentsUpdatedListener = (agents: AgentState[]) => void;
+/**
+ * Notified when a terminal tab's underlying tmux session changes (attached to
+ * a different session, or the session was renamed). ``terminalId`` is the
+ * per-tab id we pass into the ttyd URL when set (client-session-changed);
+ * ``null`` for a rename, where the tab is matched on ``sessionId`` instead.
+ */
+export type TerminalSessionListener = (terminalId: string | null, sessionId: string, sessionName: string) => void;
 /**
  * Notified when a single agent's ``activity_state`` changes between two
  * consecutive ``agents_updated`` snapshots. ``previous`` is ``null`` when the
@@ -96,6 +126,7 @@ let applications: ApplicationEntry[] = [];
 let protoAgents: ProtoAgent[] = [];
 let layoutOpListeners: LayoutOpListener[] = [];
 let agentsUpdatedListeners: AgentsUpdatedListener[] = [];
+let terminalSessionListeners: TerminalSessionListener[] = [];
 let agentActivityListeners: AgentActivityListener[] = [];
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -210,6 +241,12 @@ function handleEvent(event: WsEvent): void {
         });
       }
       break;
+
+    case "terminal_session":
+      for (const listener of terminalSessionListeners) {
+        listener(event.terminal_id, event.session_id, event.session_name);
+      }
+      break;
   }
 }
 
@@ -277,4 +314,70 @@ export function addAgentActivityListener(listener: AgentActivityListener): void 
 
 export function removeAgentActivityListener(listener: AgentActivityListener): void {
   agentActivityListeners = agentActivityListeners.filter((l) => l !== listener);
+}
+
+export function addTerminalSessionListener(listener: TerminalSessionListener): void {
+  terminalSessionListeners.push(listener);
+}
+
+export function removeTerminalSessionListener(listener: TerminalSessionListener): void {
+  terminalSessionListeners = terminalSessionListeners.filter((l) => l !== listener);
+}
+
+/** Fetch the live terminal-session fleet (all non-agent tmux sessions) plus
+ *  the agent-session prefix. Defensive: returns an empty fleet with the
+ *  default prefix if the request fails, so the "+" menu still renders. */
+export async function fetchTerminalSessions(): Promise<{ terminals: TerminalSessionInfo[]; prefix: string }> {
+  try {
+    const response = await fetch(apiUrl("/api/terminals"));
+    if (!response.ok) return { terminals: [], prefix: "mngr-" };
+    const data = (await response.json()) as { terminals?: TerminalSessionInfo[]; prefix?: string };
+    return { terminals: data.terminals ?? [], prefix: data.prefix ?? "mngr-" };
+  } catch {
+    return { terminals: [], prefix: "mngr-" };
+  }
+}
+
+// The workspace terminal (ttyd) service is proxied at this same-origin path
+// (the service dispatcher adds no base-path prefix). Kept here rather than in
+// the view so the pure URL builder below is unit-testable without importing
+// dockview-core (which needs a DOM).
+const TERMINAL_SERVICE_URL_PATH = "/service/terminal/";
+
+/** Build the ttyd URL that attaches a tab to a named tmux session via the
+ *  ``session`` dispatch key. The ttyd dispatch reads the args positionally:
+ *  ``$1`` ("_"), ``$2`` ("session"), ``$3`` (session name), ``$4`` (per-tab id
+ *  used for live title tracking), ``$5`` (working dir for a fresh session;
+ *  empty falls back to $HOME), ``$6`` ("restore" on layout restore, else
+ *  empty). ``new-session -A`` attaches if the session exists and creates it
+ *  otherwise, which is what makes these terminals persistent in memory. */
+export function buildSessionTerminalUrl(
+  sessionName: string,
+  terminalId: string,
+  workdir: string,
+  isRestore: boolean,
+): string {
+  const params = new URLSearchParams();
+  params.append("arg", "_");
+  params.append("arg", "session");
+  params.append("arg", sessionName);
+  params.append("arg", terminalId);
+  params.append("arg", workdir);
+  params.append("arg", isRestore ? "restore" : "");
+  return `${TERMINAL_SERVICE_URL_PATH}?${params.toString()}`;
+}
+
+/** Ask the backend to allocate the next free ``terminal-N`` session name. The
+ *  backend inspects live tmux sessions and picks the lowest unused index under
+ *  a lock, so concurrent "New terminal" clicks get distinct names. */
+export async function allocateTerminalName(): Promise<string> {
+  const response = await fetch(apiUrl("/api/terminals/allocate"), { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`Failed to allocate terminal name (HTTP ${response.status})`);
+  }
+  const data = (await response.json()) as { session_name?: string };
+  if (!data.session_name) {
+    throw new Error("Terminal allocation returned no session_name");
+  }
+  return data.session_name;
 }
