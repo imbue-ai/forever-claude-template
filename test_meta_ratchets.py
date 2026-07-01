@@ -117,6 +117,11 @@ def _find_bash_scripts_without_strict_mode() -> list[str]:
             continue
         if ".venv" in script.parts:
             continue
+        # runtime/ holds gitignored state and repos cloned at runtime (e.g. by the
+        # pr-review service); those scripts are not this repo's code, and the dir
+        # doesn't exist in CI. Skip it so the scan only covers our own scripts.
+        if "runtime" in script.parts:
+            continue
         content = script.read_text(errors="replace")
         if re.search(r"^#!/.*bash", content) and "set -euo pipefail" not in content:
             violations.append(str(script.relative_to(_REPO_ROOT)))
