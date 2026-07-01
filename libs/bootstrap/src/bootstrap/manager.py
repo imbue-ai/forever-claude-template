@@ -218,27 +218,15 @@ def _read_main_agent_labels() -> dict[str, str]:
     return {str(k): str(v) for k, v in labels.items()}
 
 
-def _resolve_initial_chat_workspace_label(labels: dict[str, str]) -> str | None:
-    """Pick the workspace label value for the initial chat agent.
-
-    Prefers the services agent's existing `workspace` label; falls back to
-    `$MNGR_HOST_DIR/data.json`'s host_name so the chat agent still inherits
-    a sensible workspace tag when the main-agent data.json is malformed.
-    """
-    workspace = labels.get("workspace")
-    if workspace:
-        return workspace
-    return _read_host_name()
-
-
 def _build_create_chat_command(host_name: str, labels: dict[str, str]) -> list[str]:
     """Build the `mngr create` argv for the initial chat agent.
 
     Mirrors the New Agent button's create path (see
     apps/system_interface/.../agent_manager.py:create_chat_agent): the
-    `chat` template, no-connect, and inherited workspace/project labels
-    when present on the services agent. Adds `--message /welcome`, which
-    used to live on `create_templates.main`.
+    `chat` template, no-connect, and the inherited `project` label when
+    present on the services agent. Adds `--message /welcome`, which used to
+    live on `create_templates.main`. The chat agent belongs to its workspace
+    by virtue of sharing the host; it carries no `workspace` label.
     """
     cmd: list[str] = [
         "mngr",
@@ -264,9 +252,6 @@ def _build_create_chat_command(host_name: str, labels: dict[str, str]) -> list[s
         "--format",
         "json",
     ]
-    workspace = _resolve_initial_chat_workspace_label(labels)
-    if workspace:
-        cmd.extend(["--label", f"workspace={workspace}"])
     project = labels.get("project")
     if project:
         cmd.extend(["--label", f"project={project}"])
@@ -299,7 +284,9 @@ def _persist_initial_chat_agent_id(agent_id: str) -> None:
     """
     host_dir = os.environ.get(_HOST_DIR_ENV_VAR, "")
     if not host_dir:
-        logger.warning("{} unset; cannot persist initial chat agent id", _HOST_DIR_ENV_VAR)
+        logger.warning(
+            "{} unset; cannot persist initial chat agent id", _HOST_DIR_ENV_VAR
+        )
         return
     try:
         (Path(host_dir) / INITIAL_CHAT_AGENT_ID_FILENAME).write_text(agent_id)
@@ -326,7 +313,10 @@ def _create_initial_chat_agent(host_name: str, labels: dict[str, str]) -> bool:
     if agent_id is not None:
         _persist_initial_chat_agent_id(agent_id)
     else:
-        logger.error("Initial chat agent created but could not parse agent_id from output: {!r}", result.stdout.strip())
+        logger.error(
+            "Initial chat agent created but could not parse agent_id from output: {!r}",
+            result.stdout.strip(),
+        )
     logger.info("Initial chat agent created")
     return True
 
