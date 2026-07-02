@@ -1,0 +1,197 @@
+# Engineering Report: Chat UI Scroll and Text-Selection Bugs
+
+All paths are relative to `/Users/prestonseay/Desktop/mngr-scroll-and-text-bugs/.external_worktrees/forever-claude-template/apps/system_interface/frontend/src/`. All three diagnoses were adversarially verified; refuted claims are dropped below and disputed points are flagged. Where the verifiers disagreed with each other (bug 3, clamp-vs-follow interaction), I re-read `views/ChatPanel.ts`, `models/scrollFollow.ts`, and `markdown.ts` in full to resolve; resolutions are noted inline.
+
+---
+
+## 1. Verified root causes
+
+### Bug 1 — "When I select text and scroll, it disappears"
+
+**Trigger (shared by both mechanisms):** every scroll event causes a full Mithril redraw. The scroll container binds `onscroll: handleScrollEvent` as a hyperscript handler (`views/ChatPanel.ts:708`), and `handleScrollEvent` (`views/ChatPanel.ts:470-487`) never sets `e.redraw = false` (verified: no `e.redraw` assignment exists anywhere in src/). Mithril auto-redraws (rAF-coalesced to one render per frame). Every redraw re-invokes the windowed rows' `render()` closures (`views/ChatPanel.ts:656-658`); only the row *descriptors* are memoized (`views/ChatPanel.ts:611-619`), the vnode trees are rebuilt and re-diffed each frame.
+
+**Root cause 1a (confirmed, high confidence): unconditional `innerHTML` reset in `MarkdownContent.onupdate`.**
+`markdown.ts:83-89` — `onupdate` reassigns `element.innerHTML = renderMarkdown(vnode.attrs.content)` on every diff pass with no content-changed check. Assigning `innerHTML` destroys every text node in the subtree; the browser collapses any `Selection` whose anchor/focus node was inside.
+
+Causal chain: select prose → scroll one tick → global redraw → unguarded subtree re-diffed → `onupdate` rewrites `innerHTML` → selection collapses on the first scroll frame.
+
+Which text is vulnerable (differential evidence):
+- `StableUserMessage`/`StableAssistantMessage` block the subtree diff via `onbeforeupdate` when unchanged (`views/message-renderers.ts:125-127, 204-217`) — plain user/assistant rows survive small scrolls, confirming the unguarded paths are the cause.
+- `ProgressBlock` has **no** `onbeforeupdate` (`views/ProgressBlock.ts:95-195`), so its whole subtree re-diffs every frame: trailing wrap-up replies (`views/ProgressBlock.ts:189-191`), expanded step bodies (`views/ProgressBlock.ts:87-93, 142` → `views/message-renderers.ts:357`), and the assistant prose in permission items (`views/message-renderers.ts:392-403`, which deliberately bypasses the Stable wrapper; top-level permission rows via `views/conversation-rows.ts:102-111`). This applies to **every mounted turn**, not just the live one — any turn with steps renders as an unguarded ProgressBlock (`views/conversation-rows.ts:72-89`).
+- Verifier corrections incorporated: `PermissionCard`'s own body (`views/permission-card.ts:241-295`) is plain vnodes with no `innerHTML` — selection *inside the card body* survives scroll redraws; only the `MarkdownContent` prose of the permission item dies via this mechanism. Step-narration captions use `m.trust` (`views/ProgressBlock.ts:84`), which Mithril string-compares, so identical narration is not re-rendered.
+- CSS is ruled out: `user-select: none` exists only on UI chrome (`style.css:372, 412, 608, 869`; `user-select: all` at `style.css:2544`); nothing programmatically clears the selection (no `getSelection`/`removeAllRanges`/`selectionchange` code exists in src/).
+
+**Root cause 1b (confirmed, high confidence): virtualization unmounts rows holding selection endpoints.**
+`computeVisibleWindow` keeps only the rows overlapping `[scrollTop - 800, scrollTop + viewport + 800]` (`models/virtualWindow.ts:53-76`; `OVERSCAN_PX = 800` at `views/row-measurement.ts:16`). Only that slice is rendered between keyed spacers (`views/ChatPanel.ts:654-661`); Mithril's keyed diff removes the DOM of rows leaving the window. Removing a Selection endpoint's node from the document collapses the selection — this kills selections even in the Stable-guarded rows once either end scrolls ~one viewport + 800px away. `handleScrollEvent` writes the new `scrollTop` into the closure (`views/ChatPanel.ts:474-476`) consumed by the window math (`views/ChatPanel.ts:641-652`). `SubagentView` has the identical pipeline (`views/SubagentView.ts:162-175`). Verifier addendum: the past-the-end branch (`models/virtualWindow.ts:82-91` — render only the last row) is reachable whenever the adjusted scrollTop exceeds the loaded rows' height (e.g. viewport over the bottom reserved region), not just transiently; it unmounts everything else for a frame.
+
+**Root cause 1c (confirmed, medium confidence, contributor): scroll-triggered paging tears down visible rows.**
+- Backfill prepend fires when `scrollTop - phantomTopHeight < 600` (`views/ChatPanel.ts:389-397`, also driven from render at `views/ChatPanel.ts:730-732, 744-746`); `prepend()` bumps `renderVersion` (`models/Response.ts:257-273, 211-217`), rebuilding rows. If the oldest partial section was keyed `section-pre` (`views/turn-grouping.ts:458`; keyed variant at `:454`), loading its boundary user message re-keys it to `section-<event_id>`, so the still-visible progress row (`key = progress-<section.key>`, `views/conversation-rows.ts:74`) is destroyed and recreated.
+- An offset jump (`views/ChatPanel.ts:374-385`) calls `fetchWindowAtOffset` → `store.reset` (`models/Response.ts:320-328`); a >120-event jump shares no keys with the old window, so all mounted row DOM is destroyed.
+- Verifier addendum: the first post-prepend render computes the window with the **stale** scrollTop (compensation runs in `onupdate` at `views/ChatPanel.ts:453-461`, after the render already re-sliced), so a prepend can transiently unmount even key-stable visible rows for one frame.
+
+### Bug 2 — "When I select text and the agent generates more output, it disappears"
+
+**Redraw clock:** each accepted SSE transcript event (whole `TranscriptEvent` per message, `models/StreamingMessage.ts:70-83`) flows through `appendEvents` → `renderVersion` bump → `m.redraw()` (`models/Response.ts:440-447`), rAF-coalesced. Additional clocks: agent-state WebSocket messages (`models/AgentManager.ts:~132-139`) and the rAF measure pass (`views/row-measurement.ts:72-84`).
+
+**Root cause 2a (confirmed, high): same unconditional `innerHTML` reset as 1a**, now fired by every streamed event instead of every scroll frame. Additional leak in the guarded path: `StableAssistantMessage.onbeforeupdate` returns true when a tool_result resolves or subagent metadata merges in (`views/message-renderers.ts:204-217`; in-place merge at `models/Response.ts:418-438`), after which the message's *unchanged* prose is `innerHTML`-reset — so during tool-heavy streams, selection in guarded messages also dies on each tool result.
+
+**Root cause 2b (confirmed, high): live-turn regrouping re-keys / re-parents already-rendered prose.**
+- *hasSteps flip:* a section renders as individual event-keyed rows until its first step item exists, then collapses into ONE `progress-<section.key>` row (`views/conversation-rows.ts:72-89`; step parsing at `views/turn-grouping.ts:237-248, 468-477, 737-753`). At that instant every already-rendered row of the turn is unmounted by the keyed diff. Since the agent template mandates step creation each turn, this fires once per streaming turn.
+- *Trailing-reply reclassification:* `replyBoundary = max(last work entry, last step entry)` (`views/turn-grouping.ts:632-644`); every new work/step event moves prose out of `trailing_reply` into a differently-**parented** container (`div.pv-final` as direct child of `.progress-block` at `views/ProgressBlock.ts:189-191` vs `.pv-ungrouped` inside `div.pv-timeline-nodes` at `views/ProgressBlock.ts:163-167`). Mithril never matches vnodes across parents → DOM recreated → selection dies on essentially every subsequent tool call.
+- Verifier corrections incorporated: the ordinal-key renumbering of ungrouped runs (`views/turn-grouping.ts:683-687`) is real but rare mid-stream (new flush points append at the end); the permission-resolution split (`views/turn-grouping.ts:435-441`) does **not** tear down the old progress row (its key survives) — the churn there is the old section losing frontier status. Both are supporting color, not primary drivers. Also: the rows cache key includes `agentIsIdle` (`views/ChatPanel.ts:611`), so IDLE↔ACTIVE flips also re-run classification and churn the tail row.
+
+**Root cause 2c (confirmed, medium): follow-mode auto-scroll pushes the selection out of the window; eviction deletes its events.**
+While `!userScrolledUp` (the normal state watching a stream), `applyScrollPosition` pins `scrollTop = scrollHeight` on every redraw (`views/ChatPanel.ts:463-467`, invoked at `:728, :736`; same in `views/SubagentView.ts:114-120`). Making a selection fires no scroll event, so the pin continues; once ~a viewport + 800px of new content streams in below, the selected row leaves the window (1b) and unmounts. Separately, while following, once >1500 events are held, `evictOldEvents` drops the oldest ~500 in one commit (`views/ChatPanel.ts:579-581`, `models/Response.ts:301-317`) — a selection anywhere in that history is destroyed. Caveat (verified): for MarkdownContent-hosted prose, 2a kills the selection first; 2c is independently load-bearing for text 2a doesn't touch (user bubbles, tool output, guarded rows, permission-card bodies).
+
+### Bug 3 — "Scrolling freaks out (up and down) when scrolling up or at the very bottom"
+
+**Root cause 3a (confirmed, high — with the anchoring sub-claim downgraded): the prepend compensation is defective, and the backfill loop is self-sustaining.**
+Statically provable defects:
+- *Stale baseline:* `scrollHeightBeforePrepend = element.scrollHeight` is captured at fetch **start** (`views/ChatPanel.ts:391`), but the delta is applied after the fetch resolves (`views/ChatPanel.ts:453-461`). Any scrollHeight change during the in-flight request — streaming tail appends (`models/Response.ts:440-447`), measure-pass corrections (`views/row-measurement.ts:72-84`) — is misattributed to the prepend and folded into scrollTop.
+- *Hook-ordering undercount (verifier-discovered, deterministic):* Mithril runs the scroll container's `onupdate` (ancestor) **before** freshly-prepended rows' `MarkdownContent.oncreate` (descendants) inject their prose via innerHTML (`markdown.ts:78-82`), so the delta read at `views/ChatPanel.ts:455` systematically undercounts the prepended content; the prose lands after compensation and the measure pass shifts spacers again with no compensation.
+- *Clamp teleport + self-retrigger:* `Math.max(phantomTopHeight, ...)` (`views/ChatPanel.ts:457`) can park the viewport exactly at the loaded-window top — distance 0 from the 600px backfill band (`views/ChatPanel.ts:71, 389`) — and `maybePage` is also called from render `onupdate` (`views/ChatPanel.ts:744-746`), so the next page fires with **no user input at all**. The loop is self-sustaining, not merely wheel-driven. The comment at `views/ChatPanel.ts:443-452` documents this exact symptom being fought before.
+- *Native scroll anchoring conflict — plausible/intermittent, NOT high confidence:* no `overflow-anchor` rule exists anywhere in the stylesheet (verified by grep; scroll containers are `main.app-content`, `views/ChatPanel.ts:703-708`, `views/SubagentView.ts:239-243`, styled at `style.css:90-92`), so Chromium's anchoring is a third scrollTop writer. But MarkdownContent's per-frame innerHTML resets destroy candidate anchor nodes, and the anchor can be the top spacer (contributing nothing), so its participation is nondeterministic. The statically provable defects above already suffice for the yank loop. Disabling anchoring is still correct once the app owns compensation.
+
+**Root cause 3b (confirmed, high): estimate-vs-measured height errors shift content with no compensation, with two amplifiers.**
+- Window math uses measured-or-estimate heights (`views/ChatPanel.ts:622`; estimates 90/240 at `views/row-measurement.ts:20-21`, 360 for a whole multi-thousand-px progress turn at `views/conversation-rows.ts:35`). No programmatic writer compensates estimate→measured shifts (`views/ChatPanel.ts:412-468` covers only the jump pin, prepend delta, and bottom pin).
+- *Permission-row heights are NEVER used:* row key is `perm-<event_id>` (`views/conversation-rows.ts:108`) but the rendered DOM id is the bare `event_id` (`views/message-renderers.ts:398-400`); `measureRows` caches by DOM id (`views/row-measurement.ts:57-64`) while `getHeight` looks up the row key (`views/ChatPanel.ts:622`) — permanently costed at the 240px estimate, re-shifting content on every window-edge crossing. (Scope: only top-level permission rows in no-step sections; inside ProgressBlocks they're measured under the progress row's id.)
+- *Amplifier 1, fraction→index jump:* `maybePage` maps `scrollTop/scrollHeight` to an event index assuming `scrollHeight ≈ total*160` (`views/ChatPanel.ts:370-385`); loaded-window height divergence can push `targetIndex` across the 120-event threshold and fire `fetchWindowAtOffset` → `store.reset` (`models/Response.ts:320-328`), destroying and recreating every row, then re-pinning (`views/ChatPanel.ts:428-434`). Verifier calibration: re-firing needs tens of thousands of px of divergence — an occasional violent punctuation, not the steady oscillation driver.
+- *Amplifier 2, past-the-end collapse:* height undershoot (e.g. hasSteps flip replacing a huge turn with a 360px-estimated row, or eviction re-keying the oldest section to `section-pre` at `views/turn-grouping.ts:458`, orphaning — or on subsequent evictions, staling — its cached height) can make a bottom-pinned scrollTop exceed the computed total; `models/virtualWindow.ts:82-91` then renders ONLY the last row for a frame — scrollHeight collapses, the browser clamps, everything remounts next frame: a one-frame bounce at the bottom.
+- *Stale closure scrollTop:* the window math consumes closure `scrollTop` (`views/ChatPanel.ts:646`), updated only by scroll events (`:474-476`) or programmatic writes; browser-initiated adjustments dispatch their scroll event asynchronously, so a redraw in between mounts the wrong window for a frame.
+
+**Root cause 3c (partially REFUTED, corrected): the at-bottom jitter is the wheel-swallow race, NOT clamp-driven follow disengagement.**
+The diagnosis claimed browser clamps (eviction, regrouping) spuriously disengage follow via `didScrollUp`. Re-reading the code confirms verifier 1's refutation: every such shrink happens inside a Mithril redraw, and the same redraw's `applyScrollPosition` re-pins to bottom AND syncs `previousScrollTop` (`views/ChatPanel.ts:463-467`) synchronously, before the clamp's async scroll event dispatches; the handler then reads the already-re-pinned live `scrollTop` equal to `previousScrollTop` → `didScrollUp = false` → follow stays engaged. **Drop the clamp-disengage claim for follow mode.**
+
+What IS confirmed at the bottom:
+- *Wheel-swallow race:* `applyScrollPosition` runs on every redraw and overwrites `previousScrollTop` with the pinned value (`views/ChatPanel.ts:466`). Scroll events dispatch asynchronously after the compositor moves scrollTop, so a streaming redraw landing between a user's wheel-up and its scroll event yanks scrollTop back to bottom and erases the movement before `didScrollUp` (`models/scrollFollow.ts:25-30`) can observe it. Under rapid streaming, wheel-up input is intermittently swallowed then suddenly takes effect — "fighting the scrollbar" / bouncing at the bottom. Identical in `views/SubagentView.ts:114-120, 257-261`.
+- *Hook-ordering under-pin:* the bottom pin runs before descendant markdown `oncreate` injects new prose, leaving the viewport transiently above the bottom each time a prose row mounts, until the measure-pass redraw re-pins.
+- *Scrolled-up hazard (relevant to fix design):* while `userScrolledUp = true`, no pin masks clamps; a clamp-to-max with `isNearBottom = true` makes `nextUserScrolledUp` return **false** (`models/scrollFollow.ts:29`) — content collapsing below a scrolled-up reader can spuriously RE-engage follow and yank them to the tail.
+
+---
+
+## 2. Shared machinery and fix interactions
+
+- **One redraw pipeline drives everything.** Scroll events, SSE events, agent-state WS, and the measure pass all trigger global redraws that re-diff every mounted row. The unguarded `MarkdownContent.onupdate` (`markdown.ts:83-89`) is a single defect implicated in bug 1 (selection dies on scroll), bug 2 (selection dies on stream), and bug 3 (destroys native scroll-anchor candidates and burns a markdown parse + innerHTML per block per frame). Fixing it is the highest-leverage single change.
+- **`computeVisibleWindow` + keyed slice** (`models/virtualWindow.ts`, `views/ChatPanel.ts:654-661`, `views/SubagentView.ts:162-175`) is implicated in bug 1 (unmount kills selection), bug 2 (follow-mode advance pushes selection out), and bug 3 (past-the-end collapse). The permission-row key/id mismatch feeds both bug 3 (wrong heights) and the selection-pinning fix's key↔index map (bug 1).
+- **`applyScrollPosition`** is implicated in bug 2 (follow pin advances past the selection) and bug 3 (wheel-swallow, defective prepend delta). The fixes compose cleanly: pausing follow while a selection is active (bug 2) *reduces* the pin frequency the bug-3 wheel-swallow fix must handle; anchor-based compensation (bug 3) only runs while `userScrolledUp` and writes no scrollTop while following, so it cannot fight the follow pin or the selection-pause.
+- **Conflicts to avoid:** (i) the bug-3 anchor compensation, if written as an *absolute* per-redraw write, would recreate the wheel-swallow race at scrolled-up positions — it must be relative-delta (see step 3). (ii) The "honor pending user wheel-up" fix, if unguarded, reads shrink-clamps as user intent and reintroduces spurious disengagement — it needs an at-max guard (step 4). (iii) `overflow-anchor: none` must not ship before app-side compensation exists in **both** ChatPanel and SubagentView, or scrolled-up reading in subagent views gets strictly worse.
+- **Paging/regrouping teardowns** (store.reset, section-pre re-key, hasSteps flip) are a shared residual: selection pinning cannot survive them (all keys change), and they also cause bug-3 discontinuities. They are accepted residuals for the core plan, with a lower-confidence follow-up (step 9).
+
+---
+
+## 3. Ordered fix plan
+
+Steps 1–7 are the core plan; 8 is cheap hardening; 9 is a lower-confidence follow-up. Each step is independently landable in this order.
+
+### Step 1 — Memoize `MarkdownContent` (fixes 1a, 2a; helps 3)
+**File:** `markdown.ts` (component at lines 77-93).
+Add an `onbeforeupdate` guard to the existing POJO component:
+```ts
+onbeforeupdate(vnode, old) {
+  return vnode.attrs.content !== old.attrs.content;
+},
+```
+Returning false skips the subtree diff AND `onupdate`; Mithril carries the attrs forward, and since we only skip on equality the comparison chains correctly across skipped frames. This matches the codebase idiom (`views/message-renderers.ts:125-127, 204-217`, `views/EmptySlot.ts:27-29`). Keep the existing save/restore-expanded-state logic for the changed-content path. Safe because stored event text is immutable (`models/Response.ts:226-249, 418-438` — append dedups by event_id; only subagent_metadata merges), `renderMarkdown` is deterministic (`markdown.ts:5-15`), and the view returns a childless div so Mithril never diffs the innerHTML children. Both call sites (`views/message-renderers.ts:357`, `views/ProgressBlock.ts:190`) and the test mocks (`views/message-renderers.test.ts:9`, `views/PendingMessageView.test.ts:15`) need no changes. The unkeyed positional-reuse case (trailing replies) is handled correctly: different content → re-render.
+
+### Step 2 — Fix the permission-row key/DOM-id mismatch (fixes a 3b contributor; prerequisite for step 5)
+**Files:** `views/message-renderers.ts` (renderPermissionItem, lines 392-403), `views/conversation-rows.ts` (lines 107-110).
+Add an optional `domId` parameter to `renderPermissionItem` defaulting to `event.event_id`; from `views/conversation-rows.ts:110` pass the row key `perm-<event_id>` so the rendered root's `id` equals the row key. The ProgressBlock-internal call (`views/ProgressBlock.ts:177`) is unchanged (not a measured top-level row; `measureRows` only reads direct `.message-list` children, `views/row-measurement.ts:56-62`). No other code reads that DOM id. This makes permission rows' measured heights actually reach `getHeight` and restores the `id === key` invariant for every top-level row type (others already hold: `views/message-renderers.ts:171, 237-244`; `views/ProgressBlock.ts:184` via `views/conversation-rows.ts:79-81`).
+
+### Step 3 — Single scrollTop owner: `overflow-anchor: none` + row-key-anchored compensation (fixes 3a)
+**Files:** `style.css` (rule at 90-92), `views/ChatPanel.ts`, `views/SubagentView.ts`. Ship all parts of this step together.
+1. Add `overflow-anchor: none;` to `.app-content` — covers both scrollers.
+2. Delete `scrollHeightBeforePrepend`/`prependCompensationPending` and the delta block (`views/ChatPanel.ts:150-151, 391, 394, 453-461`). Replace with row-key anchoring:
+   - When building the windowed list in `renderMessages` (`views/ChatPanel.ts:654-661`), stash each rendered row's computed top (`phantomTopHeight + topPad + accumulated getHeight`). On each scroll event, record `scrollAnchor = { key, anchorTopAtCapture, offsetPx }` for the first rendered row whose bottom edge is at/below scrollTop.
+   - In `applyScrollPosition`, only while `userScrolledUp` and an anchor exists: recompute the anchor row's current top and apply a **relative** correction — `element.scrollTop += (newAnchorTop - anchorTopAtCapture)` only when nonzero — then refresh `anchorTopAtCapture` and sync `scrollTop`/`previousScrollTop` in lockstep. Relative deltas are mandatory (verifier-required amendment): an absolute re-set per redraw would erase in-flight user wheel movement on every streaming redraw, recreating the wheel-swallow race at scrolled-up positions.
+   - First post-prepend frame accuracy: prefer reading the anchor row's live `offsetTop` relative to the list over summing estimates (the just-prepended rows above it are unmeasured, and descendant markdown `oncreate` runs after this hook); at minimum, rely on the rAF measure-pass redraw (`views/row-measurement.ts:77-83`) to converge on the second frame.
+   - Anchor-key invalidation (verifier-required): if the anchor key is absent from the current rows (hasSteps flip, `section-after-<id>` split, reset), re-capture and skip the write that frame — never treat "not found" as position 0. Reset the anchor in `ensureAgentLoaded` (`views/ChatPanel.ts:328-337`) and after the post-jump pin (`views/ChatPanel.ts:428-434`, which is kept as-is).
+3. Mirror the anchoring into `views/SubagentView.ts` (simpler: no phantom regions). Do NOT land `overflow-anchor: none` without this mirror.
+
+### Step 4 — Follow-state hardening at the bottom (fixes 3c)
+**Files:** `views/ChatPanel.ts`, `views/SubagentView.ts`, `models/scrollFollow.ts` + `models/scrollFollow.test.ts`.
+1. *Honor pending user wheel-up (highest-value change for the at-bottom symptom), with the mandatory at-max guard:* in the follow branch of `applyScrollPosition` (`views/ChatPanel.ts:463-467`), before pinning:
+   ```ts
+   const maxScroll = element.scrollHeight - element.clientHeight;
+   if (element.scrollTop < Math.min(scrollTop, maxScroll) - 1) {
+     userScrolledUp = true;  // unprocessed user upward movement; honor it, skip the pin
+     scrollTop = element.scrollTop;
+     previousScrollTop = element.scrollTop;
+     return;
+   }
+   ```
+   Without the `Math.min(..., maxScroll)` term this fix would read the browser's clamp-after-shrink (eviction at `views/ChatPanel.ts:579-581`, hasSteps flip) as user intent and spuriously disengage follow on every eviction — the exact failure the current lockstep sync prevents (both verifiers flagged this). Clamped-to-max means still-at-bottom: re-pin and keep following.
+2. *Prevent spurious follow RE-engagement while scrolled up:* extend `FollowStateInput` (`models/scrollFollow.ts:12-18`) with an `isClamp` bit (event with `scrollTop` decreased AND `scrollHeight` decreased since last observation AND landing at max scroll); a clamp preserves the prior state instead of falling through to the `isNearBottom` re-arm at `models/scrollFollow.ts:29`. Track `lastScrollHeight` in `handleScrollEvent`; update it at every programmatic write. Keep the decision in `scrollFollow.ts` with unit tests. (Lower value than 4.1 — verified that clamps in *follow* mode are already masked — but it closes the scrolled-up yank-to-tail hazard.)
+3. Mirror both into `views/SubagentView.ts` (`:114-135`).
+4. *Disputed/optional:* setting `e.redraw = false` on no-op scroll frames is a real perf win but the suppression condition must compare window indices, pads, `userScrolledUp`, AND the `inReservedRegion` boolean (`views/ChatPanel.ts:696-701` depends on raw scrollTop even when window output is unchanged — verifier-identified gap). Skip this unless scroll-frame cost still shows after step 1; if implemented, note paging still self-redraws via `m.redraw()` in its `.finally` handlers (`views/ChatPanel.ts:382, 395, 407`).
+
+### Step 5 — Pin selection-bearing rows into the virtualization window (fixes 1b)
+**Files:** `models/virtualWindow.ts` + `models/virtualWindow.test.ts`, `views/ChatPanel.ts`, `views/SubagentView.ts`.
+1. Extend `VirtualWindowInput` with optional `pinnedRange: { start: number; end: number } | null`. After the normal window (and the past-the-end branch) is computed, expand: `startIndex = min(startIndex, pinned.start)`, `endIndex = max(endIndex, pinned.end + 1)`, **clamp to `[0, count)` inside the function** (verifier-required — don't trust callers), and recompute topPad/bottomPad as height sums (the function is already O(count)). Unit tests: pinned-below, pinned-above, pinned-inside, pinned + past-the-end, out-of-range clamping.
+2. In `ChatPanel.renderMessages` (before `views/ChatPanel.ts:641`) and `SubagentView`'s equivalent (before `:162`): build a key→index Map memoized alongside `cachedRows` (inside the `renderKey !== rowsCacheKey` block, `views/ChatPanel.ts:612-619`). Resolve `document.getSelection()` when non-collapsed: for **both** `anchorNode` and `focusNode` (both required — a drag can start outside the panel), walk `parentElement` up to the element whose parent is THIS view's `.message-list` (scoped via the closure `scrollEl`, so ChatPanel and SubagentView never pin each other's rows), look up its `id` in the map (valid after step 2's id==key fix). Pin `[min, max]` of resolved endpoints; if only one resolves, pin just that row; if a key is absent (re-key/reset), drop the pin for that frame.
+3. **Mandatory cap** (verifier-upgraded from optional): abandon pinning when the gap between pin and window exceeds ~300 rows, so a selection held during a long stream cannot keep an unbounded span mounted.
+Accepted gaps: Cmd+A anchors above `.message-list` and never resolves (no pin); `store.reset` jumps and the section-pre re-key still drop the selection (keys change) — see step 9.
+
+### Step 6 — Pause tail-follow and eviction while a selection is active in the transcript (fixes 2c)
+**Files:** `views/ChatPanel.ts`, `views/SubagentView.ts`, `models/scrollFollow.ts` + test.
+1. Helper (pure predicate in `scrollFollow.ts` for testability, DOM containment check at call sites): active selection = non-null, `rangeCount > 0`, `!isCollapsed`, and **either** `anchorNode` **or** `focusNode` contained in this view's scroll element (both checked — verifier amendment).
+2. In the follow branch of `applyScrollPosition` (`views/ChatPanel.ts:463-467`, `views/SubagentView.ts:114-120`): skip `scrollToBottom` while a selection is active, WITHOUT flipping `userScrolledUp` and WITHOUT writing scrollTop (no write → no scroll event → no interaction with the direction heuristic or step 4's logic).
+3. Gate eviction with the same predicate (`views/ChatPanel.ts:579-581`). Comment that this temporarily lifts the `MAX_HELD_EVENTS` bound while a selection is held (verifier-noted omission); eviction resumes on the first redraw after deselect.
+4. Resume: streaming redraws are frequent, so follow resumes within one event of deselection. If an idle-agent resume is wanted, add a `selectionchange` listener registered in the scroll container's `oncreate`/removed in `onremove` that redraws **only on the has-selection → no-selection transition** — an unconditional `m.redraw()` per `selectionchange` fires per mousemove during a drag (verifier-required gating). Simplest correct option: omit the listener.
+5. User-visible behavior change requiring sign-off: auto-follow pauses while text is selected, snaps back on deselect (standard terminal/Slack behavior).
+
+### Step 7 — Geometry-consistent jump trigger (fixes the 3b jump amplifier; helps bug 1)
+**File:** `views/ChatPanel.ts` (`maybePage`, lines 364-385).
+Replace the global-fraction mapping with phantom-region geometry (the same constant the renderer uses, `views/ChatPanel.ts:638-639`, so the inverse mapping is exact):
+- `scrollTop < phantomTopHeight` → top reserved region → `targetIndex = round(scrollTop / ESTIMATED_EVENT_HEIGHT_PX)`.
+- `scrollTop + clientHeight > scrollHeight - phantomBottomHeight` → bottom reserved region → `targetIndex = windowEnd + round((scrollTop + clientHeight - (scrollHeight - phantomBottomHeight)) / ESTIMATED_EVENT_HEIGHT_PX)`.
+- Viewport over loaded rows → never jump (edge paging handles it).
+Keep the `JUMP_GAP_EVENTS` hysteresis (require target >120 events outside the window) and the `backfillInFlight`/`pendingPinToWindowTop` guards (`views/ChatPanel.ts:361`). This makes measured-height divergence in the loaded window structurally unable to fire a spurious `store.reset` (each of which unmounts every row — the single most violent oscillation event, and a guaranteed selection kill). Verifier calibration: spurious jumps are rare (need very large divergence), but each is catastrophic; the change is small and exact.
+
+### Step 8 — Harden the virtualWindow past-the-end branch (fixes the 3b collapse amplifier; helps bug 1)
+**Files:** `models/virtualWindow.ts` (lines 82-91), `models/virtualWindow.test.ts` (single-row behavior pinned at lines 100-112 — must be updated).
+Replace the "render only the last row" branch with a backward fill: walk backward from the last row accumulating heights until `viewportHeight + 2*overscanPx` is covered; return that slice with `bottomPad = 0`. Prefer this self-contained variant over a caller-side scrollTop clamp (which needs cross-frame state in two views). Note: this prevents the one-frame full unmount (DOM churn + selection kill) but does not eliminate the underlying height undershoot; steps 3-4 handle the visible consequences.
+
+### Step 9 — (Lower-confidence follow-up) Stabilize live-turn DOM identity (fixes 2b)
+**Files:** `views/ProgressBlock.ts`, `views/turn-grouping.ts`, `views/conversation-rows.ts`, `style.css`.
+This is the only remaining path by which selection dies during streaming after steps 1-6 (structure-change moments: first tk step lands, trailing reply reclassified, offset jump). Flags from verification, all of which must inform the design:
+- The original justification "insertBefore preserves ranges" is **factually wrong** (DOM removing-steps collapse ranges in moved subtrees; that is why `Element.moveBefore()` exists). The flat-single-keyed-container approach (render all of a section's prose as one keyed child list, classification expressed as a CSS class, not parent membership) works only because transcript order is stable, so reclassification is a class-only change and Mithril's LIS keyed diff performs **no move**. The implementation must preserve that no-move property and verify it with a DOM-level test.
+- Keying trailing replies by event_id (proposed step 1 of the original fix) is nearly useless — reclassification empties `trailing_reply` wholesale. Skip or treat as hygiene.
+- Keying ungrouped runs by first event_id (`views/turn-grouping.ts:683-687`) trades one churn case for a rarer one (a run's first event can change via step-close ejection); modest net win; check key assertions in existing tests.
+- The suggested section-pre fix (key partial sections by first held event id) was **refuted**: backfill prepends change that first event every page, re-keying anyway. The section-pre re-key and store.reset teardowns remain accepted residuals absent a different design.
+- CSS risk: the pv timeline thread line assumes nodes live inside `.pv-timeline-nodes`; would need per-item `::before` rendering.
+Worthless without step 1 (preserved nodes would still be innerHTML-wiped). Recommend landing steps 1-8, re-testing the symptom, and scoping this only if live-turn selection loss at structure transitions is still a complaint.
+
+**Explicitly rejected alternatives** (both verifiers concurred): occlusion-based virtualization via `content-visibility: auto` (up to 1500 events' vnodes diffed per SSE redraw — content-visibility saves layout/paint, not vdom diffing; corrupts `measureRows` via placeholder `offsetHeight`; still needs step 1 anyway); serialize/restore selection ranges (cannot restore into unmounted rows, breaks in-progress drags, stale offsets under regrouping); relying on native scroll anchoring as the compensator (anchor nodes destroyed per frame pre-step-1, spacer can be the anchor, async adjustments desync the closure scrollTop). A future consolidation candidate: `@tanstack/virtual-core` (framework-agnostic, ships scroll-shift compensation) — but adopting it requires reworking phantom paging and the jump flow, and does not cover follow-state or the perm-id bug; defer.
+
+**Out-of-scope adjacent surface (flag for follow-up):** the proto-agent build log pins scrollTop per redraw and keys lines by array index (`views/ChatPanel.ts:284-289`), and `views/ProtoAgentLogView.ts:87` likewise — selections there still die during log streaming.
+
+---
+
+## 4. Manual verification checklist
+
+Setup: run the system interface against an agent with a long transcript (>2000 events so eviction and phantom paging engage) that includes turns with tk steps (ProgressBlock rows) and at least one permission card, plus an agent you can actively stream from.
+
+**Bug 1 — selection survives scrolling**
+1. Select prose inside a progress block's wrap-up reply (the text under the step timeline). Scroll one wheel tick up and down. Before fix: selection vanishes on the first tick. After: selection intact.
+2. Same for an expanded step body and for the assistant prose next to a permission card.
+3. Select text in any message, then scroll away by 2-3 full viewports and back. Before: selection dead once the row left window+800px. After: intact (pinning), up to the ~300-row cap.
+4. Repeat 3 inside a subagent "View conversation" view.
+5. Accepted residuals (verify they're understood, not regressions): selection dies on a far scrollbar drag that triggers a window jump, and can die when a backfill loads the boundary user message of the oldest partial turn.
+
+**Bug 2 — selection survives streaming**
+1. While the agent is idle, select text a few messages up; send a prompt; watch output stream. Before: selection dies on the first streamed event. After: selection intact AND the view stops auto-following while the selection is held (confirm this behavior change is acceptable); on click-to-deselect, view snaps back to the tail.
+2. Select text in a message containing tool calls while more tool results stream into that same message. Before: dies per tool result. After: intact.
+3. Stream long enough to exceed 1500 held events with a selection held: selection survives (eviction paused); deselect and confirm eviction resumes (memory bound restored).
+4. Accepted residual: selecting the live turn's not-yet-settled prose can still lose the selection at the moment the turn's structure changes (first step created, next tool call) unless step 9 lands.
+
+**Bug 3 — smooth, stable scrolling**
+1. *Scroll-up yank loop:* from the tail of a long transcript, hold wheel-up through several backfill pages (watch for fetches near the loaded-window top). Before: rhythmic downward yanks, sometimes a self-sustaining bounce with hands off the wheel. After: viewport stays anchored on the content being read across every prepend; no yank, no self-firing pages (verify via network tab that pages load once each, no loop).
+2. *At-bottom wheel fighting:* while output streams rapidly, wheel up one tick. Before: intermittently snapped back to bottom (input swallowed), then suddenly jumps. After: the first tick reliably disengages follow.
+3. *Eviction/regroup stability:* stay pinned at the bottom through an eviction (cross 1500 held events) and through a turn's hasSteps collapse. After: view stays pinned smoothly — no disengage, no one-frame flash of the transcript collapsing to a single row (step 8), no yank to the tail while scrolled up reading (step 4.2).
+4. *Jump sanity:* drag the scrollbar deep into unloaded history. Exactly one window load fires, viewport lands at the top of the loaded window, and no second spontaneous jump follows as rows measure.
+5. *Permission-row heights:* scroll a no-step permission card across the window edge repeatedly; content below no longer shifts each crossing (or verify in devtools that `getHeight` for `perm-*` keys returns measured, not 240).
+6. Regression: normal follow behavior — at the tail with no selection, streaming output keeps the view pinned; scrolling up disengages; scrolling back to the bottom re-engages.
+
+---
+
+Report caveats: (i) the Mithril hook-ordering claim (ancestor `onupdate` before descendant `oncreate`) was verified from Mithril 2 render semantics, not a local node_modules read — cheap to confirm empirically with two `console.log`s before relying on it in step 3; (ii) the native-anchoring double-compensation portion of 3a is graded plausible/intermittent, but the remedy is identical either way; (iii) step 4.2 (isClamp) and step 4.4 (e.redraw suppression) are the two components verifiers disputed on value — both are small and safe as amended, but neither is load-bearing for the headline symptoms.
