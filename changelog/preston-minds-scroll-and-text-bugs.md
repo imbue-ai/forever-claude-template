@@ -2,4 +2,4 @@ Add `specs/chat-scroll-and-selection-bugs.md`: a verified diagnosis and ordered 
 
 Root causes identified (each adversarially verified against the code): an unconditional `innerHTML` reset in `MarkdownContent.onupdate` that destroys selected text nodes on every redraw; virtualization unmounting rows that hold selection endpoints; live-turn regrouping re-keying/re-parenting already-rendered prose; a defective backfill prepend compensation (stale baseline, Mithril hook-ordering undercount, clamp-driven self-retriggering loop); estimate-vs-measured row-height shifts with no compensation (including a permission-row key/DOM-id mismatch that discards measured heights); and a wheel-swallow race between the follow-mode bottom pin and asynchronous scroll event dispatch.
 
-The spec lays out a nine-step ordered fix plan plus a manual verification checklist. No code changes in this PR.
+The spec lays out a nine-step ordered fix plan plus a manual verification checklist, and `blueprint/chat-scroll-selection-fixes/` carries the corresponding phased implementation plan. No code changes in this PR.
