@@ -172,10 +172,37 @@ git worktree add -q -b "mngr/<slug>" "$WT" HEAD
 Check the subshell's exit code and handle the guard rails directly (§5): a
 non-zero exit means nothing was committed -- surface the reason to the user and
 stop. On success the assembled commit is on `mngr/<slug>`, checked out at
-`$WT`, and `$WT` is HEAD -- there is no merge-back into `/code`. Close the
-assembly step, then proceed straight to §6 (the publish popup), §7 (GitHub
-auth), and §8 (create repo + push), ALL running with **cwd = `$WT`** (see the
-callout above).
+`$WT`, and `$WT` is HEAD -- there is no merge-back into `/code`.
+
+**Flesh out the manifest -- mandatory, before §6.** `$WT/inspiration-<slug>.md`
+has `<!-- FILL-IN (publishing agent): ... -->` comment blocks in "What it is,"
+"How it works," "Holes," and "Permissions it may need" -- these are generated
+placeholders, not real content, and the script's closing summary reminds you of
+this every time. Open the file and replace EVERY block with real, specific
+content: for "Holes" and "Permissions it may need" in particular, think through
+what the included apps actually depend on -- an external API token, an OAuth
+app, a Slack/Discord/etc. workspace installation, a hardcoded account or
+channel -- and name it explicitly. If a section genuinely has nothing to add
+(no holes, no permissions needed), say so explicitly in prose; never leave the
+placeholder comment in place and never leave a section blank. This is the next
+agent's entire agenda for the adaptation conversation (see the manifest's own
+"How to adapt it" section) -- an inspiration that needs a Slack token but
+doesn't say so silently breaks adoption. Commit this edit in `$WT` (cwd = `$WT`,
+same as everything else after assembly).
+
+**Mandatory check -- do not skip.** Before opening the popup (§6), confirm no
+placeholders remain:
+
+```bash
+grep -l -- '<!-- FILL-IN (publishing agent)' "$WT/inspiration-<slug>.md" \
+  && echo "STOP: finish every FILL-IN section in the manifest before publishing"
+```
+
+If this reports a match, go back and finish the manifest -- do not proceed to
+§6 with unfinished sections. Once it reports nothing, close the assembly step
+and proceed straight to §6 (the publish popup), §7 (GitHub auth), and §8
+(create repo + push), ALL running with **cwd = `$WT`** (see the callout
+above).
 
 ## 4. What the assembly does
 

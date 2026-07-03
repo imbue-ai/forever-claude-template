@@ -577,3 +577,6 @@ fi
 echo "  manifest:  ${MANIFEST}"
 echo "  thumbnail: ${THUMBNAIL}"
 echo "  boot smoke-check: passed"
+echo "  NEXT: ${MANIFEST} still has <!-- FILL-IN (publishing agent): ... --> placeholders in"
+echo "  'What it is', 'How it works', 'Holes', and 'Permissions it may need' -- replace ALL of"
+echo "  them with real content (or explicit 'none' prose) before opening the publish popup."

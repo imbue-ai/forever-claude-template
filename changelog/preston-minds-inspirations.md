@@ -129,3 +129,16 @@
   hand-picked subset), and that any failure in assembly, the popup/auth, or
   the push must be fixed-and-retried or reported to the user -- never worked
   around with an ad-hoc alternate publish mechanism.
+
+- Fixed the generated manifest's "Holes" and "Permissions it may need"
+  sections being left empty even when the included app clearly needed one (a
+  Slack permission, in one case). The manifest template already generated
+  `FILL-IN` placeholder comments for the publishing agent to complete, but the
+  skill never instructed anyone to actually go do that, so the placeholders
+  routinely shipped as-is. Added an explicit, mandatory step right after
+  assembly to flesh out every `FILL-IN` block with real content (or an
+  explicit "none"), plus a hard gate the skill must run before opening the
+  publish popup that greps for any remaining placeholder and blocks
+  publishing until it is gone -- matching this skill's existing
+  deterministic-gate pattern (the secret scan) rather than relying on prose
+  alone. The assembly script's closing summary also reminds the agent inline.
