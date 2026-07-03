@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Assemble a clean, shareable "inspiration" snapshot on top of the FCT base the
-# mind was created from, then commit it. Run by the publish-inspiration
-# launch-task worker on its ISOLATED worktree (cwd = worktree repo root).
+# mind was created from, then commit it. Run directly by the publish-inspiration
+# skill (no launch-task sub-agent) on an ISOLATED git worktree it creates in
+# the same container (cwd = worktree repo root).
 #
 # The dev `create-new-mind-repo` recipe is NOT available in the VM, so this is
 # self-contained. It does the assembly + secret scan + manifest/thumbnail +

@@ -142,3 +142,15 @@
   publishing until it is gone -- matching this skill's existing
   deterministic-gate pattern (the secret scan) rather than relying on prose
   alone. The assembly script's closing summary also reminds the agent inline.
+
+- Final audit pass over the whole feature: a fresh, skeptical read of every
+  skill and backend/frontend file confirmed the five rounds of fixes above
+  compose correctly (no dangling cross-references, no contract mismatches
+  between the WS events / `ws_client_count` / endpoint paths on either side),
+  fixed one stale comment in `build_inspiration.sh` still describing the old
+  launch-task-sub-agent execution model, and confirmed the full system_interface
+  test suite (540 tests) and frontend suite (384 tests + build) pass clean.
+  Separately confirmed `libs/mngr` needs no change: its worktree branches are
+  always real descendants of their base (it never resets a worktree's tree to
+  an unrelated older commit the way the destructive-merge bug required), and it
+  has no `gh repo create`-style primitive the FCT skill could have reused.
