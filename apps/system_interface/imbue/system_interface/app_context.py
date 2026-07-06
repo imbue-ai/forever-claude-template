@@ -13,8 +13,6 @@ from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
-from imbue.system_interface.github_auth import GitHubAuthService
-from imbue.system_interface.inspiration import InspirationService
 from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.session_watcher import AgentSessionWatcher
 from imbue.system_interface.welcome_resend import WelcomeResender
@@ -52,8 +50,6 @@ class SystemInterfaceState(MutableModel):
     layout_mutex: LayoutMutex
     claude_auth_service: ClaudeAuthService
     welcome_resender: WelcomeResender
-    inspiration_service: InspirationService
-    github_auth_service: GitHubAuthService
     http_client: httpx.Client
     latchkey_http_client: httpx.Client
     # Whether this app built (and therefore must start/stop) the agent manager.

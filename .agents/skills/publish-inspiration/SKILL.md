@@ -9,18 +9,22 @@ An "inspiration" is a clean, shareable, **bootable** snapshot of the apps and
 features this mind built, published to a new GitHub repo so another mind can
 be created FROM it (not just read its app code). One repo can accumulate
 several inspirations (one manifest + thumbnail per inspiration, all at the
-repo root). This skill assembles the snapshot on a clean template base, shows
-the user a confirmation popup, and (on confirm) creates the repo and pushes.
+repo root). This skill assembles the snapshot on a clean template base,
+confirms the details with the user in chat, and (on confirmation) creates the
+repo and pushes.
 
 The assembly + smoke-check run in an isolated local `git worktree` in this same
 container (no sub-agent -- it is a fast, deterministic script, not work that
-warrants delegation). You own the popup, the GitHub login, and the push.
+warrants delegation). You own the chat confirmation, the GitHub auth, and the
+push. There is NO in-UI popup anywhere in this flow: everything the user
+confirms or changes happens in the chat conversation.
 
 > **CWD INVARIANT -- read this before running anything in §§6-8.** From the
 > moment §3's `git worktree add` succeeds, the live mind's checkout at `/code`
 > is DONE being touched for the rest of this skill. Every command in §6
-> (popup), §7 (GitHub auth), and §8 (create repo + push) -- including any
-> follow-up commit that writes the popup-confirmed thumbnail/title/description
+> (chat confirmation), §7 (GitHub auth), and §8 (create repo + push) --
+> including any follow-up commit that writes the confirmed
+> thumbnail/title/description
 > -- runs with **cwd = `$WT`** (the assembly worktree), NEVER `/code`. There is
 > no merge-back step: `$WT`'s tree, built by `build_inspiration.sh` on top of
 > `BASE_REF`, IS the tree that gets pushed, as-is. `/code`'s branch and working
@@ -41,7 +45,7 @@ warrants delegation). You own the popup, the GitHub login, and the push.
 > etc.) plus the selected app/feature paths -- never just the app code plus a
 > README. That full tree is what makes `/use-inspiration`'s template path work:
 > another mind must be creatable FROM the published repo, not merely able to
-> read its source. If assembly (§3), the popup or GitHub auth (§6-§7), or the
+> read its source. If assembly (§3), the chat confirmation or GitHub auth (§6-§7), or the
 > push (§8) fails for ANY reason, do NOT invent an alternate publish mechanism
 > -- do not push a hand-assembled subset of files via `gh api`, a plain `git
 > init` of just the app directory, or any other ad-hoc path outside this
@@ -55,21 +59,11 @@ warrants delegation). You own the popup, the GitHub login, and the push.
 
 ## Shared conventions
 
-- **`$SI_BASE`** -- base URL of the in-container system_interface. Use
-  `http://127.0.0.1:$SYSTEM_INTERFACE_PORT`. If `SYSTEM_INTERFACE_PORT` is
-  unset, read the port from the running supervisord service definition (the
-  same source `forward_port.py` registers) rather than guessing silently. All
-  `/api/inspiration/*` and `/api/github-auth/*` routes are loopback-only, so
-  always call them from inside the container at `127.0.0.1` (the mind always
-  is).
-- **Response-file poll path (absolute, fixed regardless of port):**
-  `/code/runtime/inspiration/publish-response.json`. The server and this skill
-  both agree on exactly this path; it is not `cwd`-relative.
 - **Slug derivation.** `slug` = the user's title lowercased, with each run of
   characters outside `[A-Za-z0-9._-]` collapsed to a single `-`, and leading /
   trailing `-` stripped. The result MUST match `^[A-Za-z0-9._-]+$` and MUST NOT
   start with `-` (the backend re-validates). `repo_name` defaults to `slug`;
-  the popup may override it (the backend re-validates the override). The same
+  the user may override it during the chat confirmation (§6). The same
   slug names the manifest (`inspiration-<slug>.md`), the thumbnail
   (`inspiration-<slug>.svg`), and the assembly branch (`mngr/<slug>`).
 - **`BASE_REF` (provenance + clean base).** The FCT commit this mind was
@@ -190,7 +184,7 @@ agent's entire agenda for the adaptation conversation (see the manifest's own
 doesn't say so silently breaks adoption. Commit this edit in `$WT` (cwd = `$WT`,
 same as everything else after assembly).
 
-**Mandatory check -- do not skip.** Before opening the popup (§6), confirm no
+**Mandatory check -- do not skip.** Before the chat confirmation (§6), confirm no
 placeholders remain:
 
 ```bash
@@ -199,8 +193,24 @@ grep -l -- '<!-- FILL-IN (publishing agent)' "$WT/inspiration-<slug>.md" \
 ```
 
 If this reports a match, go back and finish the manifest -- do not proceed to
-§6 with unfinished sections. Once it reports nothing, close the assembly step
-and proceed straight to §6 (the publish popup), §7 (GitHub auth), and §8
+§6 with unfinished sections.
+
+**Craft the thumbnail -- mandatory, before §6.** The
+`inspiration-<slug>.svg` the assembly script generates is a generic
+placeholder and MUST NOT be what the user is shown in §6 or what gets
+published. Replace it with an SVG you draw yourself that looks like the
+actual app: reproduce its real layout (header, panels, cards, chart shapes --
+whatever the app actually shows), its real color palette, and its real title
+text, so someone browsing inspirations recognizes the app at a glance. Base
+it on what the app genuinely renders -- open the running app (or its
+templates/CSS) and mirror what you see. Keep it small and self-contained
+(inline shapes and text only; mock data, never real user data, and no
+embedded rasters or external references -- `<script>`/`<foreignObject>` get
+stripped anyway). Write it over `$WT/inspiration-<slug>.svg` and commit in
+`$WT` along with the manifest edit.
+
+Once both the manifest and thumbnail are done, close the assembly step
+and proceed straight to §6 (the chat confirmation), §7 (GitHub auth), and §8
 (create repo + push), ALL running with **cwd = `$WT`** (see the callout
 above).
 
@@ -235,140 +245,104 @@ Every one of these is a "fix the input and retry the script" situation, never
 a "publish something smaller instead" situation -- see the "MUST BE BOOTABLE"
 callout at the top of this skill.
 
-## 6. Raise the publish popup
+## 6. Confirm the details in chat
 
 **cwd = `$WT` for this and every remaining section.** The manifest/thumbnail
 files referenced below (`inspiration-<slug>.md` / `.svg`) live at `$WT`'s repo
 root, not `/code`'s.
 
-Build the request from the assembled values and POST it:
+There is no popup. Confirm everything in the chat conversation, in plain
+language:
 
-```bash
-curl -sS -X POST "$SI_BASE/api/inspiration/publish-request" \
-    -H 'Content-Type: application/json' \
-    -d @- <<JSON
-{
-  "slug": "<slug>",
-  "title": "<title>",
-  "description": "<description>",
-  "repo_name": "<slug>",
-  "visibility": "private",
-  "thumbnail_svg": <the JSON-encoded contents of inspiration-<slug>.svg>
-}
-JSON
-```
+1. Present the proposal: the title, the description, the repo name, the
+   visibility (default private), and the thumbnail. For the thumbnail, give
+   the user an actual look at it, not a description of markup -- e.g. share
+   the rendered `$WT/inspiration-<slug>.svg` via the `file-sharing` skill or
+   any other way the user can SEE the image -- and briefly say what it shows.
+2. Ask the user to confirm or change any of these. Keep it to one compact
+   message; never enumerate files or paste SVG markup at them.
+3. Apply requested changes and re-confirm:
+   - Title / description / repo name / visibility: apply directly (re-derive
+     nothing; the slug stays fixed -- it is the immutable identity of this
+     proposal, so a title change does NOT rename the manifest/thumbnail/branch).
+   - Thumbnail: the user describes what they want in plain language ("darker",
+     "show the calendar view", "use the app's green"); YOU redraw the SVG
+     (same rules as the "Craft the thumbnail" step in §3: the app's real look,
+     mock data only) and show it again. NEVER ask the user to edit or supply
+     SVG markup -- this is a non-technical app, and you are the only one who
+     touches markup.
+4. Loop until the user clearly confirms ("yes, publish it") or aborts. Do not
+   proceed to §7/§8 on a lukewarm or ambiguous reply, and do not publish
+   without an explicit confirmation. If the user aborts, stop and leave the
+   assembled commit intact.
 
-**Fast-fallback rule.** The POST response includes `ws_client_count` -- the
-number of live frontend websocket clients that received the broadcast:
+Keep the SVG you commit free of active content (`<script>`, `on*` handler
+attributes, `<foreignObject>`): you author it yourself, so this is simply a
+rule about what you write, not a sanitization step.
 
-- `ws_client_count == 0` -> no UI is connected to show the popup. Do NOT poll
-  at all; go straight to the inline-chat fallback below.
-- otherwise -> poll `/code/runtime/inspiration/publish-response.json` until it
-  exists (check, then sleep ~5s) for a SINGLE bounded window of ~90 seconds.
-  Do NOT re-POST the request and do NOT start a second wait; if the window
-  expires with no response file, fall back to inline chat. One mechanism at a
-  time, bounded, no serial thrash.
+**Commit before §8's push.** Once the user has confirmed, write the final SVG
+and any edited title/description into `$WT/inspiration-<slug>.svg` /
+`$WT/inspiration-<slug>.md` and COMMIT that change with cwd = `$WT` before
+proceeding to §7/§8. Never push first and fix up the thumbnail or manifest
+with a second commit-and-re-push. This commit -- like everything else in this
+skill after assembly -- happens IN `$WT`, never `/code`.
 
-  **Run this poll loop as a BACKGROUND task, not a blocking foreground
-  command** (mirror `launch-task`'s own await pattern, §3 of
-  `.agents/skills/launch-task/SKILL.md`: "Background-poll ... never block on
-  it"). A single foreground `while` loop sleeping for up to ~90s can exceed
-  the calling agent's own tool-execution timeout and get killed (exit
-  137/144) partway through, silently abandoning the wait. Launch the poll
-  with Bash `run_in_background: true` (or an equivalent backgrounded
-  script), then continue -- handle the result when the background job
-  reports back, exactly as you would not block on a launch-task worker.
+## 7. Ensure GitHub auth (no popup, no agent restart)
 
-On a response file, read the `InspirationPublishResponse`:
+GitHub auth uses the regular credential paths -- the latchkey-provisioned
+token or a terminal login -- there is NO login popup to raise. Work through
+these in order, and verify each step's outcome before moving to the next so
+the flow never silently stalls:
 
-- `status == "aborted"` -> stop. Leave the assembled commit intact and tell the
-  user publishing was cancelled.
-- `status == "confirmed"` -> use the RETURNED `title` / `description` /
-  `repo_name` / `visibility` / `thumbnail_svg` for everything downstream. The
-  user may have edited them, so the skill MUST use the response fields, not the
-  values it originally proposed. The backend already stripped `<script>` / `on*`
-  handlers / `<foreignObject>` from `thumbnail_svg`; write that sanitized value
-  into `$WT/inspiration-<slug>.svg`, and re-commit the manifest/thumbnail IN
-  `$WT` if the confirmed title/description/thumbnail differ from what the
-  assembly generated.
+1. **Check the current state first:**
 
-**Inline-chat fallback (no popup).** Confirm in chat instead: present the
-proposed title, description, repo name, and visibility; let the user edit any
-of them in chat; then proceed with the agreed values exactly as if they were
-the confirmed response fields. The one exception is the thumbnail: the popup
-path depends on the backend's SVG sanitization, so never accept raw SVG through
-chat -- keep the placeholder SVG the assembly generated.
+   ```bash
+   gh auth status --hostname github.com
+   ```
 
-**Commit before §8's push.** Once you have confirmed values (popup or
-fallback), write the sanitized SVG and any edited title/description into
-`$WT/inspiration-<slug>.svg` / `$WT/inspiration-<slug>.md` and COMMIT that
-change with cwd = `$WT` before proceeding to §7/§8. Never push first and fix up
-the thumbnail or manifest with a second commit-and-re-push. This commit -- like
-everything else in this skill after assembly -- happens IN `$WT`, never
-`/code`.
+   If it reports logged in AND the token scopes shown include `workflow`,
+   you're done -- skip to §8. The `workflow` scope is mandatory: the template
+   ships `.github/workflows/`, and GitHub rejects pushing those files without
+   it, so a token that authenticates but lacks `workflow` still fails §8 --
+   treat it as not-logged-in and continue down this list.
 
-## 7. Ensure GitHub auth (no agent restart)
+2. **Latchkey / environment token.** The container normally receives a
+   GitHub token as `GH_TOKEN` via the minds credential plumbing (latchkey).
+   If `GH_TOKEN` is set but step 1 failed, the token is stale or
+   under-scoped. Ask the user (in chat) to grant GitHub access through the
+   app: request it per the `latchkey` skill (`latchkey services info github`,
+   then a permission request via `latchkey curl -XPOST
+   http://latchkey-self.invalid/permission-requests`), which triggers the
+   login flow on the user's side. Then re-run step 1 to verify. If latchkey
+   does not support GitHub in this deployment, say so and move to step 3 --
+   do not stall here.
 
-Check whether `gh` is authenticated. Run it with the token env vars scrubbed:
-your agent shell inherits `GH_TOKEN`, and `gh` prioritizes that over its stored
-credential, so an unscrubbed probe can report a stale/invalid env token as
-"logged in" (and the later push would use that stale token instead of the
-credential the modal just stored):
+3. **Terminal device-flow login (always works):**
 
-```bash
-env -u GH_TOKEN -u GITHUB_TOKEN gh auth status --hostname github.com
-```
+   ```bash
+   env -u GH_TOKEN -u GITHUB_TOKEN gh auth login --hostname github.com \
+       --git-protocol https --web --skip-ssh-key --scopes workflow
+   ```
 
-Whichever login path runs, the token MUST carry the `workflow` scope: the
-template ships `.github/workflows/`, and pushing those files is rejected
-without it. The modal's web flow requests `workflow` itself; the device-flow
-fallback below passes `--scopes workflow` explicitly.
+   (The `env -u` scrub matters here: with a stale `GH_TOKEN` still exported,
+   `gh` would keep preferring it over the fresh login.) Run it as a
+   background/pty task (it blocks waiting for the browser step), surface the
+   printed one-time code and `https://github.com/login/device` to the user in
+   chat, then poll `env -u GH_TOKEN -u GITHUB_TOKEN gh auth status --hostname
+   github.com` until it reports authenticated -- for a SINGLE bounded window
+   of ~90 seconds, run as a BACKGROUND task (mirror `launch-task`'s
+   background-await pattern, §3 of `.agents/skills/launch-task/SKILL.md`; a
+   foreground `while` loop sleeping ~90s can be killed by your own
+   tool-execution timeout, exit 137/144, silently abandoning the wait). Then
+   run `env -u GH_TOKEN -u GITHUB_TOKEN gh auth setup-git` to wire the git
+   credential helper. If the user never completes the login, surface a clear
+   message and stop, leaving the assembled commit intact.
 
-On a non-zero exit (not logged in), trigger the login modal:
-
-```bash
-curl -sS -X POST "$SI_BASE/api/github-auth/require"
-```
-
-(the backend broadcasts `github_auth_required`; the frontend opens the
-GitHub-login modal).
-
-**Fast-fallback rule.** The POST response includes `ws_client_count`:
-
-- `ws_client_count == 0` -> no UI is connected to show the modal. Do NOT poll
-  at all; go straight to the device-flow fallback below.
-- otherwise -> poll `GET $SI_BASE/api/github-auth/status` until `logged_in` is
-  `true`, for a SINGLE bounded window of ~90 seconds. Do NOT re-POST the
-  require and do NOT start a second wait; if the window expires, fall back to
-  the device flow. One mechanism at a time, bounded, no serial thrash.
-
-  **Run this poll loop as a BACKGROUND task, not a blocking foreground
-  command** -- same reasoning as §6's poll: mirror `launch-task`'s
-  background-await pattern (§3 of `.agents/skills/launch-task/SKILL.md`)
-  rather than a foreground `while` loop, which can be killed by the calling
-  agent's own tool-execution timeout partway through a ~90s wait (exit
-  137/144). Launch with Bash `run_in_background: true`, then continue; handle
-  the result when it reports back.
-
-**Device-flow fallback (no modal).** Log in via `gh` directly:
-
-```bash
-env -u GH_TOKEN -u GITHUB_TOKEN gh auth login --hostname github.com \
-    --git-protocol https --web --skip-ssh-key --scopes workflow
-```
-
-Run it as a background/pty task (it blocks waiting for the browser step),
-surface the printed one-time code and `https://github.com/login/device` to the
-user in chat, then poll `env -u GH_TOKEN -u GITHUB_TOKEN gh auth status
---hostname github.com` (scrubbed, as above) until it reports authenticated
-(bounded wait). Then run `env -u GH_TOKEN -u GITHUB_TOKEN gh auth setup-git`
-to wire the git credential helper, mirroring what the modal backend does. If
-the user never completes either path, surface a clear message and stop,
-leaving the assembled commit intact.
-
-The modal backend wires the git credential helper in place (`gh auth login`
-followed by `gh auth setup-git`), so your subsequent `gh` / `git push` picks it
-up at push time. Do NOT restart the agent or re-source the environment.
+Whichever path succeeded, re-verify with step 1's command before §8 -- do not
+assume auth worked because a command exited 0. If the login came from step 3,
+the `env -u GH_TOKEN -u GITHUB_TOKEN` scrub must also prefix the §8
+`gh`/`git` commands so the stored credential (not a stale env token) is used.
+Do NOT restart the agent or re-source the environment.
 
 ## 8. Create the repo and push
 
@@ -391,7 +365,7 @@ With `repo_name` / `visibility` taken from the confirmed response:
 `^[A-Za-z0-9._-]+$` server-side, which blocks argument injection, but still pass
 it as a single argv element -- never interpolate it into a shell string. The
 `env -u GH_TOKEN -u GITHUB_TOKEN` prefix is load-bearing: it forces `gh`/`git` to
-use the credential the login modal just stored via `setup-git`, not a stale
+use the credential a §7 terminal login stored via `setup-git`, not a stale
 `GH_TOKEN` inherited by your agent shell. `--source=.` resolves relative to the
 `cd "$WT"` in the same subshell, so it always means `$WT`, never `/code`.)
 
@@ -414,7 +388,7 @@ publish as failed.)
 
 **Failure handling.** If `gh repo create` fails (e.g. the name is taken, or the
 token lacks the `workflow` scope needed to push `.github/workflows/` -- see
-§7), report it to the user and re-open the publish popup (§6)
+§7), report it to the user and re-confirm in chat (§6)
 for a new name / visibility, keeping the assembled commit intact in `$WT`. Loop
 until it succeeds or the user aborts. **Never fall back to publishing a
 different, non-bootable thing** (e.g. pushing just the selected app files via
@@ -487,7 +461,8 @@ What it does, in order (see the script for the exact commands):
    authoritative blocker, not LLM prose.
 7. Generates the manifest `inspiration-<slug>.md` at the repo root.
 8. Generates a placeholder thumbnail `inspiration-<slug>.svg` (mock data only;
-   the lead may later overwrite it with the popup-confirmed sanitized SVG).
+   you MUST overwrite it with a hand-drawn SVG that looks like the actual
+   app before the chat confirmation -- see §3's "Craft the thumbnail").
 9. Rewrites only the marked stable region of `welcome/SKILL.md` to describe the
    newly-published inspiration.
 10. Validates `supervisord.conf` WITHOUT starting the daemon (never

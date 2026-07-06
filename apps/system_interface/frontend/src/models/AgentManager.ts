@@ -7,8 +7,6 @@ import m from "mithril";
 import { apiUrl } from "../base-path";
 import { ReconnectBackoff } from "./backoff";
 import { parseJsonMessage } from "./ws-json";
-import { openInspirationModal, closeInspirationModal } from "./InspirationPublish";
-import { openGitHubLoginModal } from "./GitHubAuth";
 
 export interface AgentState {
   id: string;
@@ -79,18 +77,7 @@ type WsEvent =
       op: LayoutOpName;
       args: Record<string, unknown>;
       requester_agent_id?: string;
-    }
-  | {
-      type: "inspiration_publish_requested";
-      slug: string;
-      title: string;
-      description: string;
-      repo_name: string;
-      visibility: string;
-      thumbnail_svg: string;
-    }
-  | { type: "inspiration_publish_aborted"; slug: string | null }
-  | { type: "github_auth_required" };
+    };
 
 export type LayoutOpListener = (event: LayoutOpEvent) => void;
 export type AgentsUpdatedListener = (agents: AgentState[]) => void;
@@ -222,26 +209,6 @@ function handleEvent(event: WsEvent): void {
           requesterAgentId: event.requester_agent_id ?? "",
         });
       }
-      break;
-
-    case "inspiration_publish_requested":
-      openInspirationModal({
-        slug: event.slug,
-        title: event.title,
-        description: event.description,
-        repo_name: event.repo_name,
-        visibility: event.visibility,
-        thumbnail_svg: event.thumbnail_svg,
-      });
-      break;
-
-    case "inspiration_publish_aborted":
-      // Slug-guarded: only closes if the aborted slug matches the shown proposal.
-      closeInspirationModal(event.slug);
-      break;
-
-    case "github_auth_required":
-      openGitHubLoginModal();
       break;
   }
 }

@@ -7,7 +7,7 @@
 # The dev `create-new-mind-repo` recipe is NOT available in the VM, so this is
 # self-contained. It does the assembly + secret scan + manifest/thumbnail +
 # /welcome rewrite + boot smoke-check + single commit. It does NOT create the
-# GitHub repo or push -- the lead owns the popup, GitHub login, and push.
+# GitHub repo or push -- the lead owns the chat confirmation, GitHub auth, and push.
 #
 # Known-correct methods embedded here (a prior build got these wrong):
 #   - Clean base via `git read-tree -u --reset` + `git clean -fdxq`, NEVER
@@ -336,7 +336,7 @@ fi
 # The deterministic parts (front-matter, included-path list, the "How to adapt
 # it" script, section skeletons) are generated here; the prose that requires
 # knowledge of the live mind is left as clearly-marked FILL-IN blocks that the
-# publishing agent MUST replace before the popup/confirmation step.
+# publishing agent MUST replace before the chat confirmation step.
 
 # Human-readable list of what the snapshot includes, derived from the include
 # paths (data includes are labeled as such).
@@ -372,7 +372,7 @@ follow "How to adapt it" below.
 
 ${manifest_description}
 
-<!-- FILL-IN (publishing agent): BEFORE the popup step, replace this comment
+<!-- FILL-IN (publishing agent): BEFORE the chat confirmation step, replace this comment
 with a one-paragraph overview of what this inspiration does for its user: the
 problem it solves, the main things it produces (pages, reports, automations),
 and what the user sees when it is running. Write for a reader who has never
@@ -384,7 +384,7 @@ The snapshot includes these paths (each is a repo-root-relative path copied
 from the original mind onto a clean forever-claude-template base):
 
 ${included_paths_block}
-<!-- FILL-IN (publishing agent): BEFORE the popup step, replace this comment
+<!-- FILL-IN (publishing agent): BEFORE the chat confirmation step, replace this comment
 with prose that makes the list above self-explanatory: for each included path,
 say what it is (an app or lib with code, a skill, data) and what role it plays.
 Then describe how the pieces wire together at runtime: which supervisord
@@ -411,7 +411,7 @@ new mind. This is the \`use-inspiration\` skill's template path; in short:
 
 ## Holes
 
-<!-- FILL-IN (publishing agent): BEFORE the popup step, replace this comment
+<!-- FILL-IN (publishing agent): BEFORE the chat confirmation step, replace this comment
 with one bullet per hole: every part the adapter must supply or rewire --
 stubbed integrations, hardcoded accounts/channels/ids, data that was not
 included, anything that will not work out of the box. For each, say what is
@@ -420,7 +420,7 @@ holes, say so explicitly. -->
 
 ## Permissions it may need
 
-<!-- FILL-IN (publishing agent): BEFORE the popup step, replace this comment
+<!-- FILL-IN (publishing agent): BEFORE the chat confirmation step, replace this comment
 with the tokens, scopes, or external accounts the adapter must supply (for
 example, an API token with a specific scope, or a Slack app installed in their
 workspace). If none are needed, say so explicitly. -->
@@ -434,7 +434,8 @@ MANIFEST_EOF
 # --- 7. generate a placeholder thumbnail (mock data only) --------------------
 
 # A neutral placeholder SVG using MOCK data only -- never real user data. The
-# lead may overwrite this with the popup-confirmed, server-sanitized SVG.
+# lead MUST overwrite this with a hand-drawn SVG that looks like the actual app
+# (and iterate on it from the user's plain-language feedback in chat).
 cat > "$THUMBNAIL" <<THUMB_EOF
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 160" role="img" aria-label="${TITLE}">
   <rect width="240" height="160" rx="12" fill="#1f2933"/>
@@ -580,4 +581,4 @@ echo "  thumbnail: ${THUMBNAIL}"
 echo "  boot smoke-check: passed"
 echo "  NEXT: ${MANIFEST} still has <!-- FILL-IN (publishing agent): ... --> placeholders in"
 echo "  'What it is', 'How it works', 'Holes', and 'Permissions it may need' -- replace ALL of"
-echo "  them with real content (or explicit 'none' prose) before opening the publish popup."
+echo "  them with real content (or explicit 'none' prose) before the chat confirmation."

@@ -241,11 +241,7 @@ def test_prevent_os_fork() -> None:
 def test_prevent_direct_subprocess() -> None:
     # conftest.py is test infrastructure (fixtures), same category as *_test.py
     excluded = TEST_FILE_PATTERNS + ("testing.py", "conftest.py")
-    # +1 for github_auth.py's PAT-login path: `gh auth login --with-token` reads
-    # stdin to EOF, so the token must be piped over a real stdin pipe. The shared
-    # run_local_command_modern_version helper hardcodes stdin=DEVNULL and exposes
-    # no `input` param, so a direct subprocess.run is required here.
-    rc.check_direct_subprocess(_DIR, snapshot(1), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---
