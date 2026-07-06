@@ -67,6 +67,7 @@ from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
 from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
@@ -1682,7 +1683,10 @@ class VpsProvider(BaseProviderInstance):
             # Build agent refs from live agent data
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in agent_data_by_host_id.get(host_id, []):
-                ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
+                # Discovery reads persisted agent data without a per-agent liveness
+                # probe, so the honest state is UNKNOWN; the full-listing path
+                # re-derives a real state when it builds AgentDetails.
+                ref = validate_and_create_discovered_agent(agent_data, host_id, self.name, AgentLifecycleState.UNKNOWN)
                 if ref is not None:
                     agent_refs.append(ref)
 
