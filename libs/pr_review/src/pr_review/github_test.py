@@ -282,7 +282,15 @@ def test_get_conversation_maps_and_filters_pending_reviews() -> None:
         {"id": 3, "user": {"login": "c"}, "state": "PENDING", "body": "wip"},
     ]
     review_comments = [
-        {"id": 4, "user": {"login": "d"}, "path": "f.py", "original_line": 12, "body": "nit", "created_at": "t", "html_url": "u4"}
+        {
+            "id": 4, "user": {"login": "d"}, "path": "f.py", "original_line": 12,
+            "body": "nit", "created_at": "t", "html_url": "u4",
+            "diff_hunk": "@@ -1,2 +1,2 @@\n-old\n+new", "in_reply_to_id": None,
+        },
+        {
+            "id": 5, "user": {"login": "e"}, "path": "f.py", "line": 12, "body": "reply",
+            "created_at": "t2", "html_url": "u5", "in_reply_to_id": 4,
+        },
     ]
     curl = make_curl(
         {
@@ -296,6 +304,8 @@ def test_get_conversation_maps_and_filters_pending_reviews() -> None:
     assert [r["id"] for r in out["reviews"]] == [2]  # PENDING filtered out
     assert out["review_comments"][0]["line"] == 12  # falls back to original_line
     assert out["review_comments"][0]["side"] == "RIGHT"
+    assert out["review_comments"][0]["diff_hunk"] == "@@ -1,2 +1,2 @@\n-old\n+new"
+    assert out["review_comments"][1]["in_reply_to_id"] == 4  # reply linked to its thread root
 
 
 # --- write-payload construction (no real writes) ---

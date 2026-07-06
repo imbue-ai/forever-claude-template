@@ -195,6 +195,25 @@ header.top{position:sticky;top:0;z-index:20;background:rgba(10,13,19,.78);backdr
 .cmt-card .cbody pre.md-pre{font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--border-soft);border-radius:var(--r-sm);padding:12px;overflow-x:auto;white-space:pre}
 .cmt-card.desc .chead{background:var(--accent-soft)}
 .cmt-card.review .chead{background:var(--ok-soft)}
+
+/* code-localized comment thread on the conversation page */
+.cmt-card.codethread{border-color:var(--border)}
+.ct-loc{display:flex;align-items:center;gap:10px;padding:9px 14px;background:var(--surface-2);border-bottom:1px solid var(--border-soft)}
+.ct-loc .ct-file{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+.ct-snippet{margin:0;padding:10px 14px;background:var(--bg);border-bottom:1px solid var(--border-soft);font-size:12px;line-height:1.5;overflow-x:auto}
+.ct-snippet .hl{display:block;white-space:pre;color:var(--muted)}
+.ct-snippet .hl.add{color:var(--ok);background:var(--ok-soft)}
+.ct-snippet .hl.del{color:var(--danger);background:var(--danger-soft)}
+.ct-snippet .hl.ctx{color:var(--faint)}
+.ct-comments{padding:4px 0}
+.ct-cmt{padding:11px 14px;border-top:1px solid var(--border-soft)}
+.ct-cmt:first-child{border-top:none}
+.ct-cmt .chead{display:flex;align-items:center;gap:9px;font-size:13px;margin-bottom:7px}
+.ct-cmt .chead .who{font-weight:600}
+.ct-cmt .chead .when{color:var(--faint);font-family:var(--mono);font-size:11px}
+.ct-cmt .cbody{font-size:13.5px;color:#CBD6E2;overflow-wrap:anywhere}
+.ct-cmt .cbody code{font-family:var(--mono);font-size:12px;background:var(--surface-2);padding:1px 5px;border-radius:4px}
+
 .avatar-sm{width:26px;height:26px;border-radius:8px;flex:none;display:grid;place-items:center;font-family:var(--mono);font-size:10px;font-weight:600;color:var(--text);background:var(--surface-2);border:1px solid var(--border)}
 .avatar-sm.bot{color:var(--ok);border-color:rgba(65,210,127,.3)}
 .composer-card{border:1px solid var(--border-soft);border-radius:var(--r);background:var(--surface);padding:16px;margin-top:6px}

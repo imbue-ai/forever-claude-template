@@ -639,7 +639,7 @@ function bindDetailActions(pr) {
 function renderDetailShell() {
   const pr = DETAIL.pr;
   const conv = DETAIL.conversation || { comments: [], reviews: [], review_comments: [] };
-  const convCount = conv.comments.length + conv.reviews.filter(r => r.body || r.state !== "COMMENTED").length;
+  const convCount = conv.comments.length + conv.reviews.filter(r => r.body || r.state !== "COMMENTED").length + (conv.review_comments ? conv.review_comments.length : 0);
   const d = document.getElementById("detail");
   d.innerHTML = `
     <div class="detail-head">
@@ -719,6 +719,9 @@ function renderConversation() {
     if (!r.body && r.state === "COMMENTED") continue; // a bare "commented" review with no body is noise
     items.push({ t: r.submitted_at, html: reviewCard(r) });
   }
+  for (const thread of reviewCommentThreads(conv)) {
+    items.push({ t: thread.root.created_at, html: codeThreadCard(thread) });
+  }
   items.sort((a, b) => new Date(a.t || 0) - new Date(b.t || 0));
   const pane = document.getElementById("pane-conversation");
   pane.innerHTML = `<div class="conv-col">
@@ -733,6 +736,10 @@ function renderConversation() {
   </div>`;
   pane.querySelector("#editDescBtn").addEventListener("click", editDesc);
   pane.querySelector("#generalSubmit").addEventListener("click", submitGeneralComment);
+  pane.querySelectorAll(".ct-jump").forEach(btn => btn.addEventListener("click", () => {
+    const card = btn.closest(".codethread");
+    jumpToDiffLine(card.dataset.path, card.dataset.line ? +card.dataset.line : null, card.dataset.side);
+  }));
 }
 
 function descCard(pr) {
@@ -753,6 +760,80 @@ function reviewCard(r) {
     <div class="chead">${avatarFor(r.user)}<span class="who">${esc(r.user)}</span>
       <span class="pill ${st}">${reviewStateLabel(r.state)}</span><span class="when">${relTime(r.submitted_at)}</span></div>
     ${r.body ? `<div class="cbody">${mdLite(r.body)}</div>` : ""}</div>`;
+}
+
+// ---- line-level (code-localized) review comments in the conversation view ----
+// Group each root comment with its replies (linked by in_reply_to_id) into one
+// thread, anchored at the root's file/line/diff snippet -- mirroring how GitHub
+// surfaces code comments on the conversation page.
+function reviewCommentThreads(conv) {
+  const all = conv.review_comments || [];
+  const byId = new Map(all.map(c => [c.id, c]));
+  const rootOf = (c) => {
+    let cur = c, guard = 0;
+    while (cur.in_reply_to_id && byId.has(cur.in_reply_to_id) && guard++ < 100) cur = byId.get(cur.in_reply_to_id);
+    return cur;
+  };
+  const threads = new Map();
+  for (const c of all) {
+    const root = rootOf(c);
+    if (!threads.has(root.id)) threads.set(root.id, { root, comments: [] });
+    threads.get(root.id).comments.push(c);
+  }
+  const out = [...threads.values()];
+  for (const t of out) t.comments.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
+  return out;
+}
+
+// The last few lines of a diff hunk (nearest the commented line), sign-colored.
+function diffHunkSnippet(hunk, maxLines = 4) {
+  if (!hunk) return "";
+  let lines = hunk.split("\n");
+  if (lines[0] && lines[0].startsWith("@@")) lines = lines.slice(1);
+  lines = lines.slice(-maxLines);
+  return lines.map(l => {
+    const cls = l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : "ctx";
+    return `<span class="hl ${cls}">${esc(l) || " "}</span>`;
+  }).join("");
+}
+
+function codeThreadCard(thread) {
+  const root = thread.root;
+  const loc = esc(root.path) + (root.line ? ":" + root.line : "");
+  const comments = thread.comments.map(c => `
+    <div class="ct-cmt">
+      <div class="chead">${avatarFor(c.user)}<span class="who">${esc(c.user)}</span><span class="when">${relTime(c.created_at)}</span></div>
+      <div class="cbody">${mdLite(c.body)}</div>
+    </div>`).join("");
+  return `<div class="cmt-card codethread" data-path="${attr(root.path)}" data-line="${root.line || ""}" data-side="${attr(root.side || "RIGHT")}">
+    <div class="ct-loc">
+      <span class="ct-file mono" title="${attr(root.path)}">${loc}</span>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn ghost sm ct-jump">View in diff &rarr;</button>
+    </div>
+    ${root.diff_hunk ? `<pre class="ct-snippet mono">${diffHunkSnippet(root.diff_hunk)}</pre>` : ""}
+    <div class="ct-comments">${comments}</div>
+  </div>`;
+}
+
+function revealDiffLine(line, side) {
+  if (!diffEditor || !line) return;
+  const ed = side === "LEFT" ? diffEditor.getOriginalEditor() : diffEditor.getModifiedEditor();
+  ed.revealLineInCenter(line);
+  ed.setPosition({ lineNumber: line, column: 1 });
+  ed.focus();
+}
+
+// Jump from a conversation code-thread to that line in the Files tab.
+function jumpToDiffLine(path, line, side) {
+  switchDetailTab("files");
+  if (DETAIL.files.some(f => f.path === path)) {
+    switchSidebar("changed");
+    Promise.resolve(selectChangedFile(path)).then(() => revealDiffLine(line, side));
+  } else {
+    switchSidebar("browse");
+    Promise.resolve(openRepoFile(path, line));
+  }
 }
 
 function editTitle() {
@@ -827,7 +908,7 @@ async function reloadConversation() {
   } catch (e) { /* keep old */ }
   // refresh the conversation tab count + pane
   const conv = DETAIL.conversation;
-  const convCount = conv.comments.length + conv.reviews.filter(r => r.body || r.state !== "COMMENTED").length;
+  const convCount = conv.comments.length + conv.reviews.filter(r => r.body || r.state !== "COMMENTED").length + (conv.review_comments ? conv.review_comments.length : 0);
   const tab = document.querySelector('.dtab[data-dtab="conversation"] .tcount');
   if (tab) tab.textContent = convCount;
   renderConversation();

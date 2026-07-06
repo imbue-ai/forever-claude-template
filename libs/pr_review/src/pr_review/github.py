@@ -259,6 +259,10 @@ def get_conversation(repo: str, number: int, curl: CurlFn = _curl) -> dict:
                 "line": rc.get("line") or rc.get("original_line"),
                 "side": rc.get("side", "RIGHT"), "body": rc.get("body") or "",
                 "created_at": rc.get("created_at"), "url": rc.get("html_url"),
+                # ``diff_hunk`` is the surrounding diff snippet GitHub shows above a
+                # line comment; ``in_reply_to_id`` links a reply to its thread root.
+                "diff_hunk": rc.get("diff_hunk") or "",
+                "in_reply_to_id": rc.get("in_reply_to_id"),
             }
             for rc in review_comments
         ],
