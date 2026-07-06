@@ -166,11 +166,14 @@ def derive_activity_state(
 ) -> ActivityState:
     """Derive an ``ActivityState`` from lifecycle state and transcript signals.
 
-    ``is_agent_running`` reflects the mngr lifecycle state: ``True`` when the
-    agent is in a running state (RUNNING, RUNNING_UNKNOWN_AGENT_TYPE), ``False``
-    otherwise (STOPPED, WAITING, REPLACED, DONE, etc.). A non-running agent is
-    always IDLE regardless of transcript contents, which prevents a STOPPED agent
-    from appearing as "Thinking..." due to stale transcript data.
+    ``is_agent_running`` reflects whether the agent's claude *process* is alive
+    per the mngr lifecycle state (see :func:`is_lifecycle_process_running`):
+    ``True`` for RUNNING, RUNNING_UNKNOWN_AGENT_TYPE, and WAITING (process up but
+    idle), ``False`` otherwise (STOPPED, REPLACED, DONE, etc.). A process that is
+    not alive is always IDLE regardless of transcript contents, which prevents a
+    STOPPED agent from appearing as "Thinking..." due to stale transcript data. A
+    live-but-idle (WAITING) agent is ``True`` here but still settles to IDLE
+    through the transcript signals below; it is not treated as active.
 
     ``tail_event_type`` is the cached result of :func:`last_event_type` for the
     agent's current transcript (named distinctly from the helper to avoid
