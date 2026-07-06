@@ -6,12 +6,17 @@ from typing import Any
 
 from imbue.mngr.utils.polling import wait_for
 from imbue.system_interface.layout_ops import LayoutMutex
+from imbue.system_interface.layout_ops import _service_session_suffix
+from imbue.system_interface.layout_ops import allocate_next_terminal_name
 from imbue.system_interface.layout_ops import allocate_terminal_panel_id
+from imbue.system_interface.layout_ops import filter_user_terminal_sessions
 from imbue.system_interface.layout_ops import is_broadcasting_op
+from imbue.system_interface.layout_ops import is_destroyable_terminal_session
 from imbue.system_interface.layout_ops import is_known_op
 from imbue.system_interface.layout_ops import is_mutating_op
 from imbue.system_interface.layout_ops import layout_inspect
 from imbue.system_interface.layout_ops import layout_list
+from imbue.system_interface.layout_ops import parse_tmux_sessions_output
 
 
 def test_known_ops_cover_the_full_surface() -> None:
@@ -300,9 +305,7 @@ def test_inspect_alternates_arrangement_at_each_nesting_level(tmp_path: Path) ->
             "p3": {"panelType": "chat", "chatAgentId": "agent-c"},
         },
     )
-    summary = layout_inspect(
-        layout_path, {"agent-a": "a", "agent-b": "b", "agent-c": "c"}
-    )
+    summary = layout_inspect(layout_path, {"agent-a": "a", "agent-b": "b", "agent-c": "c"})
     tree = summary["tree"]
     # Root grid orientation is VERTICAL -> children stack -> column.
     assert tree["arrangement"] == "column"
@@ -476,3 +479,79 @@ def test_list_chat_terminal_marks_open_when_url_is_mounted(tmp_path: Path) -> No
     by_ref = {e["ref"]: e for e in entries}
     assert by_ref["chat-terminal:alice"]["is_open"] is True
     assert by_ref["chat-terminal:bob"]["is_open"] is False
+
+
+def test_parse_tmux_sessions_output_parses_name_id_and_path() -> None:
+    output = "terminal-1\t$3\t/mngr/code\nmngr-alice\t$1\t/home/user\n"
+    sessions = parse_tmux_sessions_output(output)
+    assert len(sessions) == 2
+    assert sessions[0].session_name == "terminal-1"
+    assert sessions[0].session_id == "$3"
+    assert sessions[0].cwd == "/mngr/code"
+    assert sessions[1].session_name == "mngr-alice"
+
+
+def test_parse_tmux_sessions_output_skips_blank_and_malformed_lines() -> None:
+    output = "\nterminal-1\t$3\t/mngr/code\nbroken-line-no-tabs\n\t\t\n"
+    sessions = parse_tmux_sessions_output(output)
+    # The all-empty tab line still has three fields, so only the truly
+    # malformed (no-tab) and blank lines are dropped.
+    names = [s.session_name for s in sessions]
+    assert "terminal-1" in names
+    assert "broken-line-no-tabs" not in names
+
+
+def test_parse_tmux_sessions_output_keeps_tabbed_path_intact() -> None:
+    output = "terminal-1\t$3\t/weird\tpath\n"
+    sessions = parse_tmux_sessions_output(output)
+    assert sessions[0].cwd == "/weird\tpath"
+
+
+def test_filter_user_terminal_sessions_drops_agent_prefixed_sessions() -> None:
+    output = "terminal-1\t$3\t/a\nmngr-alice\t$1\t/b\nterminal-2\t$4\t/c\n"
+    sessions = parse_tmux_sessions_output(output)
+    user_terminals = filter_user_terminal_sessions(sessions, "mngr-")
+    assert [s.session_name for s in user_terminals] == ["terminal-1", "terminal-2"]
+
+
+def test_filter_user_terminal_sessions_keeps_everything_when_prefix_is_empty() -> None:
+    output = "terminal-1\t$3\t/a\nmngr-alice\t$1\t/b\n"
+    sessions = parse_tmux_sessions_output(output)
+    user_terminals = filter_user_terminal_sessions(sessions, "")
+    assert len(user_terminals) == 2
+
+
+def test_allocate_next_terminal_name_starts_at_one() -> None:
+    assert allocate_next_terminal_name(set(), "mngr-") == "terminal-1"
+
+
+def test_allocate_next_terminal_name_fills_lowest_free_index() -> None:
+    existing = {"terminal-1", "terminal-2", "mngr-alice"}
+    assert allocate_next_terminal_name(existing, "mngr-") == "terminal-3"
+
+
+def test_allocate_next_terminal_name_reuses_a_gap() -> None:
+    existing = {"terminal-1", "terminal-3"}
+    assert allocate_next_terminal_name(existing, "mngr-") == "terminal-2"
+
+
+def test_is_destroyable_terminal_session_allows_terminals_and_blocks_agents() -> None:
+    assert is_destroyable_terminal_session("terminal-1", "mngr-") is True
+    assert is_destroyable_terminal_session("mngr-alice", "mngr-") is False
+    assert is_destroyable_terminal_session("", "mngr-") is False
+
+
+def test_is_destroyable_terminal_session_blocks_agents_even_with_terminal_like_names() -> None:
+    # A custom prefix must still protect agent sessions.
+    assert is_destroyable_terminal_session("ws-alice", "ws-") is False
+    assert is_destroyable_terminal_session("terminal-1", "ws-") is True
+
+
+def test_service_session_suffix_distinguishes_browser_panes() -> None:
+    # A browser-fleet iframe carries ?session=<id> so each browser is a distinct
+    # ref (service:browser?session=2); every other service iframe stays bare.
+    assert _service_session_suffix("/service/browser/?session=2") == "?session=2"
+    assert _service_session_suffix("/service/browser/?session=0") == "?session=0"
+    assert _service_session_suffix("/service/browser/") == ""
+    assert _service_session_suffix("/service/web/") == ""
+    assert _service_session_suffix(None) == ""

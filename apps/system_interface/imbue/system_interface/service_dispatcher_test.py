@@ -21,6 +21,7 @@ from imbue.system_interface.models import ApplicationEntry
 from imbue.system_interface.server import create_application
 from imbue.system_interface.service_dispatcher import _connect_backend_websocket
 from imbue.system_interface.testing import ServedApp
+from imbue.system_interface.testing import build_test_state
 from imbue.system_interface.testing import close_ws
 from imbue.system_interface.testing import open_ws
 from imbue.system_interface.testing import serve_app
@@ -114,7 +115,7 @@ def workspace_app_with_stub(stub_backend: ServedApp, monkeypatch: pytest.MonkeyP
     agent_manager = AgentManager.build(broadcaster)
     agent_manager._applications = [ApplicationEntry(name="web", url=stub_backend.http_url)]
 
-    return create_application(Config(), agent_manager=agent_manager)
+    return create_application(build_test_state(config=Config(), agent_manager=agent_manager))
 
 
 @pytest.fixture

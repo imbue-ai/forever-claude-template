@@ -61,6 +61,67 @@ cd "$1" 2>/dev/null && exec bash
 WORKDIR_SCRIPT
         chmod +x "$MNGR_AGENT_STATE_DIR/commands/ttyd/workdir.sh"
     fi
+    # Named, in-memory persistent terminal sessions. Each dockview "New
+    # terminal" tab attaches to (or creates) its own tmux session on the
+    # shared default socket, so the session survives closing the tab,
+    # reloading the iframe, and restarting this ttyd service -- everything
+    # short of a container/host restart (which clears the tmux server).
+    # Rewritten on every run so old deployments pick up logic changes.
+    cat > "$MNGR_AGENT_STATE_DIR/commands/ttyd/session.sh" << 'SESSION_SCRIPT'
+#!/bin/bash
+# Attach to (or create) a named, in-memory tmux terminal session.
+#
+# Args (passed by the ttyd dispatch after the "session" key is consumed):
+#   $1 = session name (e.g. "terminal-1")
+#   $2 = terminal id  (per-tab id used to map this ttyd client's pty back to
+#                      the dockview tab for live tab-title tracking; may be "")
+#   $3 = working directory to anchor a newly-created session in (may be "")
+#
+# `tmux new-session -A` attaches when the session exists and creates it
+# otherwise, so this single path covers reattach (tab reopen / reload / ttyd
+# restart) and first creation, as well as recreation after a container restart
+# cleared the tmux server (the tab just comes back as a fresh shell).
+set -euo pipefail
+SESSION_NAME="${1:-}"
+TERMINAL_ID="${2:-}"
+WORKDIR="${3:-}"
+unset TMUX
+
+if [ -z "$SESSION_NAME" ]; then
+    exec bash
+fi
+
+# Record this connection's pty under the terminal id so the tmux
+# client-session-changed / session-renamed hooks can map a live client back
+# to the dockview tab that owns it (best-effort; never fatal).
+if [ -n "$TERMINAL_ID" ] && [ -n "${MNGR_AGENT_STATE_DIR:-}" ]; then
+    CLIENTS_DIR="$MNGR_AGENT_STATE_DIR/commands/ttyd/clients"
+    mkdir -p "$CLIENTS_DIR"
+    MY_TTY="$(tty 2>/dev/null || true)"
+    if [ -n "$MY_TTY" ]; then
+        # This pty now authoritatively belongs to this terminal id. Drop any
+        # stale mapping that still points at the same pty: Linux reuses a pty
+        # number after a client disconnects, so a since-closed tab's leftover
+        # file could otherwise shadow this one and misroute title updates to a
+        # closed tab (the resolver returns the first matching entry).
+        for existing in "$CLIENTS_DIR"/*; do
+            [ -f "$existing" ] || continue
+            if [ "$(cat "$existing" 2>/dev/null)" = "$MY_TTY" ]; then
+                rm -f "$existing"
+            fi
+        done
+        printf '%s\n' "$MY_TTY" > "$CLIENTS_DIR/$TERMINAL_ID" 2>/dev/null || true
+    fi
+fi
+
+WORKDIR_ARGS=()
+if [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
+    WORKDIR_ARGS=(-c "$WORKDIR")
+fi
+
+exec tmux new-session -A -s "$SESSION_NAME" "${WORKDIR_ARGS[@]}"
+SESSION_SCRIPT
+    chmod +x "$MNGR_AGENT_STATE_DIR/commands/ttyd/session.sh"
 fi
 
 # Serve the OSC 52-capable ttyd web client so a mouse-drag copy inside tmux
