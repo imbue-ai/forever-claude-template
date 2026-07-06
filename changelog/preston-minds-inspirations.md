@@ -60,3 +60,11 @@
 - Added a one-sentence note in `CLAUDE.md` that inspirations exist. Publishing
   is user-initiated; the agent does not proactively push the user to create
   one.
+
+- Fixed the publish push for git worktrees: `gh repo create --source=.` errors
+  inside a worktree (its `.git` is a file, not a directory), which a real
+  publish run hit. The skill now publishes in two steps -- create the empty
+  repo, then push the assembled `mngr/<slug>` branch as `main` directly from
+  the worktree (same full bootable tree) -- and cleans up the `inspiration`
+  remote on close-out, since remotes live in the shared repo config and would
+  otherwise linger in the live checkout and collide with the next publish.

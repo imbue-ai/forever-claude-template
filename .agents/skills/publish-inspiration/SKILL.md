@@ -464,8 +464,8 @@ surface a clear message and stop, leaving the assembled commit intact.
 ## 8. Create the repo and push
 
 **cwd = `$WT`.** This is the step that actually publishes -- it MUST run from
-the worker's worktree so `gh repo create --source=.` picks up `$WT`'s tree
-(the clean assembled snapshot), never `/code`'s.
+the worker's worktree so the push sends `$WT`'s assembled branch (the clean
+snapshot), never anything from `/code`.
 
 With `repo_name` / `visibility` taken from the chat confirmation:
 
@@ -485,18 +485,31 @@ With `repo_name` / `visibility` taken from the chat confirmation:
     are the SVG safety rules. On ANY hit, block the push, fix the file (a
     real bespoke SVG, rules applied), commit in `$WT`, and re-run the gate.
 
+Publish in TWO steps -- create the empty repo, then push the assembled branch.
+Do NOT use `gh repo create --source=.`: it does not work inside a git worktree
+(a worktree's `.git` is a file, not a directory, and gh errors out on it --
+learned from a real publish run). The two-step form publishes the identical
+full bootable tree:
+
 ```bash
-( cd "$WT" && env -u GH_TOKEN -u GITHUB_TOKEN gh repo create "<repo_name>" --<visibility> --source=. --remote=inspiration --push )
+( cd "$WT" \
+  && env -u GH_TOKEN -u GITHUB_TOKEN gh repo create "<repo_name>" --<visibility> \
+  && git remote add inspiration "https://github.com/<owner>/<repo_name>.git" \
+  && env -u GH_TOKEN -u GITHUB_TOKEN git push -u inspiration "mngr/<slug>:main" )
 ```
 
-(`--private` or `--public` per the confirmed visibility. You already validated
-`repo_name` against `^[A-Za-z0-9._-]+$` in §6, which blocks argument
+(`--private` or `--public` per the confirmed visibility. Take `<owner>` from
+the `gh repo create` output -- it prints the new repo's URL. You already
+validated `repo_name` against `^[A-Za-z0-9._-]+$` in §6, which blocks argument
 injection, but still pass it as a single argv element -- never interpolate it
 into a shell string. The `env -u GH_TOKEN -u GITHUB_TOKEN` prefix is
-load-bearing: it forces `gh`/`git` to use the credential the device flow just
-stored via `setup-git`, not a stale `GH_TOKEN` inherited by your agent shell.
-`--source=.` resolves relative to the `cd "$WT"` in the same subshell, so it
-always means `$WT`, never `/code`.)
+load-bearing on both the create and the push: it forces `gh`/`git` to use the
+credential the device flow just stored via `setup-git`, not a stale `GH_TOKEN`
+inherited by your agent shell. The refspec `mngr/<slug>:main` pushes the
+assembled branch as the new repo's `main` regardless of anything else, so the
+published tree is exactly `$WT`'s snapshot. If the remote name is already
+taken from an earlier attempt, `git remote set-url inspiration <url>` instead
+of `remote add`.)
 
 **Tag the repo (immediately after a successful create+push).** Every published
 inspiration carries the `minds-inspiration` GitHub topic -- a repo topic, NOT
@@ -515,11 +528,13 @@ this edit fails, the publish itself already succeeded -- retry the edit once,
 and if it still fails, report it as a minor follow-up rather than treating the
 publish as failed.)
 
-**Failure handling.** If `gh repo create` fails (e.g. the name is taken, or the
-token lacks the `workflow` scope needed to push `.github/workflows/` -- see
-§7), report it to the user and return to §6's chat confirmation for a new
-name / visibility, keeping the assembled commit intact in `$WT`. Loop until it
-succeeds or the user aborts. **Never fall back to publishing a different,
+**Failure handling.** If the create fails (e.g. the name is taken) or the push
+fails (e.g. the token lacks the `workflow` scope needed to push
+`.github/workflows/` -- see §7), report it to the user and return to §6's chat
+confirmation for a new name / visibility (or fix the auth per §7), keeping the
+assembled commit intact in `$WT`. If the empty repo was created but the push
+failed, retry the push after fixing the cause rather than re-creating the
+repo. Loop until it succeeds or the user aborts. **Never fall back to publishing a different,
 non-bootable thing** (e.g. pushing just the selected app files via `gh api`
 instead of `$WT`'s full assembled tree) -- see the "MUST BE BOOTABLE" callout
 at the top of this skill. If you cannot get the documented flow to succeed,
@@ -542,7 +557,12 @@ local branch can go too -- the commit is fully preserved on the new remote:
 uv run .agents/skills/launch-task/scripts/create_worker.py destroy --name <slug>
 git worktree prune
 git branch -D "mngr/<slug>"
+git remote remove inspiration
 ```
+
+(The `inspiration` remote lives in the shared repo config, not the worktree,
+so it would otherwise linger in `/code` after `$WT` is gone and collide with
+the next publish's `git remote add`.)
 
 If the push failed and you are stopping (user aborted, unrecoverable error),
 leave the worker, `$WT`, and the `mngr/<slug>` branch intact instead -- do not
