@@ -2,11 +2,16 @@ import m from "mithril";
 import { apiUrl } from "../base-path";
 import type { TranscriptEvent, SubagentMetadata } from "../models/Response";
 import { parseJsonMessage } from "../models/ws-json";
-import { computeVisibleWindow } from "../models/virtualWindow";
-import { nextUserScrolledUp } from "../models/scrollFollow";
-import { createRowMeasurer, OVERSCAN_PX } from "./row-measurement";
-import { buildConversationRows, isSubagentRunning, type RowDescriptor } from "./conversation-rows";
-import { resolveSelectionRowRange, SELECTION_PIN_MAX_GAP_ROWS } from "./scroll-selection";
+import { computeTranscriptSlices } from "../models/virtualWindow";
+import { OVERSCAN_PX } from "./row-measurement";
+import {
+  buildConversationRows,
+  isSubagentRunning,
+  renderTranscriptSegments,
+  type RowDescriptor,
+} from "./conversation-rows";
+import { resolveSelectionRowRange } from "./scroll-selection";
+import { createTranscriptScroll } from "./transcript-scroll";
 
 interface SubagentViewAttrs {
   agentId: string;
@@ -27,22 +32,10 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
   let loadingError: string | null = null;
   let eventSource: EventSource | null = null;
 
-  // Virtualization state (a subagent transcript is bounded but can still be
-  // large; only the viewport window is rendered to the DOM).
-  let scrollEl: HTMLElement | null = null;
-  let viewportHeight = 0;
-  let scrollTop = 0;
-  const rowMeasurer = createRowMeasurer();
-  let userScrolledUp = false;
-  let previousScrollTop = 0;
-  let viewportResizeObserver: ResizeObserver | null = null;
-  // Follow-hardening / selection state, mirrored from ChatPanel (see there for the
-  // rationale). Scrolled-up stability comes from native scroll anchoring (spacers
-  // opt out below); the app only pins to the tail while following, defers that pin
-  // mid-drag, and keeps selected rows mounted.
-  let lastScrollHeight = 0;
-  let isPointerDown = false;
-  let pointerReleaseListener: (() => void) | null = null;
+  // Virtualization: only the viewport window (plus any selected rows) is rendered.
+  // The scroll-follow machinery -- tail following, native-anchoring stability, the
+  // drag/resize lifecycle and the row measurer -- lives in the shared controller.
+  const scroll = createTranscriptScroll();
   // Memoized rows. buildConversationRows walks the whole subagent transcript, so
   // it is recomputed only when the event set or idleness changes -- not on every
   // scroll redraw. The transcript is append-only here (no in-place upgrades, no
@@ -121,63 +114,6 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     }
   }
 
-  function applyScrollPosition(element: HTMLElement): void {
-    // While scrolled up the app writes nothing: native scroll anchoring holds the
-    // viewport (the spacers opt out so it anchors to a real row). Only the tail
-    // pin writes scrollTop, and only when following. See ChatPanel for the full
-    // rationale (per-frame JS compensation is what caused random snaps).
-    if (!userScrolledUp) {
-      applyTailFollow(element);
-    }
-    lastScrollHeight = element.scrollHeight;
-  }
-
-  function applyTailFollow(element: HTMLElement): void {
-    if (isPointerDown) {
-      return;
-    }
-    const maxScroll = element.scrollHeight - element.clientHeight;
-    if (element.scrollTop < Math.min(scrollTop, maxScroll) - 1) {
-      userScrolledUp = true;
-      scrollTop = element.scrollTop;
-      previousScrollTop = element.scrollTop;
-      return;
-    }
-    element.scrollTop = element.scrollHeight;
-    scrollTop = element.scrollTop;
-    previousScrollTop = element.scrollTop;
-  }
-
-  function handleScrollEvent(event: Event): void {
-    const element = event.target as HTMLElement;
-    const didScrollUp = element.scrollTop < previousScrollTop;
-    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 40;
-    // A shrink-clamp looks like a scroll-up but carries no user intent; preserve
-    // the follow state rather than re-deriving it (see scrollFollow).
-    const isClamp = didScrollUp && element.scrollHeight < lastScrollHeight && atBottom;
-    previousScrollTop = element.scrollTop;
-    scrollTop = element.scrollTop;
-    // A subagent transcript is a single loaded list with no off-tail jump, so
-    // there is never newer unloaded history below: hasMoreAfter is always false.
-    userScrolledUp = nextUserScrolledUp({
-      didScrollUp,
-      isNearBottom: atBottom,
-      hasMoreAfter: false,
-      isClamp,
-      wasUserScrolledUp: userScrolledUp,
-    });
-    lastScrollHeight = element.scrollHeight;
-  }
-
-  // Refresh the cached viewport height and schedule a measure pass; the
-  // measure/cache mechanics live in the shared row measurer.
-  function scheduleMeasure(): void {
-    if (scrollEl !== null) {
-      viewportHeight = scrollEl.clientHeight;
-    }
-    rowMeasurer.scheduleMeasure(() => scrollEl);
-  }
-
   function renderWindowedList(agentId: string): m.Vnode {
     // A subagent has no server-derived activity_state, so derive idleness from
     // the transcript tail; idle settles the frontier spinner. It is part of the
@@ -190,59 +126,30 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
       // idle source differs (derived here rather than from activity_state).
       cachedRows = buildConversationRows(agentId, events, agentIsIdle);
       cachedKeyToIndex = new Map(cachedRows.map((row, index) => [row.key, index]));
-      rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
+      scroll.rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
       rowsCacheKey = renderKey;
     }
     const rows = cachedRows;
-    const getHeight = (index: number): number => rowMeasurer.getHeight(rows[index].key) ?? rows[index].estimate;
-    const effectiveViewportHeight = viewportHeight > 0 ? viewportHeight : (scrollEl?.clientHeight ?? 2000);
-    const baseWindow = computeVisibleWindow({
+    const getHeight = (index: number): number => scroll.rowMeasurer.getHeight(rows[index].key) ?? rows[index].estimate;
+    const effectiveViewportHeight =
+      scroll.viewportHeight > 0 ? scroll.viewportHeight : (scroll.scrollEl?.clientHeight ?? 2000);
+    // A live selection's rows are kept mounted as a (possibly disjoint) run so
+    // scrolling/streaming past them doesn't collapse the selection -- with no gap
+    // cap, since a disjoint run mounts only the selected rows, not those in between.
+    const { segments } = computeTranscriptSlices({
       count: rows.length,
       getHeight,
-      scrollTop,
+      scrollTop: scroll.scrollTop,
       viewportHeight: effectiveViewportHeight,
       overscanPx: OVERSCAN_PX,
+      pinnedRange: resolveSelectionRowRange(scroll.scrollEl, cachedKeyToIndex),
     });
-    // Keep the rows holding a live selection mounted so scrolling/streaming past
-    // them doesn't collapse the selection; drop the pin past the gap cap.
-    let pinnedRange = resolveSelectionRowRange(scrollEl, cachedKeyToIndex);
-    if (pinnedRange !== null) {
-      const gapAbove = baseWindow.startIndex - pinnedRange.end;
-      const gapBelow = pinnedRange.start - baseWindow.endIndex;
-      if (gapAbove > SELECTION_PIN_MAX_GAP_ROWS || gapBelow > SELECTION_PIN_MAX_GAP_ROWS) {
-        pinnedRange = null;
-      }
-    }
-    const windowResult =
-      pinnedRange === null
-        ? baseWindow
-        : computeVisibleWindow({
-            count: rows.length,
-            getHeight,
-            scrollTop,
-            viewportHeight: effectiveViewportHeight,
-            overscanPx: OVERSCAN_PX,
-            pinnedRange,
-          });
-
-    // Spacers opt out of native scroll anchoring so the browser anchors to a real
-    // message row rather than a resizing spacer (see ChatPanel for the rationale).
-    const visibleRows: m.Children[] = [];
-    visibleRows.push(
-      m("div", { key: "__spacer_top", style: `height: ${windowResult.topPad}px; overflow-anchor: none` }),
-    );
-    for (let i = windowResult.startIndex; i < windowResult.endIndex; i++) {
-      visibleRows.push(rows[i].render());
-    }
-    visibleRows.push(
-      m("div", { key: "__spacer_bottom", style: `height: ${windowResult.bottomPad}px; overflow-anchor: none` }),
-    );
 
     return m("div", { class: "message-list-wrapper" }, [
       m(
         "div",
         { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
-        visibleRows,
+        renderTranscriptSegments(rows, segments),
       ),
     ]);
   }
@@ -257,16 +164,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
 
     onremove() {
       disconnectFromStream();
-      if (viewportResizeObserver !== null) {
-        viewportResizeObserver.disconnect();
-        viewportResizeObserver = null;
-      }
-      if (pointerReleaseListener !== null) {
-        window.removeEventListener("pointerup", pointerReleaseListener);
-        window.removeEventListener("pointercancel", pointerReleaseListener);
-        pointerReleaseListener = null;
-      }
-      scrollEl = null;
+      scroll.detach();
     },
 
     view(vnode) {
@@ -309,35 +207,19 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
           "main",
           {
             class: "app-content flex-1 overflow-y-auto px-8 py-6",
-            onscroll: handleScrollEvent,
-            onpointerdown: () => {
-              isPointerDown = true;
-            },
+            onscroll: (event: Event) => scroll.onScroll(event),
+            onpointerdown: () => scroll.onPointerDown(),
             oncreate: (mainVnode: m.VnodeDOM) => {
-              scrollEl = mainVnode.dom as HTMLElement;
-              viewportHeight = scrollEl.clientHeight;
-              pointerReleaseListener = () => {
-                if (isPointerDown) {
-                  isPointerDown = false;
-                  m.redraw();
-                }
-              };
-              window.addEventListener("pointerup", pointerReleaseListener);
-              window.addEventListener("pointercancel", pointerReleaseListener);
-              viewportResizeObserver = new ResizeObserver(() => {
-                if (scrollEl !== null && scrollEl.clientHeight !== viewportHeight) {
-                  viewportHeight = scrollEl.clientHeight;
-                  m.redraw();
-                }
-              });
-              viewportResizeObserver.observe(scrollEl);
-              applyScrollPosition(scrollEl);
-              scheduleMeasure();
+              const element = mainVnode.dom as HTMLElement;
+              scroll.attach(element);
+              scroll.applyScrollPosition(element);
+              scroll.scheduleMeasure();
             },
             onupdate: (mainVnode: m.VnodeDOM) => {
-              scrollEl = mainVnode.dom as HTMLElement;
-              applyScrollPosition(scrollEl);
-              scheduleMeasure();
+              const element = mainVnode.dom as HTMLElement;
+              scroll.attach(element);
+              scroll.applyScrollPosition(element);
+              scroll.scheduleMeasure();
             },
           },
           content,

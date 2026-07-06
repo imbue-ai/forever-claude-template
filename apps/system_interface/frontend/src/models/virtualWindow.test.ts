@@ -1,10 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { computeVisibleWindow } from "./virtualWindow";
+import { computeVisibleWindow, computeTranscriptSlices, type WindowSegment } from "./virtualWindow";
 
 const uniform =
   (height: number) =>
   (_index: number): number =>
     height;
+
+/** Every row index the segments would render, in order. */
+function renderedIndices(segments: WindowSegment[]): number[] {
+  const indices: number[] = [];
+  for (const segment of segments) {
+    if (segment.kind === "rows") {
+      for (let i = segment.startIndex; i < segment.endIndex; i++) indices.push(i);
+    }
+  }
+  return indices;
+}
+
+/** Total height the segments occupy (spacers + rendered rows). */
+function segmentsHeight(segments: WindowSegment[], getHeight: (i: number) => number): number {
+  let height = 0;
+  for (const segment of segments) {
+    if (segment.kind === "spacer") height += segment.height;
+    else for (let i = segment.startIndex; i < segment.endIndex; i++) height += getHeight(i);
+  }
+  return height;
+}
 
 describe("computeVisibleWindow", () => {
   it("returns an empty window with no padding for an empty list", () => {
@@ -127,53 +148,101 @@ describe("computeVisibleWindow", () => {
     expect(result.endIndex).toBe(10);
     expect(result.bottomPad).toBe(0);
   });
+});
 
-  it("expands the window downward to keep a pinned row below the viewport mounted", () => {
-    const result = computeVisibleWindow({
-      count: 100,
-      getHeight: uniform(100),
-      scrollTop: 0,
-      viewportHeight: 500,
-      overscanPx: 0,
-      pinnedRange: { start: 80, end: 82 },
-    });
-    // Viewport alone would render rows 0..4; the pin drags the end out to 83.
-    expect(result.startIndex).toBe(0);
-    expect(result.endIndex).toBe(83);
-    expect(result.topPad).toBe(0);
-    expect(result.bottomPad).toBe((100 - 83) * 100);
-  });
-
-  it("expands the window upward to keep a pinned row above the viewport mounted", () => {
-    const result = computeVisibleWindow({
+describe("computeTranscriptSlices", () => {
+  it("renders one contiguous run matching the viewport when there is no pin", () => {
+    const { segments, totalHeight } = computeTranscriptSlices({
       count: 100,
       getHeight: uniform(100),
       scrollTop: 5000,
       viewportHeight: 500,
       overscanPx: 0,
-      pinnedRange: { start: 10, end: 10 },
     });
-    // Viewport alone would render rows 50..54; the pin drags the start up to 10.
-    expect(result.startIndex).toBe(10);
-    expect(result.endIndex).toBe(55);
-    expect(result.topPad).toBe(10 * 100);
+    // spacer, one row-run, spacer.
+    expect(segments.map((s) => s.kind)).toEqual(["spacer", "rows", "spacer"]);
+    expect(renderedIndices(segments)).toEqual([50, 51, 52, 53, 54]);
+    expect(totalHeight).toBe(10000);
+    expect(segmentsHeight(segments, uniform(100))).toBe(totalHeight);
   });
 
-  it("leaves the window unchanged when the pinned range is already inside it", () => {
-    const withPin = computeVisibleWindow({
+  it("merges a pin that overlaps or touches the viewport into one run", () => {
+    const { segments } = computeTranscriptSlices({
       count: 100,
       getHeight: uniform(100),
       scrollTop: 5000,
       viewportHeight: 500,
       overscanPx: 0,
-      pinnedRange: { start: 51, end: 52 },
+      pinnedRange: { start: 55, end: 56 }, // adjacent to the viewport window [50,55)
     });
-    expect(withPin.startIndex).toBe(50);
-    expect(withPin.endIndex).toBe(55);
+    expect(segments.map((s) => s.kind)).toEqual(["spacer", "rows", "spacer"]);
+    expect(renderedIndices(segments)).toEqual([50, 51, 52, 53, 54, 55, 56]);
   });
 
-  it("clamps an out-of-range pinned range instead of producing a bad slice", () => {
-    const result = computeVisibleWindow({
+  it("keeps a far-above selection as a SEPARATE run -- not the rows in between", () => {
+    // The whole point of the disjoint window: a selection at the top with the
+    // viewport near the bottom must NOT mount the ~900 rows between them.
+    const { segments } = computeTranscriptSlices({
+      count: 1000,
+      getHeight: uniform(100),
+      scrollTop: 95000, // viewport near the bottom -> rows ~950..954
+      viewportHeight: 500,
+      overscanPx: 0,
+      pinnedRange: { start: 2, end: 3 },
+    });
+    expect(segments.map((s) => s.kind)).toEqual(["spacer", "rows", "spacer", "rows", "spacer"]);
+    const indices = renderedIndices(segments);
+    // Only the 2 pinned rows plus the ~5 viewport rows -- a handful, not hundreds.
+    expect(indices).toContain(2);
+    expect(indices).toContain(3);
+    expect(indices).toContain(950);
+    expect(indices).not.toContain(500); // nothing from the gap between
+    expect(indices.length).toBeLessThan(20);
+    expect(segmentsHeight(segments, uniform(100))).toBe(100000);
+  });
+
+  it("keeps a far-below selection as a separate run after the viewport", () => {
+    const { segments } = computeTranscriptSlices({
+      count: 1000,
+      getHeight: uniform(100),
+      scrollTop: 0, // viewport at the top -> rows 0..4
+      viewportHeight: 500,
+      overscanPx: 0,
+      pinnedRange: { start: 900, end: 901 },
+    });
+    expect(segments.map((s) => s.kind)).toEqual(["spacer", "rows", "spacer", "rows", "spacer"]);
+    const indices = renderedIndices(segments);
+    expect(indices).toContain(0);
+    expect(indices).toContain(900);
+    expect(indices).toContain(901);
+    expect(indices).not.toContain(500);
+    expect(indices.length).toBeLessThan(20);
+  });
+
+  it("folds the phantom regions into the outer spacers and total height", () => {
+    const { segments, totalHeight } = computeTranscriptSlices({
+      count: 10,
+      getHeight: uniform(100),
+      scrollTop: 400, // 400 raw - 400 phantomTop = 0 into the loaded rows
+      viewportHeight: 300,
+      overscanPx: 0,
+      phantomTopHeight: 400,
+      phantomBottomHeight: 600,
+    });
+    // 10 rows * 100 + 400 + 600 reserved.
+    expect(totalHeight).toBe(2000);
+    expect(segmentsHeight(segments, uniform(100))).toBe(2000);
+    const first = segments[0];
+    const last = segments[segments.length - 1];
+    // Leading spacer includes the top phantom; trailing spacer includes the bottom.
+    expect(first.kind).toBe("spacer");
+    expect((first as { height: number }).height).toBeGreaterThanOrEqual(400);
+    expect(last.kind).toBe("spacer");
+    expect((last as { height: number }).height).toBeGreaterThanOrEqual(600);
+  });
+
+  it("clamps an out-of-range pin instead of producing a bad run", () => {
+    const { segments } = computeTranscriptSlices({
       count: 10,
       getHeight: uniform(100),
       scrollTop: 0,
@@ -181,25 +250,10 @@ describe("computeVisibleWindow", () => {
       overscanPx: 0,
       pinnedRange: { start: -5, end: 999 },
     });
-    expect(result.startIndex).toBe(0);
-    expect(result.endIndex).toBe(10);
-    expect(result.topPad).toBe(0);
-    expect(result.bottomPad).toBe(0);
-  });
-
-  it("keeps a pinned row mounted even past the end of the content", () => {
-    const result = computeVisibleWindow({
-      count: 20,
-      getHeight: uniform(100),
-      scrollTop: 100000,
-      viewportHeight: 300,
-      overscanPx: 0,
-      pinnedRange: { start: 2, end: 2 },
-    });
-    // Past-the-end backward fill covers the tail; the pin additionally holds row 2.
-    expect(result.startIndex).toBe(2);
-    expect(result.endIndex).toBe(20);
-    const rendered = (result.endIndex - result.startIndex) * 100;
-    expect(result.topPad + rendered + result.bottomPad).toBe(result.totalHeight);
+    const indices = renderedIndices(segments);
+    for (const i of indices) {
+      expect(i).toBeGreaterThanOrEqual(0);
+      expect(i).toBeLessThan(10);
+    }
   });
 });

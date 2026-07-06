@@ -24,10 +24,11 @@ import {
   isConversationNotFound,
   MAX_HELD_EVENTS,
 } from "../models/Response";
-import { computeVisibleWindow } from "../models/virtualWindow";
-import { nextUserScrolledUp, isSelectionActiveWithin } from "../models/scrollFollow";
-import { createRowMeasurer, OVERSCAN_PX } from "./row-measurement";
-import { resolveSelectionRowRange, selectionStateWithin, SELECTION_PIN_MAX_GAP_ROWS } from "./scroll-selection";
+import { computeTranscriptSlices } from "../models/virtualWindow";
+import { isSelectionActiveWithin } from "../models/scrollFollow";
+import { OVERSCAN_PX } from "./row-measurement";
+import { resolveSelectionRowRange, selectionStateWithin } from "./scroll-selection";
+import { createTranscriptScroll } from "./transcript-scroll";
 import { connectToStream, disconnectFromStream, loadSnapshotWithStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
 import { openLoginModal } from "../models/ClaudeAuth";
@@ -35,7 +36,7 @@ import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { MessageInput } from "./MessageInput";
 import { buildAgentTerminalUrl, getTerminalUrl, openIframeTabForAgent } from "./DockviewWorkspace";
-import { buildConversationRows, type RowDescriptor } from "./conversation-rows";
+import { buildConversationRows, renderTranscriptSegments, type RowDescriptor } from "./conversation-rows";
 import { ActivityIndicator } from "./ActivityIndicator";
 import { renderPendingMessages } from "./PendingMessageView";
 
@@ -60,8 +61,6 @@ function openAgentTerminalTab(agentId: string): void {
   const title = agent?.name ? `${agent.name} terminal` : "agent terminal";
   openIframeTabForAgent(agentId, getAgentTerminalUrl(agentId), title);
 }
-
-const SCROLL_BOTTOM_THRESHOLD_PX = 40;
 
 // Layout for the centered message column. Shared between the normal transcript
 // render and the empty-state branch that shows an optimistic first message, so
@@ -88,14 +87,6 @@ const JUMP_GAP_EVENTS = 120;
 // residual (measured height vs count * this) is affected.
 const ESTIMATED_EVENT_HEIGHT_PX = 160;
 
-function isNearBottom(element: HTMLElement): boolean {
-  return element.scrollHeight - element.scrollTop - element.clientHeight < SCROLL_BOTTOM_THRESHOLD_PX;
-}
-
-function scrollToBottom(element: HTMLElement): void {
-  element.scrollTop = element.scrollHeight;
-}
-
 function isProtoAgent(agentId: string): boolean {
   return getProtoAgents().some((p) => p.agent_id === agentId);
 }
@@ -104,17 +95,7 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
   let loading = false;
   let loadingError: string | null = null;
   let currentAgentId: string | null = null;
-  let userScrolledUp = false;
 
-  // Virtualization state.
-  let scrollEl: HTMLElement | null = null;
-  let viewportHeight = 0;
-  let scrollTop = 0;
-  // Previous observed scroll position, for detecting scroll direction. Updated in
-  // lockstep with scrollTop at every programmatic scroll site (see handleScrollEvent).
-  let previousScrollTop = 0;
-  const rowMeasurer = createRowMeasurer();
-  let viewportResizeObserver: ResizeObserver | null = null;
   // Whether this panel is the visible (selected) tab in its dockview group.
   // dockview keeps an inactive tab mounted (defaultRenderer: "always") and
   // mithril redraws globally, so the component keeps running while hidden
@@ -124,6 +105,21 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
   // createMithrilRenderer); the scroll hooks below skip while it is false.
   // Defaults to true so the panel works before the first render sets it.
   let panelVisible = true;
+  // Shared scroll controller: owns the scroll position, follow state, drag flag and
+  // row measurer, plus the tail-follow / native-anchoring / pointer / resize
+  // machinery. Everything specific to the main chat -- the phantom regions, paging,
+  // eviction and the offset-jump pin below -- stays here; the controller is fed this
+  // panel's visibility, whether newer history exists below the window, and the
+  // after-scroll paging hook.
+  const scroll = createTranscriptScroll({
+    isVisible: () => panelVisible,
+    getHasMoreAfter: () => hasMoreAfter(currentAgentId ?? ""),
+    onUserScroll: (element) => {
+      if (currentAgentId !== null) {
+        maybePage(currentAgentId, element);
+      }
+    },
+  });
   // Memoized turn-grouping output. buildSections walks the whole held
   // transcript, so it is recomputed only when the data actually changes (keyed
   // on the render version + idle flag), not on every scroll-driven redraw.
@@ -148,19 +144,6 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
   // reserved heights now sized by a stable constant, the top of the loaded window
   // doesn't drift as rows measure, so a single pin suffices -- no timed settle.
   let pendingPinToWindowTop = false;
-  // Last observed scrollHeight, to distinguish a browser shrink-clamp (content got
-  // shorter, so scrollTop was pushed up to the new max) from a genuine user
-  // scroll-up when updating the follow state.
-  let lastScrollHeight = 0;
-  // A pointer button is held down over the transcript (the user is mid-drag,
-  // likely selecting). The tail-follow pin is deferred while this holds so
-  // streaming output doesn't scroll content out from under the drag; it resumes
-  // the instant the button is released. Unlike a scroll-up, this never disengages
-  // follow.
-  let isPointerDown = false;
-  // Window-level listener that clears isPointerDown on release (the pointer may be
-  // released outside the panel). Registered on mount, removed on unmount.
-  let pointerReleaseListener: (() => void) | null = null;
 
   // Snapshot-load path: SSE only carries events emitted after subscription,
   // so an auth-error that happened before the user opened the panel (e.g.
@@ -337,12 +320,8 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
     }
 
     currentAgentId = agentId;
-    scrollTop = 0;
-    previousScrollTop = 0;
-    userScrolledUp = false;
+    scroll.reset();
     backfillInFlight = false;
-    lastScrollHeight = 0;
-    rowMeasurer.reset();
     loadAgent(agentId);
   }
 
@@ -402,7 +381,7 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
         backfillInFlight = false;
         // The window now sits off the live tail, so stop following it, and pin the
         // viewport once to the new window's top on the next redraw (applyScrollPosition).
-        userScrolledUp = true;
+        scroll.userScrolledUp = true;
         pendingPinToWindowTop = true;
         m.redraw();
       });
@@ -433,13 +412,8 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
   }
 
   function applyScrollPosition(element: HTMLElement): void {
-    // While the panel is hidden (an inactive dockview tab) the element is
-    // zero-sized. Re-pinning or scrolling-to-bottom now would set scrollTop from
-    // a 0 scrollHeight and clobber the retained scrollTop/previousScrollTop to 0,
-    // losing the user's place. The browser preserves the native scrollTop across
-    // a hide/show, so skipping here keeps the position intact; dockview fires a
-    // visibility change on show that forces a redraw (see createMithrilRenderer),
-    // so this runs again then and restores the tail / scrolled-up position.
+    // Hidden panels and the tail-follow pin are handled by the shared controller;
+    // this wrapper only adds the offset-jump pin that is specific to the main chat.
     if (!panelVisible) {
       return;
     }
@@ -450,93 +424,10 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
     // rows measure -- a single pin lands correctly without a timed settle.
     if (pendingPinToWindowTop) {
       pendingPinToWindowTop = false;
-      element.scrollTop = phantomTopHeight;
-      scrollTop = element.scrollTop;
-      previousScrollTop = element.scrollTop;
-      lastScrollHeight = element.scrollHeight;
+      scroll.pinTo(element, phantomTopHeight);
       return;
     }
-
-    // While scrolled up, the app writes NOTHING to scrollTop. Native scroll
-    // anchoring keeps the viewport pinned to the content the user is reading as
-    // rows above it load (backfill) or measure to their real height: the scroll
-    // container keeps its default `overflow-anchor`, and only the spacer divs opt
-    // out so the browser anchors to a real row. Hand-rolled per-frame compensation
-    // here is what produced the random snaps -- a compensating write that landed
-    // near the bottom flipped the view back into follow mode, and each write fired
-    // its own scroll event. The browser does this frame-perfectly. The only
-    // scrollTop writes left are the discrete tail-follow and jump pins.
-    if (!userScrolledUp) {
-      applyTailFollow(element);
-    }
-    lastScrollHeight = element.scrollHeight;
-  }
-
-  function applyTailFollow(element: HTMLElement): void {
-    // Mid-drag: hold position so a selection drag isn't chasing auto-scroll. Does
-    // not disengage follow -- it resumes on the next redraw once the button is up.
-    if (isPointerDown) {
-      return;
-    }
-    // Honor an unprocessed user wheel-up whose scroll event hasn't fired yet: if
-    // the live scrollTop sits above where we last pinned, the user is scrolling up,
-    // so stop pinning (otherwise a streaming redraw yanks it back before the scroll
-    // event registers -- input swallowed, "fighting the scrollbar"). The
-    // `min(scrollTop, maxScroll)` guard distinguishes this from the browser
-    // clamping scrollTop after the content shrank (eviction, a turn collapsing),
-    // which is still-at-bottom and must keep following.
-    const maxScroll = element.scrollHeight - element.clientHeight;
-    if (element.scrollTop < Math.min(scrollTop, maxScroll) - 1) {
-      userScrolledUp = true;
-      scrollTop = element.scrollTop;
-      previousScrollTop = element.scrollTop;
-      return;
-    }
-    scrollToBottom(element);
-    scrollTop = element.scrollTop;
-    previousScrollTop = element.scrollTop;
-  }
-
-  function handleScrollEvent(event: Event): void {
-    const element = event.target as HTMLElement;
-    // applyScrollPosition keeps previousScrollTop in lockstep with its own
-    // programmatic re-pins, so only a genuine user scroll registers as movement.
-    const didScrollUp = element.scrollTop < previousScrollTop;
-    const atBottom = isNearBottom(element);
-    // A shrink-clamp: the content got shorter and the browser pushed scrollTop up
-    // to the new max. It looks like a scroll-up but carries no user intent, so the
-    // follow state must be preserved rather than re-derived (see scrollFollow).
-    const isClamp = didScrollUp && element.scrollHeight < lastScrollHeight && atBottom;
-    previousScrollTop = element.scrollTop;
-    scrollTop = element.scrollTop;
-
-    userScrolledUp = nextUserScrolledUp({
-      didScrollUp,
-      isNearBottom: atBottom,
-      hasMoreAfter: hasMoreAfter(currentAgentId ?? ""),
-      isClamp,
-      wasUserScrolledUp: userScrolledUp,
-    });
-
-    lastScrollHeight = element.scrollHeight;
-
-    if (currentAgentId !== null) {
-      maybePage(currentAgentId, element);
-    }
-  }
-
-  // Refresh the cached viewport height and schedule a measure pass. Kept local
-  // so the viewport height (used by the window math below) stays current; the
-  // measure/cache mechanics themselves live in the shared row measurer.
-  function scheduleMeasure(): void {
-    // While the panel is hidden the element measures 0; don't overwrite the
-    // retained viewportHeight with 0 (the windowing math would then fall back to
-    // a wrong height). The row measurer already ignores zero-height rows, so it
-    // is safe to schedule regardless.
-    if (scrollEl !== null && panelVisible) {
-      viewportHeight = scrollEl.clientHeight;
-    }
-    rowMeasurer.scheduleMeasure(() => scrollEl);
+    scroll.applyScrollPosition(element);
   }
 
   function renderMessages(agentId: string): m.Vnode {
@@ -612,7 +503,7 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
     // Whether a live text selection is anchored in this panel's transcript. Gates
     // both eviction (below) and the tail-follow pin's effect on the window (via the
     // selection pin further down): a selection must survive scrolling and streaming.
-    const selectionActive = isSelectionActiveWithin(selectionStateWithin(scrollEl));
+    const selectionActive = isSelectionActiveWithin(selectionStateWithin(scroll.scrollEl));
 
     // Bound client memory while following the live tail: trim the oldest held
     // events once well over the cap. Only when at the bottom, so a scrolled-up
@@ -623,7 +514,7 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
     // eviction deletes the underlying events, which no amount of DOM pinning can
     // survive. This temporarily lifts the MAX_HELD_EVENTS bound while a selection
     // is held; it is restored on the first redraw after the selection is dropped.
-    if (!userScrolledUp && !selectionActive && getEventCount(agentId) > MAX_HELD_EVENTS) {
+    if (!scroll.userScrolledUp && !selectionActive && getEventCount(agentId) > MAX_HELD_EVENTS) {
       evictOldEvents(agentId);
     }
 
@@ -662,12 +553,12 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
       // subagent's "View conversation" renders an identical progress timeline.
       cachedRows = buildConversationRows(agentId, events, agentIsIdle);
       cachedKeyToIndex = new Map(cachedRows.map((row, index) => [row.key, index]));
-      rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
+      scroll.rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
       rowsCacheKey = renderKey;
     }
     const rows = cachedRows;
 
-    const getHeight = (index: number): number => rowMeasurer.getHeight(rows[index].key) ?? rows[index].estimate;
+    const getHeight = (index: number): number => scroll.rowMeasurer.getHeight(rows[index].key) ?? rows[index].estimate;
 
     // Reserve space above and below the loaded window for history that exists on
     // the server but isn't loaded yet, so the scrollbar reflects the whole
@@ -686,87 +577,41 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
     phantomTopHeight = Math.round(olderUnloaded * ESTIMATED_EVENT_HEIGHT_PX);
     phantomBottomHeight = Math.round(newerUnloaded * ESTIMATED_EVENT_HEIGHT_PX);
 
-    // The loaded rows start below the top phantom spacer, so shift the scroll
-    // position into the loaded rows' own coordinate space for the window math.
-    const adjustedScrollTop = Math.max(0, scrollTop - phantomTopHeight);
     // Before the first measure viewportHeight is 0; fall back to the live
     // clientHeight (or a large value) so the initial render is not a 1-row sliver
     // that the post-mount measure then has to expand.
-    const effectiveViewportHeight = viewportHeight > 0 ? viewportHeight : (scrollEl?.clientHeight ?? 2000);
-    const baseWindow = computeVisibleWindow({
+    const effectiveViewportHeight =
+      scroll.viewportHeight > 0 ? scroll.viewportHeight : (scroll.scrollEl?.clientHeight ?? 2000);
+    // Windowed slice for the viewport, plus a (possibly disjoint) run holding the
+    // rows a live selection touches so scrolling/streaming past them doesn't
+    // unmount their DOM and collapse the selection. A disjoint run mounts only the
+    // selected rows -- not the arbitrarily many between them and the viewport -- so
+    // there is no gap cap: the selection survives at any scroll distance.
+    const { segments } = computeTranscriptSlices({
       count: rows.length,
       getHeight,
-      scrollTop: adjustedScrollTop,
+      scrollTop: scroll.scrollTop,
       viewportHeight: effectiveViewportHeight,
       overscanPx: OVERSCAN_PX,
+      phantomTopHeight,
+      phantomBottomHeight,
+      pinnedRange: selectionActive ? resolveSelectionRowRange(scroll.scrollEl, cachedKeyToIndex) : null,
     });
-    // Pin the rows holding a live selection into the window so scrolling or
-    // streaming past them doesn't unmount their DOM and collapse the selection.
-    // Abandon the pin once the selection is more than SELECTION_PIN_MAX_GAP_ROWS
-    // from the viewport, so a selection held through a long stream can't keep an
-    // unbounded span mounted (the selection then collapses -- a deliberate bound).
-    let pinnedRange = selectionActive ? resolveSelectionRowRange(scrollEl, cachedKeyToIndex) : null;
-    if (pinnedRange !== null) {
-      const gapAbove = baseWindow.startIndex - pinnedRange.end;
-      const gapBelow = pinnedRange.start - baseWindow.endIndex;
-      if (gapAbove > SELECTION_PIN_MAX_GAP_ROWS || gapBelow > SELECTION_PIN_MAX_GAP_ROWS) {
-        pinnedRange = null;
-      }
-    }
-    const windowResult =
-      pinnedRange === null
-        ? baseWindow
-        : computeVisibleWindow({
-            count: rows.length,
-            getHeight,
-            scrollTop: adjustedScrollTop,
-            viewportHeight: effectiveViewportHeight,
-            overscanPx: OVERSCAN_PX,
-            pinnedRange,
-          });
-
-    const visibleRows: m.Children[] = [];
-    // `overflow-anchor: none` on the spacers keeps native scroll anchoring from
-    // choosing a spacer as its anchor: a spacer's height changes every time rows
-    // page in or measure, so anchoring to one would move the viewport. Excluding
-    // them makes the browser anchor to a real message row, holding the content the
-    // user is reading still as the spacers around it resize.
-    visibleRows.push(
-      m("div", {
-        key: "__spacer_top",
-        style: `height: ${phantomTopHeight + windowResult.topPad}px; overflow-anchor: none`,
-      }),
-    );
-    for (let i = windowResult.startIndex; i < windowResult.endIndex; i++) {
-      visibleRows.push(rows[i].render());
-    }
-    visibleRows.push(
-      m("div", {
-        key: "__spacer_bottom",
-        style: `height: ${windowResult.bottomPad + phantomBottomHeight}px; overflow-anchor: none`,
-      }),
-    );
 
     return m("div", { class: "message-list-wrapper" }, [
       // Pending (optimistic) messages render after the virtualized rows so a
       // just-sent bubble shows at the live tail until its real event lands.
-      m("div", { class: MESSAGE_LIST_CLASS }, [...visibleRows, ...renderPendingMessages(agentId)]),
+      m("div", { class: MESSAGE_LIST_CLASS }, [
+        ...renderTranscriptSegments(rows, segments),
+        ...renderPendingMessages(agentId),
+      ]),
     ]);
   }
 
   return {
     onremove() {
       disconnectLogWs();
-      if (viewportResizeObserver !== null) {
-        viewportResizeObserver.disconnect();
-        viewportResizeObserver = null;
-      }
-      if (pointerReleaseListener !== null) {
-        window.removeEventListener("pointerup", pointerReleaseListener);
-        window.removeEventListener("pointercancel", pointerReleaseListener);
-        pointerReleaseListener = null;
-      }
-      scrollEl = null;
+      scroll.detach();
       if (currentAgentId !== null) {
         disconnectFromStream(currentAgentId);
       }
@@ -785,64 +630,38 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
       // all loaded rows, or below them) and so should show a loading overlay
       // instead of a blank spacer while the fetch for that region lands.
       const content = isSlotClaimed("conversation-content") ? null : renderMessages(agentId);
-      const viewportPx = viewportHeight > 0 ? viewportHeight : (scrollEl?.clientHeight ?? 0);
+      const scrollEl = scroll.scrollEl;
+      const currentScrollTop = scroll.scrollTop;
+      const viewportPx = scroll.viewportHeight > 0 ? scroll.viewportHeight : (scrollEl?.clientHeight ?? 0);
       const loadedTop = phantomTopHeight;
       const loadedBottom = scrollEl !== null ? scrollEl.scrollHeight - phantomBottomHeight : Number.MAX_SAFE_INTEGER;
       const inReservedRegion =
-        (phantomTopHeight > 0 && scrollTop < loadedTop) ||
-        (phantomBottomHeight > 0 && scrollTop + viewportPx > loadedBottom);
+        (phantomTopHeight > 0 && currentScrollTop < loadedTop) ||
+        (phantomBottomHeight > 0 && currentScrollTop + viewportPx > loadedBottom);
 
       return m("div", { class: "chat-panel flex flex-col h-full relative" }, [
         m(
           "main",
           {
             class: "app-content flex-1 overflow-y-auto px-8 py-6",
-            onscroll: handleScrollEvent,
+            onscroll: (event: Event) => scroll.onScroll(event),
             // Mark the start of a drag (likely a selection) so the tail-follow pin
-            // defers while the button is held (see applyTailFollow).
-            onpointerdown: () => {
-              isPointerDown = true;
-            },
+            // defers while the button is held (see the controller's applyTailFollow).
+            onpointerdown: () => scroll.onPointerDown(),
             oncreate: (mainVnode: m.VnodeDOM) => {
-              scrollEl = mainVnode.dom as HTMLElement;
-              viewportHeight = scrollEl.clientHeight;
-              // Clear the mid-drag flag on release. Listen on window, not the panel,
-              // because the pointer is often released outside the transcript; redraw
-              // so the deferred tail pin re-applies immediately.
-              pointerReleaseListener = () => {
-                if (isPointerDown) {
-                  isPointerDown = false;
-                  m.redraw();
-                }
-              };
-              window.addEventListener("pointerup", pointerReleaseListener);
-              window.addEventListener("pointercancel", pointerReleaseListener);
-              // Recompute the window when the panel itself resizes (dockview
-              // splits, window resize) since that changes the visible range. Skip
-              // while hidden: dockview collapses an inactive tab's element to 0,
-              // and updating viewportHeight from that 0 would break the windowing
-              // math. Restoring the position on show is driven by the visibility
-              // change forcing a redraw (see createMithrilRenderer), not here.
-              viewportResizeObserver = new ResizeObserver(() => {
-                if (scrollEl === null || !panelVisible) {
-                  return;
-                }
-                if (scrollEl.clientHeight !== viewportHeight) {
-                  viewportHeight = scrollEl.clientHeight;
-                  m.redraw();
-                }
-              });
-              viewportResizeObserver.observe(scrollEl);
-              applyScrollPosition(scrollEl);
-              scheduleMeasure();
+              const element = mainVnode.dom as HTMLElement;
+              scroll.attach(element);
+              applyScrollPosition(element);
+              scroll.scheduleMeasure();
               if (currentAgentId !== null) {
-                maybePage(currentAgentId, scrollEl);
+                maybePage(currentAgentId, element);
               }
             },
             onupdate: (mainVnode: m.VnodeDOM) => {
-              scrollEl = mainVnode.dom as HTMLElement;
-              applyScrollPosition(scrollEl);
-              scheduleMeasure();
+              const element = mainVnode.dom as HTMLElement;
+              scroll.attach(element);
+              applyScrollPosition(element);
+              scroll.scheduleMeasure();
               // Drive paging from the render loop, not only from scroll events, so
               // the viewport sitting over a reserved region always triggers (or
               // already has in flight) the fetch to cover it. Without this a drag
@@ -850,7 +669,7 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
               // suppressed by an in-flight fetch -- could strand the loading overlay
               // with nothing actually loading.
               if (currentAgentId !== null) {
-                maybePage(currentAgentId, scrollEl);
+                maybePage(currentAgentId, element);
               }
             },
           },

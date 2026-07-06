@@ -1,6 +1,6 @@
 Fix three chat-transcript bugs in the system interface: text selection was lost when scrolling, text selection was lost while the agent streamed new output, and the scroll position oscillated ("freaked out") when scrolling up through history or sitting at the bottom during streaming.
 
-- Text selection now survives scrolling and streaming. Markdown content is no longer re-rendered (which destroyed the selected text nodes) when its text is unchanged, the rows holding a selection are kept mounted as the transcript scrolls or streams past them, and event eviction pauses while a selection is held.
+- Text selection now survives scrolling and streaming. Markdown content is no longer re-rendered (which destroyed the selected text nodes) when its text is unchanged, the rows holding a selection are kept mounted as the transcript scrolls or streams past them, and event eviction pauses while a selection is held. A selection survives at any scroll distance -- when it is far off-screen only its own rows stay mounted (a disjoint window), not the rows between it and the viewport, so there is no lag and no distance limit.
 
 - Auto-follow stays on while text is selected: the view keeps following the live tail, the selected text scrolls off-screen but stays selected, and copying still works. Making a selection during streaming no longer fights the auto-scroll -- the view holds still while the mouse button is held and snaps back to the tail on release.
 

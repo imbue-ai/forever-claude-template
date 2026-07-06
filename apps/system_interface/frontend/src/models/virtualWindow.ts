@@ -1,12 +1,14 @@
 /**
  * Pure windowing math for the virtualized message list.
  *
- * Given the heights of an ordered list of rows and the current scroll position,
- * computes which contiguous slice of rows intersects the viewport (plus an
- * overscan margin) and how much vertical padding stands in for the rows above
- * and below that slice. Keeping this free of the DOM makes the non-trivial part
- * of virtualization unit-testable; the component only has to feed it measured
- * heights and render the result.
+ * `computeVisibleWindow` picks the contiguous slice of rows intersecting the
+ * viewport (plus overscan). `computeTranscriptSlices` builds on it to produce the
+ * ordered render segments -- spacers and row-runs -- including a *disjoint* run for
+ * the rows holding a live text selection, so a selection scrolled far off-screen
+ * keeps only its own rows mounted rather than everything between it and the
+ * viewport. Keeping this free of the DOM makes the non-trivial part of
+ * virtualization unit-testable; the views only feed it measured heights and render
+ * the segments.
  */
 
 export interface VirtualWindowInput {
@@ -20,14 +22,6 @@ export interface VirtualWindowInput {
   viewportHeight: number;
   /** Extra pixels rendered above and below the viewport to avoid blank flashes. */
   overscanPx: number;
-  /**
-   * Inclusive row-index range that must stay rendered even when it lies outside
-   * the viewport window -- rows holding a live text selection, so scrolling or
-   * streaming past them does not unmount their DOM and collapse the selection.
-   * Clamped to `[0, count)` internally, so a caller may pass a stale range
-   * (e.g. from a selection made before the last data change) without guarding.
-   */
-  pinnedRange?: { start: number; end: number } | null;
 }
 
 export interface VirtualWindowResult {
@@ -52,7 +46,7 @@ export interface VirtualWindowResult {
  * collapse so the spacers still sum to the true total height.
  */
 export function computeVisibleWindow(input: VirtualWindowInput): VirtualWindowResult {
-  const { count, getHeight, scrollTop, viewportHeight, overscanPx, pinnedRange } = input;
+  const { count, getHeight, scrollTop, viewportHeight, overscanPx } = input;
 
   if (count <= 0) {
     return { startIndex: 0, endIndex: 0, topPad: 0, bottomPad: 0, totalHeight: 0 };
@@ -107,16 +101,6 @@ export function computeVisibleWindow(input: VirtualWindowInput): VirtualWindowRe
     endIndex = startIndex + 1;
   }
 
-  // Expand the window to keep pinned rows mounted. Clamp defensively so a stale
-  // range (rows removed since it was captured) can never produce an out-of-bounds
-  // slice; the caller is free to pass yesterday's indices.
-  if (pinnedRange) {
-    const pinStart = Math.max(0, Math.min(pinnedRange.start, count - 1));
-    const pinEnd = Math.max(0, Math.min(pinnedRange.end, count - 1));
-    startIndex = Math.min(startIndex, pinStart);
-    endIndex = Math.max(endIndex, pinEnd + 1);
-  }
-
   // Pads are the exact height sums of the rows the window excludes on each side,
   // so topPad + rendered + bottomPad always reconstructs the total height.
   let topPad = 0;
@@ -129,4 +113,144 @@ export function computeVisibleWindow(input: VirtualWindowInput): VirtualWindowRe
   }
 
   return { startIndex, endIndex, topPad, bottomPad, totalHeight };
+}
+
+/** A run of consecutive rows to render, `[startIndex, endIndex)` (end exclusive). */
+export interface RowRunSegment {
+  kind: "rows";
+  startIndex: number;
+  endIndex: number;
+}
+
+/** A vertical spacer standing in for the rows a run omits (or reserved history). */
+export interface SpacerSegment {
+  kind: "spacer";
+  height: number;
+}
+
+export type WindowSegment = RowRunSegment | SpacerSegment;
+
+export interface TranscriptSlicesInput {
+  /** Number of rows in the list. */
+  count: number;
+  /** Height in pixels of row `index` (measured if known, else an estimate). */
+  getHeight: (index: number) => number;
+  /** Current scrollTop of the scroll container (raw, before phantom adjustment). */
+  scrollTop: number;
+  /** Visible height of the scroll container. */
+  viewportHeight: number;
+  /** Extra pixels rendered above and below the viewport to avoid blank flashes. */
+  overscanPx: number;
+  /**
+   * Reserved height above/below the loaded rows for server history not yet loaded
+   * (ChatPanel's phantom regions). Folded into the leading/trailing spacers so the
+   * scrollbar reflects the whole conversation. Default 0 (the subagent view, which
+   * loads its whole transcript). The viewport window math runs in the loaded rows'
+   * own coordinate space, i.e. `scrollTop - phantomTopHeight`.
+   */
+  phantomTopHeight?: number;
+  phantomBottomHeight?: number;
+  /**
+   * Inclusive row-index range holding a live text selection that must stay
+   * rendered even when outside the viewport window, so scrolling or streaming past
+   * it does not unmount its DOM and collapse the selection. Rendered as a *separate*
+   * run (with a spacer between it and the viewport) when it is disjoint from the
+   * viewport, so only its own rows mount -- not the arbitrarily many rows in
+   * between. Clamped to `[0, count)` internally, so a stale range is safe.
+   */
+  pinnedRange?: { start: number; end: number } | null;
+}
+
+export interface TranscriptSlicesResult {
+  /** Ordered segments to render: spacer, row-run, [spacer, row-run,] spacer. */
+  segments: WindowSegment[];
+  /** Total scroll height (phantomTop + all rows + phantomBottom). */
+  totalHeight: number;
+}
+
+/**
+ * Build the ordered render segments for the transcript: the viewport window, an
+ * optional disjoint run for a pinned (selected) range, and the spacers between and
+ * around them (with the phantom regions folded into the outer spacers).
+ */
+export function computeTranscriptSlices(input: TranscriptSlicesInput): TranscriptSlicesResult {
+  const {
+    count,
+    getHeight,
+    scrollTop,
+    viewportHeight,
+    overscanPx,
+    phantomTopHeight = 0,
+    phantomBottomHeight = 0,
+    pinnedRange,
+  } = input;
+
+  const sumHeights = (from: number, to: number): number => {
+    let sum = 0;
+    for (let i = from; i < to; i++) {
+      sum += getHeight(i);
+    }
+    return sum;
+  };
+
+  // Viewport window, computed in the loaded rows' own coordinate space (the loaded
+  // rows sit below the top phantom spacer).
+  const adjustedScrollTop = Math.max(0, scrollTop - phantomTopHeight);
+  const viewport = computeVisibleWindow({
+    count,
+    getHeight,
+    scrollTop: adjustedScrollTop,
+    viewportHeight,
+    overscanPx,
+  });
+  const totalHeight = phantomTopHeight + viewport.totalHeight + phantomBottomHeight;
+
+  if (count <= 0) {
+    return { segments: [{ kind: "spacer", height: totalHeight }], totalHeight };
+  }
+
+  // Resolve and clamp the pin to a valid, ordered, inclusive range.
+  let pin: { start: number; end: number } | null = null;
+  if (pinnedRange) {
+    const a = Math.max(0, Math.min(pinnedRange.start, count - 1));
+    const b = Math.max(0, Math.min(pinnedRange.end, count - 1));
+    pin = { start: Math.min(a, b), end: Math.max(a, b) };
+  }
+
+  // Build the (1 or 2) row-runs, sorted and non-overlapping. `end` is exclusive.
+  let runs: Array<{ start: number; end: number }>;
+  if (pin === null) {
+    runs = [{ start: viewport.startIndex, end: viewport.endIndex }];
+  } else {
+    const pinStart = pin.start;
+    const pinEnd = pin.end + 1;
+    // Overlapping or touching the viewport -> merge into one contiguous run.
+    if (viewport.startIndex <= pinEnd && pinStart <= viewport.endIndex) {
+      runs = [{ start: Math.min(viewport.startIndex, pinStart), end: Math.max(viewport.endIndex, pinEnd) }];
+    } else if (pinEnd <= viewport.startIndex) {
+      // Selection entirely above the viewport: its run, a gap spacer, the viewport.
+      runs = [
+        { start: pinStart, end: pinEnd },
+        { start: viewport.startIndex, end: viewport.endIndex },
+      ];
+    } else {
+      // Selection entirely below the viewport.
+      runs = [
+        { start: viewport.startIndex, end: viewport.endIndex },
+        { start: pinStart, end: pinEnd },
+      ];
+    }
+  }
+
+  const segments: WindowSegment[] = [];
+  segments.push({ kind: "spacer", height: phantomTopHeight + sumHeights(0, runs[0].start) });
+  for (let r = 0; r < runs.length; r++) {
+    segments.push({ kind: "rows", startIndex: runs[r].start, endIndex: runs[r].end });
+    if (r < runs.length - 1) {
+      segments.push({ kind: "spacer", height: sumHeights(runs[r].end, runs[r + 1].start) });
+    }
+  }
+  segments.push({ kind: "spacer", height: sumHeights(runs[runs.length - 1].end, count) + phantomBottomHeight });
+
+  return { segments, totalHeight };
 }
