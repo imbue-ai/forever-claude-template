@@ -436,6 +436,101 @@ def test_save_layout_rejects_invalid_json(
     assert response.status_code == 400
 
 
+def test_terminal_banner_defaults_to_not_dismissed(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no saved preference, the terminal banner reports not-dismissed."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+    response = client.get("/api/terminals/banner-dismissed")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"dismissed": False}
+
+
+def test_terminal_banner_dismissal_round_trips(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A persisted "never show again" is reflected on the next read."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+
+    post_response = client.post("/api/terminals/banner-dismissed", json={"dismissed": True})
+    assert post_response.status_code == 200
+    assert post_response.get_json()["dismissed"] is True
+
+    get_response = client.get("/api/terminals/banner-dismissed")
+    assert get_response.get_json() == {"dismissed": True}
+
+
+def test_destroy_terminal_refuses_agent_prefixed_session(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The destroy endpoint never kills an mngr agent's tmux session."""
+    monkeypatch.setenv("MNGR_PREFIX", "mngr-")
+    response = client.post("/api/terminals/mngr-alice/destroy")
+
+    assert response.status_code == 400
+
+
+def test_terminal_notify_rejects_unknown_kind(client: FlaskClient) -> None:
+    """An unrecognized notify kind is a 400."""
+    response = client.post("/api/terminals/notify", json={"kind": "bogus"})
+
+    assert response.status_code == 400
+
+
+def test_terminal_notify_session_renamed_broadcasts(client: FlaskClient) -> None:
+    """A rename notification always broadcasts (matched by session_id downstream)."""
+    response = client.post(
+        "/api/terminals/notify",
+        json={"kind": "session-renamed", "session_name": "terminal-2", "session_id": "$4"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "broadcast": True}
+
+
+def test_terminal_notify_session_changed_skips_when_client_unresolved(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session switch from a client with no ttyd mapping does not broadcast."""
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    response = client.post(
+        "/api/terminals/notify",
+        json={
+            "kind": "session-changed",
+            "client_tty": "/dev/pts/9",
+            "session_name": "terminal-1",
+            "session_id": "$3",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "broadcast": False}
+
+
+def test_terminal_notify_session_changed_resolves_terminal_id_from_clients_map(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session switch broadcasts once the client tty maps to a known terminal tab."""
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    clients_dir = tmp_path / "commands" / "ttyd" / "clients"
+    clients_dir.mkdir(parents=True)
+    (clients_dir / "term-xyz").write_text("/dev/pts/7\n")
+
+    response = client.post(
+        "/api/terminals/notify",
+        json={
+            "kind": "session-changed",
+            "client_tty": "/dev/pts/7",
+            "session_name": "terminal-1",
+            "session_id": "$3",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "broadcast": True}
+
+
 def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
     """The index page includes a hostname meta tag."""
     static_dir = tmp_path / "static"

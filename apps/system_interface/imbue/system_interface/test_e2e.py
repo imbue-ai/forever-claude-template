@@ -439,6 +439,10 @@ def _broadcast_layout_op(base_url: str, op: str, args: dict[str, Any], agent_id:
         assert response.status == 200, f"layout broadcast failed: {response.status}"
 
 
+# Selects "New terminal" from the add-tab dropdown, which spawns a real tmux
+# session, so this test must be marked ``tmux`` (the resource_guards plugin
+# blocks unmarked tmux invocations).
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
     """The header "+" opens the new tab in the split whose header was clicked.
@@ -500,9 +504,7 @@ def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], 
 
     # The new tab must render in the RIGHT split, not the left, and must tab
     # into the existing right group rather than carving a third.
-    expect(page.locator(".dv-default-tab-content", has_text="terminal").first).to_be_visible(
-        timeout=10000
-    )
+    expect(page.locator(".dv-default-tab-content", has_text="terminal").first).to_be_visible(timeout=10000)
     placement = page.evaluate(
         """
         (title) => {
@@ -680,9 +682,7 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
         assert anchor_message in during_hidden, (
             f"hidden tab lost its place: anchor {anchor_message!r} no longer rendered ({during_hidden[:3]}...)"
         )
-        assert "msg-0" not in during_hidden, (
-            f"hidden tab jumped to the start of the conversation: {during_hidden[:3]}"
-        )
+        assert "msg-0" not in during_hidden, f"hidden tab jumped to the start of the conversation: {during_hidden[:3]}"
 
         # Show the chat tab again; the user must be exactly where they left off.
         _broadcast_layout_op(base_url, "focus", {"ref": "chat:test-agent"}, agent_id="agent-test-123")
@@ -693,7 +693,9 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
         page.wait_for_timeout(1000)
         after_restore = _visible_user_messages(page)
         scroll_top_after = page.evaluate("() => document.querySelector('.app-content').scrollTop")
-        assert "msg-0" not in after_restore, f"after showing the tab again the window jumped to the start: {after_restore[:3]}"
+        assert "msg-0" not in after_restore, (
+            f"after showing the tab again the window jumped to the start: {after_restore[:3]}"
+        )
         # The same anchor row is rendered again and -- because the tab switch never
         # resized the chat -- the native scroll position is preserved exactly (no
         # re-pin churn to a different offset).

@@ -24,10 +24,8 @@ from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
-from imbue.mngr.api.discovery_events import FullDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
+from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
+from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.errors import MngrError
@@ -94,11 +92,10 @@ def _build_worktree_create_command(
         "worktree",
         "--label",
         "user_created=true",
-        "--label",
-        f"workspace={name}",
         "--no-connect",
     ]
-    # Inherit the project label from the parent agent.
+    # Inherit the project label from the parent agent. The worker belongs to its
+    # workspace by sharing the host; it carries no workspace label.
     if "project" in parent_labels:
         cmd.extend(["--label", f"project={parent_labels['project']}"])
     return cmd
@@ -123,10 +120,10 @@ def _build_chat_create_command(
         "chat",
         "--no-connect",
     ]
-    # Inherit workspace and project labels from the primary agent.
-    for key in ("workspace", "project"):
-        if key in primary_labels:
-            cmd.extend(["--label", f"{key}={primary_labels[key]}"])
+    # Inherit the project label from the primary agent. The chat agent belongs to
+    # its workspace by sharing the host; it carries no workspace label.
+    if "project" in primary_labels:
+        cmd.extend(["--label", f"project={primary_labels['project']}"])
     return cmd
 
 
@@ -282,6 +279,12 @@ class AgentManager:
 
     _broadcaster: WebSocketBroadcaster
     _lock: threading.Lock
+    # Folds the per-provider discovery stream into one consistent view. Each
+    # discovery event (per-provider snapshot or incremental agent/host event) is
+    # applied here, and ``_agents`` / ``_match_by_agent_id`` are rebuilt from the
+    # accumulated state so a slow/errored provider's snapshot can never wipe
+    # another provider's agents.
+    _aggregator: DiscoveryStateAggregator
     _agents: dict[str, AgentStateItem]
     # agent id -> its discovered location (host/provider), maintained from the
     # observe snapshot/discovered/destroy events so messaging can resolve an
@@ -322,6 +325,7 @@ class AgentManager:
         manager = cls.__new__(cls)
         manager._broadcaster = broadcaster
         manager._lock = threading.Lock()
+        manager._aggregator = DiscoveryStateAggregator()
         manager._agents = {}
         manager._match_by_agent_id = {}
         manager._applications = []
@@ -541,7 +545,7 @@ class AgentManager:
             parent_agent_id=None,
         )
 
-        labels = {"user_created": "true", "workspace": name}
+        labels = {"user_created": "true"}
         if "project" in parent_labels:
             labels["project"] = parent_labels["project"]
         self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
@@ -583,9 +587,8 @@ class AgentManager:
         )
 
         labels: dict[str, str] = {}
-        for key in ("workspace", "project"):
-            if key in primary_labels:
-                labels[key] = primary_labels[key]
+        if "project" in primary_labels:
+            labels["project"] = primary_labels["project"]
         self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
 
         return agent_id
@@ -884,19 +887,82 @@ class AgentManager:
             raise MngrError(f"parse_discovery_event_line returned None for non-empty line: {stripped[:200]!r}")
         self._handle_discovery_event(event)
 
-    def _handle_discovery_event(self, event: object) -> None:
-        """Handle a discovery event from mngr observe."""
-        if isinstance(event, FullDiscoverySnapshotEvent):
-            self._handle_full_snapshot(event)
-        elif isinstance(event, AgentDiscoveryEvent):
-            self._handle_agent_discovered(event)
-        elif isinstance(event, AgentDestroyedEvent):
-            self._handle_agent_destroyed(event)
-        elif isinstance(event, HostDestroyedEvent):
-            self._handle_host_destroyed(event)
-        # FIXME: make the match exhaustive so that we have to think about what to do for new types
-        else:
-            pass
+    def _handle_discovery_event(self, event: DiscoveryEvent) -> None:
+        """Fold a discovery event into the aggregator and reconcile tracked state.
+
+        Every parsed discovery event -- per-provider snapshots and incremental
+        agent/host events alike -- is applied to the shared
+        :class:`DiscoveryStateAggregator`, which maintains the
+        per-provider-correct view (a per-provider snapshot is authoritative only
+        for its own provider, and an item with a newer incremental event is not
+        clobbered by an in-flight snapshot). ``self._agents`` and
+        ``self._match_by_agent_id`` are then rebuilt wholesale from that
+        consistent view, while the returned membership delta drives per-agent
+        resource start/stop (app watcher, activity tracking) and assist
+        auto-open. This replaces the old per-event-type dispatch and centralizes
+        the "what changed" decision in the aggregator.
+        """
+        delta = self._aggregator.apply_event(event)
+
+        agent_by_id = self._aggregator.get_agent_by_id()
+        new_agents: dict[str, AgentStateItem] = {}
+        new_matches: dict[str, AgentMatch] = {}
+        for agent_id, agent in agent_by_id.items():
+            new_agents[agent_id] = AgentStateItem(
+                id=agent_id,
+                name=str(agent.agent_name),
+                state="RUNNING",
+                labels=dict(agent.labels),
+                work_dir=str(agent.work_dir) if agent.work_dir else None,
+            )
+            new_matches[agent_id] = _build_agent_match(agent)
+
+        with self._lock:
+            # Rebuilding ``_agents`` wholesale drops the per-agent ``activity_state``
+            # (the discovery payload carries no such field). Re-apply the cached
+            # value so the broadcast below does not blank the indicator for agents
+            # that are already tracked: only ids in ``delta.added_agent_ids`` get an
+            # ``_ensure_activity_tracking`` recompute, so persisting agents rely on
+            # this re-application to keep their state.
+            for agent_id, agent_state in new_agents.items():
+                cached_state = self._activity_state_by_agent.get(agent_id)
+                if cached_state is not None:
+                    new_agents[agent_id] = AgentStateItem(
+                        id=agent_state.id,
+                        name=agent_state.name,
+                        state=agent_state.state,
+                        labels=agent_state.labels,
+                        work_dir=agent_state.work_dir,
+                        activity_state=cached_state.value,
+                    )
+            self._agents = new_agents
+            self._match_by_agent_id = new_matches
+
+        for agent_id in delta.added_agent_ids:
+            added_agent_state = new_agents.get(agent_id)
+            if added_agent_state is None:
+                continue
+            if agent_id == self._own_agent_id and added_agent_state.work_dir:
+                self._start_app_watcher(agent_id, Path(added_agent_state.work_dir))
+            self._ensure_activity_tracking(agent_id)
+
+        for agent_id in delta.removed_agent_ids:
+            self._stop_app_watcher(agent_id)
+            self._stop_activity_tracking(agent_id)
+
+        # Broadcast the updated agent list BEFORE any auto-open: the frontend's open
+        # handler resolves ``chat:<name>`` against its known-agents list and drops the
+        # open if the agent is not there yet, so the chat must be known first.
+        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
+
+        # A newly-created chat usually surfaces as a freshly-added agent here, so
+        # auto-open assist chats that have appeared. ``_maybe_auto_open_assist``
+        # dedupes, so an assist chat already present (including at startup) is not
+        # reopened.
+        for agent_id in delta.added_agent_ids:
+            appeared_agent_state = new_agents.get(agent_id)
+            if appeared_agent_state is not None:
+                self._maybe_auto_open_assist(appeared_agent_state)
 
     def _maybe_auto_open_assist(self, agent_state: AgentStateItem) -> None:
         """Auto-open ``agent_state``'s tab if it is an assist chat we have not opened yet.
@@ -917,104 +983,6 @@ class AgentManager:
             args={"ref": f"chat:{agent_state.name}"},
             requester_agent_id=self._own_agent_id,
         )
-
-    def _handle_full_snapshot(self, event: FullDiscoverySnapshotEvent) -> None:
-        """Handle a full discovery snapshot."""
-        new_agents: dict[str, AgentStateItem] = {}
-        for agent in event.agents:
-            new_agents[str(agent.agent_id)] = AgentStateItem(
-                id=str(agent.agent_id),
-                name=str(agent.agent_name),
-                state="RUNNING",
-                labels=dict(agent.labels),
-                work_dir=str(agent.work_dir) if agent.work_dir else None,
-            )
-
-        new_matches = {str(agent.agent_id): _build_agent_match(agent) for agent in event.agents}
-
-        with self._lock:
-            old_ids = set(self._agents.keys())
-            self._agents = new_agents
-            self._match_by_agent_id = new_matches
-            new_ids = set(new_agents.keys())
-
-        for agent_id in new_ids:
-            agent = new_agents[agent_id]
-            if agent_id == self._own_agent_id and agent.work_dir:
-                self._start_app_watcher(agent_id, Path(agent.work_dir))
-            self._ensure_activity_tracking(agent_id)
-
-        for agent_id in old_ids - new_ids:
-            self._stop_app_watcher(agent_id)
-            self._stop_activity_tracking(agent_id)
-
-        # Broadcast the updated agent list BEFORE any auto-open: the frontend's open
-        # handler resolves ``chat:<name>`` against its known-agents list and drops the
-        # open if the agent is not there yet, so the chat must be known first.
-        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
-        # A newly-created chat usually surfaces here (the periodic snapshot), not as a
-        # per-agent delta, so auto-open assist chats that have appeared since the last
-        # snapshot. ``_maybe_auto_open_assist`` dedupes, so an assist chat that was
-        # already present (including at startup) is not reopened.
-        for agent_id in new_ids - old_ids:
-            self._maybe_auto_open_assist(new_agents[agent_id])
-
-    def _handle_agent_discovered(self, event: AgentDiscoveryEvent) -> None:
-        """Handle an agent discovered event."""
-        agent = event.agent
-        agent_id = str(agent.agent_id)
-        agent_state = AgentStateItem(
-            id=agent_id,
-            name=str(agent.agent_name),
-            state="RUNNING",
-            labels=dict(agent.labels),
-            work_dir=str(agent.work_dir) if agent.work_dir else None,
-        )
-
-        with self._lock:
-            self._agents[agent_id] = agent_state
-            # Record the location now (host_id + provider_name from the delta) so the
-            # first message to a just-created agent skips discovery instead of waiting
-            # for the next full snapshot.
-            self._match_by_agent_id[agent_id] = _build_agent_match(agent)
-
-        if agent_id == self._own_agent_id and agent_state.work_dir:
-            self._start_app_watcher(agent_id, Path(agent_state.work_dir))
-        self._ensure_activity_tracking(agent_id)
-
-        # Broadcast the updated agent list BEFORE any auto-open: the frontend's open
-        # handler resolves ``chat:<name>`` against its known-agents list and drops the
-        # open if the agent is not there yet, so the chat must be known first.
-        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
-        # Auto-open the tab if this is an assist chat we have not opened yet (the
-        # snapshot path handles the same for chats that surface there instead).
-        self._maybe_auto_open_assist(agent_state)
-
-    def _handle_agent_destroyed(self, event: AgentDestroyedEvent) -> None:
-        """Handle an agent destroyed event."""
-        agent_id = str(event.agent_id)
-
-        with self._lock:
-            self._agents.pop(agent_id, None)
-            self._match_by_agent_id.pop(agent_id, None)
-
-        self._stop_app_watcher(agent_id)
-        self._stop_activity_tracking(agent_id)
-        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
-    def _handle_host_destroyed(self, event: HostDestroyedEvent) -> None:
-        """Handle a host destroyed event (remove all agents on that host)."""
-        for agent_id in event.agent_ids:
-            aid = str(agent_id)
-            with self._lock:
-                self._agents.pop(aid, None)
-                self._match_by_agent_id.pop(aid, None)
-            self._stop_app_watcher(aid)
-            self._stop_activity_tracking(aid)
-
-        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def _start_app_watcher(self, agent_id: str, work_dir: Path) -> None:
         """Start watching runtime/applications.toml for an agent."""
@@ -1079,10 +1047,11 @@ class AgentManager:
         are tracked on a remote host and have no local transcript to watch.
         Idempotent: a second call does not duplicate work. The cached activity
         state is re-applied to ``_agents`` on every call, which matters because
-        the lifecycle handlers (``_handle_full_snapshot``, ``_refresh_agents``,
-        ``_handle_agent_discovered``) rebuild ``_agents`` entries from raw
-        discovery data with ``activity_state=None`` and rely on this method to
-        repopulate it.
+        the lifecycle handlers (``_handle_discovery_event``, ``_refresh_agents``)
+        rebuild ``_agents`` entries from raw discovery data with
+        ``activity_state=None`` and rely on this method (for newly-added agents)
+        or on ``_handle_discovery_event``'s own cached-state re-application (for
+        agents that persist across events) to repopulate it.
         """
         state_dir = self._get_agent_state_dir(agent_id)
         if not state_dir.exists():

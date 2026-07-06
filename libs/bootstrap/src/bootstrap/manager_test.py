@@ -249,11 +249,12 @@ def test_build_create_chat_command_includes_transfer_none() -> None:
     assert cmd[cmd.index("--transfer") + 1] == "none"
 
 
-def test_build_create_chat_command_passes_workspace_label() -> None:
+def test_build_create_chat_command_carries_no_workspace_label() -> None:
     cmd = _build_create_chat_command("my-workspace", {"workspace": "my-workspace"})
-    # The workspace label should be present exactly once.
+    # The chat agent belongs to its workspace by sharing the host; it carries no
+    # workspace label (the label was removed from the naming model).
     labels = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--label"]
-    assert "workspace=my-workspace" in labels
+    assert all(not label.startswith("workspace=") for label in labels)
 
 
 def test_build_create_chat_command_passes_project_label_when_present(

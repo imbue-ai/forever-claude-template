@@ -2,6 +2,7 @@ import json
 import os
 import queue
 import socket
+import threading
 import traceback
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -36,12 +37,16 @@ from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.layout_ops import LayoutMutex
+from imbue.system_interface.layout_ops import allocate_next_terminal_name
 from imbue.system_interface.layout_ops import allocate_terminal_panel_id
+from imbue.system_interface.layout_ops import filter_user_terminal_sessions
 from imbue.system_interface.layout_ops import is_broadcasting_op
+from imbue.system_interface.layout_ops import is_destroyable_terminal_session
 from imbue.system_interface.layout_ops import is_known_op
 from imbue.system_interface.layout_ops import is_mutating_op
 from imbue.system_interface.layout_ops import layout_inspect
 from imbue.system_interface.layout_ops import layout_list
+from imbue.system_interface.layout_ops import parse_tmux_sessions_output
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentListItem
 from imbue.system_interface.models import AgentListResponse
@@ -55,6 +60,7 @@ from imbue.system_interface.models import RandomNameResponse
 from imbue.system_interface.models import SendMessageRequest
 from imbue.system_interface.models import SendMessageResponse
 from imbue.system_interface.models import StartAgentResponse
+from imbue.system_interface.models import TerminalSessionInfo
 from imbue.system_interface.plugins import get_plugin_manager
 from imbue.system_interface.service_dispatcher import register_service_routes
 from imbue.system_interface.welcome_resend import WelcomeResender
@@ -438,6 +444,15 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str) -> Response
 
 _LAYOUT_FILENAME = "layout.json"
 
+# Stores the user's "never show again" choice for the terminal lifecycle banner,
+# alongside layout.json in the primary agent's workspace_layout dir.
+_TERMINAL_BANNER_FILENAME = "terminal_banner.json"
+
+# Serializes terminal-name allocation and tracks names handed out but not yet
+# materialized as live tmux sessions (session creation is lazy, on ttyd connect).
+_terminal_allocate_lock = threading.Lock()
+_recently_allocated_terminal_names: set[str] = set()
+
 
 def _primary_agent_layout_dir() -> Path | None:
     """Return the workspace layout directory for this workspace's primary agent.
@@ -490,6 +505,200 @@ def _save_layout() -> Response:
     layout_file.write_bytes(body)
 
     return _json_response({"status": "ok"})
+
+
+def _tmux_prefix() -> str:
+    """The mngr session-name prefix; agent sessions carry it, terminals do not."""
+    return os.environ.get("MNGR_PREFIX", "mngr-")
+
+
+def _list_tmux_sessions() -> tuple[TerminalSessionInfo, ...]:
+    """Enumerate every tmux session on the default socket, or () when none.
+
+    A missing tmux server (no sessions yet) returns a non-zero exit code, which
+    we treat as an empty list rather than an error.
+    """
+    result = run_local_command_modern_version(
+        command=["tmux", "list-sessions", "-F", "#{session_name}\t#{session_id}\t#{session_path}"],
+        cwd=None,
+        is_checked=False,
+        timeout=5.0,
+    )
+    if result.returncode != 0:
+        return ()
+    return parse_tmux_sessions_output(result.stdout)
+
+
+def _list_terminals() -> Response:
+    """List the live user-terminal tmux sessions (excludes mngr agent sessions)."""
+    prefix = _tmux_prefix()
+    sessions = filter_user_terminal_sessions(_list_tmux_sessions(), prefix)
+    return _json_response(
+        {
+            "terminals": [session.model_dump() for session in sessions],
+            "prefix": prefix,
+        }
+    )
+
+
+def _allocate_terminal() -> Response:
+    """Reserve the next free ``terminal-<N>`` name for a new terminal tab.
+
+    The lock plus the in-memory ``_recently_allocated_terminal_names`` set make
+    consecutive allocations return distinct names even before the ttyd
+    connection has actually created the tmux session (creation is lazy, so two
+    rapid clicks would otherwise both see the same live-session set and collide).
+    """
+    prefix = _tmux_prefix()
+    with _terminal_allocate_lock:
+        live_names = {session.session_name for session in _list_tmux_sessions()}
+        # Drop reservations that have since become real sessions so the set
+        # cannot grow without bound.
+        _recently_allocated_terminal_names.difference_update(live_names)
+        taken = live_names | _recently_allocated_terminal_names
+        name = allocate_next_terminal_name(taken, prefix)
+        _recently_allocated_terminal_names.add(name)
+    return _json_response({"session_name": name})
+
+
+def _destroy_terminal(session_name: str) -> Response:
+    """Kill a user-terminal tmux session. Refuses to touch mngr agent sessions."""
+    prefix = _tmux_prefix()
+    if not is_destroyable_terminal_session(session_name, prefix):
+        error = ErrorResponse(detail=f"Refusing to destroy non-terminal session: {session_name!r}")
+        return _json_response(error.model_dump(), status_code=400)
+    # ``=`` forces an exact session-name match so tmux's prefix fallback can't
+    # target a different session.
+    result = run_local_command_modern_version(
+        command=["tmux", "kill-session", "-t", f"={session_name}"],
+        cwd=None,
+        is_checked=False,
+        timeout=5.0,
+    )
+    # tmux returns non-zero both for a genuine failure and for an already-absent
+    # session (nothing to kill). Distinguish the two by re-listing: if the
+    # session is gone, the destroy succeeded (or was idempotent); if it is still
+    # present, the kill really failed and we must surface it rather than telling
+    # the UI the terminal is gone when it is still running.
+    if result.returncode != 0:
+        still_live = any(session.session_name == session_name for session in _list_tmux_sessions())
+        if still_live:
+            _loguru_logger.warning("Failed to kill terminal session {}: {}", session_name, result.stderr.strip())
+            error = ErrorResponse(detail=f"Failed to destroy terminal {session_name!r}: {result.stderr.strip()}")
+            return _json_response(error.model_dump(), status_code=500)
+    with _terminal_allocate_lock:
+        _recently_allocated_terminal_names.discard(session_name)
+    return _json_response({"status": "ok"})
+
+
+def _get_terminal_banner_dismissed() -> Response:
+    """Whether the user has permanently dismissed the terminal lifecycle banner."""
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is None:
+        return _json_response({"dismissed": False})
+    banner_file = layout_dir / _TERMINAL_BANNER_FILENAME
+    if not banner_file.exists():
+        return _json_response({"dismissed": False})
+    try:
+        data = json.loads(banner_file.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        _loguru_logger.opt(exception=e).warning(
+            "Failed to read terminal banner state at {}; treating as not dismissed", banner_file
+        )
+        return _json_response({"dismissed": False})
+    dismissed = bool(data.get("dismissed", False)) if isinstance(data, dict) else False
+    return _json_response({"dismissed": dismissed})
+
+
+def _set_terminal_banner_dismissed() -> Response:
+    """Persist the user's "never show again" choice for the terminal banner."""
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is None:
+        error = ErrorResponse(detail="No primary agent configured for this workspace")
+        return _json_response(error.model_dump(), status_code=500)
+    try:
+        body = json.loads(request.get_data() or b"{}")
+    except (json.JSONDecodeError, ValueError) as e:
+        _loguru_logger.opt(exception=e).warning("terminal banner-dismissed received invalid JSON body")
+        error = ErrorResponse(detail="Invalid JSON in request body")
+        return _json_response(error.model_dump(), status_code=400)
+    dismissed = bool(body.get("dismissed", False)) if isinstance(body, dict) else False
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    (layout_dir / _TERMINAL_BANNER_FILENAME).write_text(json.dumps({"dismissed": dismissed}))
+    return _json_response({"dismissed": dismissed})
+
+
+def _resolve_terminal_id_for_tty(client_tty: str) -> str | None:
+    """Reverse-look-up the dockview terminal id bound to a tmux client tty.
+
+    ``scripts/run_ttyd.sh`` records ``terminal_id -> $(tty)`` files under
+    ``$MNGR_AGENT_STATE_DIR/commands/ttyd/clients/`` when a tab attaches; this
+    finds the id whose recorded tty matches ``client_tty``. Returns None when
+    the mapping directory or a matching entry is absent.
+    """
+    if not client_tty:
+        return None
+    state_dir = os.environ.get("MNGR_AGENT_STATE_DIR", "")
+    if not state_dir:
+        return None
+    clients_dir = Path(state_dir) / "commands" / "ttyd" / "clients"
+    if not clients_dir.is_dir():
+        return None
+    for entry in clients_dir.iterdir():
+        if not entry.is_file():
+            continue
+        try:
+            recorded_tty = entry.read_text().strip()
+        except OSError:
+            continue
+        if recorded_tty == client_tty:
+            return entry.name
+    return None
+
+
+def _terminal_notify_endpoint() -> Response:
+    """Loopback endpoint the tmux hooks call when a terminal's session changes.
+
+    Body: ``{kind, client_tty, session_name, session_id}``. For a session
+    switch we resolve the affected dockview tab from ``client_tty``; for a
+    rename the frontend matches by ``session_id`` so ``terminal_id`` stays None.
+    Either way we re-broadcast as a ``terminal_session`` WS event.
+    """
+    client_host = request.remote_addr or ""
+    if client_host not in _LOOPBACK_CLIENT_HOSTS:
+        error = ErrorResponse(detail="terminal notify is only callable from loopback")
+        return _json_response(error.model_dump(), status_code=403)
+    try:
+        body = json.loads(request.get_data())
+    except (json.JSONDecodeError, ValueError) as e:
+        _loguru_logger.opt(exception=e).warning("terminal notify received invalid JSON body")
+        error = ErrorResponse(detail="Invalid JSON in request body")
+        return _json_response(error.model_dump(), status_code=400)
+    if not isinstance(body, dict):
+        error = ErrorResponse(detail="Request body must be a JSON object")
+        return _json_response(error.model_dump(), status_code=400)
+    kind = body.get("kind")
+    session_name = str(body.get("session_name") or "")
+    session_id = str(body.get("session_id") or "")
+    client_tty = str(body.get("client_tty") or "")
+    broadcaster: WebSocketBroadcaster = get_state().broadcaster
+    if kind == "session-changed":
+        # Resolve which dockview tab this tmux client belongs to. An
+        # unresolved tty (e.g. an mngr agent-session client, which never
+        # writes the ttyd clients map) means there is no terminal tab to
+        # update, so skip the broadcast entirely.
+        terminal_id = _resolve_terminal_id_for_tty(client_tty)
+        if terminal_id is None:
+            return _json_response({"ok": True, "broadcast": False})
+        broadcaster.broadcast_terminal_session(terminal_id, session_id, session_name)
+        return _json_response({"ok": True, "broadcast": True})
+    if kind == "session-renamed":
+        # A rename has no client context; the frontend matches the affected
+        # tab by ``session_id``.
+        broadcaster.broadcast_terminal_session(None, session_id, session_name)
+        return _json_response({"ok": True, "broadcast": True})
+    error = ErrorResponse(detail=f"Unknown terminal notify kind: {kind!r}")
+    return _json_response(error.model_dump(), status_code=400)
 
 
 def _get_screen_capture(agent_id: str) -> Response:
@@ -981,6 +1190,25 @@ def create_application(
     application.add_url_rule("/api/agents/<agent_id>/screen", view_func=_get_screen_capture, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/destroy", view_func=_destroy_agent, methods=["POST"])
     application.add_url_rule("/api/agents/<agent_id>/start", view_func=_start_agent, methods=["POST"])
+    application.add_url_rule("/api/terminals", view_func=_list_terminals, methods=["GET"])
+    application.add_url_rule("/api/terminals/allocate", view_func=_allocate_terminal, methods=["POST"])
+    application.add_url_rule(
+        "/api/terminals/banner-dismissed",
+        view_func=_get_terminal_banner_dismissed,
+        methods=["GET"],
+    )
+    application.add_url_rule(
+        "/api/terminals/banner-dismissed",
+        view_func=_set_terminal_banner_dismissed,
+        methods=["POST"],
+        endpoint="_set_terminal_banner_dismissed",
+    )
+    application.add_url_rule(
+        "/api/terminals/<session_name>/destroy",
+        view_func=_destroy_terminal,
+        methods=["POST"],
+    )
+    application.add_url_rule("/api/terminals/notify", view_func=_terminal_notify_endpoint, methods=["POST"])
     claude_auth_endpoints.register_routes(application)
     latchkey_endpoints.register_routes(application)
     application.add_url_rule("/api/layout/broadcast", view_func=_layout_broadcast_endpoint, methods=["POST"])
