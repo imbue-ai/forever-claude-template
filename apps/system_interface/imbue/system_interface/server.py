@@ -576,13 +576,11 @@ def _create_chat_agent() -> Response:
 
 def _ws_endpoint(websocket: Any) -> None:
     """Unified WebSocket for agent state and application updates."""
-    ws_state = get_state()
-    client_queue = ws_state.broadcaster.register()
+    state = get_state()
     _run_ws_broadcast_loop(
         websocket=websocket,
-        agent_manager=ws_state.agent_manager,
-        ws_broadcaster=ws_state.broadcaster,
-        client_queue=client_queue,
+        agent_manager=state.agent_manager,
+        ws_broadcaster=state.broadcaster,
     )
 
 
@@ -590,7 +588,6 @@ def _run_ws_broadcast_loop(
     websocket: Any,
     agent_manager: AgentManager,
     ws_broadcaster: WebSocketBroadcaster,
-    client_queue: "queue.Queue[str | None]",
 ) -> None:
     """Stream broadcaster messages to ``websocket`` until the client disconnects.
 
@@ -600,11 +597,8 @@ def _run_ws_broadcast_loop(
     half-dead peer, surfacing as ``ConnectionClosed`` from ``send``; the
     broadcaster can also evict a hopelessly-behind client by pushing the
     shutdown sentinel (``None``) into the queue.
-
-    ``client_queue`` must already be registered with ``ws_broadcaster`` by the
-    caller, ``_ws_endpoint``, before any ``websocket.send()`` runs here, so a
-    broadcast landing during connection setup is queued rather than dropped.
     """
+    client_queue = ws_broadcaster.register()
     try:
         websocket.send(
             json.dumps(
