@@ -26,6 +26,8 @@ from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
+from imbue.system_interface.testing import RecordingMngrMessenger
+from imbue.system_interface.testing import build_test_state
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 from imbue.system_interface.wsgi import make_threaded_server
 
@@ -168,15 +170,15 @@ def _running_e2e_server(
     # duration of the test.
     with (
         patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""}),
-        patch("imbue.system_interface.agent_manager.send_message", return_value=True),
         patch("imbue.system_interface.server.discover_agents", return_value=agents),
     ):
-        # The autouse conftest fixture no-ops AgentManager.start (so background mngr
-        # discovery never runs in tests), so seed the agent into the manager directly
-        # and inject it. The UI renders its agent list from the WebSocket
-        # agents_updated snapshot, which the server sends from this manager on connect.
+        # Seed the agent into a manager and inject it; the manager is never started,
+        # so no background mngr discovery runs. Its messenger is a recording fake so
+        # message sends succeed without contacting mngr. The UI renders its agent
+        # list from the WebSocket agents_updated snapshot, which the server sends
+        # from this manager on connect.
         broadcaster = WebSocketBroadcaster()
-        manager = AgentManager.build(broadcaster)
+        manager = AgentManager.build(broadcaster, messenger=RecordingMngrMessenger())
         with manager._lock:
             manager._agents[agent_info.id] = AgentStateItem(
                 id=agent_info.id,
@@ -188,7 +190,7 @@ def _running_e2e_server(
         manager._ensure_activity_tracking(agent_info.id)
 
         config = Config(system_interface_host="127.0.0.1", system_interface_port=port)
-        app = create_application(config, agent_manager=manager)
+        app = create_application(build_test_state(config=config, agent_manager=manager))
 
         server = make_threaded_server("127.0.0.1", port, app)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -350,12 +352,10 @@ def test_tool_calls_render_as_collapsible(tmp_path: Path, page: Page) -> None:
     agents = [agent_info]
 
     config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT + 1)
-    app = create_application(config)
+    manager = AgentManager.build(WebSocketBroadcaster(), messenger=RecordingMngrMessenger())
+    app = create_application(build_test_state(config=config, agent_manager=manager))
 
-    with (
-        patch("imbue.system_interface.server.discover_agents", return_value=agents),
-        patch("imbue.system_interface.agent_manager.send_message", return_value=True),
-    ):
+    with patch("imbue.system_interface.server.discover_agents", return_value=agents):
         server = make_threaded_server("127.0.0.1", _PORT + 1, app)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -439,6 +439,10 @@ def _broadcast_layout_op(base_url: str, op: str, args: dict[str, Any], agent_id:
         assert response.status == 200, f"layout broadcast failed: {response.status}"
 
 
+# Selects "New terminal" from the add-tab dropdown, which spawns a real tmux
+# session, so this test must be marked ``tmux`` (the resource_guards plugin
+# blocks unmarked tmux invocations).
+@pytest.mark.tmux
 @pytest.mark.timeout(120)
 def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
     """The header "+" opens the new tab in the split whose header was clicked.
@@ -500,9 +504,7 @@ def test_new_tab_opens_in_clicked_split(e2e_server: tuple[str, list[AgentInfo], 
 
     # The new tab must render in the RIGHT split, not the left, and must tab
     # into the existing right group rather than carving a third.
-    expect(page.locator(".dv-default-tab-content", has_text="terminal").first).to_be_visible(
-        timeout=10000
-    )
+    expect(page.locator(".dv-default-tab-content", has_text="terminal").first).to_be_visible(timeout=10000)
     placement = page.evaluate(
         """
         (title) => {
@@ -680,9 +682,7 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
         assert anchor_message in during_hidden, (
             f"hidden tab lost its place: anchor {anchor_message!r} no longer rendered ({during_hidden[:3]}...)"
         )
-        assert "msg-0" not in during_hidden, (
-            f"hidden tab jumped to the start of the conversation: {during_hidden[:3]}"
-        )
+        assert "msg-0" not in during_hidden, f"hidden tab jumped to the start of the conversation: {during_hidden[:3]}"
 
         # Show the chat tab again; the user must be exactly where they left off.
         _broadcast_layout_op(base_url, "focus", {"ref": "chat:test-agent"}, agent_id="agent-test-123")
@@ -693,7 +693,9 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
         page.wait_for_timeout(1000)
         after_restore = _visible_user_messages(page)
         scroll_top_after = page.evaluate("() => document.querySelector('.app-content').scrollTop")
-        assert "msg-0" not in after_restore, f"after showing the tab again the window jumped to the start: {after_restore[:3]}"
+        assert "msg-0" not in after_restore, (
+            f"after showing the tab again the window jumped to the start: {after_restore[:3]}"
+        )
         # The same anchor row is rendered again and -- because the tab switch never
         # resized the chat -- the native scroll position is preserved exactly (no
         # re-pin churn to a different offset).
@@ -709,12 +711,10 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
 def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
     """When there are no agents, the sidebar shows an empty message."""
     config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT + 2)
-    app = create_application(config)
+    manager = AgentManager.build(WebSocketBroadcaster(), messenger=RecordingMngrMessenger())
+    app = create_application(build_test_state(config=config, agent_manager=manager))
 
-    with (
-        patch("imbue.system_interface.server.discover_agents", return_value=[]),
-        patch("imbue.system_interface.agent_manager.send_message", return_value=True),
-    ):
+    with patch("imbue.system_interface.server.discover_agents", return_value=[]):
         server = make_threaded_server("127.0.0.1", _PORT + 2, app)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

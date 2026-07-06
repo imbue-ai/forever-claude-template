@@ -23,10 +23,14 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from pathlib import Path
 from typing import Any
 
 from loguru import logger as _loguru_logger
+
+from imbue.system_interface.models import TerminalSessionInfo
 
 # Path prefix the dispatcher uses for the workspace terminal service. The
 # agent-attached terminal URL the frontend stores is
@@ -204,6 +208,72 @@ def allocate_terminal_panel_id() -> tuple[str, str]:
     return panel_id, f"terminal:{_short_hash(panel_id)}"
 
 
+# Prefix of the auto-generated names for ad-hoc dockview terminal sessions
+# ("terminal-1", "terminal-2", ...). These are plain tmux sessions on the same
+# default socket the mngr agents use; a session is a *user terminal* iff its
+# name does not start with MNGR_PREFIX (agent sessions do), which is what keeps
+# the two populations from ever colliding in list / allocate / destroy.
+_TERMINAL_NAME_PREFIX: str = "terminal-"
+
+
+def parse_tmux_sessions_output(output: str) -> tuple[TerminalSessionInfo, ...]:
+    """Parse ``tmux list-sessions`` lines of ``name\\tsession_id\\tsession_path``.
+
+    Lines with fewer than three tab-separated fields are skipped. The path is
+    split with ``maxsplit=2`` so a (pathological) path containing a tab is kept
+    intact.
+    """
+    sessions: list[TerminalSessionInfo] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split("\t", 2)
+        if len(fields) < 3:
+            continue
+        session_name, session_id, cwd = fields
+        sessions.append(TerminalSessionInfo(session_name=session_name, session_id=session_id, cwd=cwd))
+    return tuple(sessions)
+
+
+def _is_agent_session(session_name: str, prefix: str) -> bool:
+    """True when ``session_name`` belongs to an mngr agent (prefix-prefixed).
+
+    An empty ``prefix`` means "no agent prefix configured", so nothing is
+    treated as an agent session (avoids ``startswith("")`` matching everything).
+    """
+    return bool(prefix) and session_name.startswith(prefix)
+
+
+def filter_user_terminal_sessions(
+    sessions: Sequence[TerminalSessionInfo],
+    prefix: str,
+) -> tuple[TerminalSessionInfo, ...]:
+    """Drop the mngr-agent sessions, keeping only user terminals."""
+    return tuple(session for session in sessions if not _is_agent_session(session.session_name, prefix))
+
+
+def allocate_next_terminal_name(existing_names: AbstractSet[str], prefix: str) -> str:
+    """Return the smallest-index unused ``terminal-<N>`` name (N starts at 1).
+
+    ``prefix`` is accepted for symmetry with the rest of the terminal helpers;
+    generated names never begin with the agent prefix (unless the prefix is
+    itself ``terminal-``), so it does not affect the result in practice.
+    """
+    index = 1
+    while f"{_TERMINAL_NAME_PREFIX}{index}" in existing_names:
+        index += 1
+    return f"{_TERMINAL_NAME_PREFIX}{index}"
+
+
+def is_destroyable_terminal_session(session_name: str, prefix: str) -> bool:
+    """True iff ``session_name`` names a user terminal (non-empty, not an agent).
+
+    Guards the destroy endpoint so an mngr agent's tmux session can never be
+    killed via the terminal API.
+    """
+    return bool(session_name) and not _is_agent_session(session_name, prefix)
+
+
 def _extract_agent_terminal_name(url: str) -> str | None:
     """If ``url`` is the per-agent terminal URL, return the bound agent name.
 
@@ -290,7 +360,11 @@ def _resolve_ref(
         # dedup / focus. Any other service iframe stays ``service:<name>``.
         session_suffix = _service_session_suffix(url)
         ref = f"service:{service_name}{session_suffix}"
-    elif panel_type == "iframe" and isinstance(url, str) and (agent_terminal_name := _extract_agent_terminal_name(url)) is not None:
+    elif (
+        panel_type == "iframe"
+        and isinstance(url, str)
+        and (agent_terminal_name := _extract_agent_terminal_name(url)) is not None
+    ):
         # Per-agent terminals get the symmetric ``chat-terminal:<name>``
         # form so they're addressable by name (parallel to ``chat:<name>``)
         # rather than only via the opaque ``terminal:<hash>``.
@@ -355,7 +429,9 @@ def _serialize_grid_node(
         active_view = data.get("activeView")
         panels: list[dict[str, Any]] = []
         for panel_id in view_ids:
-            summary = dict(panel_summaries.get(panel_id, {"ref": f"url:{_short_hash(panel_id)}", "panel_id": panel_id}))
+            summary = dict(
+                panel_summaries.get(panel_id, {"ref": f"url:{_short_hash(panel_id)}", "panel_id": panel_id})
+            )
             if not summary.get("title"):
                 meta = panels_meta.get(panel_id, {})
                 summary["title"] = meta.get("title")
@@ -377,9 +453,7 @@ def _serialize_grid_node(
         "type": "branch",
         "arrangement": "row" if orientation == "HORIZONTAL" else "column",
         "size_ratio": node.get("size"),
-        "children": [
-            _serialize_grid_node(child, panel_summaries, panels_meta, child_orientation) for child in data
-        ],
+        "children": [_serialize_grid_node(child, panel_summaries, panels_meta, child_orientation) for child in data],
     }
 
 

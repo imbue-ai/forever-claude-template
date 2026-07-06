@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import signal
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +64,7 @@ class _RecordingRunner(reveal_mod.Runner):
 
     calls: list[list[str]] = field(default_factory=list)
     _responses: dict[tuple[str, ...], object] = field(default_factory=dict)
+    killed_pgroups: list[int] = field(default_factory=list)
 
     def respond(self, prefix: tuple[str, ...], result: object) -> None:
         self._responses[prefix] = result
@@ -87,6 +89,12 @@ class _RecordingRunner(reveal_mod.Runner):
 
     def ran(self, *prefix: str) -> bool:
         return bool(self.argvs_starting(*prefix))
+
+    def kill_process_group(self, pid: int, sig: int = signal.SIGTERM) -> None:
+        self.killed_pgroups.append(pid)
+
+    def killed_pgroup(self, pid: int) -> bool:
+        return pid in self.killed_pgroups
 
 
 class _FakeHttp(reveal_mod.HttpClient):
@@ -554,7 +562,7 @@ def test_preview_rejects_a_work_dir_without_the_app(tmp_path: Path) -> None:
 
     assert code == 1
     assert not spawner.detached_spawns
-    assert not runner.ran("kill")  # didn't disturb any existing preview
+    assert not runner.killed_pgroups  # didn't disturb any existing preview
     assert not _state_path(tmp_path).exists()
 
 
@@ -572,7 +580,7 @@ def test_preview_clears_a_stale_preview_before_booting(tmp_path: Path) -> None:
     code = _preview(runner, _FakeHttp(_all_healthy), _FakeSpawner(), tmp_path, work_dir)
 
     assert code == 0
-    assert runner.ran("kill", "-TERM", "-999")  # old server killed
+    assert runner.killed_pgroup(999)  # old server killed
     assert runner.ran(
         *reveal_mod.FORWARD_PORT_CMD, "--remove", "--name"
     )  # old service deregistered
@@ -607,7 +615,7 @@ def test_preview_tears_down_booted_server_when_it_never_gets_healthy(
 
     assert code == 1
     assert spawner.detached_spawns  # it was booted
-    assert runner.ran("kill", "-TERM", f"-{spawner.detached_pid}")  # then killed
+    assert runner.killed_pgroup(spawner.detached_pid)  # then killed
     assert not runner.ran(
         *reveal_mod.FORWARD_PORT_CMD, "--name"
     )  # never registered (health failed first)
@@ -631,7 +639,7 @@ def test_preview_tears_down_both_servers_when_the_wrapper_never_gets_healthy(
     assert code == 1
     assert len(spawner.detached_pids) == 2  # both servers were booted
     for pid in spawner.detached_pids:
-        assert runner.ran("kill", "-TERM", f"-{pid}")  # both killed
+        assert runner.killed_pgroup(pid)  # both killed
     # The inner service was registered, so teardown must deregister it.
     assert runner.ran(*reveal_mod.FORWARD_PORT_CMD, "--remove", "--name")
     assert not _state_path(tmp_path).exists()
@@ -694,8 +702,8 @@ def test_unpreview_tears_down_both_servers_and_services(tmp_path: Path) -> None:
 
     assert code == 0
     # Both detached servers killed and both proxied services deregistered.
-    assert runner.ran("kill", "-TERM", "-4242")
-    assert runner.ran("kill", "-TERM", "-4243")
+    assert runner.killed_pgroup(4242)
+    assert runner.killed_pgroup(4243)
     removed = [argv[-1] for argv in runner.argvs_starting(*reveal_mod.FORWARD_PORT_CMD, "--remove", "--name")]
     assert reveal_mod.PREVIEW_INNER_SERVICE_NAME in removed
     assert reveal_mod.PREVIEW_SERVICE_NAME in removed
@@ -717,7 +725,7 @@ def test_unpreview_tears_down_a_legacy_single_server_state(tmp_path: Path) -> No
     code = reveal_mod.unpreview(_SLUG, tmp_path, runner=runner)
 
     assert code == 0
-    assert runner.ran("kill", "-TERM", "-4242")
+    assert runner.killed_pgroup(4242)
     remove = runner.argvs_starting(*reveal_mod.FORWARD_PORT_CMD, "--remove", "--name")
     assert remove and remove[0][-1] == reveal_mod.PREVIEW_SERVICE_NAME
     assert not state_dir.exists()
@@ -729,7 +737,7 @@ def test_unpreview_without_state_is_a_noop_success(tmp_path: Path) -> None:
     code = reveal_mod.unpreview(_SLUG, tmp_path, runner=runner)
 
     assert code == 0
-    assert not runner.ran("kill")
+    assert not runner.killed_pgroups
 
 
 def test_main_routes_unpreview(tmp_path: Path) -> None:
