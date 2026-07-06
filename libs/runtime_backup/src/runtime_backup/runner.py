@@ -29,20 +29,26 @@ LOG_FILE = Path("/tmp/runtime-backup.log")
 STALE_LOCK_MIN_AGE_SECONDS = TICK_INTERVAL_SECONDS
 
 
-def _git(*args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command inside the runtime worktree, never raising or prompting.
+def _git_noninteractive_env() -> dict[str, str]:
+    """Environment for backup git calls: never prompt for credentials.
 
     GIT_TERMINAL_PROMPT=0 turns any credential prompt (e.g. a push to a
     private origin whose token went stale) into a fast failure instead of a
     TTY prompt that would wedge the backup loop forever; every caller already
-    logs-and-continues on a nonzero exit.
+    logs-and-continues on a nonzero exit. Mirrors the helper of the same name
+    in bootstrap.manager (kept local so this lib stays dependency-free).
     """
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    """Run a git command inside the runtime worktree, never raising or prompting."""
     return subprocess.run(
         ["git", "-C", str(RUNTIME_DIR), *args],
         capture_output=True,
         text=True,
         check=False,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env=_git_noninteractive_env(),
     )
 
 
