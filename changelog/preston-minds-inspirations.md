@@ -94,3 +94,20 @@
   asking how they want to adapt it. The generated welcome ends its first
   response on the connect-your-accounts question instead of the adaptation
   question; "Holes" is now strictly the adaptation agenda.
+
+- GitHub access for publishing now goes through latchkey permissioning like
+  every other connector -- the `gh` CLI is banned from the flow entirely. The
+  agent probes `latchkey curl https://api.github.com/user`, initiates a
+  `github-rest-api` / `github-write-repos` permission request itself when
+  needed (approved by the user in the minds app), creates the repo with the
+  description and visibility in one API call, and sets the
+  `minds-inspiration` topic via the API. The git push itself authenticates
+  with the mind's standard `GH_TOKEN` (latchkey deliberately never hands raw
+  tokens to the container, and a push is not an HTTP call it can inject
+  into); if `GH_TOKEN` is absent the agent says so and stops rather than
+  improvising. No named remote is written, so no cleanup is needed.
+
+- The chat confirmation now embeds the designed thumbnail as a markdown image
+  (the SVG's absolute worktree path), so the user sees exactly what will
+  represent their inspiration while confirming the title, description, repo
+  name, and visibility.

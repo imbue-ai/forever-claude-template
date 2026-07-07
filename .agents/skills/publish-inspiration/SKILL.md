@@ -12,8 +12,8 @@ several inspirations (one manifest + thumbnail per inspiration, all at the
 repo root). This skill delegates the assembly to a `launch-task` sub-agent
 worker (which builds the snapshot, finishes the manifest, and designs the
 thumbnail in its own git worktree), confirms the publish with the user in
-chat, logs into GitHub via the `gh` device flow in chat, and then creates the
-repo and pushes -- directly from the worker's worktree.
+chat, obtains GitHub access via latchkey permissioning (never the `gh` CLI),
+and then creates the repo and pushes -- directly from the worker's worktree.
 
 > **CWD INVARIANT -- read this before running anything in §§6-8.** From the
 > moment §3's worker reports `done`, the live mind's checkout at `/code` is
@@ -373,8 +373,15 @@ mechanism. Present the proposal to the user ONCE, in plain language:
 - the **title** and **description**;
 - the **repo name** (defaults to `slug`);
 - the **visibility** (default: **private**);
-- that the sub-agent designed a **thumbnail** for the inspiration (it lives
-  at `$WT/inspiration-<slug>.svg`), and that you can describe or adjust it if
+- the **thumbnail** the sub-agent designed -- EMBED it in the chat message
+  as a markdown image so the user actually sees what will represent their
+  inspiration, using the file's absolute path:
+
+  ```markdown
+  ![<title> thumbnail]($WT/inspiration-<slug>.svg)
+  ```
+
+  (substitute the real absolute worktree path), and note you can adjust it if
   they'd like.
 
 Let the user edit any of these in their replies, then proceed with the agreed
@@ -399,63 +406,68 @@ Never push first and fix up the manifest or thumbnail with a second
 commit-and-re-push. This commit -- like everything else in this skill after
 assembly -- happens IN `$WT`, never `/code`.
 
-## 7. Ensure GitHub auth (chat device flow)
+## 7. Ensure GitHub access (latchkey -- do NOT use the gh CLI)
 
-Check whether `gh` is authenticated. Run it with the token env vars scrubbed:
-your agent shell inherits `GH_TOKEN`, and `gh` prioritizes that over its stored
-credential, so an unscrubbed probe can report a stale/invalid env token as
-"logged in" (and the later push would use that stale token instead of the
-credential the device flow just stored):
+GitHub access goes through **latchkey's github permissioning**, exactly like
+every other connector in this template (see the `latchkey` skill). Do NOT use
+the `gh` CLI anywhere in this flow -- no `gh auth`, no `gh repo` -- and do not
+run browser/device login flows. Latchkey keeps the credential outside the
+container and injects it per-request; the user approves once in the minds app.
 
-```bash
-env -u GH_TOKEN -u GITHUB_TOKEN gh auth status --hostname github.com
-```
-
-Whichever way the user is logged in, the token MUST carry the `workflow`
-scope: the template ships `.github/workflows/`, and pushing those files is
-rejected without it. The device flow below passes `--scopes workflow`
-explicitly.
-
-On a non-zero exit (not logged in), go straight to the `gh` device flow --
-auth is surfaced in chat, nothing else:
+Probe whether GitHub API access is already permitted:
 
 ```bash
-env -u GH_TOKEN -u GITHUB_TOKEN gh auth login --hostname github.com \
-    --git-protocol https --web --skip-ssh-key --scopes workflow
+latchkey curl https://api.github.com/user
 ```
 
-Run it as a background/pty task (it blocks waiting for the browser step), and
-surface the printed one-time code and `https://github.com/login/device` to the
-user in chat. Then poll for completion **as a background task, bounded** --
-mirror `launch-task`'s background-await pattern rather than a foreground
-`while` loop, which can be killed by your own tool-execution timeout partway
-through the wait (exit 137/144). Launch with Bash `run_in_background: true`
-and handle the result when it reports back; each probe is the same scrubbed
-status check:
+If that fails with missing credentials or "request not permitted by the
+user", initiate a permission request for the github scope YOURSELF (the
+request opens the approval/login flow in the minds app):
+
+```bash
+latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
+    -H 'Content-Type: application/json' \
+    -d '{"scope": "github-rest-api", "permissions": ["github-read-repos", "github-write-repos"], "rationale": "Publish this inspiration as a new GitHub repo on your account."}'
+```
+
+Tell the user in chat that a GitHub approval is waiting for them in minds,
+then poll the probe **as a background task, bounded** (mirror `launch-task`'s
+background-await pattern; a foreground `while` loop can be killed by your own
+tool-execution timeout):
 
 ```bash
 # Run with Bash run_in_background: true -- bounded (~5 minutes), one wait, no re-arm thrash
 for _ in $(seq 1 30); do
-    if env -u GH_TOKEN -u GITHUB_TOKEN gh auth status --hostname github.com >/dev/null 2>&1; then
-        echo "github auth: logged in"
+    if latchkey curl https://api.github.com/user >/dev/null 2>&1; then
+        echo "github access: permitted"
         exit 0
     fi
     sleep 10
 done
-echo "github auth: still not logged in" >&2
+echo "github access: still not permitted" >&2
 exit 1
 ```
 
-Once authenticated, wire the git credential helper so the push picks up the
-stored credential:
+If the user never approves, surface a clear message and stop, leaving the
+assembled commit intact.
+
+**The push credential is separate.** Latchkey covers every GitHub API call
+(repo creation, topics, description -- see §8), but a `git push` is not an
+HTTP API call latchkey can inject into, and latchkey deliberately never hands
+the raw token to the container. The push authenticates with the mind's
+standard `GH_TOKEN` (the same credential the post-commit auto-push hook
+uses). Check it now:
 
 ```bash
-env -u GH_TOKEN -u GITHUB_TOKEN gh auth setup-git
+[ -n "$GH_TOKEN" ] && echo "GH_TOKEN present" || echo "GH_TOKEN MISSING"
 ```
 
-Do NOT restart the agent or re-source the environment -- the credential store
-is picked up at push time. If the user never completes the device flow,
-surface a clear message and stop, leaving the assembled commit intact.
+If `GH_TOKEN` is missing, tell the user plainly: the repo and its metadata
+can be created via latchkey, but pushing the git history needs `GH_TOKEN`
+configured for this mind -- and stop rather than improvising (see the "MUST
+BE BOOTABLE" callout; never upload a partial tree through the API instead).
+Note the token must carry the `workflow` scope: the template ships
+`.github/workflows/`, and GitHub rejects pushes of those files without it.
 
 ## 8. Create the repo and push
 
@@ -481,60 +493,64 @@ With `repo_name` / `visibility` taken from the chat confirmation:
     are the SVG safety rules. On ANY hit, block the push, fix the file (a
     real bespoke SVG, rules applied), commit in `$WT`, and re-run the gate.
 
-Publish in TWO steps -- create the empty repo, then push the assembled branch.
-Do NOT use `gh repo create --source=.`: it does not work inside a git worktree
-(a worktree's `.git` is a file, not a directory, and gh errors out on it --
-learned from a real publish run). The two-step form publishes the identical
-full bootable tree:
+Publish in TWO steps -- create the repo via the GitHub API through latchkey,
+then push the assembled branch with git. (Historical note: this flow once used
+`gh repo create --source=.`, which both violates the no-gh rule and breaks
+inside git worktrees, whose `.git` is a file.)
+
+**Step 1 -- create the repo (latchkey, sets name + description + visibility
+in one call):**
 
 ```bash
-( cd "$WT" \
-  && env -u GH_TOKEN -u GITHUB_TOKEN gh repo create "<repo_name>" --<visibility> \
-  && git remote add inspiration "https://github.com/<owner>/<repo_name>.git" \
-  && env -u GH_TOKEN -u GITHUB_TOKEN git push -u inspiration "mngr/<slug>:main" )
+latchkey curl -X POST https://api.github.com/user/repos \
+    -H 'Content-Type: application/json' \
+    -d '{"name": "<repo_name>", "description": "<description>", "private": <true|false>}'
 ```
 
-(`--private` or `--public` per the confirmed visibility. Take `<owner>` from
-the `gh repo create` output -- it prints the new repo's URL. You already
-validated `repo_name` against `^[A-Za-z0-9._-]+$` in §6, which blocks argument
-injection, but still pass it as a single argv element -- never interpolate it
-into a shell string. The `env -u GH_TOKEN -u GITHUB_TOKEN` prefix is
-load-bearing on both the create and the push: it forces `gh`/`git` to use the
-credential the device flow just stored via `setup-git`, not a stale `GH_TOKEN`
-inherited by your agent shell. The refspec `mngr/<slug>:main` pushes the
-assembled branch as the new repo's `main` regardless of anything else, so the
-published tree is exactly `$WT`'s snapshot. If the remote name is already
-taken from an earlier attempt, `git remote set-url inspiration <url>` instead
-of `remote add`.)
+Take `<owner>` from the response's `.owner.login`. `"private"` is `true` for
+the default private visibility, `false` only if the user chose public. You
+already validated `repo_name` against `^[A-Za-z0-9._-]+$` in §6; keep the
+JSON built from variables, never string-interpolated shell.
 
-**Tag the repo (immediately after a successful create+push).** Every published
-inspiration carries the `minds-inspiration` GitHub topic -- a repo topic, NOT
-part of the description -- so inspirations are discoverable as a group (e.g.
-`gh search repos --topic minds-inspiration`, or GitHub's topic page). Also set
-the repo's description from the confirmed `description`:
+**Step 2 -- push the assembled branch as `main` (git + `GH_TOKEN`):**
 
 ```bash
-( cd "$WT" && env -u GH_TOKEN -u GITHUB_TOKEN gh repo edit "<owner>/<repo_name>" --add-topic minds-inspiration --description "<description>" )
+( cd "$WT" && git push "https://x-access-token:${GH_TOKEN}@github.com/<owner>/<repo_name>.git" "mngr/<slug>:main" )
+```
+
+The refspec `mngr/<slug>:main` pushes the assembled branch as the new repo's
+`main` regardless of anything else, so the published tree is exactly `$WT`'s
+snapshot. The token rides in the URL for this one command -- do not echo the
+URL, do not write it into git config or a named remote (nothing to clean up
+afterward, and the token never lands on disk).
+
+**Step 3 -- tag the repo (immediately after a successful push).** Every
+published inspiration carries the `minds-inspiration` GitHub topic -- a repo
+topic, NOT part of the description -- so inspirations are discoverable as a
+group (topic search / GitHub's topic page):
+
+```bash
+latchkey curl -X PUT "https://api.github.com/repos/<owner>/<repo_name>/topics" \
+    -H 'Content-Type: application/json' \
+    -d '{"names": ["minds-inspiration"]}'
 ```
 
 (GitHub topic rules: lowercase letters, digits, and hyphens only -- the fixed
-literal `minds-inspiration` already conforms; do not prefix it with `#`. Take
-`<owner>` from the `gh repo create` output or `gh repo view --json owner`. If
-this edit fails, the publish itself already succeeded -- retry the edit once,
-and if it still fails, report it as a minor follow-up rather than treating the
+literal `minds-inspiration` already conforms; do not prefix it with `#`. If
+this call fails, the publish itself already succeeded -- retry once, and if
+it still fails, report it as a minor follow-up rather than treating the
 publish as failed.)
 
-**Failure handling.** If the create fails (e.g. the name is taken) or the push
-fails (e.g. the token lacks the `workflow` scope needed to push
-`.github/workflows/` -- see §7), report it to the user and return to §6's chat
-confirmation for a new name / visibility (or fix the auth per §7), keeping the
-assembled commit intact in `$WT`. If the empty repo was created but the push
-failed, retry the push after fixing the cause rather than re-creating the
-repo. Loop until it succeeds or the user aborts. **Never fall back to publishing a different,
-non-bootable thing** (e.g. pushing just the selected app files via `gh api`
-instead of `$WT`'s full assembled tree) -- see the "MUST BE BOOTABLE" callout
-at the top of this skill. If you cannot get the documented flow to succeed,
-stop and report the blocker; do not improvise a substitute publish.
+**Failure handling.** If the create fails (e.g. the name is taken), ask in
+chat for a new name and retry step 1. If the push fails (e.g. `GH_TOKEN`
+missing the `workflow` scope needed for `.github/workflows/`), fix the cause
+and retry step 2 -- do NOT re-create the repo. Keep the assembled commit
+intact in `$WT` throughout; loop until it succeeds or the user aborts.
+**Never fall back to publishing a different, non-bootable thing** (e.g.
+uploading just the selected app files through the API instead of pushing
+`$WT`'s full assembled tree) -- see the "MUST BE BOOTABLE" callout at the top
+of this skill. If you cannot get the documented flow to succeed, stop and
+report the blocker; do not improvise a substitute publish.
 
 ## 9. Accumulation
 
@@ -553,12 +569,10 @@ local branch can go too -- the commit is fully preserved on the new remote:
 uv run .agents/skills/launch-task/scripts/create_worker.py destroy --name <slug>
 git worktree prune
 git branch -D "mngr/<slug>"
-git remote remove inspiration
 ```
 
-(The `inspiration` remote lives in the shared repo config, not the worktree,
-so it would otherwise linger in `/code` after `$WT` is gone and collide with
-the next publish's `git remote add`.)
+(No git remote cleanup is needed: §8 pushes to an explicit URL and never adds
+a named remote.)
 
 If the push failed and you are stopping (user aborted, unrecoverable error),
 leave the worker, `$WT`, and the `mngr/<slug>` branch intact instead -- do not
