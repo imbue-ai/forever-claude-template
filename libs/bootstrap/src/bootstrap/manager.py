@@ -923,12 +923,17 @@ def detect_snapshot_settings(
 
 def _findmnt_fstype(path: Path) -> str:
     """Return the filesystem type for `path` via `findmnt`; empty string on any failure."""
-    result = subprocess.run(
-        ["findmnt", "-n", "-o", "FSTYPE", str(path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["findmnt", "-n", "-o", "FSTYPE", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        # findmnt is util-linux (absent on e.g. macOS dev machines); treat a
+        # missing binary like any other lookup failure.
+        return ""
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
