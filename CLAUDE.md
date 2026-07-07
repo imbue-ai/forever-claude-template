@@ -242,7 +242,7 @@ Supervisord is for **long-running** processes (the mind's apps and always-on dae
 
 # Scheduled tasks
 
-Recurring routines that are part of *the mind itself* -- backups, health checks, the daily Caretaker (on by default) -- run through stock **cron + anacron**, not supervisord, and never as a sleep-loop program. Rule of thumb: an *app or service the mind exposes* (a web app, an always-listening bot) is a supervisord program; a *routine the mind performs on a cadence* (back something up, run a check, message the user each morning) is a cron/anacron job. A scheduled job can also wake an agent that runs a skill in its own chat tab -- use `scripts/run_task_agent.sh <skill>` as the job command; the daily Caretaker is the built-in example. For everything else -- choosing anacron vs cron, entry formats, the env wrapper, the user-timezone check, wiring a scheduled agent -- use the **`manage-scheduled-tasks`** skill.
+Recurring routines (backups, health checks, the daily Caretaker) run through stock cron + anacron. For everything about them -- choosing anacron vs cron, entry formats, wiring a scheduled agent, the timezone check -- use the **`manage-scheduled-tasks`** skill.
 
 # Git
 
