@@ -1,31 +1,39 @@
-A nightly scheduler and the Caretaker. Adds a recurring-task scheduler to every
-workspace, a nightly **Caretaker** agent built on top of it, and the supporting
-skills, docs, and in-workspace tab behavior that make scheduled agents visible.
+Recurring jobs via cron/anacron, and the Caretaker. Adds recurring-job scheduling
+to every workspace using the stock OS tools, a daily **Caretaker** agent built on
+top of it, and the supporting skills, docs, and in-workspace tab behavior that
+make scheduled agents visible.
 
-**A file-driven task scheduler.** A new `libs/scheduler` service runs recurring
-shell commands on a cron schedule, but unlike plain cron it catches up on runs
-missed while the machine was off: when the workspace comes back online, any task
-whose time passed during the downtime runs once (multiple missed intervals
-collapse into a single run). The schedule lives in one readable, commented file,
-`runtime/scheduled_tasks.toml`, that users and agents can edit -- each task has a
-name, a 5-field cron schedule, a shell command, and `enabled`/`catch_up` flags. A
-`scheduler` CLI lists, adds, shows, and removes tasks; the service runs under
-supervisord (`[program:scheduler]`) and applies edits within a minute with no
-restart. On first boot the bootstrap seeds a default schedule (only if absent, so
-a user's edits are never overwritten) with a single nightly Caretaker task at
-3 AM, and creates the `runtime/scheduler/` and `runtime/caretaker/` directories.
-(We evaluated off-the-shelf options -- APScheduler, systemd timers, anacron -- but
-none cleanly fit a supervisord-based, file-as-source-of-truth, catch-up-from-disk
-model, so the small custom scheduler is a net simplification.)
+**Recurring jobs with cron + anacron.** Workspaces schedule recurring work with
+the standard OS tools instead of a custom service: **anacron**
+(`/etc/anacrontab`) for jobs that run about once a day or coarser and must not be
+skipped when the container was off -- it catches up missed runs at the next
+opportunity, coalescing several misses into one run -- and **cron**
+(`/etc/cron.d/` drop-ins) for precise times or sub-daily cadences, exact but
+never backfilled. The cron daemon runs under supervisord (`[program:cron]`);
+anacron is triggered once per boot (`[program:anacron-boot]` -- the catch-up
+path) and hourly around the clock (`/etc/cron.d/fct-anacron`). Because cron and
+anacron scrub the job environment, a small wrapper
+(`scripts/with_agent_env.sh`) restores the workspace environment from a snapshot
+the bootstrap writes each boot, and every scheduled job runs through it. The
+container's clock is set to the user's local timezone at each boot: the
+bootstrap pulls it from the minds desktop client's `GET /api/v1/timezone`
+through the latchkey gateway (falling back to UTC when unreachable), so
+schedules run in the user's local time. (An earlier iteration of this branch
+built a custom `libs/scheduler` service for the catch-up behavior; it was
+removed in favor of anacron, which provides the same missed-run semantics with
+zero code to maintain -- the trade-off being that anacron is day-granularity, so
+the Caretaker runs "once a day, shortly after local midnight or on the first
+boot of the day" rather than at a fixed 3 AM.)
 
-**Scheduled agent tasks and the Caretaker.** A scheduled task can wake an agent
+**Scheduled agent tasks and the Caretaker.** A scheduled job can wake an agent
 that runs a skill on a cadence, in its own chat tab. `scripts/run_task_agent.sh
 <skill>` spawns a single persistent agent for that skill; on each run mngr clears
 the agent's session and re-sends `/<skill>` so the skill runs fresh, with no memory
 of the previous run.
-A new scheduled agent (e.g. a morning news digest) needs only a skill plus a
-scheduler entry -- no new agent template. The nightly **Caretaker** is the
-built-in instance: once a night it quietly checks the apps and services in your
+A new scheduled agent (e.g. a morning news digest) needs only a skill plus an
+anacron or cron entry -- no new agent template. The daily **Caretaker** is the
+built-in instance, baked into `/etc/anacrontab` at image build (delete its line
+to switch it off): once a night it quietly checks the apps and services in your
 workspace for problems -- a page that stopped loading, a service that crashed,
 errors piling up -- and either fixes them or explains what it found, always in
 plain, non-technical language. On its very first night it does one look-only scan
@@ -44,13 +52,15 @@ entirely.
 `supervisorctl status`, scan `/var/log/supervisor/` for errors and tracebacks,
 summarize what's wrong and where), reusable by both day-to-day chat agents and the
 Caretaker's nightly scan; and a `manage-scheduled-tasks` skill that teaches agents
-the scheduler's CLI, the task schema and cron syntax, and catch-up semantics.
-CLAUDE.md gains a "Scheduled tasks" section (when to use the scheduler vs. a
+to choose anacron vs. cron per job, the entry formats, the env wrapper, and to
+re-check the user's current timezone (via the minds timezone endpoint) before
+scheduling anything, updating the container clock if the user has moved.
+CLAUDE.md gains a "Scheduled tasks" section (when to use cron/anacron vs. a
 long-running supervisord service) and a reminder to check `/var/log/supervisor/`
 after building or editing any service, since a clean exit code does not mean a
 service is healthy.
 
-**Surfacing scheduled agents in the workspace.** An agent the scheduler creates
+**Surfacing scheduled agents in the workspace.** An agent a scheduled job creates
 now opens as its own tab in the main chat window (without stealing focus) and
 blinks until you open it, so a new run is never easy to miss. The blink uses the
 workspace's own accent color -- a sharp flash-then-fade on the whole clickable tab

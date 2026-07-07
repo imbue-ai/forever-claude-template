@@ -15,11 +15,14 @@ sourced agent environment (MNGR_AGENT_STATE_DIR, CLAUDE_CONFIG_DIR, etc.).
 
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
+import time
+import urllib.request
 from pathlib import Path
 
-import tomlkit
 from host_backup.config import (
     BACKUP_TOML_PATH,
     RESTIC_ENV_PATH,
@@ -43,14 +46,33 @@ RUNTIME_PREEXISTING_DIR = Path("runtime.preexisting")
 RUNTIME_BACKUP_USER_NAME = "runtime-backup"
 RUNTIME_BACKUP_USER_EMAIL = "runtime-backup@mindsbackup.local"
 
-# Scheduler state lives under runtime/ so it rides the runtime-backup branch.
-# scheduled_tasks.toml is the shared, human/agent-editable schedule; the
-# scheduler service reads it (and writes state.toml) once a minute. We seed the
-# file with the nightly Caretaker task on first boot (iff absent) and create the
-# per-feature dirs the scheduler + Caretaker write into. See libs/scheduler/.
-SCHEDULED_TASKS_TOML = RUNTIME_DIR / "scheduled_tasks.toml"
-SCHEDULER_DIR = RUNTIME_DIR / "scheduler"
+# The Caretaker's state dir (run logs + permissions.md, written by the
+# caretaker skill) lives under runtime/ so it rides the runtime-backup branch.
 CARETAKER_DIR = RUNTIME_DIR / "caretaker"
+
+# Env snapshot for cron/anacron jobs. cron builds a minimal environment for its
+# jobs, so none of the agent env (MNGR_*, LATCHKEY_*, GH_TOKEN, the PATH with
+# /root/.local/bin, ...) survives into them. Bootstrap has the full agent env
+# (supervisord and every service inherit it from this shell), so it dumps a
+# snapshot here each boot for scripts/with_agent_env.sh to source. /run is a
+# tmpfs, so the snapshot never outlives the boot that wrote it.
+AGENT_ENV_SNAPSHOT_PATH = Path("/run/fct-agent-env")
+# Keys must be valid shell identifiers to be re-exported (cron jobs source the
+# snapshot through bash); anything else (e.g. bash exports function baggage) is
+# skipped.
+_ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Timezone-at-boot: the minds desktop client serves the user's IANA timezone at
+# GET /api/v1/timezone; bootstrap reaches it through the latchkey gateway's
+# minds-api-proxy and points /etc/localtime + /etc/timezone at it, so cron
+# schedules run in the user's local time. The gateway's reverse tunnel may not
+# be up yet this early in boot, hence the small bounded retry.
+_TIMEZONE_FETCH_ATTEMPTS = 3
+_TIMEZONE_FETCH_RETRY_SECONDS = 3.0
+_TIMEZONE_FETCH_TIMEOUT_SECONDS = 5.0
+# Conservative IANA-name shape (America/New_York, Etc/GMT+5, UTC). No dots, so
+# a hostile/broken response cannot traverse out of the zoneinfo dir.
+_TZ_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_+\-]+(/[A-Za-z0-9_+\-]+)*$")
 
 # Signal file gating exactly-once creation of the initial chat agent. Lives
 # under runtime/ so the runtime-backup service replicates it to the
@@ -497,6 +519,121 @@ def _configure_git_global() -> None:
             )
 
 
+def _write_agent_env_snapshot(path: Path = AGENT_ENV_SNAPSHOT_PATH) -> None:
+    """Dump this process's environment as `export KEY=<value>` lines at `path`.
+
+    scripts/with_agent_env.sh sources the file to rebuild the agent environment
+    inside cron/anacron jobs (see AGENT_ENV_SNAPSHOT_PATH). Values are
+    shell-quoted; keys that are not valid shell identifiers are skipped. Written
+    0600 because the env carries secrets (GH_TOKEN, gateway password).
+    Best-effort: logs and returns rather than raising.
+    """
+    lines = []
+    for key, value in sorted(os.environ.items()):
+        if not _ENV_KEY_PATTERN.fullmatch(key):
+            continue
+        lines.append(f"export {key}={shlex.quote(value)}")
+    content = "\n".join(lines) + "\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(content)
+        # os.open's mode only applies at creation; tighten a pre-existing file.
+        path.chmod(0o600)
+    except OSError as e:
+        logger.warning("Failed to write agent env snapshot to {}: {}", path, e)
+        return
+    logger.info("Wrote agent env snapshot to {}", path)
+
+
+def _fetch_user_timezone() -> str:
+    """Fetch the user's IANA timezone name from the minds desktop client.
+
+    GETs /api/v1/timezone through the latchkey gateway's minds-api-proxy using
+    the gateway env vars mngr injects into the agent environment. The gateway's
+    reverse tunnel may not be up yet this early in boot, so the fetch retries a
+    few times before giving up. Returns "" on any failure (missing env, refused
+    connection, non-200, malformed body) so the caller can fall back to UTC.
+    """
+    gateway = os.environ.get("LATCHKEY_GATEWAY", "")
+    password = os.environ.get("LATCHKEY_GATEWAY_PASSWORD", "")
+    permissions = os.environ.get("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE", "")
+    if not gateway or not password or not permissions:
+        logger.debug("Latchkey gateway env not fully set; skipping timezone fetch")
+        return ""
+    request = urllib.request.Request(
+        f"{gateway.rstrip('/')}/minds-api-proxy/api/v1/timezone",
+        headers={
+            "X-Latchkey-Gateway-Password": password,
+            "X-Latchkey-Gateway-Permissions-Override": permissions,
+        },
+    )
+    last_error: Exception | None = None
+    for attempt in range(_TIMEZONE_FETCH_ATTEMPTS):
+        if attempt > 0:
+            # The bounded sleep between attempts is deliberate (and carried by
+            # the time_sleep ratchet): there is no readiness event for the
+            # gateway's reverse tunnel to wait on this early in boot.
+            time.sleep(_TIMEZONE_FETCH_RETRY_SECONDS)
+        try:
+            with urllib.request.urlopen(
+                request, timeout=_TIMEZONE_FETCH_TIMEOUT_SECONDS
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, ValueError) as e:
+            # OSError covers URLError/HTTPError (refused, 403/503, timeout);
+            # ValueError covers a non-JSON or non-UTF-8 body.
+            last_error = e
+            continue
+        timezone = payload.get("timezone") if isinstance(payload, dict) else None
+        if isinstance(timezone, str) and timezone:
+            return timezone
+        last_error = ValueError(f"unexpected timezone payload: {payload!r}")
+    logger.warning(
+        "Could not fetch the user timezone from the gateway after {} attempts "
+        "({}); container stays on UTC",
+        _TIMEZONE_FETCH_ATTEMPTS,
+        last_error,
+    )
+    return ""
+
+
+def _apply_container_timezone(
+    tz_name: str,
+    zoneinfo_dir: Path = Path("/usr/share/zoneinfo"),
+    localtime_path: Path = Path("/etc/localtime"),
+    timezone_path: Path = Path("/etc/timezone"),
+) -> bool:
+    """Point /etc/localtime and /etc/timezone at the named IANA zone.
+
+    The name must match _TZ_NAME_PATTERN and resolve to an existing zoneinfo
+    file (together these also guard against path traversal from a malicious
+    response). The localtime swap is a temp symlink + os.replace so a concurrent
+    reader never sees the file missing. Must run before supervisord starts cron:
+    cron reads the timezone once at daemon start. Best-effort: returns False
+    with a warning on any failure.
+    """
+    if not _TZ_NAME_PATTERN.fullmatch(tz_name):
+        logger.warning("Ignoring invalid timezone name {!r}", tz_name)
+        return False
+    zone_file = zoneinfo_dir / tz_name
+    if not zone_file.is_file():
+        logger.warning("Timezone {!r} has no zoneinfo file at {}", tz_name, zone_file)
+        return False
+    try:
+        tmp_link = localtime_path.with_name(localtime_path.name + ".fct-tmp")
+        tmp_link.unlink(missing_ok=True)
+        tmp_link.symlink_to(zone_file)
+        os.replace(tmp_link, localtime_path)
+        timezone_path.write_text(tz_name + "\n")
+    except OSError as e:
+        logger.warning("Failed to apply timezone {!r}: {}", tz_name, e)
+        return False
+    logger.info("Container timezone set to {}", tz_name)
+    return True
+
+
 def _ensure_supervisor_log_dir() -> None:
     """Create supervisord's log directory if missing.
 
@@ -717,71 +854,16 @@ def _init_runtime_worktree() -> None:
         logger.info("No GH_TOKEN; skipping initial push")
 
 
-def _render_default_scheduled_tasks_toml() -> str:
-    """Render the default scheduled_tasks.toml with the single Caretaker task.
+def _ensure_caretaker_dir() -> None:
+    """Create runtime/caretaker/ (the Caretaker's run logs + permissions.md).
 
-    Built with tomlkit so the on-disk file is a clean, human/agent-editable
-    `[[task]]` table the user can re-time (change the cron) or disable. The
-    schema (name/schedule/command/enabled/catch_up/description) is the frozen
-    scheduler contract; the command wakes the nightly Caretaker agent.
-    """
-    task = tomlkit.table()
-    task["name"] = "caretaker"
-    task["schedule"] = "0 3 * * *"
-    task["command"] = "bash scripts/run_task_agent.sh caretaker --template caretaker"
-    task["enabled"] = True
-    task["catch_up"] = True
-    task["description"] = (
-        "Nightly Caretaker run: scans service logs and proposes fixes."
-    )
-    doc = tomlkit.document()
-    doc.add(tomlkit.comment("Scheduled tasks run by the scheduler service (see the"))
-    doc.add(
-        tomlkit.comment(
-            "manage-scheduled-tasks skill). Edit a task's schedule (5-field"
-        )
-    )
-    doc.add(
-        tomlkit.comment(
-            "cron) or set enabled = false to turn it off; changes apply within a"
-        )
-    )
-    doc.add(tomlkit.comment("minute, no restart needed."))
-    tasks = tomlkit.aot()
-    tasks.append(task)
-    doc["task"] = tasks
-    return tomlkit.dumps(doc)
-
-
-def _seed_scheduler_runtime() -> None:
-    """Seed the default schedule + create the scheduler/Caretaker runtime dirs.
-
-    First-boot setup for the scheduler service: write the default
-    scheduled_tasks.toml (containing the nightly Caretaker task) iff it does not
-    already exist -- so a user who has re-timed or removed the task on a prior
-    boot is never overwritten -- and create runtime/scheduler/ and
-    runtime/caretaker/ that the scheduler and Caretaker write into. Best-effort:
-    logs and returns rather than raising so a transient FS error here does not
-    block the supervisord launch.
+    Best-effort: logs and returns rather than raising so a transient FS error
+    here does not block the supervisord launch.
     """
     try:
-        SCHEDULER_DIR.mkdir(parents=True, exist_ok=True)
         CARETAKER_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        logger.warning("Failed to create scheduler runtime dirs: {}", e)
-    if SCHEDULED_TASKS_TOML.exists():
-        logger.debug(
-            "{} already present; not reseeding default schedule",
-            SCHEDULED_TASKS_TOML,
-        )
-        return
-    try:
-        SCHEDULED_TASKS_TOML.parent.mkdir(parents=True, exist_ok=True)
-        SCHEDULED_TASKS_TOML.write_text(_render_default_scheduled_tasks_toml())
-    except OSError as e:
-        logger.warning("Failed to seed {}: {}", SCHEDULED_TASKS_TOML, e)
-        return
-    logger.info("Seeded default schedule at {}", SCHEDULED_TASKS_TOML)
+        logger.warning("Failed to create caretaker runtime dir: {}", e)
 
 
 def detect_snapshot_settings(
@@ -925,6 +1007,16 @@ def main() -> None:
     # service or agent runs git. Replaces the old git_auth_setup extra_window.
     _configure_git_global()
 
+    # Snapshot the agent environment for cron/anacron jobs (they get a scrubbed
+    # env; scripts/with_agent_env.sh sources this snapshot), and set the
+    # container clock to the user's timezone so schedules run in their local
+    # time. Both must precede _exec_supervisord: cron reads the timezone once
+    # at daemon start. When the fetch fails the container stays on UTC.
+    _write_agent_env_snapshot()
+    tz_name = _fetch_user_timezone()
+    if tz_name:
+        _apply_container_timezone(tz_name)
+
     # Restore runtime/ FIRST so the initial_chat_created signal file (which
     # lives inside the worktree and is replicated to mindsbackup/$MNGR_AGENT_ID
     # by the runtime-backup service) is in place before we decide whether to
@@ -937,11 +1029,11 @@ def main() -> None:
 
     _bootstrap_init_chat_dir()
 
-    # Seed the default scheduled_tasks.toml (the nightly Caretaker task) iff
-    # absent and create runtime/scheduler/ + runtime/caretaker/. Runs after the
-    # runtime worktree is in place (so the file rides the backup branch) and
-    # before supervisord starts the scheduler service that reads it.
-    _seed_scheduler_runtime()
+    # Create runtime/caretaker/ (the Caretaker's state dir) after the runtime
+    # worktree is in place, so it rides the backup branch. The Caretaker itself
+    # runs as a daily anacron job (see /etc/anacrontab, appended by
+    # scripts/build_workspace.sh).
+    _ensure_caretaker_dir()
 
     # Detect the snapshot environment and write runtime/backup.toml +
     # runtime/secrets/restic.env so the host-backup service comes up with a

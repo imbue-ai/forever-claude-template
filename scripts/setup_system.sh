@@ -24,11 +24,13 @@ provision_skip_if_done setup_system
 : "${LATCHKEY_VERSION:=2.19.1}"
 
 # System packages (tini for signal handling; supervisor runs our background
-# services; the rest are agent/runtime deps). supervisor provides the system
-# supervisord + supervisorctl that `uv run bootstrap` execs into the foreground.
+# services; cron + anacron run the recurring jobs, both driven from supervisord
+# rather than an init system; the rest are agent/runtime deps). supervisor
+# provides the system supervisord + supervisorctl that `uv run bootstrap` execs
+# into the foreground.
 apt-get update
 apt-get install -y --no-install-recommends \
-    bash build-essential ca-certificates curl fd-find git git-lfs jq less nano \
+    anacron bash build-essential ca-certificates cron curl fd-find git git-lfs jq less nano \
     openssh-server procps restic ripgrep rsync sqlite3 supervisor tini tmux unison util-linux wget \
     xxd xmlstarlet
 rm -rf /var/lib/apt/lists/*
@@ -43,7 +45,21 @@ rm -rf /var/lib/apt/lists/*
 if command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now supervisor 2>/dev/null || true
     systemctl mask supervisor 2>/dev/null || true
+    # Same story for cron and anacron: our supervisord runs them ([program:cron]
+    # + [program:anacron-boot] + the hourly /etc/cron.d/fct-anacron trigger), so
+    # the packaged systemd units would double-run every job on systemd hosts.
+    systemctl disable --now cron.service anacron.service anacron.timer 2>/dev/null || true
+    systemctl mask cron.service anacron.service anacron.timer 2>/dev/null || true
 fi
+
+# Replace the stock anacron trigger with our own. Debian's /etc/cron.d/anacron
+# only fires between 07:30 and 23:30 and only when systemd is NOT running
+# anacron.timer -- neither guard fits a container where our supervisord owns
+# cron. Trigger anacron hourly around the clock instead; `anacron -s` runs any
+# job whose period has elapsed (serially) and exits immediately when none is due.
+rm -f /etc/cron.d/anacron
+printf '%s\n' '17 * * * *   root   /usr/sbin/anacron -s' > /etc/cron.d/fct-anacron
+chmod 0644 /etc/cron.d/fct-anacron
 
 # ttyd (terminal-over-web) binary from GitHub releases (not in apt).
 ttyd_arch="$(uname -m)"

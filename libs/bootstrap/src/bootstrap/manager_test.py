@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shlex
 import subprocess
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -14,10 +16,12 @@ from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from bootstrap.manager import (
     INITIAL_CHAT_AGENT_ID_FILENAME,
+    _apply_container_timezone,
     _build_create_chat_command,
     _configure_git_global,
     _create_orphan_runtime_worktree,
     _ensure_host_claude_config_dir,
+    _fetch_user_timezone,
     _format_env_file,
     _initialize_workspace_main_branch,
     _maybe_create_initial_chat,
@@ -27,6 +31,7 @@ from bootstrap.manager import (
     _read_host_name,
     _read_main_agent_labels,
     _resolve_services_claude_config_dir,
+    _write_agent_env_snapshot,
 )
 
 # --- _configure_git_global ---
@@ -542,6 +547,180 @@ def test_create_orphan_runtime_worktree_creates_empty_orphan_branch(
     # Nothing is tracked yet (empty tree); the worktree has no repo content.
     assert _git_in(runtime, "ls-files").stdout.strip() == ""
     assert not (runtime / "README.md").exists()
+
+
+# --- _apply_container_timezone ---
+
+
+def _make_zoneinfo_tree(tmp_path: Path) -> Path:
+    """Build a fake zoneinfo dir with a single America/New_York zone file."""
+    zoneinfo = tmp_path / "zoneinfo"
+    (zoneinfo / "America").mkdir(parents=True)
+    (zoneinfo / "America" / "New_York").write_bytes(b"TZif-fake")
+    return zoneinfo
+
+
+def test_apply_container_timezone_symlinks_and_writes_name(tmp_path: Path) -> None:
+    zoneinfo = _make_zoneinfo_tree(tmp_path)
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    localtime = etc / "localtime"
+    timezone_file = etc / "timezone"
+
+    assert _apply_container_timezone(
+        "America/New_York",
+        zoneinfo_dir=zoneinfo,
+        localtime_path=localtime,
+        timezone_path=timezone_file,
+    )
+
+    assert localtime.is_symlink()
+    assert Path(os.readlink(localtime)) == zoneinfo / "America" / "New_York"
+    assert timezone_file.read_text() == "America/New_York\n"
+
+
+def test_apply_container_timezone_replaces_existing_localtime(tmp_path: Path) -> None:
+    """The common container case: /etc/localtime already exists (a regular file
+    baked into the image) and must be atomically replaced by the symlink."""
+    zoneinfo = _make_zoneinfo_tree(tmp_path)
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    localtime = etc / "localtime"
+    localtime.write_bytes(b"stale UTC zone data")
+    timezone_file = etc / "timezone"
+
+    assert _apply_container_timezone(
+        "America/New_York",
+        zoneinfo_dir=zoneinfo,
+        localtime_path=localtime,
+        timezone_path=timezone_file,
+    )
+    assert localtime.is_symlink()
+    assert Path(os.readlink(localtime)) == zoneinfo / "America" / "New_York"
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "",
+        "../../etc",
+        "America/../../etc/passwd",
+        "America/New York",
+        "UTC;rm -rf /",
+        "/America/New_York",
+        "America/",
+    ],
+)
+def test_apply_container_timezone_rejects_malformed_names(
+    tmp_path: Path, bad_name: str
+) -> None:
+    zoneinfo = _make_zoneinfo_tree(tmp_path)
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    localtime = etc / "localtime"
+
+    assert not _apply_container_timezone(
+        bad_name,
+        zoneinfo_dir=zoneinfo,
+        localtime_path=localtime,
+        timezone_path=etc / "timezone",
+    )
+    assert not localtime.exists()
+
+
+def test_apply_container_timezone_rejects_unknown_zone(tmp_path: Path) -> None:
+    """A well-formed name whose zoneinfo file does not exist is rejected."""
+    zoneinfo = _make_zoneinfo_tree(tmp_path)
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    localtime = etc / "localtime"
+
+    assert not _apply_container_timezone(
+        "Mars/Olympus_Mons",
+        zoneinfo_dir=zoneinfo,
+        localtime_path=localtime,
+        timezone_path=etc / "timezone",
+    )
+    assert not localtime.exists()
+
+
+def test_apply_container_timezone_tolerates_oserror(tmp_path: Path) -> None:
+    """A failing filesystem write (here: parent dir absent) returns False
+    instead of raising -- bootstrap must never die on the timezone step."""
+    zoneinfo = _make_zoneinfo_tree(tmp_path)
+    missing_dir = tmp_path / "does-not-exist"
+
+    assert not _apply_container_timezone(
+        "America/New_York",
+        zoneinfo_dir=zoneinfo,
+        localtime_path=missing_dir / "localtime",
+        timezone_path=missing_dir / "timezone",
+    )
+
+
+# --- _write_agent_env_snapshot ---
+
+
+def test_write_agent_env_snapshot_quotes_values_and_restricts_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("FCT_TEST_SPACES", "two words")
+    monkeypatch.setenv("FCT_TEST_QUOTES", "he said \"hi\" and 'bye'")
+    snapshot = tmp_path / "agent-env"
+
+    _write_agent_env_snapshot(snapshot)
+
+    assert (snapshot.stat().st_mode & 0o777) == 0o600
+    parsed: dict[str, str] = {}
+    for line in snapshot.read_text().splitlines():
+        # Each line must be a shell-parseable `export KEY=<value>` statement.
+        words = shlex.split(line)
+        assert words[0] == "export"
+        key, _, value = words[1].partition("=")
+        parsed[key] = value
+    assert parsed["FCT_TEST_SPACES"] == "two words"
+    assert parsed["FCT_TEST_QUOTES"] == "he said \"hi\" and 'bye'"
+
+
+def test_write_agent_env_snapshot_skips_non_identifier_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # POSIX allows env keys that are not valid shell identifiers (e.g. with a
+    # dash); an `export` line for one would break sourcing, so it is skipped.
+    monkeypatch.setenv("FCT-BAD-KEY", "value")
+    monkeypatch.setenv("FCT_GOOD_KEY", "value")
+    snapshot = tmp_path / "agent-env"
+
+    _write_agent_env_snapshot(snapshot)
+
+    content = snapshot.read_text()
+    assert "FCT-BAD-KEY" not in content
+    assert "export FCT_GOOD_KEY=value" in content
+
+
+def test_write_agent_env_snapshot_overwrites_and_retightens_mode(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "agent-env"
+    snapshot.write_text("stale\n")
+    snapshot.chmod(0o644)
+
+    _write_agent_env_snapshot(snapshot)
+
+    assert (snapshot.stat().st_mode & 0o777) == 0o600
+    assert "stale" not in snapshot.read_text()
+
+
+# --- _fetch_user_timezone ---
+
+
+def test_fetch_user_timezone_returns_empty_when_gateway_env_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LATCHKEY_GATEWAY", raising=False)
+    monkeypatch.delenv("LATCHKEY_GATEWAY_PASSWORD", raising=False)
+    monkeypatch.delenv("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE", raising=False)
+    assert _fetch_user_timezone() == ""
 
 
 # --- detect_snapshot_settings / init_backup_config_with_settings ---

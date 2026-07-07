@@ -132,7 +132,7 @@ there is no script). The three lines are:
 
 Then briefly confirm, in plain language, what you'll do. They have already seen
 tonight's first look, so there is nothing more to scan in this same turn -- just
-record their answer and confirm; the scheduler wakes you again on the next cadence.
+record their answer and confirm; the daily job wakes you again on the next cadence.
 
 ## The run
 
@@ -193,6 +193,5 @@ over.
 ## If the user never answers
 
 Keep doing only a cheap survey each night (no scan, no fix) and gently re-offer.
-The user can switch you off entirely by disabling your task
-(`scheduler remove caretaker`, or set `enabled = false` in
-`runtime/scheduled_tasks.toml`).
+The user can switch you off entirely by removing your daily job (delete the
+`caretaker` line from `/etc/anacrontab`), or pause you by commenting it out.

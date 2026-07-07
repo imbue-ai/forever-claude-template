@@ -579,8 +579,8 @@ type = "claude"
 # tailored example of the generic `task_agent` template below. Like `chat`, it is
 # a plain `claude` agent sharing the services agent's CLAUDE_CONFIG_DIR via the
 # inherited host env, but it is oriented by an appended system prompt to run the
-# `caretaker` skill. It is spawned (and re-woken) once a night by the scheduler
-# service via scripts/run_task_agent.sh, and is
+# `caretaker` skill. It is spawned (and re-woken) once a day by the caretaker
+# anacron job (see /etc/anacrontab) via scripts/run_task_agent.sh, and is
 # labelled task_agent=caretaker + highlight=<run-key> so it can be found as a
 # singleton and surfaced/re-flashed as a tab in the minds UI.
 [create_templates.caretaker]
@@ -595,9 +595,9 @@ agent_args = [
 # Caretaker above is a tailored instance). scripts/run_task_agent.sh <skill>
 # spawns one of these per skill, labels it task_agent=<skill> + highlight, and
 # messages it `/<skill>` on every run -- so a new scheduled agent (e.g. a morning
-# news digest) needs only a skill plus a scheduler entry, no new template. It is a
-# plain `claude` agent oriented, by an appended system prompt, to run whatever
-# skill the slash-command it receives names.
+# news digest) needs only a skill plus an anacron or cron entry, no new template.
+# It is a plain `claude` agent oriented, by an appended system prompt, to run
+# whatever skill the slash-command it receives names.
 [create_templates.task_agent]
 type = "claude"
 env = ["MNGR_AGENT_ROLE=task_agent"]

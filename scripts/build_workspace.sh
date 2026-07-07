@@ -61,3 +61,11 @@ uv sync --all-packages --frozen
 # /mngr/code is in place (on docker, after the first-boot seed).
 ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/tk
 ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/ticket
+
+# Register the daily Caretaker anacron job (period 1 day, 5 min delay, job id
+# `caretaker`). anacron re-reads /etc/anacrontab on every invocation, so
+# appending is enough; grep-guarded on the job id because this script reruns on
+# every Lima create. Deleting this line is how the Caretaker is switched off.
+if ! grep -q 'caretaker' /etc/anacrontab 2>/dev/null; then
+    printf '%s\n' '1   5   caretaker   /mngr/code/scripts/with_agent_env.sh bash /mngr/code/scripts/run_task_agent.sh caretaker --template caretaker >> /var/log/supervisor/caretaker-job.log 2>&1' >> /etc/anacrontab
+fi
