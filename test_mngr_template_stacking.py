@@ -138,16 +138,25 @@ def test_main_extra_provision_command_present_for_docker_nixos_mode() -> None:
 
 @pytest.mark.parametrize("template_name", ["docker", "docker-nixos"])
 def test_docker_templates_harden_start_args_and_drop_sys_ptrace(template_name: str) -> None:
-    """Docker templates are hardened for untrusted agents -- block privilege
-    escalation and no longer grant the SYS_PTRACE capability. (The gVisor
-    runtime itself is selected via `docker_runtime` in the [providers.docker]
-    block, not a create-template setting, so it's not asserted here.)"""
+    """Docker templates harden start args without selecting a runtime directly.
+
+    The gVisor runtime is opt-in via the separate `docker_runsc` template
+    overlay, which flips the provider's `docker_runtime` to runsc through a
+    template setting.
+    """
     result = _apply(("main", template_name))
     # no-new-privileges hardening rides on start_arg (a `docker run` flag).
     assert "--security-opt=no-new-privileges" in result["start_arg"]
     # The SYS_PTRACE capability grant was removed (gVisor is the boundary now).
     assert "--cap-add=SYS_PTRACE" not in result["start_arg"]
     assert "--cap-add=SYS_PTRACE" not in result["build_arg"]
+
+
+@pytest.mark.parametrize("base_template", ["docker", "docker-nixos"])
+def test_docker_runsc_overlay_selects_gvisor_runtime(base_template: str) -> None:
+    """`docker_runsc` opts either Docker base template into runsc."""
+    result = _apply(("main", base_template, "docker_runsc"))
+    assert "providers.docker.docker_runtime=runsc" in result["setting"]
 
 
 def test_scalar_template_options_override_rather_than_stack() -> None:

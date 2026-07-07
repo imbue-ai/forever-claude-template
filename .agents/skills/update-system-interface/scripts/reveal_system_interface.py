@@ -86,6 +86,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -221,6 +222,22 @@ class Runner:
 
     def run(self, argv: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
         return subprocess.run(list(argv), **kwargs)
+
+    def kill_process_group(self, pid: int, sig: int = signal.SIGTERM) -> None:
+        """Send ``sig`` to the whole process group led by ``pid``; a no-op if the
+        group is already gone.
+
+        Uses ``os.killpg`` directly rather than shelling out to ``kill -<sig>
+        -<pid>``. The external procps-ng ``kill`` mis-parses a bare negative-pid
+        argument (one not preceded by ``--``) and can deliver the signal to PID 1
+        / unrelated process groups instead of the intended one (procps-ng issue
+        #65). Inside a container whose PID 1 traps SIGTERM and exits, that bare
+        ``kill`` restarts the entire container (taking down every agent in it).
+        """
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            pass
 
 
 class HttpClient:
@@ -745,14 +762,9 @@ def _teardown_preview(
     worker's own work_dir in place.
     """
     for pid in pids:
-        # Negative pid signals the whole process group (see ``spawn_detached``).
-        runner.run(
-            ["kill", "-TERM", f"-{pid}"],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        # Kill the whole process group the detached server leads (see
+        # ``spawn_detached``, which starts each server in its own session).
+        runner.kill_process_group(pid)
     for service in services:
         runner.run(
             [*FORWARD_PORT_CMD, "--remove", "--name", service],

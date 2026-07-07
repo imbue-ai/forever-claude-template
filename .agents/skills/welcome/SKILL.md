@@ -5,17 +5,39 @@ description: Greet the user with a short, friendly welcome message when a new pr
 
 # Welcome the user
 
+This skill has two parts: the opening greeting you always send first, and a list of suggestions you offer only if the user asks for ideas.
+
+## Opening message
+
 Output the following welcome message to the user, verbatim, as your entire response. Do NOT call any tools, do NOT look at the codebase, and do NOT add anything else:
 
 ---
 
 ### Welcome to Minds
 
-A Mind runs your responsibilities in the background — even when your laptop is closed. It learns what you care about, fixes connections when things break, and gets smarter every time you use it. 
-Tell it what you want, how it can be better, and it'll take care of it.
+I'm an AI operating system built to extend *you* — so you can do your best work.
 
-**What do you want to start with?**
+I can take on tasks for you, build custom AI tools you can easily edit, connect to the tools you already use to pull in information, or just brainstorm ways to make your work better.
+
+**Let's get started**
+
+Already have something in mind? Tell me what you'd like to work on below. If not, I'm happy to suggest a few ways to get started.
 
 ---
 
-That is the entire welcome message. Stop after printing it.
+That is the entire opening message. Stop after printing it.
+
+## If the user asks for suggestions
+
+After the opening message the user replies. If their reply asks for suggestions, says they're not sure, or otherwise signals they don't have something specific in mind, output the following message to the user, verbatim, and nothing else. (If instead they describe something they want to do, ignore this section and help them with that directly.)
+
+---
+
+Here are some popular ways people get started with Minds. Pick whichever fits, and we can build on it as a starting point.
+
+1. **Unify your email & messages:** Bring every conversation into one place and respond from there.
+2. **Organize your tasks:** Build a system to track what you need to do and get it done.
+3. **Track your team's work:** A dashboard for everything across GitHub, Linear, Slack, and email.
+4. **Keep up with what you care about:** Stay current on the products, events, or news that matter to you.
+
+---

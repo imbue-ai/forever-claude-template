@@ -2,10 +2,16 @@ import m from "mithril";
 import { apiUrl } from "../base-path";
 import type { TranscriptEvent, SubagentMetadata } from "../models/Response";
 import { parseJsonMessage } from "../models/ws-json";
-import { computeVisibleWindow } from "../models/virtualWindow";
-import { nextUserScrolledUp } from "../models/scrollFollow";
-import { createRowMeasurer, OVERSCAN_PX } from "./row-measurement";
-import { buildConversationRows, isSubagentRunning, type RowDescriptor } from "./conversation-rows";
+import { computeTranscriptSlices } from "../models/virtualWindow";
+import { OVERSCAN_PX } from "./row-measurement";
+import {
+  buildConversationRows,
+  isSubagentRunning,
+  renderTranscriptSegments,
+  type RowDescriptor,
+} from "./conversation-rows";
+import { resolveSelectionRowRange } from "./scroll-selection";
+import { createTranscriptScroll } from "./transcript-scroll";
 
 interface SubagentViewAttrs {
   agentId: string;
@@ -26,21 +32,18 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
   let loadingError: string | null = null;
   let eventSource: EventSource | null = null;
 
-  // Virtualization state (a subagent transcript is bounded but can still be
-  // large; only the viewport window is rendered to the DOM).
-  let scrollEl: HTMLElement | null = null;
-  let viewportHeight = 0;
-  let scrollTop = 0;
-  const rowMeasurer = createRowMeasurer();
-  let userScrolledUp = false;
-  let previousScrollTop = 0;
-  let viewportResizeObserver: ResizeObserver | null = null;
+  // Virtualization: only the viewport window (plus any selected rows) is rendered.
+  // The scroll-follow machinery -- tail following, native-anchoring stability, the
+  // drag/resize lifecycle and the row measurer -- lives in the shared controller.
+  const scroll = createTranscriptScroll();
   // Memoized rows. buildConversationRows walks the whole subagent transcript, so
   // it is recomputed only when the event set or idleness changes -- not on every
   // scroll redraw. The transcript is append-only here (no in-place upgrades, no
   // eviction), so the event count plus the idle flag is a sufficient cache key.
   let rowsCacheKey = "";
   let cachedRows: RowDescriptor[] = [];
+  // Row key -> index in cachedRows, for resolving a selection's DOM rows to pin.
+  let cachedKeyToIndex = new Map<string, number>();
 
   function addEvents(incoming: TranscriptEvent[]): boolean {
     let added = false;
@@ -111,38 +114,6 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
     }
   }
 
-  function applyScrollPosition(element: HTMLElement): void {
-    if (!userScrolledUp) {
-      element.scrollTop = element.scrollHeight;
-      scrollTop = element.scrollTop;
-      previousScrollTop = element.scrollTop;
-    }
-  }
-
-  function handleScrollEvent(event: Event): void {
-    const element = event.target as HTMLElement;
-    const currentScrollTop = element.scrollTop;
-    const didScrollUp = currentScrollTop < previousScrollTop;
-    previousScrollTop = currentScrollTop;
-    scrollTop = currentScrollTop;
-    // A subagent transcript is a single loaded list with no off-tail jump, so
-    // there is never newer unloaded history below: hasMoreAfter is always false.
-    userScrolledUp = nextUserScrolledUp({
-      didScrollUp,
-      isNearBottom: element.scrollHeight - element.scrollTop - element.clientHeight < 40,
-      hasMoreAfter: false,
-    });
-  }
-
-  // Refresh the cached viewport height and schedule a measure pass; the
-  // measure/cache mechanics live in the shared row measurer.
-  function scheduleMeasure(): void {
-    if (scrollEl !== null) {
-      viewportHeight = scrollEl.clientHeight;
-    }
-    rowMeasurer.scheduleMeasure(() => scrollEl);
-  }
-
   function renderWindowedList(agentId: string): m.Vnode {
     // A subagent has no server-derived activity_state, so derive idleness from
     // the transcript tail; idle settles the frontier spinner. It is part of the
@@ -154,31 +125,31 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
       // subagent's conversation renders an identical progress timeline; only the
       // idle source differs (derived here rather than from activity_state).
       cachedRows = buildConversationRows(agentId, events, agentIsIdle);
-      rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
+      cachedKeyToIndex = new Map(cachedRows.map((row, index) => [row.key, index]));
+      scroll.rowMeasurer.prune(new Set(cachedRows.map((row) => row.key)));
       rowsCacheKey = renderKey;
     }
     const rows = cachedRows;
-    const getHeight = (index: number): number => rowMeasurer.getHeight(rows[index].key) ?? rows[index].estimate;
-    const windowResult = computeVisibleWindow({
+    const getHeight = (index: number): number => scroll.rowMeasurer.getHeight(rows[index].key) ?? rows[index].estimate;
+    const effectiveViewportHeight =
+      scroll.viewportHeight > 0 ? scroll.viewportHeight : (scroll.scrollEl?.clientHeight ?? 2000);
+    // A live selection's rows are kept mounted as a (possibly disjoint) run so
+    // scrolling/streaming past them doesn't collapse the selection -- with no gap
+    // cap, since a disjoint run mounts only the selected rows, not those in between.
+    const { segments } = computeTranscriptSlices({
       count: rows.length,
       getHeight,
-      scrollTop,
-      viewportHeight: viewportHeight > 0 ? viewportHeight : (scrollEl?.clientHeight ?? 2000),
+      scrollTop: scroll.scrollTop,
+      viewportHeight: effectiveViewportHeight,
       overscanPx: OVERSCAN_PX,
+      pinnedRange: resolveSelectionRowRange(scroll.scrollEl, cachedKeyToIndex),
     });
-
-    const visibleRows: m.Children[] = [];
-    visibleRows.push(m("div", { key: "__spacer_top", style: `height: ${windowResult.topPad}px` }));
-    for (let i = windowResult.startIndex; i < windowResult.endIndex; i++) {
-      visibleRows.push(rows[i].render());
-    }
-    visibleRows.push(m("div", { key: "__spacer_bottom", style: `height: ${windowResult.bottomPad}px` }));
 
     return m("div", { class: "message-list-wrapper" }, [
       m(
         "div",
         { class: "message-list mx-auto w-full max-w-(--width-message-column) flex flex-col py-6" },
-        visibleRows,
+        renderTranscriptSegments(rows, segments),
       ),
     ]);
   }
@@ -193,11 +164,7 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
 
     onremove() {
       disconnectFromStream();
-      if (viewportResizeObserver !== null) {
-        viewportResizeObserver.disconnect();
-        viewportResizeObserver = null;
-      }
-      scrollEl = null;
+      scroll.detach();
     },
 
     view(vnode) {
@@ -240,24 +207,19 @@ export function SubagentView(): m.Component<SubagentViewAttrs> {
           "main",
           {
             class: "app-content flex-1 overflow-y-auto px-8 py-6",
-            onscroll: handleScrollEvent,
+            onscroll: (event: Event) => scroll.onScroll(event),
+            onpointerdown: () => scroll.onPointerDown(),
             oncreate: (mainVnode: m.VnodeDOM) => {
-              scrollEl = mainVnode.dom as HTMLElement;
-              viewportHeight = scrollEl.clientHeight;
-              viewportResizeObserver = new ResizeObserver(() => {
-                if (scrollEl !== null && scrollEl.clientHeight !== viewportHeight) {
-                  viewportHeight = scrollEl.clientHeight;
-                  m.redraw();
-                }
-              });
-              viewportResizeObserver.observe(scrollEl);
-              applyScrollPosition(scrollEl);
-              scheduleMeasure();
+              const element = mainVnode.dom as HTMLElement;
+              scroll.attach(element);
+              scroll.applyScrollPosition(element);
+              scroll.scheduleMeasure();
             },
             onupdate: (mainVnode: m.VnodeDOM) => {
-              scrollEl = mainVnode.dom as HTMLElement;
-              applyScrollPosition(scrollEl);
-              scheduleMeasure();
+              const element = mainVnode.dom as HTMLElement;
+              scroll.attach(element);
+              scroll.applyScrollPosition(element);
+              scroll.scheduleMeasure();
             },
           },
           content,

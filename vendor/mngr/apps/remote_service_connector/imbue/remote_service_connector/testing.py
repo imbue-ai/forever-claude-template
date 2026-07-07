@@ -5,10 +5,10 @@ import json
 import secrets
 import uuid
 from typing import Any
+from typing import Final
 from uuid import UUID
 
 import pytest
-from ovh.exceptions import APIError as OvhApiError
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
 from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as EPSignInOkResult
@@ -31,6 +31,7 @@ from supertokens_python.types.base import AccountInfoInput
 
 from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import ForwardingCtx
+from imbue.remote_service_connector.app import PoolHostCleanupError
 from imbue.remote_service_connector.app import R2BucketNotEmptyError
 from imbue.remote_service_connector.app import R2BucketNotFoundError
 
@@ -850,6 +851,13 @@ def make_fake_supertokens_backend() -> FakeSuperTokensBackend:
 # ---------------------------------------------------------------------------
 
 
+# Placeholder host public keys for fake pool rows. The fake replaces the real
+# SSH layer (``_append_authorized_key``), so these are never parsed/pinned -- they
+# only need to be non-null so the lease fail-closed check passes.
+_FAKE_OUTER_HOST_PUBLIC_KEY: Final[str] = "ssh-ed25519 AAAAFAKEouterhostkey"
+_FAKE_CONTAINER_HOST_PUBLIC_KEY: Final[str] = "ssh-ed25519 AAAAFAKEcontainerhostkey"
+
+
 class FakePoolRow:
     """In-memory record for a single pool_hosts row."""
 
@@ -869,10 +877,11 @@ class FakePoolRow:
     leased_to_user: str | None
     leased_at: str | None
     released_at: str | None
-    backend_kind: str
     lima_instance_name: str | None
     lima_disk_name: str | None
     bare_metal_server_id: UUID | None
+    outer_host_public_key: str | None
+    container_host_public_key: str | None
 
 
 def _row_attributes(row: "FakePoolRow") -> dict[str, Any]:
@@ -911,6 +920,8 @@ def _make_pool_row(
     leased_at: str | None = None,
     host_name: str | None = None,
     region: str | None = None,
+    outer_host_public_key: str | None = _FAKE_OUTER_HOST_PUBLIC_KEY,
+    container_host_public_key: str | None = _FAKE_CONTAINER_HOST_PUBLIC_KEY,
 ) -> FakePoolRow:
     row = FakePoolRow()
     row.host_id = host_id
@@ -931,11 +942,12 @@ def _make_pool_row(
     row.released_at = None
     row.attributes = None
     row.region = region
-    # Default to a real OVH VPS; slice-specific tests set these explicitly.
-    row.backend_kind = "ovh_vps"
+    # Slice-specific tests set these explicitly.
     row.lima_instance_name = None
     row.lima_disk_name = None
     row.bare_metal_server_id = None
+    row.outer_host_public_key = outer_host_public_key
+    row.container_host_public_key = container_host_public_key
     return row
 
 
@@ -982,6 +994,8 @@ class FakeCursor:
                         chosen.agent_id,
                         chosen.host_id_str,
                         _row_attributes(chosen),
+                        chosen.outer_host_public_key,
+                        chosen.container_host_public_key,
                     )
                 ]
 
@@ -998,6 +1012,26 @@ class FakeCursor:
                     row.host_name = host_name
                     break
 
+        elif "select leased_to_user, status from pool_hosts" in query_lower:
+            # Rename endpoint: a narrow ownership/status lookup by id (only
+            # ``leased_to_user`` and ``status``). Matched before the broader
+            # release lookup below, which selects additional columns.
+            raw_host_id = params[0]
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    self._results = [(row.leased_to_user, row.status)]
+                    break
+
+        elif "update pool_hosts set host_name" in query_lower:
+            # Rename endpoint: set the mutable friendly name by id.
+            host_name, raw_host_id = params
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            for row in self._backend.pool_rows:
+                if row.host_id == host_id:
+                    row.host_name = host_name
+                    break
+
         elif (
             "from pool_hosts" in query_lower
             and "leased_to_user" in query_lower
@@ -1006,9 +1040,10 @@ class FakeCursor:
             # Release endpoint: lookup by id. The connector stringifies
             # the UUID before passing it as a bind param (psycopg2 can't
             # adapt Python ``UUID`` directly), so accept either form.
-            # Returns ``(leased_to_user, status, vps_instance_id)`` so the
-            # route can distinguish already-released / removing / leased and
-            # has the service name needed for the OVH cancel.
+            # Returns ``(leased_to_user, status, lima_instance_name,
+            # lima_disk_name, bare_metal_server_id)`` so the route can distinguish
+            # already-released / removing / leased and has the slice's lima fields
+            # needed for VM teardown.
             raw_host_id = params[0]
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             for row in self._backend.pool_rows:
@@ -1017,29 +1052,12 @@ class FakeCursor:
                         (
                             row.leased_to_user,
                             row.status,
-                            row.vps_instance_id,
-                            row.backend_kind,
                             row.lima_instance_name,
                             row.lima_disk_name,
                             row.bare_metal_server_id,
                         )
                     ]
                     break
-
-        elif "select id, vps_instance_id" in query_lower and "status = 'removing'" in query_lower:
-            # Cleanup sweep: every row still marked 'removing'.
-            for row in self._backend.pool_rows:
-                if row.status == "removing":
-                    self._results.append(
-                        (
-                            row.host_id,
-                            row.vps_instance_id,
-                            row.backend_kind,
-                            row.lima_instance_name,
-                            row.lima_disk_name,
-                            row.bare_metal_server_id,
-                        )
-                    )
 
         elif (
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
@@ -1060,6 +1078,8 @@ class FakeCursor:
                             row.host_name,
                             _row_attributes(row),
                             row.leased_at,
+                            row.outer_host_public_key,
+                            row.container_host_public_key,
                         )
                     )
 
@@ -1161,32 +1181,6 @@ def _make_fake_connection(backend: "FakePoolBackend") -> FakeConnection:
     return conn
 
 
-class FakeOvhOps:
-    """In-memory fake implementing the OvhOps protocol for testing.
-
-    Records tag deletions and cancellations so tests can assert the cleanup
-    chain ran. ``resources`` backs ``list_vps_resources`` (used by the runbook
-    tag-scan). Set ``fail_on_cancel`` to simulate a flaky OVH cancel.
-    """
-
-    def __init__(self) -> None:
-        self.deleted_tags: list[tuple[str, str]] = []
-        self.cancelled: list[str] = []
-        self.resources: list[Any] = []
-        self.fail_on_cancel: bool = False
-
-    def delete_tag(self, urn: str, key: str) -> None:
-        self.deleted_tags.append((urn, key))
-
-    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
-        if self.fail_on_cancel:
-            raise OvhApiError(f"simulated OVH cancel failure for {service_name}")
-        self.cancelled.append(service_name)
-
-    def list_vps_resources(self) -> list[Any]:
-        return list(self.resources)
-
-
 _PAID_ENTRY_CREATED_AT = "2026-01-01T00:00:00+00:00"
 _PAID_ENTRY_UPDATED_AT = "2026-01-02T00:00:00+00:00"
 
@@ -1195,8 +1189,11 @@ class FakePoolBackend:
     """In-memory pool database replacement for testing host pool + paid-list endpoints."""
 
     pool_rows: list[FakePoolRow]
-    append_key_calls: list[tuple[str, int, str, str, str]]
-    ovh_ops: FakeOvhOps
+    append_key_calls: list[tuple[str, int, str, str, str, str]]
+    # Recorded slice-VM teardowns (the box SSH is faked); set
+    # ``slice_teardown_should_fail`` to simulate a teardown that cannot complete.
+    slice_teardowns: list[tuple[Any, Any, str | None, str | None]]
+    slice_teardown_should_fail: bool
     # Paid-list stores: value -> {"is_paid", "created_at", "updated_at"}.
     paid_domains: dict[str, dict[str, Any]]
     paid_emails: dict[str, dict[str, Any]]
@@ -1242,7 +1239,7 @@ class FakePoolBackend:
             existing["updated_at"] = _PAID_ENTRY_UPDATED_AT
 
     def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Swap DB, SSH, and OVH functions on the app module with fakes.
+        """Swap DB and SSH functions on the app module with fakes.
 
         Uses the same single-loop-setattr pattern as FakeSuperTokensBackend to
         minimize the test-patching ratchet count.
@@ -1250,7 +1247,7 @@ class FakePoolBackend:
         fakes: dict[str, Any] = {
             "_get_pool_db_connection": self.get_connection,
             "_append_authorized_key": self.append_authorized_key,
-            "_get_ovh_ops": self.get_ovh_ops,
+            "clean_up_slice_on_box": self.clean_up_slice_on_box,
         }
         for name, fake in fakes.items():
             monkeypatch.setattr(app_mod, name, fake)
@@ -1258,8 +1255,18 @@ class FakePoolBackend:
     def get_connection(self) -> FakeConnection:
         return _make_fake_connection(self)
 
-    def get_ovh_ops(self) -> FakeOvhOps:
-        return self.ovh_ops
+    def clean_up_slice_on_box(
+        self,
+        conn: Any,
+        host_db_id: Any,
+        bare_metal_server_id: Any,
+        lima_instance_name: str | None,
+        lima_disk_name: str | None,
+    ) -> None:
+        """Record a slice teardown (the real box SSH is not exercised in unit tests)."""
+        if self.slice_teardown_should_fail:
+            raise PoolHostCleanupError(f"simulated slice teardown failure for {host_db_id}")
+        self.slice_teardowns.append((host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name))
 
     def append_authorized_key(
         self,
@@ -1268,8 +1275,11 @@ class FakePoolBackend:
         user: str,
         management_key_pem: str,
         public_key_to_add: str,
+        expected_host_public_key: str,
     ) -> None:
-        self.append_key_calls.append((host, port, user, management_key_pem, public_key_to_add))
+        self.append_key_calls.append(
+            (host, port, user, management_key_pem, public_key_to_add, expected_host_public_key)
+        )
 
     def add_available_host(
         self,
@@ -1283,6 +1293,8 @@ class FakePoolBackend:
         host_id_str: str = "host-xyz",
         host_name: str | None = None,
         region: str | None = None,
+        outer_host_public_key: str | None = _FAKE_OUTER_HOST_PUBLIC_KEY,
+        container_host_public_key: str | None = _FAKE_CONTAINER_HOST_PUBLIC_KEY,
     ) -> FakePoolRow:
         """Add an available host to the in-memory pool."""
         row = _make_pool_row(
@@ -1296,6 +1308,8 @@ class FakePoolBackend:
             version=version,
             host_name=host_name,
             region=region,
+            outer_host_public_key=outer_host_public_key,
+            container_host_public_key=container_host_public_key,
         )
         self.pool_rows.append(row)
         return row
@@ -1364,7 +1378,8 @@ def make_fake_pool_backend() -> FakePoolBackend:
     backend = FakePoolBackend()
     backend.pool_rows = []
     backend.append_key_calls = []
+    backend.slice_teardowns = []
+    backend.slice_teardown_should_fail = False
     backend.paid_domains = {}
     backend.paid_emails = {}
-    backend.ovh_ops = FakeOvhOps()
     return backend

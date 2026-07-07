@@ -50,6 +50,36 @@ function findByClass(tree: unknown, className: string): VnodeLike | undefined {
   return undefined;
 }
 
+function findById(tree: unknown, id: string): VnodeLike | undefined {
+  for (const vnode of walk(tree)) {
+    if (vnode.attrs?.id === id) return vnode;
+  }
+  return undefined;
+}
+
+// Find a `<button>` vnode whose rendered text contains `text` and invoke its
+// onclick. Matches on the vnode tag (the hyperscript selector) so it picks the
+// button itself rather than an ancestor container that merely contains the text.
+function clickButtonByText(tree: unknown, text: string): void {
+  for (const vnode of walk(tree)) {
+    const onclick = vnode.attrs?.onclick;
+    const tag = (vnode as { tag?: unknown }).tag;
+    if (
+      typeof onclick === "function" &&
+      typeof tag === "string" &&
+      tag.startsWith("button") &&
+      JSON.stringify(vnode.children ?? "").includes(text)
+    ) {
+      (onclick as () => void)();
+      return;
+    }
+  }
+  throw new Error(`No button found with text: ${text}`);
+}
+
+// Let queued microtasks + the setTimeout-based redraw polyfill drain.
+const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
 describe("ClaudeLoginModal", () => {
   it("renders the default provider-selection view without a mixed-key fragment error", () => {
     // Mithril's hyperscript throws synchronously from `m()` when a fragment
@@ -84,5 +114,30 @@ describe("ClaudeLoginModal", () => {
     const expanded = JSON.stringify(modal.render());
     expect(expanded).toContain("Anthropic Console");
     expect(expanded).toContain("Use an API key");
+  });
+
+  it("offers only a Start-over action on a sign-in failure, and it restarts the flow", async () => {
+    // The node test env has no XHR, so the OAuth-start request fails -- landing
+    // on the same `error` view that a failed OAuth code submission now routes to
+    // (a submitted code consumes the single-use session, so it cannot be retried
+    // in place). The failure screen must expose only a working "Start over" (the
+    // old dead "Try again"/code-form path is gone), and "Start over" must return
+    // to the beginning of sign-in.
+    const modal = makeModal();
+    clickButtonByText(modal.render(), "Continue with Claude subscription");
+    await flush();
+
+    const failed = modal.render();
+    const serialized = JSON.stringify(failed);
+    expect(serialized).toContain("Start over");
+    // The pre-fix retry affordances are gone from the failure screen.
+    expect(serialized).not.toContain("Try again");
+    expect(serialized).not.toContain("Verify & finish");
+    expect(findById(failed, "claude-login-code-input")).toBeUndefined();
+
+    // "Start over" returns to the beginning of sign-in (provider selection).
+    clickButtonByText(failed, "Start over");
+    await flush();
+    expect(JSON.stringify(modal.render())).toContain("Continue with Claude subscription");
   });
 });

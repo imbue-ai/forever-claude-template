@@ -43,8 +43,7 @@ export function ProtoAgentLogView(): m.Component<ProtoAgentLogViewAttrs> {
 
     ws.onmessage = (event: MessageEvent) => {
       const data = JSON.parse(event.data as string) as
-        | { line: string }
-        | { done: true; success: boolean; error: string | null };
+        { line: string } | { done: true; success: boolean; error: string | null };
 
       if ("line" in data) {
         lines.push(data.line);

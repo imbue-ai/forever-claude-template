@@ -29,6 +29,7 @@ import { isHiddenUserMessage } from "./message-classification";
 import { buildSections, type SectionView } from "./turn-grouping";
 import { ProgressBlock } from "./ProgressBlock";
 import { ESTIMATED_USER_HEIGHT_PX, ESTIMATED_ASSISTANT_HEIGHT_PX } from "./row-measurement";
+import type { WindowSegment } from "../models/virtualWindow";
 
 // Fallback height for a progress block until it has been measured. The user and
 // assistant estimates are shared (see row-measurement).
@@ -40,6 +41,36 @@ export interface RowDescriptor {
   // m.Children (not m.Vnode) because a row can be a component vnode
   // (ProgressBlock), whose typed attrs do not fit the bare Vnode<{}, {}>.
   render: () => m.Children;
+}
+
+/**
+ * Render the ordered window segments (from computeTranscriptSlices) into the
+ * message list's children: a spacer div for each spacer, and each row's own vnode
+ * for each row-run. Shared by ChatPanel and SubagentView so both virtualize
+ * identically.
+ *
+ * Spacers carry `overflow-anchor: none` so native scroll anchoring never picks a
+ * spacer (whose height changes as rows page in/measure) as its anchor -- it anchors
+ * to a real message row instead. They are keyed by role (top / mid / bottom) so the
+ * key stays stable as the middle spacer appears and disappears with a disjoint
+ * selection pin.
+ */
+export function renderTranscriptSegments(rows: RowDescriptor[], segments: WindowSegment[]): m.Children[] {
+  const children: m.Children[] = [];
+  for (let s = 0; s < segments.length; s++) {
+    const segment = segments[s];
+    if (segment.kind === "spacer") {
+      const role = s === 0 ? "top" : s === segments.length - 1 ? "bottom" : "mid";
+      children.push(
+        m("div", { key: `__spacer_${role}`, style: `height: ${segment.height}px; overflow-anchor: none` }),
+      );
+    } else {
+      for (let i = segment.startIndex; i < segment.endIndex; i++) {
+        children.push(rows[i].render());
+      }
+    }
+  }
+  return children;
 }
 
 /**
@@ -104,10 +135,13 @@ function buildRows(
         // always-visible card so the user can act on it without expanding a step.
         const permissionEvent = item.event;
         const resolution = item.resolution;
+        const permKey = `perm-${permissionEvent.event_id}`;
         rows.push({
-          key: `perm-${permissionEvent.event_id}`,
+          key: permKey,
           estimate: ESTIMATED_ASSISTANT_HEIGHT_PX,
-          render: () => renderPermissionItem(permissionEvent, toolResults, agentId, resolution),
+          // Pass the row key as the DOM id so the measured height is cached under
+          // the same key the window math looks up (see renderPermissionItem).
+          render: () => renderPermissionItem(permissionEvent, toolResults, agentId, resolution, permKey),
         });
       } else if (item.kind === "chip") {
         const chipEvent = item.event;

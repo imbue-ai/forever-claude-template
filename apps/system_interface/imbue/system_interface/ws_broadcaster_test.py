@@ -293,6 +293,35 @@ def test_evicted_client_receives_shutdown_sentinel() -> None:
     assert stuck_queue.get_nowait() is None
 
 
+def test_broadcast_terminal_session_delivers_typed_event() -> None:
+    """A session switch broadcasts the terminal_id-tagged terminal_session event."""
+    broadcaster = WebSocketBroadcaster()
+    client_queue = broadcaster.register()
+
+    broadcaster.broadcast_terminal_session("term-abc", "$3", "terminal-2")
+
+    message = json.loads(_get_message(client_queue))
+    assert message == {
+        "type": "terminal_session",
+        "terminal_id": "term-abc",
+        "session_id": "$3",
+        "session_name": "terminal-2",
+    }
+
+
+def test_broadcast_terminal_session_allows_null_terminal_id_for_rename() -> None:
+    """A rename broadcasts with terminal_id=None so the frontend matches by session_id."""
+    broadcaster = WebSocketBroadcaster()
+    client_queue = broadcaster.register()
+
+    broadcaster.broadcast_terminal_session(None, "$5", "renamed-terminal")
+
+    message = json.loads(_get_message(client_queue))
+    assert message["terminal_id"] is None
+    assert message["session_id"] == "$5"
+    assert message["session_name"] == "renamed-terminal"
+
+
 def test_shutdown_delivers_sentinel_even_to_full_queue() -> None:
     """Shutdown must signal even clients whose queues happen to be full."""
     broadcaster = WebSocketBroadcaster()

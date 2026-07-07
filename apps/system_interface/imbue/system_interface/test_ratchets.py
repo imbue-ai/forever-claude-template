@@ -207,20 +207,15 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    # The single monkeypatch.setattr in conftest.py's
-    # `_isolate_system_interface_tests` autouse fixture patches
-    # `AgentManager.start` to skip the observe subprocess for tests
-    # (rationale documented at the call site). DI alternative would
-    # require plumbing a flag through every call site of
-    # create_application, which is a much larger blast radius for a
-    # test-only workaround.
-    #
-    # The in-UI Claude login modal tests use no `monkeypatch.setattr`:
-    # `ClaudeAuthService` and `WelcomeResender` take their outside-world
-    # dependencies (subprocess runner, pexpect spawner, transcript reader,
-    # message sender, welcome-skill path) as constructor arguments, so
-    # tests construct isolated instances with deterministic fakes.
-    rc.check_monkeypatch_setattr(_DIR, snapshot(1))
+    # No `monkeypatch.setattr` anywhere in the package. Collaborators are
+    # constructor-injected end to end: the composition root (`main`) builds the
+    # real graph and is the sole caller of `AgentManager.start`, while
+    # `create_application` takes an already-built `SystemInterfaceState` and
+    # tests assemble one with fakes via `testing.build_test_state` (e.g. a
+    # `RecordingMngrMessenger` for the message-send path). `ClaudeAuthService`
+    # and `WelcomeResender` likewise take their outside-world dependencies as
+    # constructor arguments, so tests construct isolated instances with fakes.
+    rc.check_monkeypatch_setattr(_DIR, snapshot(0))
 
 
 def test_prevent_test_container_classes() -> None:

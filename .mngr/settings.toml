@@ -5,7 +5,7 @@
 type = "claude"
 connect = false
 ensure_clean = false
-pass_env__extend = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_NAME", "REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
+pass_env__extend = ["REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
 host_env__extend = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
@@ -63,10 +63,6 @@ worktree_base_folder = "/mngr/worktree/"
 disable_plugin__extend = ["recursive", "ttyd", "claude_subagent_proxy"]
 yes = true
 
-# for the list command -- ensures that we don't see other agents when we're listing, even if we happen to list remote agents
-[commands.list]
-include__extend = ["""has(labels.workspace)"""]
-
 # --- Agent types ---
 
 # Agent type defaults -- apply to all claude agents created from this repo
@@ -84,7 +80,7 @@ version = "2.1.160"
 # (inside the services agent) and inherited via the host env file the
 # bootstrap writes. Disabled below on the "main" type, which still owns
 # the per-agent config dir that everyone else points at.
-use_env_config_dir = true
+isolate_local_config_dir = false
 
 # The "main" (services) agent type -- inherits everything from claude, then
 # disables every path that pulls user-local content into the workspace. The
@@ -99,7 +95,7 @@ sync_credentials_on_login = false
 # Keep this agent's per-agent CLAUDE_CONFIG_DIR (don't inherit the parent's
 # new shared-mode default). Every other agent in the workspace points at
 # *this* directory via the host env var the bootstrap writes.
-use_env_config_dir = false
+isolate_local_config_dir = true
 # Window 0 of the services agent must never actually run claude -- the bootstrap
 # window (extra_window) runs supervisord, which owns every background service,
 # and the real chat agents are spun up separately by the bootstrap. Making
@@ -124,13 +120,23 @@ is_enabled = false
 [providers.docker]
 is_enabled = false
 isolate_host_volumes = true
-# Run agent containers under the gVisor (`runsc`) runtime to shrink the host
-# kernel attack surface for untrusted agents. `runsc` must be installed and
-# registered with the local Docker daemon (see CLAUDE.md); container creation
-# fails with Docker's native "unknown runtime" error otherwise. Override back to
-# the default runtime where gVisor is unavailable (e.g. CI, Modal) with
-# MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc.
-docker_runtime = "runsc"
+# No `docker_runtime` is set here, so containers use Docker's default runtime
+# (runc), which is available everywhere -- notably macOS, where gVisor's `runsc`
+# is not. The gVisor-hardened runtime is selected per-create by stacking the
+# `docker_runsc` template overlay below (the minds desktop app does this by
+# default on Linux, where `runsc` is installed). A direct CLI user can opt in
+# with `--template docker --template docker_runsc`, or override either way with
+# MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=<runc|runsc>.
+# Mount /run as a tmpfs so supervisord can install its control socket. When runsc
+# is registered with --overlay2=none (required so the container rootfs -- and
+# mngr's SSH provisioning written to it -- survives a restart), /run lives on
+# gVisor's gofer-backed filesystem, which returns EOPNOTSUPP for os.link() of a
+# socket inode. supervisord installs its control socket via a hard link, so on a
+# gofer-backed /run it wedges ("Unlinking stale socket") and never starts
+# system_interface -- the workspace then sits on the "Loading workspace" loader
+# forever. A tmpfs /run makes the hard link work. Mirrors the tmpfs /run that the
+# aws-<region> provider start args and the ovh/vultr/imbue_cloud host setup apply.
+default_start_args = ["--tmpfs", "/run"]
 # First-time nix/Dockerfile builds pull a large Nix base and closure; keep the
 # Docker provider timeout wide enough for that separate template path.
 build_timeout_seconds = 5400
@@ -194,25 +200,40 @@ type = "main"
 # chat agent) and then launches supervisord, which runs every background
 # service (system_interface, web, cloudflared, app-watcher, runtime-backup,
 # host-backup, terminal, and the one-shot deferred-install -- see
-# supervisord.conf). The old telegram + git_auth_setup windows are gone
-# (telegram is retired; the git config it performed now runs inside bootstrap),
-# and terminal is a supervisord service rather than its own window.
+# supervisord.conf). The old git_auth_setup window is gone (the git config it
+# performed now runs inside bootstrap), and terminal is a supervisord service
+# rather than its own window.
 extra_window = ["bootstrap='uv run bootstrap'"]
 # Write a sane default tmux config on every minds host. tuple-typed
 # `extra_provision_command` stacks across templates (see
 # `apply_create_template` in vendor/mngr/.../common_opts.py), so the
 # mode-specific templates (docker/lima/...) keep their own commands.
+#
+# `mouse on` keeps wheel scroll and in-app mouse working in the browser
+# terminal. The clipboard lines make a plain mouse-drag copy reach the system
+# clipboard via OSC 52: `set-clipboard on` tells tmux to emit it,
+# `terminal-features ,*:clipboard` makes tmux believe the terminal accepts it,
+# and the copy-mode bindings copy-and-emit on drag-release. This relies on the
+# mngr_ttyd plugin serving an OSC 52-capable web client (the stock ttyd client
+# drops these escapes); see libs/mngr_ttyd in the mngr repo.
+#
+# The final `if-shell ... source-file` line pulls in scripts/terminal_tmux.conf
+# (committed to /mngr/code), which holds the in-memory-persistent-terminals
+# settings: a larger history-limit, window-size latest, and the tab-title
+# tracking hooks. It lives in its own file so those hook lines stay readable.
 extra_provision_command__extend = [
-    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' > "$HOME/.tmux.conf"''',
+    '''printf '%s\n' 'set -g alternate-screen off' 'set -g mouse on' 'set -g set-clipboard on' 'set -as terminal-features ,*:clipboard' 'bind -T copy-mode MouseDragEnd1Pane send -X copy-pipe-and-cancel' 'bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-and-cancel' 'if-shell "test -f /mngr/code/scripts/terminal_tmux.conf" "source-file /mngr/code/scripts/terminal_tmux.conf"' > "$HOME/.tmux.conf"''',
 ]
 
-# template for docker provider
+# Shared base template for the local docker provider. Used on its own for the
+# default (runc) runtime; stack `--template docker_runsc` on top of it to select
+# the gVisor (runsc) runtime instead (see that overlay below and the
+# [providers.docker] note above). The container-runtime choice is the only
+# difference between the two, so the body lives here once and the overlay reuses
+# it -- nothing to keep in sync.
 [create_templates.docker]
 provider = "docker"
 target_path = "/mngr/code/"
-# gVisor runtime selection lives in the [providers.docker] block above
-# (docker_runtime), not here -- provider config belongs on the provider, and
-# template `--setting` entries don't reliably reach the provider config anyway.
 setting__extend = ["providers.docker.is_enabled=true"]
 build_arg__extend = ["--file=Dockerfile", "."]
 # Security hardening for `docker run`: block privilege escalation via setuid
@@ -260,6 +281,19 @@ start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--resta
 idle_mode = "disabled"
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+
+# gVisor (runsc) runtime overlay for the docker provider. Always stacked on top
+# of `docker` (`--template docker --template docker_runsc`): it reuses the entire
+# docker template body and only switches the provider's container runtime to
+# `runsc`, shrinking the host kernel attack surface for untrusted agents. `runsc`
+# must be installed + registered with the local Docker daemon (see CLAUDE.md);
+# container creation fails with Docker's native "unknown runtime" error
+# otherwise -- which is why this is opt-in rather than the default. The
+# template-contributed provider-config setting reaches the provider at create
+# time: mngr re-applies template `--setting` entries against the provider config
+# after template resolution (imbue-ai/mngr#1914).
+[create_templates.docker_runsc]
+setting__extend = ["providers.docker.docker_runtime=runsc"]
 
 # template for lima VM provider
 [create_templates.lima]

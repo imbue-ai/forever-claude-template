@@ -35,6 +35,7 @@ from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.server import create_application
+from imbue.system_interface.testing import build_test_state
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 from imbue.system_interface.wsgi import make_threaded_server
 
@@ -95,7 +96,7 @@ def layout_server(
     )
 
     config = Config(system_interface_host="127.0.0.1", system_interface_port=_PORT)
-    app = create_application(config=config, agent_manager=manager)
+    app = create_application(build_test_state(config=config, agent_manager=manager))
 
     server = make_threaded_server("127.0.0.1", _PORT, app)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

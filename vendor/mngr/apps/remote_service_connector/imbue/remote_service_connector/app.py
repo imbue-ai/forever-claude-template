@@ -33,16 +33,13 @@ from uuid import UUID
 
 import httpx
 import modal
-import ovh
 import paramiko
 import psycopg2
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import HTMLResponse
-from ovh.exceptions import APIError as OvhApiError
-from ovh.exceptions import HTTPError as OvhHttpError
-from ovh.exceptions import ResourceNotFoundError
+from paramiko.hostkeys import HostKeyEntry
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
@@ -301,10 +298,10 @@ class R2BucketLimitError(RuntimeError):
 
 
 class PoolHostCleanupError(RuntimeError):
-    """Raised when a pool-host release/teardown cannot complete its OVH cleanup.
+    """Raised when a pool-host release/teardown cannot destroy the slice's lima VM.
 
     Surfaced (rather than swallowed to a warning) so a release that fails to
-    actually cancel the VPS reports failure instead of a false success.
+    actually tear down the VM reports failure instead of a false success.
     """
 
 
@@ -414,7 +411,7 @@ class LeaseHostRequest(BaseModel):
     region: str | None = Field(
         default=None,
         description=(
-            "Hard region requirement (OVH datacenter code, e.g. 'US-EAST-VA'). When set, only "
+            "Hard region requirement (lease-region label, e.g. 'US-EAST-VA'). When set, only "
             "hosts whose region column equals this value are eligible; if none is available the "
             "lease fails. Leave unset to be region-agnostic."
         ),
@@ -426,11 +423,7 @@ class LeaseHostRequest(BaseModel):
 class LeaseHostResponse(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_address: str = Field(
-        description=(
-            "SSH-reachable VPS address. Either a public IPv4 or a DNS hostname depending "
-            "on what the host's provider returned at bake time (OVH-backed rows are DNS "
-            "hostnames like ``vps-eec8860b.vps.ovh.us``)."
-        )
+        description="SSH-reachable address of the leased host's bare-metal box (reaches the slice VM)."
     )
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
@@ -439,6 +432,12 @@ class LeaseHostResponse(BaseModel):
     host_id: str = Field(description="Host ID in the mngr provider")
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes the row was matched against")
+    outer_host_public_key: str = Field(
+        description="The VPS/VM-root sshd host public key (port ssh_port), for strict host-key pinning"
+    )
+    container_host_public_key: str = Field(
+        description="The docker container sshd host public key (port container_ssh_port), for strict host-key pinning"
+    )
 
 
 class ReleaseHostResponse(BaseModel):
@@ -447,14 +446,26 @@ class ReleaseHostResponse(BaseModel):
     )
 
 
+class RenameHostRequest(BaseModel):
+    host_name: str = Field(
+        description=(
+            "New user-chosen friendly name for the leased host. Must satisfy mngr's SafeName "
+            "regex (alphanumeric, dashes/underscores allowed in the middle). Required."
+        )
+    )
+
+    _validate_host_name = field_validator("host_name")(_validate_host_name)
+
+
+class RenameHostResponse(BaseModel):
+    host_db_id: UUID = Field(description="Database ID of the renamed host")
+    host_name: str = Field(description="The new user-chosen friendly name")
+
+
 class LeasedHostInfo(BaseModel):
     host_db_id: UUID = Field(description="Database ID of the leased host")
     vps_address: str = Field(
-        description=(
-            "SSH-reachable VPS address. Either a public IPv4 or a DNS hostname depending "
-            "on what the host's provider returned at bake time (OVH-backed rows are DNS "
-            "hostnames like ``vps-eec8860b.vps.ovh.us``)."
-        )
+        description="SSH-reachable address of the leased host's bare-metal box (reaches the slice VM)."
     )
     ssh_port: int = Field(description="SSH port on the VPS")
     ssh_user: str = Field(description="SSH user on the VPS")
@@ -464,6 +475,12 @@ class LeasedHostInfo(BaseModel):
     host_name: str = Field(description="User-chosen friendly name for the leased host")
     attributes: dict[str, Any] = Field(description="Attributes attached to the lease row")
     leased_at: str = Field(description="ISO 8601 timestamp when the host was leased")
+    outer_host_public_key: str | None = Field(
+        default=None, description="The VPS/VM-root sshd host public key, for strict host-key pinning"
+    )
+    container_host_public_key: str | None = Field(
+        default=None, description="The docker container sshd host public key, for strict host-key pinning"
+    )
 
 
 # -- LiteLLM key management models --
@@ -1880,12 +1897,6 @@ def raise_as_http(exc: Exception) -> NoReturn:
         # error so the client retries rather than treating the lease as gone.
         logger.error("Pool host cleanup error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    if isinstance(exc, (OvhApiError, OvhHttpError)):
-        # OVH calls during teardown (tag strip / cancel) failed. Surface as a
-        # bad-gateway so the failed cancel is visible and retryable instead of
-        # being swallowed into a false "released" success.
-        logger.error("OVH API error during pool-host teardown: %s", exc)
-        raise HTTPException(status_code=502, detail=f"OVH API error during teardown: {exc}") from exc
     if isinstance(exc, TunnelNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if isinstance(exc, TunnelOwnershipError):
@@ -1936,14 +1947,45 @@ def _get_pool_db_connection() -> Any:
     return psycopg2.connect(database_url)
 
 
+def _pin_expected_host_key(client: paramiko.SSHClient, host: str, port: int, expected_host_public_key: str) -> None:
+    """Pin ``expected_host_public_key`` for ``host:port`` and reject any other host key.
+
+    paramiko keys non-default ports under the ``[host]:port`` known-hosts name, so
+    a container/forwarded port must be pinned under that bracketed name to match
+    what ``connect`` looks up. Replaces trust-on-first-use: a mismatched or
+    unknown host key is rejected.
+    """
+    known_hosts_name = host if port == 22 else f"[{host}]:{port}"
+    entry = HostKeyEntry.from_line(f"{known_hosts_name} {expected_host_public_key.strip()}")
+    if entry is None or entry.key is None:
+        # An SSHException (not PoolHostCleanupError) so this is handled uniformly by
+        # every caller: the teardown sweep and reconcile already treat it as an SSH
+        # failure, and the lease path's `except (paramiko.SSHException, OSError)`
+        # maps it to a 502 (SSH key injection failed) rather than a misleading 500.
+        raise paramiko.SSHException(
+            f"could not parse expected host key for {known_hosts_name}: {expected_host_public_key!r}"
+        )
+    client.get_host_keys().add(known_hosts_name, entry.key.get_name(), entry.key)
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+
+
 @contextlib.contextmanager
 def _management_ssh_client(
-    host: str, port: int, user: str, management_key_pem: str, timeout_seconds: float
+    host: str,
+    port: int,
+    user: str,
+    management_key_pem: str,
+    timeout_seconds: float,
+    expected_host_public_key: str,
 ) -> Iterator[paramiko.SSHClient]:
-    """Yield an SSHClient connected to ``host`` with the pool management key, closed on exit."""
+    """Yield an SSHClient connected to ``host`` with the pool management key, closed on exit.
+
+    The host is authenticated against ``expected_host_public_key`` (strict pinning,
+    no trust-on-first-use); callers fail closed when no pinned key is available.
+    """
     private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    _pin_expected_host_key(client, host, port, expected_host_public_key)
     try:
         client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=timeout_seconds)
         yield client
@@ -1957,9 +1999,12 @@ def _append_authorized_key(
     user: str,
     management_key_pem: str,
     public_key_to_add: str,
+    expected_host_public_key: str,
 ) -> None:
     """SSH into a host using the management key and append a public key to authorized_keys."""
-    with _management_ssh_client(host, port, user, management_key_pem, timeout_seconds=15) as client:
+    with _management_ssh_client(
+        host, port, user, management_key_pem, timeout_seconds=15, expected_host_public_key=expected_host_public_key
+    ) as client:
         key_line = public_key_to_add.strip()
         commands = (
             "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo {} >> ~/.ssh/authorized_keys && ".format(
@@ -1975,129 +2020,12 @@ def _append_authorized_key(
 
 
 # ---------------------------------------------------------------------------
-# OVH pool-host cleanup
+# Slice pool-host cleanup
 #
-# Releasing a pool host (and the periodic sweep that mops up interrupted
-# releases) must (a) strip the per-lease OVH IAM tags so the VPS reads as a
-# clean, recyclable host and (b) cancel the VPS in OVH so it stops renewing.
-# We do this with direct OVH REST calls rather than running ``mngr`` here so
-# the connector image stays light; the call surface is intentionally tiny.
-# Keep the tag keys / endpoint defaults in sync with ``libs/mngr_ovh``.
+# A pool host is a "slice": a lima VM on one of our bare-metal boxes. Releasing
+# it (the inline release path) destroys the VM by SSHing the box and running
+# limactl. The connector makes no provider-API calls of its own.
 # ---------------------------------------------------------------------------
-
-# Always kept on a recyclable host so the OVH provider can still discover it.
-OVH_PROVIDER_TAG_KEY = "mngr-provider"
-# Per-lease tags stripped on cleanup (everything except the provider tag).
-_OVH_STALE_TAG_KEYS: tuple[str, ...] = ("minds_env", "mngr-host-id")
-_OVH_DEFAULT_ENDPOINT = "ovh-us"
-
-
-class OvhVpsResource(BaseModel):
-    """A single OVH IAM ``vps`` resource with its tags."""
-
-    urn: str = Field(description="IAM URN like urn:v1:us:resource:vps:<serviceName>")
-    name: str = Field(description="OVH VPS service name")
-    tags: dict[str, str] = Field(default_factory=dict, description="IAM resource tags")
-
-
-class OvhOps(Protocol):
-    """Abstraction over the few OVH REST calls the cleanup path needs."""
-
-    def delete_tag(self, urn: str, key: str) -> None: ...
-    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None: ...
-    def list_vps_resources(self) -> list[OvhVpsResource]: ...
-
-
-class OvhClientCaller(Protocol):
-    """The single python-ovh entrypoint HttpOvhOps depends on (a DI seam for tests)."""
-
-    def call(self, method: str, path: str, data: object, need_auth: bool) -> Any: ...
-
-
-class HttpOvhOps:
-    """OvhOps implementation backed by the official ``ovh`` SDK (signed calls)."""
-
-    def __init__(self, application_key: str, application_secret: str, consumer_key: str, endpoint: str) -> None:
-        self.client: OvhClientCaller = ovh.Client(
-            endpoint=endpoint,
-            application_key=application_key,
-            application_secret=application_secret,
-            consumer_key=consumer_key,
-        )
-
-    def delete_tag(self, urn: str, key: str) -> None:
-        # Idempotent: a missing tag means the strip already happened.
-        try:
-            self.client.call("DELETE", f"/v2/iam/resource/{urn}/tag/{key}", None, True)
-        except ResourceNotFoundError:
-            pass
-
-    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
-        # Read-modify-write so we don't clobber unrelated serviceInfos fields.
-        # Idempotent: a missing service means OVH already removed the VPS, so
-        # there is nothing left to cancel (treat as success, like delete_tag).
-        try:
-            info = dict(self.client.call("GET", f"/vps/{service_name}/serviceInfos", None, True) or {})
-            renew = dict(info.get("renew") or {})
-            renew["deleteAtExpiration"] = delete_at_expiration
-            info["renew"] = renew
-            self.client.call("PUT", f"/vps/{service_name}/serviceInfos", info, True)
-        except ResourceNotFoundError:
-            pass
-
-    def list_vps_resources(self) -> list[OvhVpsResource]:
-        payload = self.client.call("GET", "/v2/iam/resource?resourceType=vps", None, True)
-        if not isinstance(payload, list):
-            return []
-        resources: list[OvhVpsResource] = []
-        for raw in payload:
-            if not isinstance(raw, dict):
-                continue
-            urn = str(raw.get("urn") or "")
-            if not urn:
-                continue
-            tags = {str(k): str(v) for k, v in (raw.get("tags") or {}).items()}
-            resources.append(OvhVpsResource(urn=urn, name=str(raw.get("name") or ""), tags=tags))
-        return resources
-
-
-def ovh_region_code_for_endpoint(endpoint: str) -> str:
-    """Map an OVH endpoint id (``ovh-us``) to the URN region segment (``us``)."""
-    if endpoint.startswith("ovh-"):
-        return endpoint.removeprefix("ovh-")
-    return "us"
-
-
-def _get_ovh_endpoint() -> str:
-    return os.environ.get("OVH_ENDPOINT", _OVH_DEFAULT_ENDPOINT)
-
-
-def vps_urn_for(service_name: str, region_code: str) -> str:
-    """Build the IAM resource URN for an OVH VPS owned by this account."""
-    return f"urn:v1:{region_code}:resource:vps:{service_name}"
-
-
-@functools.cache
-def _get_ovh_ops() -> OvhOps:
-    return HttpOvhOps(
-        application_key=os.environ["OVH_APPLICATION_KEY"],
-        application_secret=os.environ["OVH_APPLICATION_SECRET"],
-        consumer_key=os.environ["OVH_CONSUMER_KEY"],
-        endpoint=_get_ovh_endpoint(),
-    )
-
-
-def clean_up_pool_host_in_ovh(ovh_ops: OvhOps, vps_instance_id: str, region_code: str) -> None:
-    """Strip the per-lease tags (keeping ``mngr-provider``) then cancel the VPS.
-
-    Tags are stripped first (per the cleanup contract) so a mid-crash leaves a
-    recyclable-looking host that the next sweep finishes cancelling. Each call
-    is idempotent, so re-running is safe.
-    """
-    urn = vps_urn_for(vps_instance_id, region_code)
-    for tag_key in _OVH_STALE_TAG_KEYS:
-        ovh_ops.delete_tag(urn, tag_key)
-    ovh_ops.set_delete_at_expiration(vps_instance_id, True)
 
 
 def _delete_pool_host_row(conn: Any, host_db_id: Any) -> None:
@@ -2105,14 +2033,6 @@ def _delete_pool_host_row(conn: Any, host_db_id: Any) -> None:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
     conn.commit()
-
-
-# pool_hosts.backend_kind values (kept in sync with migration 009 and the
-# mngr_imbue_cloud primitives). A real OVH VPS is cancelled in OVH on release;
-# a "slice" is a lima VM on one of our bare-metal boxes and is destroyed by
-# SSHing the box and running limactl.
-BACKEND_KIND_OVH_VPS = "ovh_vps"
-BACKEND_KIND_SLICE = "slice"
 
 
 def build_slice_teardown_commands(lima_instance_name: str, lima_disk_name: str | None) -> tuple[str, ...]:
@@ -2124,10 +2044,12 @@ def build_slice_teardown_commands(lima_instance_name: str, lima_disk_name: str |
 
 
 def _run_ssh_commands_on_box(
-    host: str, port: int, user: str, management_key_pem: str, commands: tuple[str, ...]
+    host: str, port: int, user: str, management_key_pem: str, commands: tuple[str, ...], box_host_public_key: str
 ) -> None:
     """SSH into the box with the pool management key and run each command, raising on failure."""
-    with _management_ssh_client(host, port, user, management_key_pem, timeout_seconds=30) as client:
+    with _management_ssh_client(
+        host, port, user, management_key_pem, timeout_seconds=30, expected_host_public_key=box_host_public_key
+    ) as client:
         for command in commands:
             _stdin, stdout, stderr = client.exec_command(command)
             exit_status = stdout.channel.recv_exit_status()
@@ -2159,7 +2081,7 @@ def clean_up_slice_on_box(
         )
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT public_address, lima_service_user FROM bare_metal_servers WHERE id = %s",
+            "SELECT public_address, lima_service_user, box_host_public_key FROM bare_metal_servers WHERE id = %s",
             (str(bare_metal_server_id),),
         )
         server_row = cur.fetchone()
@@ -2167,10 +2089,18 @@ def clean_up_slice_on_box(
         raise PoolHostCleanupError(
             f"slice pool host {host_db_id}: bare_metal_servers row {bare_metal_server_id} is missing or has no public_address"
         )
-    box_address, lima_service_user = server_row[0], server_row[1] or "root"
+    box_address, lima_service_user, box_host_public_key = server_row[0], server_row[1] or "root", server_row[2]
+    # Fail closed: without the box's pinned host key we cannot reach it without
+    # trust-on-first-use. The row stays ``removing`` and the sweep retries once
+    # the one-time keyscan backfill has populated the column.
+    if not box_host_public_key:
+        raise PoolHostCleanupError(
+            f"slice pool host {host_db_id}: bare_metal_servers row {bare_metal_server_id} has no box_host_public_key "
+            "(run the one-time `mngr imbue_cloud admin` host-key backfill)"
+        )
     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
     commands = build_slice_teardown_commands(lima_instance_name, lima_disk_name)
-    _run_ssh_commands_on_box(box_address, 22, lima_service_user, management_key_pem, commands)
+    _run_ssh_commands_on_box(box_address, 22, lima_service_user, management_key_pem, commands, box_host_public_key)
 
 
 # Slice lima resources are named ``mngr-slice-<env>-<host-hex>`` (the data disk
@@ -2196,7 +2126,9 @@ def slice_name_env_owner(name: str) -> str | None:
     return match.group("env") if match else None
 
 
-def _list_box_lima_names(host: str, user: str, management_key_pem: str, json_subcommand: str) -> set[str]:
+def _list_box_lima_names(
+    host: str, user: str, management_key_pem: str, json_subcommand: str, box_host_public_key: str
+) -> set[str]:
     """SSH the box and return the ``name`` of every lima instance or disk (per ``json_subcommand``).
 
     ``json_subcommand`` is ``list --json`` (instances) or ``disk list --json`` (disks);
@@ -2205,7 +2137,9 @@ def _list_box_lima_names(host: str, user: str, management_key_pem: str, json_sub
     """
     names: set[str] = set()
     command = f"{_BOX_LIMACTL_PATH_PREFIX} limactl {json_subcommand}"
-    with _management_ssh_client(host, 22, user, management_key_pem, timeout_seconds=30) as client:
+    with _management_ssh_client(
+        host, 22, user, management_key_pem, timeout_seconds=30, expected_host_public_key=box_host_public_key
+    ) as client:
         _stdin, stdout, stderr = client.exec_command(command)
         exit_status = stdout.channel.recv_exit_status()
         output = stdout.read().decode()
@@ -2251,27 +2185,39 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
         logger.info("Slice reconcile skipped: connector has no MINDS_ENV_NAME to scope to")
         return 0
     with conn.cursor() as cur:
-        cur.execute("SELECT id, public_address, lima_service_user FROM bare_metal_servers")
+        cur.execute("SELECT id, public_address, lima_service_user, box_host_public_key FROM bare_metal_servers")
         servers = cur.fetchall()
     # Read the pool key only once we know there are boxes to inspect: a deployment
     # with no slice infrastructure (no boxes, no POOL_SSH_PRIVATE_KEY) must not fail
-    # here just because the cron also covers the OVH pool-host cleanup.
+    # here.
     if not servers:
         return 0
     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
     divergence_count = 0
-    for server_id, public_address, lima_service_user in servers:
+    for server_id, public_address, lima_service_user, box_host_public_key in servers:
         if not public_address:
+            continue
+        # Fail closed on a box with no pinned host key: skipping it would look like
+        # a clean audit, so surface it loudly instead. Cleared once the one-time
+        # keyscan backfill populates the column.
+        if not box_host_public_key:
+            logger.error(
+                "Slice reconcile skipped box %s: no box_host_public_key (run the one-time host-key backfill)",
+                public_address,
+            )
+            divergence_count += 1
             continue
         user = lima_service_user or "root"
         # If we cannot list a box's lima resources we did NOT reconcile it; let the
         # failure propagate rather than silently skipping (which would look like a
         # clean audit and could mask vanished/leaked VMs).
-        box_instances = _list_box_lima_names(public_address, user, management_key_pem, "list --json")
+        box_instances = _list_box_lima_names(
+            public_address, user, management_key_pem, "list --json", box_host_public_key
+        )
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT lima_instance_name FROM pool_hosts WHERE backend_kind = %s AND bare_metal_server_id = %s",
-                (BACKEND_KIND_SLICE, str(server_id)),
+                "SELECT lima_instance_name FROM pool_hosts WHERE bare_metal_server_id = %s",
+                (str(server_id),),
             )
             tracked_instances = {row[0] for row in cur.fetchall() if row[0]}
 
@@ -2296,65 +2242,6 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
                 missing_instance,
             )
     return divergence_count
-
-
-def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) -> tuple[int, int]:
-    """Clean up every ``removing`` pool host: strip tags, cancel, delete the row.
-
-    Returns ``(success_count, failure_count)``. Per-host failures are logged
-    and skipped (the row stays ``removing`` for the next run); ``FOR UPDATE
-    SKIP LOCKED`` keeps a concurrent inline release and the sweep from
-    double-processing the same row.
-    """
-    success_count = 0
-    failure_count = 0
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, vps_instance_id, backend_kind, lima_instance_name, lima_disk_name, bare_metal_server_id "
-            "FROM pool_hosts WHERE status = 'removing' FOR UPDATE SKIP LOCKED"
-        )
-        rows = cur.fetchall()
-        for (
-            host_db_id,
-            vps_instance_id,
-            backend_kind,
-            lima_instance_name,
-            lima_disk_name,
-            bare_metal_server_id,
-        ) in rows:
-            # Per-host savepoint so a DB error on one host's DELETE doesn't
-            # abort the whole transaction (which would roll back every other
-            # host's already-issued DELETE in this run and poison subsequent
-            # statements). Rollback-to-savepoint leaves the transaction usable.
-            cur.execute("SAVEPOINT pool_host_cleanup")
-            try:
-                # Branch on backend: slices are torn down on their box via
-                # limactl; real VPSes are cancelled in OVH. A slice whose VM
-                # isn't destroyed must NOT have its row deleted (that would leak
-                # the VM and the slot), so clean_up_slice_on_box raises on any
-                # problem and the row stays ``removing`` for the next run.
-                if backend_kind == BACKEND_KIND_SLICE:
-                    clean_up_slice_on_box(conn, host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name)
-                elif vps_instance_id:
-                    clean_up_pool_host_in_ovh(ovh_ops, vps_instance_id, region_code)
-                else:
-                    logger.warning("Removing pool host %s has no vps_instance_id; skipping OVH cleanup", host_db_id)
-                cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
-                cur.execute("RELEASE SAVEPOINT pool_host_cleanup")
-                success_count += 1
-            except (
-                OvhApiError,
-                OvhHttpError,
-                psycopg2.Error,
-                PoolHostCleanupError,
-                paramiko.SSHException,
-                OSError,
-            ) as exc:
-                cur.execute("ROLLBACK TO SAVEPOINT pool_host_cleanup")
-                logger.warning("Cleanup failed for removing pool host %s; will retry next run: %s", host_db_id, exc)
-                failure_count += 1
-    conn.commit()
-    return success_count, failure_count
 
 
 # ---------------------------------------------------------------------------
@@ -2614,7 +2501,8 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                         query_params.append(body.region)
                     order_by = "created_at ASC"
                     lease_select_sql = (
-                        "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
+                        "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes, "
+                        "outer_host_public_key, container_host_public_key "
                         "FROM pool_hosts "
                         f"WHERE {' AND '.join(where_clauses)} "
                         f"ORDER BY {order_by} LIMIT 1 FOR UPDATE SKIP LOCKED"
@@ -2629,18 +2517,53 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
                                 "Please ask Josh to provision more, or relax the attribute filter."
                             ),
                         )
-                    host_db_id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes = (
-                        row
-                    )
+                    (
+                        host_db_id,
+                        vps_address,
+                        ssh_port,
+                        ssh_user,
+                        container_ssh_port,
+                        agent_id,
+                        host_id,
+                        attributes,
+                        outer_host_public_key,
+                        container_host_public_key,
+                    ) = row
 
-                    # Inject the user's SSH public key on VPS and container
+                    # Fail closed: a row without both pinned host keys cannot be
+                    # leased without trust-on-first-use. This only happens for rows
+                    # baked before the host-key columns existed; the one-time
+                    # keyscan backfill populates them. Surface it as no-capacity so
+                    # the caller (and the fast/slow path retry) treats it like an
+                    # unavailable host rather than a hard error.
+                    if not outer_host_public_key or not container_host_public_key:
+                        raise HTTPException(
+                            status_code=503,
+                            detail=(
+                                f"Pool host {host_db_id} has no pinned SSH host keys yet; "
+                                "run the one-time `mngr imbue_cloud admin` host-key backfill."
+                            ),
+                        )
+
+                    # Inject the user's SSH public key on VPS and container, pinning
+                    # each sshd's recorded host key (strict, no trust-on-first-use).
                     management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
                     try:
                         _append_authorized_key(
-                            vps_address, ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                            vps_address,
+                            ssh_port,
+                            ssh_user,
+                            management_key_pem,
+                            body.ssh_public_key,
+                            outer_host_public_key,
                         )
                         _append_authorized_key(
-                            vps_address, container_ssh_port, ssh_user, management_key_pem, body.ssh_public_key
+                            vps_address,
+                            container_ssh_port,
+                            ssh_user,
+                            management_key_pem,
+                            body.ssh_public_key,
+                            container_host_public_key,
                         )
                     except (paramiko.SSHException, OSError) as exc:
                         logger.warning("SSH key injection failed for host %s: %s", host_db_id, exc)
@@ -2669,23 +2592,24 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
             host_id=host_id,
             host_name=body.host_name,
             attributes=attrs_dict,
+            outer_host_public_key=outer_host_public_key,
+            container_host_public_key=container_host_public_key,
         ).model_dump()
 
 
 @web_app.post("/hosts/{host_db_id}/release")
 def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
-    """Release a leased host: cancel the OVH VPS, strip its tags, drop the row.
+    """Release a leased host: destroy its slice lima VM, then drop the row.
 
     Runs the full cleanup chain inline and **synchronously**: flip the row to
-    ``removing`` (the durable, retryable in-progress marker), strip the
-    per-lease OVH tags, cancel the VPS, then delete the row.
+    ``removing`` (the durable, retryable in-progress marker), destroy the slice's
+    lima VM on its bare-metal box, then delete the row.
 
     Returns 200 only once *every* step has succeeded -- a "released" result
-    truly means the VPS is cancelled. If any teardown step fails, the row stays
-    ``removing`` and the endpoint returns an error (5xx) so the client (or the
-    hourly sweep backstop) retries; we never report success on a failed cancel.
-    A failure before ``removing`` is committed (lookup, ownership, the status
-    flip) surfaces as an error too.
+    truly means the VM is destroyed. If any teardown step fails, the row stays
+    ``removing`` and the endpoint returns an error (5xx) so the client retries;
+    we never report success on a failed teardown. A failure before ``removing``
+    is committed (lookup, ownership, the status flip) surfaces as an error too.
 
     Idempotent at the HTTP layer: a release on a row that is already gone
     (deleted) or no longer leased returns 200 ``status: already_released``.
@@ -2702,7 +2626,7 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 # Python ``UUID`` type that FastAPI parsed from the path
                 # (it raises "can't adapt type 'UUID'").
                 cur.execute(
-                    "SELECT leased_to_user, status, vps_instance_id, backend_kind, "
+                    "SELECT leased_to_user, status, "
                     "lima_instance_name, lima_disk_name, bare_metal_server_id "
                     "FROM pool_hosts WHERE id = %s",
                     (str(host_db_id),),
@@ -2714,8 +2638,6 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 (
                     leased_to_user,
                     status,
-                    vps_instance_id,
-                    backend_kind,
                     lima_instance_name,
                     lima_disk_name,
                     bare_metal_server_id,
@@ -2734,14 +2656,12 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                         (str(host_db_id),),
                     )
                     conn.commit()
-            # Past the commit point: the row is durably ``removing`` and the
-            # sweep will finish anything that fails below, so we always
-            # return 200 from here.
+            # Past the commit point: the row is durably ``removing``. A teardown
+            # failure below leaves the row ``removing`` and surfaces a 5xx so the
+            # client retries.
             _finish_releasing_pool_host(
                 conn,
                 host_db_id,
-                vps_instance_id,
-                backend_kind,
                 lima_instance_name,
                 lima_disk_name,
                 bare_metal_server_id,
@@ -2754,29 +2674,60 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
 def _finish_releasing_pool_host(
     conn: Any,
     host_db_id: Any,
-    vps_instance_id: str | None,
-    backend_kind: str | None,
     lima_instance_name: str | None,
     lima_disk_name: str | None,
     bare_metal_server_id: Any,
 ) -> None:
-    """Tear down a host already marked ``removing``, then delete the row.
+    """Destroy a slice's lima VM (host already marked ``removing``), then delete the row.
 
-    Branches on ``backend_kind``: a real OVH VPS is cancelled in OVH; a slice
-    has its lima VM destroyed on its bare-metal box. **Raises** on any failure
-    rather than swallowing it -- the caller has already committed the row to
-    ``removing`` (a durable, retryable in-progress marker), so a failure here
-    propagates to the HTTP layer: the release reports failure, the row stays
-    ``removing``, and the client (or the hourly sweep) retries. A release that
-    cannot actually destroy the underlying machine must never report success.
+    **Raises** on any failure rather than swallowing it -- the caller has already
+    committed the row to ``removing`` (a durable, retryable in-progress marker), so
+    a failure here propagates to the HTTP layer: the release reports failure, the
+    row stays ``removing``, and the client retries. A release that cannot actually
+    destroy the slice VM must never report success.
     """
-    if backend_kind == BACKEND_KIND_SLICE:
-        clean_up_slice_on_box(conn, host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name)
-    elif vps_instance_id:
-        clean_up_pool_host_in_ovh(_get_ovh_ops(), vps_instance_id, ovh_region_code_for_endpoint(_get_ovh_endpoint()))
-    else:
-        raise PoolHostCleanupError(f"pool host {host_db_id} has no vps_instance_id; cannot cancel its VPS")
+    clean_up_slice_on_box(conn, host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name)
     _delete_pool_host_row(conn, host_db_id)
+
+
+@web_app.post("/hosts/{host_db_id}/rename")
+def rename_host(request: Request, host_db_id: UUID, body: RenameHostRequest) -> dict[str, object]:
+    """Rename a leased host: update the mutable ``host_name`` column on its row.
+
+    The lease's ``host_db_id`` is the durable identity; only the friendly
+    ``host_name`` changes, so a rename never touches the VPS/VM or the lease
+    state. Ownership is enforced (a row leased by another user returns 403);
+    a missing or not-leased row returns 404. ``host_name`` is validated by the
+    request model against mngr's SafeName regex.
+    """
+    with handle_endpoint_errors():
+        auth = authenticate_request(request, get_ctx().ops)
+        admin = require_admin(auth)
+        require_paid_account(admin)
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT leased_to_user, status FROM pool_hosts WHERE id = %s",
+                    (str(host_db_id),),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="No such host")
+                leased_to_user, status = row
+                # Ownership check first, to avoid leaking a status signal.
+                if leased_to_user != admin.username:
+                    raise HTTPException(status_code=403, detail="You do not own this host lease")
+                if status != "leased":
+                    raise HTTPException(status_code=404, detail="Host is not currently leased")
+                cur.execute(
+                    "UPDATE pool_hosts SET host_name = %s WHERE id = %s",
+                    (body.host_name, str(host_db_id)),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return RenameHostResponse(host_db_id=host_db_id, host_name=body.host_name).model_dump()
 
 
 @web_app.get("/hosts")
@@ -2791,7 +2742,7 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, "
-                    "host_name, attributes, leased_at "
+                    "host_name, attributes, leased_at, outer_host_public_key, container_host_public_key "
                     "FROM pool_hosts "
                     "WHERE status = 'leased' AND leased_to_user = %s",
                     (admin.username,),
@@ -2811,6 +2762,8 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
                 host_name=r[7],
                 attributes=r[8] if isinstance(r[8], dict) else {},
                 leased_at=str(r[9]) if r[9] is not None else "",
+                outer_host_public_key=r[10],
+                container_host_public_key=r[11],
             ).model_dump()
             for r in rows
         ]
@@ -4065,7 +4018,7 @@ _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 _SCALEDOWN_WINDOW = int(os.environ.get("MINDS_CONNECTOR_SCALEDOWN_WINDOW", "0"))
 
 image = modal.Image.debian_slim().pip_install(
-    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko", "ovh"
+    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
 )
 app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 
@@ -4179,18 +4132,13 @@ def _init_supertokens() -> None:
 
 
 def _connector_secrets() -> list[modal.Secret]:
-    """The Modal secrets attached to every connector function (web app + cron).
-
-    Includes ``ovh-<env>`` so the release route and the cleanup cron can make
-    signed OVH calls (tag strip + cancel) at runtime.
-    """
+    """The Modal secrets attached to every connector function (web app + cron)."""
     return [
         modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"neon-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
-        modal.Secret.from_name(f"ovh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, _MINDS_DEPLOY_ID_ENV_VAR: _MINDS_DEPLOY_ID}),
     ]
 
@@ -4219,18 +4167,15 @@ def fastapi_app() -> FastAPI:
 @app.function(
     name="cleanup_removing_pool_hosts",
     secrets=_connector_secrets(),
-    # Hourly mop-up of any pool host left in ``removing`` by a crashed or
-    # timed-out inline release. The happy path deletes the row inline, so this
-    # is purely a safety net.
+    # Hourly slice-box reconcile audit. Scoped to this env's stamped slices; it
+    # only alerts (never auto-deletes), so it is safe on a box shared by multiple
+    # dev envs.
     schedule=modal.Cron("0 * * * *"),
     timeout=900,
 )
 def cleanup_removing_pool_hosts() -> dict[str, int]:
     conn = _get_pool_db_connection()
     try:
-        success_count, failure_count = run_pool_host_cleanup_sweep(
-            conn, _get_ovh_ops(), ovh_region_code_for_endpoint(_get_ovh_endpoint())
-        )
         # Audit this env's slices on every box against the DB (alert-only: it never
         # auto-deletes, to avoid racing an in-flight bake). Scoped to MINDS_ENV_NAME so
         # it is safe on a box shared by multiple dev envs. A reconcile failure (DB,
@@ -4239,14 +4184,5 @@ def cleanup_removing_pool_hosts() -> dict[str, int]:
         divergence_count = reconcile_slice_boxes(conn, _current_minds_env_name())
     finally:
         conn.close()
-    logger.info(
-        "Pool host cleanup sweep done: cleaned=%d failed=%d slice_divergences=%d",
-        success_count,
-        failure_count,
-        divergence_count,
-    )
-    return {
-        "cleaned": success_count,
-        "failed": failure_count,
-        "slice_divergences": divergence_count,
-    }
+    logger.info("Slice reconcile done: slice_divergences=%d", divergence_count)
+    return {"slice_divergences": divergence_count}

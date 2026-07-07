@@ -30,14 +30,18 @@ with open('parent.toml', 'rb') as f:
 
 ## Pulling updates
 
+Always pull with `--no-ff` and the recognizable commit subject below, so the merge that brings in template (built-in) code is identifiable in `git log` afterwards. Tools that classify code as built-in vs. user-created (e.g. the `assist` skill) rely on this `update-self:` subject convention to find which commits came from upstream:
+
 ```bash
 BRANCH=$(python3 -c "
 import tomllib
 with open('parent.toml', 'rb') as f:
     print(tomllib.load(f)['branch'])
 ")
-git pull upstream "$BRANCH"
+git pull --no-ff --no-edit upstream "$BRANCH" -m "update-self: merge upstream template ($BRANCH)"
 ```
+
+`--no-ff` forces a real merge commit even when the pull could fast-forward, so the subject is always recorded. Do not amend or reword that subject -- the `update-self:` prefix is the marker.
 
 Resolve any merge conflicts if needed. For conflicts in files customized per-agent (PURPOSE.md, agent-specific CLAUDE.md sections), prefer your local version.
 

@@ -17,6 +17,11 @@ if [ -f /etc/profile.d/fct_path.sh ]; then
     . /etc/profile.d/fct_path.sh
 fi
 
+# NOTE: intentionally NOT guarded by the provisioning skip cache -- this produces
+# in-repo outputs (frontend dist, .venv) that the create's git-mirror landing does
+# not carry, so it must run on every create to regenerate them (fast via the baked
+# warm caches). Only setup_system (global-only effects) is skipped.
+
 # Disable OpenSSL CPU-cap detection. lima-VZ on Apple M5 advertises SVE in
 # /proc/cpuinfo but traps the `cntb` SVE instruction OpenSSL emits during
 # CPU-cap init -- so any cryptography>=47 import (mngr CLI, system-interface)

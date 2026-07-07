@@ -80,6 +80,17 @@ export const MarkdownContent: m.Component<{ content: string }> = {
     element.innerHTML = renderMarkdown(vnode.attrs.content);
     wrapToolCallBlocks(element);
   },
+  // Skip the subtree diff (and the onupdate innerHTML rewrite below) whenever the
+  // markdown source is unchanged. onupdate re-sets innerHTML, which destroys every
+  // text node in the subtree; the browser then collapses any selection anchored in
+  // it. Since a global redraw fires on every scroll tick and every streamed event,
+  // an unguarded rewrite kills a user's text selection on the first frame. The
+  // rendered element is a childless div whose content we manage by hand, so there is
+  // nothing for Mithril to diff -- retaining the DOM untouched is always correct when
+  // the content matches.
+  onbeforeupdate(vnode, old) {
+    return vnode.attrs.content !== old.attrs.content;
+  },
   onupdate(vnode) {
     const element = vnode.dom as HTMLElement;
     const expanded = saveExpandedState(element);

@@ -1,6 +1,5 @@
 """Tests for agent_discovery module."""
 
-from collections.abc import Iterator
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -14,8 +13,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.system_interface.agent_discovery import _get_mngr_context
-from imbue.system_interface.agent_discovery import _send_message_to_agent
+from imbue.system_interface.agent_discovery import MngrMessenger
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 
 
@@ -109,17 +107,17 @@ def test_falls_back_to_home_claude_when_nothing_else_exists(monkeypatch: pytest.
 
 
 @pytest.fixture
-def mngr_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[MngrContext]:
-    """A real MngrContext rooted at empty tmp dirs (no project config files to load)."""
+def isolated_mngr_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Root mngr config/host at empty tmp dirs so `MngrMessenger` loads a clean context.
+
+    `MngrMessenger.send_to_agent` builds its own `MngrContext` internally; the
+    injected `discover`/`send` fakes ignore that context, but it must still load
+    without picking up the developer's real project config.
+    """
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "host"))
-    ctx, cg = _get_mngr_context()
-    try:
-        yield ctx
-    finally:
-        cg.__exit__(None, None, None)
 
 
 _AGENT_ID = AgentId("agent-00000000000000000000000000000001")
@@ -135,7 +133,8 @@ def _make_match(agent_id: AgentId = _AGENT_ID, host: str = "host-a") -> AgentMat
     )
 
 
-def test_known_location_is_messaged_without_discovery(mngr_ctx: MngrContext) -> None:
+@pytest.mark.usefixtures("isolated_mngr_env")
+def test_known_location_is_messaged_without_discovery() -> None:
     match = _make_match()
     discover_calls: list[AgentId] = []
     send_calls: list[tuple[AgentMatch, ...]] = []
@@ -148,12 +147,14 @@ def test_known_location_is_messaged_without_discovery(mngr_ctx: MngrContext) -> 
         send_calls.append(tuple(matches))
         return MessageResult(successful_agents=[str(m.agent_id) for m in matches])
 
-    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (match,), discover=_discover, send=_send)
+    messenger = MngrMessenger(discover=_discover, send=_send)
+    assert messenger.send_to_agent(_AGENT_ID, "hi", (match,))
     assert discover_calls == []
     assert send_calls == [(match,)]
 
 
-def test_empty_known_locations_falls_back_to_discovery(mngr_ctx: MngrContext) -> None:
+@pytest.mark.usefixtures("isolated_mngr_env")
+def test_empty_known_locations_falls_back_to_discovery() -> None:
     discovered = _make_match()
     discover_calls: list[AgentId] = []
     send_calls: list[tuple[AgentMatch, ...]] = []
@@ -166,12 +167,14 @@ def test_empty_known_locations_falls_back_to_discovery(mngr_ctx: MngrContext) ->
         send_calls.append(tuple(matches))
         return MessageResult(successful_agents=[str(m.agent_id) for m in matches])
 
-    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (), discover=_discover, send=_send)
+    messenger = MngrMessenger(discover=_discover, send=_send)
+    assert messenger.send_to_agent(_AGENT_ID, "hi", ())
     assert discover_calls == [_AGENT_ID]
     assert send_calls == [(discovered,)]
 
 
-def test_stale_known_location_falls_back_to_discovery(mngr_ctx: MngrContext) -> None:
+@pytest.mark.usefixtures("isolated_mngr_env")
+def test_stale_known_location_falls_back_to_discovery() -> None:
     stale = _make_match(host="host-a")
     fresh = _make_match(host="host-b")
     discover_calls: list[AgentId] = []
@@ -187,16 +190,19 @@ def test_stale_known_location_falls_back_to_discovery(mngr_ctx: MngrContext) -> 
         reached = [str(m.agent_id) for m in matches if str(m.host_name) == "host-b"]
         return MessageResult(successful_agents=reached)
 
-    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (stale,), discover=_discover, send=_send)
+    messenger = MngrMessenger(discover=_discover, send=_send)
+    assert messenger.send_to_agent(_AGENT_ID, "hi", (stale,))
     assert discover_calls == [_AGENT_ID]
     assert send_calls == [(stale,), (fresh,)]
 
 
-def test_returns_false_when_nothing_reachable(mngr_ctx: MngrContext) -> None:
+@pytest.mark.usefixtures("isolated_mngr_env")
+def test_returns_false_when_nothing_reachable() -> None:
     def _discover(agent_id: AgentId, ctx: MngrContext) -> Sequence[AgentMatch]:
         return ()
 
     def _send(matches: Sequence[AgentMatch], message: str, ctx: MngrContext) -> MessageResult:
         return MessageResult(successful_agents=[])
 
-    assert _send_message_to_agent(_AGENT_ID, "hi", mngr_ctx, (), discover=_discover, send=_send) is False
+    messenger = MngrMessenger(discover=_discover, send=_send)
+    assert messenger.send_to_agent(_AGENT_ID, "hi", ()) is False

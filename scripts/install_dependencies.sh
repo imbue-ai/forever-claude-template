@@ -16,6 +16,11 @@ if [ -f /etc/profile.d/fct_path.sh ]; then
     . /etc/profile.d/fct_path.sh
 fi
 
+# NOTE: intentionally NOT guarded by the provisioning skip cache -- this produces
+# in-repo outputs (.venv, node_modules) that the create's git-mirror landing does
+# not carry, so it must run on every create to regenerate them (fast via the
+# baked warm uv/npm caches). Only setup_system (global-only effects) is skipped.
+
 # Pin uv to a Python that satisfies the lockfile (>=3.12). The Docker base ships
 # 3.12; on other bases setup_system.sh fetched a uv-managed 3.12, so point uv at
 # it. No-op when system Python is already >=3.12 (Docker build unchanged).

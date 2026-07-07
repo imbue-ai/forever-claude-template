@@ -394,10 +394,16 @@ export function renderPermissionItem(
   toolResults: Map<string, ToolResultEvent>,
   agentId: string,
   resolution: PermissionResolution | null,
+  domId: string = event.event_id,
 ): m.Vnode {
+  // ``domId`` defaults to the event id but a top-level permission row passes its
+  // row key (``perm-<event_id>``) so the rendered root's ``id`` matches the key
+  // the virtualization measures by -- otherwise the measured height is cached
+  // under the bare event id and never read, leaving the row stuck at its estimate
+  // and shifting content each time it crosses the window edge.
   return m(
     "div",
-    { id: event.event_id, class: "message message-assistant", key: event.event_id },
+    { id: domId, class: "message message-assistant", key: event.event_id },
     renderAssistantMessageChildren(event, toolResults, agentId, resolution),
   );
 }
