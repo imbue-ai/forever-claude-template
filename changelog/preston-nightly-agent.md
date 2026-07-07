@@ -10,10 +10,10 @@ skipped when the container was off -- it catches up missed runs at the next
 opportunity, coalescing several misses into one run -- and **cron**
 (`/etc/cron.d/` drop-ins) for precise times or sub-daily cadences, exact but
 never backfilled. The cron daemon runs under supervisord (`[program:cron]`);
-anacron is triggered once per boot (`[program:anacron-boot]` -- the catch-up
-path, running missed jobs immediately) and every minute around the clock
+anacron has a single deliberately-simple trigger, an every-minute cron line
 (`/etc/cron.d/fct-anacron`), so a job missed while the container was off starts
-right at boot and one coming due mid-uptime starts within a minute. Because cron and
+within a minute of boot and one coming due mid-uptime starts within a minute.
+Because cron and
 anacron scrub the job environment, a small wrapper
 (`scripts/with_agent_env.sh`) restores the workspace environment from a snapshot
 the bootstrap writes each boot, and every scheduled job runs through it. The

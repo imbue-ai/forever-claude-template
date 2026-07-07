@@ -142,12 +142,11 @@ agent template. Its entry is the `caretaker` line in `/etc/anacrontab` (period
   -- and it stays off.
 - **When it fires:** once a day, at the first anacron invocation of the new
   day. Anacron is not a daemon; each invocation runs whatever is due and exits.
-  It is invoked once per boot by the `[program:anacron-boot]` supervisord
-  one-shot (the catch-up path: a day missed while the container was off is run
-  at the next boot, immediately: the boot pass runs `anacron -n`, which skips
-  the per-job start delays) and every minute by `/etc/cron.d/fct-anacron` (written by
-  `scripts/setup_system.sh`, which also installs the cron and anacron packages
-  and removes Debian's stock anacron trigger).
+  There is exactly one trigger: `/etc/cron.d/fct-anacron` invokes it every
+  minute (written by `scripts/setup_system.sh`, which also installs the cron
+  and anacron packages and removes Debian's stock anacron trigger). The first
+  tick after boot doubles as catch-up -- a day missed while the container was
+  off runs within a minute of cron starting.
 
 ## See, pause, or remove a job
 
@@ -166,13 +165,11 @@ The complete map of the scheduling machinery, for edits and debugging:
   rescans the directory within a minute).
 - `/etc/cron.d/fct-anacron` -- the every-minute anacron trigger.
 - `supervisord.conf` -- `[program:cron]` is the cron daemon (check it with
-  `supervisorctl status cron`); `[program:anacron-boot]` is the boot-time
-  catch-up one-shot.
+  `supervisorctl status cron`).
 - `/var/spool/anacron/<job-id>` -- anacron's per-job last-run stamps (how it
   knows a period has lapsed).
 - `/var/log/supervisor/<job>.log` -- each job's own output (per the redirect
-  on its entry); `/var/log/supervisor/cron-*.log` and
-  `/var/log/supervisor/anacron-boot-*.log` -- the daemons' logs.
+  on its entry); `/var/log/supervisor/cron-*.log` -- the cron daemon's logs.
 - `/run/fct-agent-env` -- the per-boot agent-environment snapshot that
   `scripts/with_agent_env.sh` sources.
 - `/etc/localtime` + `/etc/timezone` -- the container clock, set from the

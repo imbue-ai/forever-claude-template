@@ -45,10 +45,9 @@ rm -rf /var/lib/apt/lists/*
 if command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now supervisor 2>/dev/null || true
     systemctl mask supervisor 2>/dev/null || true
-    # Same story for cron and anacron: our supervisord runs them ([program:cron]
-    # + [program:anacron-boot] + the every-minute /etc/cron.d/fct-anacron
-    # trigger), so the packaged systemd units would double-run every job on
-    # systemd hosts.
+    # Same story for cron and anacron: our supervisord runs cron ([program:cron])
+    # and the every-minute /etc/cron.d/fct-anacron line triggers anacron, so the
+    # packaged systemd units would double-run every job on systemd hosts.
     systemctl disable --now cron.service anacron.service anacron.timer 2>/dev/null || true
     systemctl mask cron.service anacron.service anacron.timer 2>/dev/null || true
 fi
@@ -56,8 +55,10 @@ fi
 # Replace the stock anacron trigger with our own. Debian's /etc/cron.d/anacron
 # only fires between 07:30 and 23:30 and only when systemd is NOT running
 # anacron.timer -- neither guard fits a container where our supervisord owns
-# cron. Trigger anacron every minute around the clock instead, so a job that
-# comes due mid-uptime (e.g. at the midnight rollover) starts within a minute.
+# cron. Trigger anacron every minute around the clock instead -- the ONLY
+# trigger, kept deliberately simple: the first tick after boot runs anything
+# missed while the container was off, and a job coming due mid-uptime (e.g. at
+# the midnight rollover) starts within a minute.
 # An idle `anacron -s` just compares the /var/spool/anacron date stamps and
 # exits in milliseconds, and per-job locks make overlapping invocations
 # harmless, so the frequent poll costs nothing.
