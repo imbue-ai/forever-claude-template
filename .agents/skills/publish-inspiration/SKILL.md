@@ -428,8 +428,11 @@ Probe both up front:
 ```bash
 # API access -- succeeds only when github-rest-api is permitted:
 latchkey curl https://api.github.com/user
-# Push access -- the github-git-write rule must already be granted:
-latchkey curl http://latchkey-self.invalid/permissions/self | grep -q '"github-git-write"' && echo "git push: permitted" || echo "git push: NOT permitted"
+# Push access -- a github-git (or catch-all) rule granting github-git-write
+# (or "any") must exist; grants can take either form, so check both:
+latchkey curl http://latchkey-self.invalid/permissions/self \
+    | jq -e '[.rules[]? | to_entries[] | select(.key == "github-git" or .key == "any") | select(any(.value[]?; . == "github-git-write" or . == "any"))] | length > 0' >/dev/null \
+    && echo "git push: permitted" || echo "git push: NOT permitted"
 ```
 
 For whichever is missing, initiate the permission request YOURSELF (each
@@ -454,7 +457,8 @@ tool-execution timeout):
 # Run with Bash run_in_background: true -- bounded (~5 minutes), one wait, no re-arm thrash
 for _ in $(seq 1 30); do
     if latchkey curl https://api.github.com/user >/dev/null 2>&1 \
-        && latchkey curl http://latchkey-self.invalid/permissions/self | grep -q '"github-git-write"'; then
+        && latchkey curl http://latchkey-self.invalid/permissions/self \
+           | jq -e '[.rules[]? | to_entries[] | select(.key == "github-git" or .key == "any") | select(any(.value[]?; . == "github-git-write" or . == "any"))] | length > 0' >/dev/null; then
         echo "github access: permitted (api + git push)"
         exit 0
     fi
