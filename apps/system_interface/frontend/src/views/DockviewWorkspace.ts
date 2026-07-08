@@ -353,8 +353,8 @@ function createCustomTab(options: { id: string; name: string }): {
         // ``title`` is suppressed on dockview's draggable tabs -- see
         // ``attachHoverTooltip``). Hidden until the agent's state is known.
         //
-        // The lifecycle RUNNING/WAITING split comes only from mngr's discovery
-        // poll and lags a sent message by ~10s, so the color is resolved through
+        // The lifecycle RUNNING/WAITING split comes only from the backend's
+        // lifecycle poll and lags a sent message, so the color is resolved through
         // ``effectiveLifecycleState`` against the prompt activity signal
         // (transcript-derived, plus the optimistic forced-THINKING the send
         // applies). That makes the dot turn green the instant a message is sent,

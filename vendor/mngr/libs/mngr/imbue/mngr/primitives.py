@@ -9,7 +9,6 @@ from typing import Self
 
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
-from pydantic import field_validator
 from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
@@ -272,13 +271,10 @@ class AgentLifecycleState(UpperCaseStrEnum):
     # without the config, it can be hard to tell whether the agent is still running or not, because we don't know the process name to expect
     RUNNING_UNKNOWN_AGENT_TYPE = auto()
     DONE = auto()
-    # The agent's actual state could not be determined. Two producers emit this:
-    # AgentObserver, for previously-tracked agents whose provider just failed discovery
-    # (sticky there: such an agent leaves UNKNOWN only by reappearing in a snapshot or
-    # being explicitly destroyed); and DiscoveredAgent references built without a
-    # liveness probe (e.g. a raw data.json read on an online host, or a lease-only stub
-    # for an unreachable host), where it means "present per persisted records, liveness
-    # not checked."
+    # The provider that owns this agent could not be accessed during the most recent discovery attempt,
+    # so the agent's actual state is unknown. Emitted by AgentObserver for previously-tracked agents
+    # whose provider just failed discovery. Sticky: an agent leaves UNKNOWN only by reappearing in a
+    # snapshot or being explicitly destroyed.
     UNKNOWN = auto()
 
 
@@ -599,17 +595,8 @@ class DiscoveredAgent(FrozenModel):
     """Lightweight agent data collected during discovery (without connecting to the host).
 
     This class provides access to agent data that can be retrieved without requiring
-    the host to be online, and property methods provide convenient typed access to
-    common fields.
-
-    The contents of ``certified_data`` depend on where the reference was built: paths
-    that read persisted records directly (``discover_agents``, offline listings,
-    rename) carry the full raw ``data.json`` dict, while references derived from a
-    full listing (``discovered_agent_from_agent_details``) carry a subset
-    reconstructed from the typed ``AgentDetails`` (``type``, ``work_dir``,
-    ``command``, ``create_time``, ``start_on_boot``, ``labels``, ``plugin``). Keys
-    outside that subset (e.g. ``created_branch_name``) are only present on the
-    raw-dict paths.
+    the host to be online. The certified_data field contains the raw data.json contents,
+    and property methods provide convenient typed access to common fields.
     """
 
     host_id: HostId
@@ -617,27 +604,6 @@ class DiscoveredAgent(FrozenModel):
     agent_name: AgentName
     provider_name: ProviderInstanceName
     certified_data: Mapping[str, Any] = Field(default_factory=dict)
-    # Lifecycle state of the agent. Unlike the rest of this model -- static data.json
-    # that needs no host connection -- a live value requires touching the host, so
-    # producers that cannot (or do not) probe supply an honest static value: STOPPED
-    # for offline hosts (the host is down, so no agent process can be running),
-    # UNKNOWN for unprobed reads (present per persisted records, liveness not
-    # checked). Everything emitted onto the discovery event stream carries a real
-    # probed state, so stream consumers (e.g. minds' system interface) can show
-    # whether the agent process is actually running without re-listing. UNKNOWN is
-    # the default so that older discovery-event lines (a missing or null state) keep
-    # parsing, per the back-compat rule in imbue.mngr.api.discovery_events.
-    state: AgentLifecycleState = Field(
-        default=AgentLifecycleState.UNKNOWN,
-        description="The agent's lifecycle state; UNKNOWN when it was not determined.",
-    )
-
-    @field_validator("state", mode="before")
-    @classmethod
-    def _coerce_missing_state(cls, value: Any) -> Any:
-        # A null state on the wire maps to UNKNOWN so older discovery-event lines
-        # keep parsing.
-        return AgentLifecycleState.UNKNOWN if value is None else value
 
     @property
     def agent_type(self) -> "AgentTypeName | None":

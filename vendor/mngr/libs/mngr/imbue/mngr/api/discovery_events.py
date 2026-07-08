@@ -30,7 +30,6 @@ from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import rotation_lock
-from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_reconciliation import is_intervening_event
@@ -293,10 +292,6 @@ def discovered_agent_from_agent_details(agent_details: AgentDetails) -> Discover
         agent_id=agent_details.id,
         agent_name=agent_details.name,
         provider_name=agent_details.host.provider_name,
-        # The listing already computed the live lifecycle state for this agent;
-        # carry it through so discovery-stream consumers see it instead of
-        # having to re-list. (Static fields go in certified_data below.)
-        state=agent_details.state,
         certified_data={
             "type": agent_details.type,
             "work_dir": str(agent_details.work_dir),
@@ -578,10 +573,7 @@ def emit_discovery_events_for_host(
     """Emit agent and host discovery events by reading current state from the host.
 
     Re-reads the agent data from the host's filesystem to ensure the emitted
-    events contain full certified_data, and probes each agent's lifecycle state
-    so the emitted events carry a real state (stream consumers show
-    process-liveness directly from these events, without re-listing). Also emits
-    a host discovery event.
+    events contain full certified_data. Also emits a host discovery event.
 
     If provider_name is not provided, it is inferred from the host's discovered
     agents (each DiscoveredAgent carries its provider_name).
@@ -592,20 +584,6 @@ def emit_discovery_events_for_host(
     try:
         # Read agent data once and reuse for both provider_name inference and event emission
         discovered_agents = host.discover_agents()
-
-        # discover_agents deliberately skips the liveness probe (its refs default to
-        # UNKNOWN), but events on the discovery stream must carry a real state. The
-        # callers of this function are rare lifecycle actions (create/start/stop/
-        # archive/cleanup) on an already-connected host, so the extra probe per agent
-        # is cheap relative to the work just performed. An agent present in data.json
-        # whose object cannot be loaded (e.g. unknown type) stays UNKNOWN.
-        state_by_agent_id = {agent.id: agent.get_lifecycle_state() for agent in host.get_agents()}
-        discovered_agents = [
-            agent.model_copy_update(to_update(agent.field_ref().state, state_by_agent_id[agent.agent_id]))
-            if agent.agent_id in state_by_agent_id
-            else agent
-            for agent in discovered_agents
-        ]
 
         # Infer provider_name from the host's agents if not provided
         if provider_name is None:

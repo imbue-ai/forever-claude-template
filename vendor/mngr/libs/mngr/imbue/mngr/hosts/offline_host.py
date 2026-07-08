@@ -30,7 +30,6 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
@@ -43,17 +42,11 @@ def validate_and_create_discovered_agent(
     agent_data: dict[str, Any],
     host_id: HostId,
     provider_name: ProviderInstanceName,
-    state: AgentLifecycleState,
 ) -> DiscoveredAgent | None:
     """Validate agent data and create a DiscoveredAgent if valid.
 
     Returns None if the agent data is malformed (missing or invalid id/name).
     Logs warnings for malformed records.
-
-    ``state`` is the caller's honest lifecycle assessment -- this function only
-    reads persisted records, so it cannot probe liveness itself. Offline callers
-    pass STOPPED (the host is down, so no agent process can be running); online
-    callers that skip the probe pass UNKNOWN.
     """
     agent_id_str = agent_data.get("id")
     if agent_id_str is None:
@@ -85,7 +78,6 @@ def validate_and_create_discovered_agent(
         agent_name=agent_name,
         provider_name=provider_name,
         certified_data=agent_data,
-        state=state,
     )
 
 
@@ -189,16 +181,13 @@ class BaseHost(HostInterface):
     # Agent Information
     # =========================================================================
 
-    def _validate_and_create_discovered_agent(
-        self, agent_data: dict[str, Any], state: AgentLifecycleState
-    ) -> DiscoveredAgent | None:
+    def _validate_and_create_discovered_agent(self, agent_data: dict[str, Any]) -> DiscoveredAgent | None:
         """Validate agent data and create a DiscoveredAgent if valid.
 
         Returns None if the agent data is malformed (missing or invalid id/name).
-        Logs warnings for malformed records. ``state`` is the caller's honest
-        lifecycle assessment (see :func:`validate_and_create_discovered_agent`).
+        Logs warnings for malformed records.
         """
-        return validate_and_create_discovered_agent(agent_data, self.id, self.provider_instance.name, state)
+        return validate_and_create_discovered_agent(agent_data, self.id, self.provider_instance.name)
 
     def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
         """Return a list of all agent references for this host.
@@ -214,9 +203,7 @@ class BaseHost(HostInterface):
 
         agent_refs: list[DiscoveredAgent] = []
         for agent_data in agent_records:
-            # The host is offline, so no agent process can be running on it -- the
-            # same assertion build_agent_details_from_offline_ref makes.
-            ref = self._validate_and_create_discovered_agent(agent_data, AgentLifecycleState.STOPPED)
+            ref = self._validate_and_create_discovered_agent(agent_data)
             if ref is not None:
                 agent_refs.append(ref)
 
@@ -385,8 +372,6 @@ class OfflineHost(BaseHost):
                     agent_name=new_name,
                     provider_name=self.provider_instance.name,
                     certified_data=updated,
-                    # The host is offline, so no agent process can be running.
-                    state=AgentLifecycleState.STOPPED,
                 )
             raise AgentNotFoundOnHostError(agent_ref.agent_id, self.id)
 

@@ -107,10 +107,10 @@ RUNNING_LIFECYCLE_STATES: frozenset[str] = frozenset({"RUNNING", "RUNNING_UNKNOW
 # Lifecycle states in which the agent's claude *process* is alive, whether or not
 # it is mid-turn. Broader than RUNNING_LIFECYCLE_STATES (which means "is it
 # working right now"): WAITING means the process is up but idle, which counts as
-# alive yet not "active". mngr derives these states by probing whether the
-# expected claude process is alive in the agent's tmux pane -- not whether the
-# container is up -- so a process the OOM handler (earlyoom) sheds drops out of
-# this set within one observe cycle.
+# alive yet not "active". The system interface's lifecycle poll derives these
+# states from mngr, which probes whether the expected claude process is alive in
+# the agent's tmux pane -- not whether the container is up -- so a process the OOM
+# handler (earlyoom) sheds drops out of this set within one poll interval.
 PROCESS_ALIVE_LIFECYCLE_STATES: frozenset[str] = frozenset({"RUNNING", "RUNNING_UNKNOWN_AGENT_TYPE", "WAITING"})
 
 
@@ -121,7 +121,7 @@ def is_lifecycle_process_running(state: str) -> bool:
     Gates the activity indicator (see ``derive_activity_state``'s
     ``is_agent_running``): a WAITING agent (process up, idle) reads as alive here
     but as IDLE for activity, and once the process is gone -- e.g. the OOM
-    handler sheds it and mngr's next observe cycle sees the claude process is no
+    handler sheds it and the next lifecycle poll sees the claude process is no
     longer in the tmux pane -- this returns False and the activity indicator is
     forced to IDLE.
     """

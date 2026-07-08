@@ -25,7 +25,6 @@ from imbue.mngr.api.discovery_events import make_agent_discovery_event
 from imbue.mngr.api.discovery_events import make_host_discovery_event
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.primitives import AgentId as MngrAgentId
-from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName as MngrAgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
@@ -351,48 +350,54 @@ def test_handle_agent_discovered(agent_manager: AgentManager, broadcaster: WebSo
     assert msg["type"] == "agents_updated"
 
 
-def test_full_snapshot_lifecycle_state_reaches_payload(agent_manager: AgentManager) -> None:
-    """The live lifecycle state carried on a discovery snapshot must reach the
-    serialized payload's ``state`` -- this is what lets the tab's liveness dot
-    reflect reality (e.g. drop from green to grey when an agent's claude process
-    dies in an OOM shed) rather than staying green forever."""
-    alive = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName("alive"),
-        provider_name=ProviderInstanceName("local"),
-        # WAITING = process up but idle; still "running" for the liveness dot.
-        state=AgentLifecycleState.WAITING,
-        certified_data={"labels": {}, "work_dir": None},
-    )
-    dead = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName("dead"),
-        provider_name=ProviderInstanceName("local"),
-        state=AgentLifecycleState.DONE,
-        certified_data={"labels": {}, "work_dir": None},
-    )
-    agent_manager._handle_discovery_event(_provider_snapshot([alive, dead]))
+def test_lifecycle_poll_updates_state_and_forces_idle_when_process_dies(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """The lifecycle poll -- not the (metadata-only) discovery stream -- owns the
+    agent's process-liveness state. When a poll finds the process gone, the tab's
+    liveness dot state updates and the activity indicator is forced to IDLE even
+    while the transcript still looks mid-turn (e.g. an OOM shed / crash)."""
+    test_agent_id = MngrAgentId()
+    str_id = str(test_agent_id)
+    (tmp_path / "agents" / str_id).mkdir(parents=True)
 
-    by_name = {a["name"]: a for a in agent_manager.get_agents_serialized()}
-    assert by_name["alive"]["state"] == "WAITING"
-    assert by_name["dead"]["state"] == "DONE"
-
-
-def test_discovered_agent_state_is_recorded_verbatim(agent_manager: AgentManager) -> None:
-    """The manager records the lifecycle state carried on a discovery event
-    directly onto the agent it serializes."""
-    agent = DiscoveredAgent(
+    # A just-appeared agent (metadata only) defaults to RUNNING; a mid-turn
+    # transcript then reads THINKING.
+    discovered = DiscoveredAgent(
         host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName("fresh"),
+        agent_id=test_agent_id,
+        agent_name=MngrAgentName("shed-me"),
         provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": None},
-        state=AgentLifecycleState.WAITING,
+        certified_data={"labels": {}, "work_dir": str(tmp_path / "work")},
     )
-    agent_manager._handle_discovery_event(make_agent_discovery_event(agent))
-    assert agent_manager.get_agents_serialized()[0]["state"] == "WAITING"
+    agent_manager._handle_discovery_event(make_agent_discovery_event(discovered))
+    agent_manager.update_session_events(str_id, [{"type": "user_message", "content": "go"}])
+    with agent_manager._lock:
+        assert agent_manager._agents[str_id].state == "RUNNING"
+        assert agent_manager._activity_state_by_agent[str_id] == ActivityState.THINKING
+
+    listener = broadcaster.register()
+    # The poll now finds the process gone.
+    agent_manager._apply_polled_lifecycle_states({str_id: "DONE"})
+
+    serialized = {a["id"]: a for a in agent_manager.get_agents_serialized()}
+    assert serialized[str_id]["state"] == "DONE"
+    # A non-running process forces the indicator to IDLE regardless of the transcript.
+    assert serialized[str_id]["activity_state"] == ActivityState.IDLE.value
+    latest = _last_agents_updated(_drain(listener))
+    assert latest is not None
+    assert latest["agents"][0]["state"] == "DONE"
+
+
+def test_lifecycle_poll_is_a_noop_when_no_tracked_state_changed(agent_manager: AgentManager) -> None:
+    """Probing a state equal to what's already tracked broadcasts nothing, but the
+    poll cache is still seeded so a later stream rebuild re-applies the real state."""
+    # _seed_agent inserts the agent as RUNNING.
+    _seed_agent(agent_manager, "a1")
+    agent_manager._apply_polled_lifecycle_states({"a1": "RUNNING"})
+    with agent_manager._lock:
+        assert agent_manager._lifecycle_state_by_agent["a1"] == "RUNNING"
+        assert agent_manager._agents["a1"].state == "RUNNING"
 
 
 def _layout_ops(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -550,17 +555,15 @@ def _discovered_agent(
     name: str,
     agent_id: MngrAgentId | None = None,
     host_id: HostId | None = None,
-    state: AgentLifecycleState = AgentLifecycleState.RUNNING,
 ) -> DiscoveredAgent:
-    # Real discovery events carry a probed lifecycle state; RUNNING models the
-    # common case of a live agent.
+    # The discovery stream is metadata-only (no lifecycle state); the lifecycle poll
+    # owns state. This models the membership/metadata a stream event carries.
     return DiscoveredAgent(
         host_id=host_id if host_id is not None else HostId(),
         agent_id=agent_id if agent_id is not None else MngrAgentId(),
         agent_name=MngrAgentName(name),
         provider_name=ProviderInstanceName("local"),
         certified_data={"labels": {}, "work_dir": None},
-        state=state,
     )
 
 
@@ -1614,8 +1617,9 @@ def test_provider_snapshot_preserves_activity_state_for_tracked_agent(
         agent_name=MngrAgentName("snapshot-agent"),
         provider_name=ProviderInstanceName("local"),
         certified_data={"labels": {}, "work_dir": str(tmp_path / "work")},
-        state=AgentLifecycleState.RUNNING,
     )
+    # A just-appeared agent defaults to RUNNING until the lifecycle poll probes it,
+    # so its transcript signals (below) are not gated to IDLE.
     agent_manager._handle_discovery_event(make_agent_discovery_event(discovered))
     agent_manager.update_session_events(str_id, [{"type": "user_message", "content": "go"}])
     with agent_manager._lock:
