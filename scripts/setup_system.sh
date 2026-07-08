@@ -52,41 +52,21 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl mask cron.service anacron.service anacron.timer 2>/dev/null || true
 fi
 
-# Replace the stock anacron trigger with our own two-line scheme. Debian's
-# /etc/cron.d/anacron only fires between 07:30 and 23:30 and only when systemd
-# is NOT running anacron.timer -- neither guard fits a container where our
-# supervisord owns cron.
-#
-# Line 1 runs the main /etc/anacrontab every minute around the clock: catch-up
-# for a fully missed day happens within a minute of boot at ANY hour. Line 2
-# runs /etc/anacrontab.nightly every minute from 03:00 to 23:59 against the
-# SAME spool: its window opening is what pins nightly jobs to 3 AM local time
-# (bootstrap sets the container clock from the user's timezone).
-#
-# A nightly job (the Caretaker) has one entry in EACH tab, same job id, so they
-# share one date stamp: the nightly period-1 entry fires at 3 AM each day,
-# while the main-tab period-2 entry only becomes due when a whole day was
-# actually missed (stamp two+ days old) -- so an after-midnight boot catches up
-# a missed day immediately, yet the night after a successful run nothing fires
-# at 00:00. anacron's per-stamp locks make overlapping invocations harmless,
-# and an idle `anacron -s` exits in milliseconds, so the polling costs nothing.
+# Replace the stock anacron trigger with our own. Debian's /etc/cron.d/anacron
+# only fires between 07:30 and 23:30 and only when systemd is NOT running
+# anacron.timer -- neither guard fits a container where our supervisord owns
+# cron. Trigger anacron every minute from 03:00 to 23:59 instead -- the ONLY
+# trigger, kept deliberately simple. Daily jobs therefore run at 3 AM local
+# time (bootstrap sets the container clock from the user's timezone), and a
+# job missed while the container was off runs within a minute of the first
+# in-window boot. The 00:00-02:59 gap is what pins "daily" to 3 AM: without
+# it a daily job would fire right after midnight.
+# An idle `anacron -s` just compares the /var/spool/anacron date stamps and
+# exits in milliseconds, and per-job locks make overlapping invocations
+# harmless, so the frequent poll costs nothing.
 rm -f /etc/cron.d/anacron
-printf '%s\n' \
-    '* * * * *   root   /usr/sbin/anacron -s' \
-    '* 3-23 * * *   root   /usr/sbin/anacron -s -t /etc/anacrontab.nightly -S /var/spool/anacron' \
-    > /etc/cron.d/fct-anacron
+printf '%s\n' '* 3-23 * * *   root   /usr/sbin/anacron -s' > /etc/cron.d/fct-anacron
 chmod 0644 /etc/cron.d/fct-anacron
-
-# The nightly anacrontab (3 AM window, shared spool). Created empty here with
-# the standard header; jobs are appended by build_workspace.sh.
-if [ ! -f /etc/anacrontab.nightly ]; then
-    printf '%s\n' \
-        '# Nightly anacron jobs: run by the 03:00-23:59 trigger in /etc/cron.d/fct-anacron,' \
-        '# against the same /var/spool/anacron stamps as /etc/anacrontab.' \
-        'SHELL=/bin/sh' \
-        'PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin' \
-        > /etc/anacrontab.nightly
-fi
 
 # ttyd (terminal-over-web) binary from GitHub releases (not in apt).
 ttyd_arch="$(uname -m)"

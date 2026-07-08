@@ -10,13 +10,10 @@ skipped when the container was off -- it catches up missed runs at the next
 opportunity, coalescing several misses into one run -- and **cron**
 (`/etc/cron.d/` drop-ins) for precise times or sub-daily cadences, exact but
 never backfilled. The cron daemon runs under supervisord (`[program:cron]`);
-anacron runs from two cron trigger lines (`/etc/cron.d/fct-anacron`): the main
-tab every minute around the clock, and a nightly tab every minute from 03:00
-to 23:59 that pins overnight jobs to 3 AM local time. The Caretaker is a pair
-of entries sharing one date stamp -- a period-1 nightly entry (the 3 AM daily
-run) and a period-2 main-tab entry that only fires when a whole day was
-missed -- so a boot at any hour catches up a missed day within a minute, while
-nothing runs at midnight after a successful day. The Caretaker never runs at workspace
+anacron has a single deliberately-simple trigger, a cron line firing every
+minute between 03:00 and 23:59 (`/etc/cron.d/fct-anacron`), so daily jobs run
+at 3 AM local time and a job missed while the container was off starts within
+a minute of the first in-window boot. The Caretaker never runs at workspace
 creation: the bootstrap seeds its anacron stamp at first boot, so its first run
 is the next day's 3 AM -- and when the user's timezone cannot be fetched, the
 bootstrap adopts a fixed-offset zone that lands that first run about 8 hours
@@ -30,7 +27,9 @@ through the latchkey gateway (falling back to UTC when unreachable), so
 schedules run in the user's local time. (An earlier iteration of this branch
 built a custom `libs/scheduler` service for the catch-up behavior; it was
 removed in favor of anacron, which provides the same missed-run semantics with
-zero code to maintain.)
+zero code to maintain -- the trade-off being that anacron is day-granularity, so
+the Caretaker runs "once a day, shortly after local midnight or on the first
+boot of the day" rather than at a fixed 3 AM.)
 
 **Scheduled agent tasks and the Caretaker.** A scheduled job can wake an agent
 that runs a skill on a cadence, in its own chat tab. `scripts/run_task_agent.sh
@@ -39,8 +38,8 @@ the agent's session and re-sends `/<skill>` so the skill runs fresh, with no mem
 of the previous run.
 A new scheduled agent (e.g. a morning news digest) needs only a skill plus an
 anacron or cron entry -- no new agent template. The daily **Caretaker** is the
-built-in instance, baked into the anacron tabs at image build (delete its two
-lines to switch it off): once a night it quietly checks the apps and services in your
+built-in instance, baked into `/etc/anacrontab` at image build (delete its line
+to switch it off): once a night it quietly checks the apps and services in your
 workspace for problems -- a page that stopped loading, a service that crashed,
 errors piling up -- and either fixes them or explains what it found, always in
 plain, non-technical language. On its very first night it does one look-only scan

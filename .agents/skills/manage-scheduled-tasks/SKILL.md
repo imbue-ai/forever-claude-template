@@ -84,18 +84,9 @@ Append a line to `/etc/anacrontab`. Format: four fields --
 - `job-id` -- unique name; anacron tracks the last run date under
   `/var/spool/anacron/<job-id>`.
 
-There are two anacron tabs, sharing one spool, with different triggers
-(`/etc/cron.d/fct-anacron`):
-
-- `/etc/anacrontab` -- evaluated every minute around the clock. A daily entry
-  here runs at the first tick after local midnight, and catch-up after
-  downtime happens within a minute of boot at any hour.
-- `/etc/anacrontab.nightly` -- evaluated every minute from 03:00 to 23:59, so
-  entries here are pinned to 3 AM local time. Use this tab when the user asks
-  for a nightly/overnight job.
-
-Both are re-read on every invocation, so a new entry takes effect with nothing
-to reload.
+Anacron re-reads `/etc/anacrontab` on every invocation (triggered every
+minute between 03:00 and 23:59), so a new entry takes effect with nothing to
+reload; a new daily job first fires at the next 3 AM.
 
 ## Add a cron job (precise schedule, no catch-up)
 
@@ -148,21 +139,19 @@ agent template. Its entry is the `caretaker` line in `/etc/anacrontab` (period
 - **What it runs:** the env wrapper around `bash scripts/run_task_agent.sh
   caretaker --template caretaker` (wake the singleton Caretaker agent for one
   run), with output appended to `/var/log/supervisor/caretaker-job.log`.
-- **How it got there:** both entries are appended at image build by
-  `scripts/build_workspace.sh` (grep-guarded on the job id so re-runs never
-  duplicate them). The script does not run again during the container's life,
-  so deleting both lines is how the Caretaker is switched off -- and it stays
-  off.
+- **How it got there:** appended to `/etc/anacrontab` at image build by
+  `scripts/build_workspace.sh`, grep-guarded on the job id so re-runs of that
+  script never duplicate it. The script does not run again during the
+  container's life, so deleting the line is how the Caretaker is switched off
+  -- and it stays off.
 - **When it fires:** once a day at 3 AM local time (never at workspace
-  creation), with any-hour catch-up. The Caretaker is a PAIR of anacron
-  entries sharing one date stamp (same job id, same spool): the period-1 entry
-  in `/etc/anacrontab.nightly` (3 AM window) is the regular daily run, and the
-  period-2 entry in `/etc/anacrontab` (24/7 trigger) becomes due only when a
-  whole day was actually missed -- so a boot at any hour, even just after
-  midnight, catches up a missed day within a minute, yet nothing fires at
-  00:00 the night after a successful run. Both triggers live in
-  `/etc/cron.d/fct-anacron` (written by `scripts/setup_system.sh`, which also
-  installs the cron and anacron packages and removes Debian's stock trigger).
+  creation). Anacron is not a daemon; each invocation runs whatever is due and
+  exits. There is exactly one trigger: `/etc/cron.d/fct-anacron` invokes it
+  every minute between 03:00 and 23:59 (written by `scripts/setup_system.sh`,
+  which also installs the cron and anacron packages and removes Debian's stock
+  anacron trigger), so a daily job first becomes eligible at 3 AM each day.
+  The first in-window tick after boot doubles as catch-up -- a day missed
+  while the container was off runs within a minute of cron starting.
 - **The first run:** at first boot the bootstrap seeds the caretaker's spool
   stamp (`/var/spool/anacron/caretaker`) with today's date, so the Caretaker
   never spawns on creation day; its first run is the next day's 3 AM. When the
@@ -186,10 +175,7 @@ The complete map of the scheduling machinery, for edits and debugging:
   (anacron re-reads it per invocation); the Caretaker's entry lives here.
 - `/etc/cron.d/` -- one drop-in file per precise or sub-daily job (cron
   rescans the directory within a minute).
-- `/etc/anacrontab.nightly` -- nightly (3 AM-pinned) jobs; same spool as the
-  main tab.
-- `/etc/cron.d/fct-anacron` -- the two anacron triggers (24/7 for the main
-  tab, 03:00-23:59 for the nightly tab).
+- `/etc/cron.d/fct-anacron` -- the every-minute anacron trigger.
 - `supervisord.conf` -- `[program:cron]` is the cron daemon (check it with
   `supervisorctl status cron`).
 - `/var/spool/anacron/<job-id>` -- anacron's per-job last-run stamps (how it
