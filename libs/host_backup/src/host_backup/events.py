@@ -165,7 +165,11 @@ class PruneSkippedEvent(BackupEvent):
 
 
 class ConfigReloadedEvent(BackupEvent):
-    """backup.toml was re-read for this tick."""
+    """Records the config-file mtimes in effect for this tick.
+
+    Emitted at the start of every tick; backup.toml itself is re-parsed only
+    when its mtime moves (see `_load_config_if_changed` in runner.py).
+    """
 
     tick_id: str
     backup_toml_mtime: float
