@@ -62,10 +62,19 @@ uv sync --all-packages --frozen
 ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/tk
 ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/ticket
 
-# Register the daily Caretaker anacron job (period 1 day, 5 min delay, job id
-# `caretaker`). anacron re-reads /etc/anacrontab on every invocation, so
-# appending is enough; grep-guarded on the job id because this script reruns on
-# every Lima create. Deleting this line is how the Caretaker is switched off.
+# Register the daily Caretaker as a PAIR of anacron entries sharing one date
+# stamp (same job id `caretaker`, same spool):
+#   - /etc/anacrontab.nightly (3 AM window trigger), period 1: the daily 3 AM run.
+#   - /etc/anacrontab (24/7 trigger), period 2: catch-up only -- becomes due only
+#     when a whole day was missed, so it runs right after boot at any hour but
+#     never fires at midnight the night after a successful run.
+# anacron re-reads its tab on every invocation, so appending is enough;
+# grep-guarded on the job id because this script reruns on every Lima create.
+# Deleting BOTH lines is how the Caretaker is switched off.
+CARETAKER_CMD='/mngr/code/scripts/with_agent_env.sh bash /mngr/code/scripts/run_task_agent.sh caretaker --template caretaker >> /var/log/supervisor/caretaker-job.log 2>&1'
+if ! grep -q 'caretaker' /etc/anacrontab.nightly 2>/dev/null; then
+    printf '%s\n' "1   0   caretaker   $CARETAKER_CMD" >> /etc/anacrontab.nightly
+fi
 if ! grep -q 'caretaker' /etc/anacrontab 2>/dev/null; then
-    printf '%s\n' '1   0   caretaker   /mngr/code/scripts/with_agent_env.sh bash /mngr/code/scripts/run_task_agent.sh caretaker --template caretaker >> /var/log/supervisor/caretaker-job.log 2>&1' >> /etc/anacrontab
+    printf '%s\n' "2   0   caretaker   $CARETAKER_CMD" >> /etc/anacrontab
 fi
