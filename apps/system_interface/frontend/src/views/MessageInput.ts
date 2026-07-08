@@ -1,4 +1,16 @@
 import m from "mithril";
+import {
+  clearComposerAttachments,
+  getComposerAttachments,
+  getReadyAttachmentPaths,
+  hasReadyAttachments,
+  removeComposerAttachment,
+  restoreComposerAttachments,
+  uploadFilesToComposer,
+  waitForComposerUploads,
+} from "../models/ComposerAttachments";
+import type { ComposerAttachment } from "../models/ComposerAttachments";
+import { buildMessageWithAttachments, formatFileSize } from "../models/attachments";
 import { interruptAgent, sendMessage, getEventsForAgent } from "../models/Response";
 import {
   addPendingMessage,
@@ -13,6 +25,22 @@ const MAX_TEXTAREA_HEIGHT_PX = 200;
 
 const MESSAGE_TEXT_KEY_PREFIX = "message-text:";
 
+const ATTACH_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+  'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
+
+const REMOVE_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
+  'stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>';
+
+const FILE_ICON_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
+  'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M14 3v4a1 1 0 0 0 1 1h4"/>' +
+  '<path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/></svg>';
+
 function messageTextKey(agentId: string): string {
   return `${MESSAGE_TEXT_KEY_PREFIX}${agentId}`;
 }
@@ -23,6 +51,22 @@ function autoResizeTextarea(textarea: HTMLTextAreaElement): void {
   textarea.style.overflowY = textarea.scrollHeight > MAX_TEXTAREA_HEIGHT_PX ? "auto" : "hidden";
 }
 
+function imageFilesFromClipboard(clipboardData: DataTransfer | null): File[] {
+  if (clipboardData === null) {
+    return [];
+  }
+  const files: File[] = [];
+  for (const item of Array.from(clipboardData.items)) {
+    if (item.kind === "file") {
+      const file = item.getAsFile();
+      if (file !== null) {
+        files.push(file);
+      }
+    }
+  }
+  return files;
+}
+
 // Compatibility export
 export function setSelectedModelId(_modelId: string): void {}
 
@@ -30,10 +74,58 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
   let messageText = "";
   let currentAgentId: string | null = null;
   let messageTextareaElement: HTMLTextAreaElement | null = null;
+  let fileInputElement: HTMLInputElement | null = null;
   let isInterruptInFlight = false;
 
   function focusMessageTextarea(): void {
     messageTextareaElement?.focus();
+  }
+
+  function renderComposerAttachment(agentId: string, attachment: ComposerAttachment): m.Vnode {
+    const isReadyImage = attachment.status === "ready" && attachment.isImage && attachment.uploaded !== undefined;
+    const thumbnail = isReadyImage
+      ? m("img", {
+          class: "composer-attachment-thumb",
+          src: attachment.uploaded?.url,
+          alt: attachment.fileName,
+        })
+      : m(
+          "span",
+          { class: "composer-attachment-icon" },
+          attachment.status === "uploading"
+            ? m("span", { class: "composer-attachment-spinner" })
+            : m.trust(FILE_ICON_SVG),
+        );
+    return m(
+      "div",
+      { key: attachment.localId, class: `composer-attachment composer-attachment--${attachment.status}` },
+      [
+        thumbnail,
+        m("span", { class: "composer-attachment-info" }, [
+          m("span", { class: "composer-attachment-name", title: attachment.fileName }, attachment.fileName),
+          attachment.status === "ready" && attachment.uploaded !== undefined
+            ? m("span", { class: "composer-attachment-detail" }, formatFileSize(attachment.uploaded.size))
+            : null,
+          attachment.status === "uploading" ? m("span", { class: "composer-attachment-detail" }, "Uploading…") : null,
+          attachment.status === "error"
+            ? m("span", { class: "composer-attachment-detail composer-attachment-detail--error" }, "Upload failed")
+            : null,
+        ]),
+        attachment.status === "uploading"
+          ? null
+          : m(
+              "button",
+              {
+                type: "button",
+                class: "composer-attachment-remove",
+                title: "Remove attachment",
+                "aria-label": "Remove attachment",
+                onclick: () => removeComposerAttachment(agentId, attachment.localId),
+              },
+              m.trust(REMOVE_ICON_SVG),
+            ),
+      ],
+    );
   }
 
   return {
@@ -51,20 +143,34 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
       }
 
       async function handleSend(): Promise<void> {
-        if (!agentId || !messageText.trim()) {
+        if (!agentId) {
+          return;
+        }
+        // Wait for in-flight uploads so a just-dropped file is included rather
+        // than dropped from the message.
+        await waitForComposerUploads(agentId);
+
+        const attachmentPaths = getReadyAttachmentPaths(agentId);
+        const text = messageText;
+        if (!text.trim() && attachmentPaths.length === 0) {
           return;
         }
 
-        const text = messageText;
+        const finalText = buildMessageWithAttachments(text, attachmentPaths);
+        // Snapshot for rollback if the send fails.
+        const sentText = text;
+        const sentAttachments = getComposerAttachments(agentId);
+
         messageText = "";
+        clearComposerAttachments(agentId);
         localStorage.removeItem(messageTextKey(agentId));
         // Show the message immediately (and force "Thinking..." if the agent is
         // idle) instead of waiting for it to round-trip through the transcript.
-        const pendingId = addPendingMessage(agentId, text, getEventsForAgent(agentId));
+        const pendingId = addPendingMessage(agentId, finalText, getEventsForAgent(agentId));
         m.redraw();
 
         try {
-          await sendMessage(agentId, text);
+          await sendMessage(agentId, finalText);
           // The POST resolves once the backend confirms the agent accepted the
           // message into its queue, so move the bubble to "queued". It stays up
           // until the real transcript event reconciles it away -- that is when
@@ -83,24 +189,19 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
           if (pendingId !== null) {
             removePendingMessage(agentId, pendingId);
           }
-          // Restore the user's text so the send is not silently lost -- but only
-          // if they have not already started a new draft for this agent. The
-          // input was cleared at send time, so during the in-flight request the
-          // user may have typed a fresh message; blindly restoring the failed
-          // text would clobber that newer draft. The agent's current draft is
-          // the live input when the user is still on this agent, otherwise its
-          // persisted localStorage value.
+          // Restore the user's text and attachments so the send is not silently
+          // lost -- but only if they have not already started a new draft for
+          // this agent (the input was cleared at send time, so during the
+          // in-flight request the user may have typed or attached something
+          // new; blindly restoring would clobber that newer draft).
           const currentDraft =
             currentAgentId === agentId ? messageText : (localStorage.getItem(messageTextKey(agentId)) ?? "");
-          if (currentDraft.trim().length === 0) {
-            // No newer draft to protect: recover the failed text. Persist it to
-            // localStorage (keyed to this agent) so the recovered draft survives
-            // a reload or agent switch, and only touch the live input if the user
-            // is still on this agent (otherwise we would write into the input of
-            // the agent they switched to; the draft stays recoverable here).
-            localStorage.setItem(messageTextKey(agentId), text);
+          const isComposerEmpty = currentDraft.trim().length === 0 && getComposerAttachments(agentId).length === 0;
+          if (isComposerEmpty) {
+            localStorage.setItem(messageTextKey(agentId), sentText);
+            restoreComposerAttachments(agentId, sentAttachments);
             if (currentAgentId === agentId) {
-              messageText = text;
+              messageText = sentText;
               m.redraw();
             }
           }
@@ -146,7 +247,24 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         }
       }
 
+      function handlePaste(event: ClipboardEvent): void {
+        if (!agentId) {
+          return;
+        }
+        const files = imageFilesFromClipboard(event.clipboardData);
+        if (files.length > 0) {
+          event.preventDefault();
+          uploadFilesToComposer(agentId, files);
+        }
+      }
+
+      function openFilePicker(): void {
+        fileInputElement?.click();
+      }
+
+      const attachments = getComposerAttachments(agentId);
       const hasMessageText = messageText.trim().length > 0;
+      const canSend = hasMessageText || hasReadyAttachments(agentId);
 
       // The stop button is only meaningful while the agent has an interruptible
       // turn in progress -- the same condition that drives the activity
@@ -157,58 +275,95 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
       const isStopButtonVisible = isAgentWorking && !isInterruptInFlight;
 
       return m("div", { class: "message-input mx-auto w-full" }, [
-        m("div", { class: "message-input-box flex flex-row items-center" }, [
-          m("textarea", {
-            class: "message-input-textbox flex-1 resize-none focus:outline-none",
-            placeholder: "Type a message...",
-            rows: 1,
-            value: messageText,
-            oncreate: (textareaVnode: m.VnodeDOM) => {
-              messageTextareaElement = textareaVnode.dom as HTMLTextAreaElement;
-              autoResizeTextarea(messageTextareaElement);
-              focusMessageTextarea();
-            },
-            onupdate: (textareaVnode: m.VnodeDOM) => {
-              messageTextareaElement = textareaVnode.dom as HTMLTextAreaElement;
-              autoResizeTextarea(messageTextareaElement);
-            },
-            onremove: () => {
-              messageTextareaElement = null;
-            },
-            oninput: (event: Event) => {
-              const textarea = event.target as HTMLTextAreaElement;
-              messageText = textarea.value;
-              localStorage.setItem(messageTextKey(agentId), messageText);
-              autoResizeTextarea(textarea);
-            },
-            onkeydown: handleKeydown,
-          }),
-          m("div", { class: "message-input-toolbar" }, [
-            isStopButtonVisible
-              ? m(
-                  "button",
-                  {
-                    class: "message-input-stop-button",
-                    title: "Interrupt current turn",
-                    onclick: handleInterrupt,
-                  },
-                  m.trust(
-                    '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
-                  ),
-                )
-              : null,
-            hasMessageText
-              ? m(
-                  "button",
-                  {
-                    class: "message-input-send-button",
-                    onclick: handleSend,
-                  },
-                  m.trust(
-                    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
-                  ),
-                )
-              : null,
+        m("input", {
+          type: "file",
+          multiple: true,
+          class: "message-input-file-input",
+          oncreate: (inputVnode: m.VnodeDOM) => {
+            fileInputElement = inputVnode.dom as HTMLInputElement;
+          },
+          onremove: () => {
+            fileInputElement = null;
+          },
+          onchange: (event: Event) => {
+            const input = event.target as HTMLInputElement;
+            uploadFilesToComposer(agentId, input.files);
+            input.value = "";
+          },
+        }),
+        m("div", { class: "message-input-box flex flex-col" }, [
+          attachments.length > 0
+            ? m(
+                "div",
+                { class: "message-input-attachments" },
+                attachments.map((attachment) => renderComposerAttachment(agentId, attachment)),
+              )
+            : null,
+          m("div", { class: "message-input-row flex flex-row items-center" }, [
+            m("textarea", {
+              class: "message-input-textbox flex-1 resize-none focus:outline-none",
+              placeholder: "Type a message...",
+              rows: 1,
+              value: messageText,
+              oncreate: (textareaVnode: m.VnodeDOM) => {
+                messageTextareaElement = textareaVnode.dom as HTMLTextAreaElement;
+                autoResizeTextarea(messageTextareaElement);
+                focusMessageTextarea();
+              },
+              onupdate: (textareaVnode: m.VnodeDOM) => {
+                messageTextareaElement = textareaVnode.dom as HTMLTextAreaElement;
+                autoResizeTextarea(messageTextareaElement);
+              },
+              onremove: () => {
+                messageTextareaElement = null;
+              },
+              oninput: (event: Event) => {
+                const textarea = event.target as HTMLTextAreaElement;
+                messageText = textarea.value;
+                localStorage.setItem(messageTextKey(agentId), messageText);
+                autoResizeTextarea(textarea);
+              },
+              onkeydown: handleKeydown,
+              onpaste: handlePaste,
+            }),
+            m("div", { class: "message-input-toolbar" }, [
+              m(
+                "button",
+                {
+                  type: "button",
+                  class: "message-input-attach-button",
+                  title: "Attach files",
+                  "aria-label": "Attach files",
+                  onclick: openFilePicker,
+                },
+                m.trust(ATTACH_ICON_SVG),
+              ),
+              isStopButtonVisible
+                ? m(
+                    "button",
+                    {
+                      class: "message-input-stop-button",
+                      title: "Interrupt current turn",
+                      onclick: handleInterrupt,
+                    },
+                    m.trust(
+                      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
+                    ),
+                  )
+                : null,
+              canSend
+                ? m(
+                    "button",
+                    {
+                      class: "message-input-send-button",
+                      onclick: handleSend,
+                    },
+                    m.trust(
+                      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
+                    ),
+                  )
+                : null,
+            ]),
           ]),
         ]),
       ]);

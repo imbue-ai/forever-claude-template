@@ -1,5 +1,6 @@
 """Tests for the Flask server."""
 
+import io
 import json
 import queue
 from pathlib import Path
@@ -108,6 +109,80 @@ def test_send_message_for_unknown_agent(client: FlaskClient) -> None:
     with patch("imbue.system_interface.server.discover_agents", return_value=[]):
         response = client.post("/api/agents/nonexistent/message", json={"message": "hello"})
     assert response.status_code == 404
+
+
+def _upload_relative_path(stored_path: str) -> str:
+    """Extract the ``<subdir>/<name>`` part of an absolute upload path."""
+    return stored_path.split("/uploads/", 1)[1]
+
+
+def test_upload_attachment_stores_file_and_returns_path(client: FlaskClient) -> None:
+    """Uploading a file stores it under uploads/ and returns its path and size."""
+    response = client.post(
+        "/api/uploads",
+        data={"file": (io.BytesIO(b"image-bytes"), "diagram.png")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 201
+    data = response.get_json()
+    assert "/uploads/" in data["path"]
+    assert data["path"].endswith("/diagram.png")
+    assert data["size"] == len(b"image-bytes")
+    assert Path(data["path"]).read_bytes() == b"image-bytes"
+
+
+def test_upload_attachment_without_file_returns_400(client: FlaskClient) -> None:
+    """Posting with no file part is a 400."""
+    response = client.post("/api/uploads", data={}, content_type="multipart/form-data")
+
+    assert response.status_code == 400
+
+
+def test_serve_attachment_returns_stored_bytes(client: FlaskClient) -> None:
+    """A stored attachment can be fetched back for preview."""
+    upload = client.post(
+        "/api/uploads",
+        data={"file": (io.BytesIO(b"hello-bytes"), "note.txt")},
+        content_type="multipart/form-data",
+    )
+    relative_path = _upload_relative_path(upload.get_json()["path"])
+
+    response = client.get(f"/api/uploads/{relative_path}")
+
+    assert response.status_code == 200
+    assert response.data == b"hello-bytes"
+
+
+def test_serve_attachment_missing_returns_404(client: FlaskClient) -> None:
+    """Fetching an unknown attachment is a 404."""
+    response = client.get("/api/uploads/deadbeef/missing.png")
+
+    assert response.status_code == 404
+
+
+def test_delete_attachment_removes_stored_file(client: FlaskClient) -> None:
+    """Deleting an attachment removes it from disk and from later fetches."""
+    upload = client.post(
+        "/api/uploads",
+        data={"file": (io.BytesIO(b"bye-bytes"), "remove-me.txt")},
+        content_type="multipart/form-data",
+    )
+    stored_path = upload.get_json()["path"]
+    relative_path = _upload_relative_path(stored_path)
+
+    delete_response = client.delete(f"/api/uploads/{relative_path}")
+
+    assert delete_response.status_code == 200
+    assert not Path(stored_path).exists()
+    assert client.get(f"/api/uploads/{relative_path}").status_code == 404
+
+
+def test_delete_attachment_missing_is_ok(client: FlaskClient) -> None:
+    """Deleting an unknown attachment still reports success (idempotent)."""
+    response = client.delete("/api/uploads/deadbeef/missing.png")
+
+    assert response.status_code == 200
 
 
 def test_get_events_with_session_files(client: FlaskClient, tmp_path: Path) -> None:

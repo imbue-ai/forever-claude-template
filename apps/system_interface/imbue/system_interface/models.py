@@ -10,6 +10,12 @@ class AgentCreationError(ValueError):
     ...
 
 
+class AttachmentError(ValueError):
+    """Raised when a chat attachment cannot be stored or located."""
+
+    ...
+
+
 class AgentListItem(FrozenModel):
     """An agent entry in the agent list response."""
 
@@ -34,6 +40,13 @@ class SendMessageResponse(FrozenModel):
     """Response from the message endpoint."""
 
     status: str = Field(description="Status of the send operation")
+
+
+class AttachmentUploadResponse(FrozenModel):
+    """Response from the chat attachment upload endpoint."""
+
+    path: str = Field(description="Absolute path to the stored upload on the agent VM")
+    size: int = Field(description="Size of the stored upload in bytes")
 
 
 class InterruptAgentResponse(FrozenModel):
