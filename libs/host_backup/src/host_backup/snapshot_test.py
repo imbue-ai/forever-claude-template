@@ -23,12 +23,12 @@ from host_backup.snapshot import (
 # --- DirectSnapshotTaker ---
 
 
-def test_direct_snapshot_taker_returns_read_path_from_settings() -> None:
-    settings = BackupCapabilities(
+def test_direct_snapshot_taker_returns_read_path_from_capabilities() -> None:
+    capabilities = BackupCapabilities(
         method=SnapshotMethod.DIRECT,
         snapshot_read_path=Path("/mngr"),
     )
-    taker = DirectSnapshotTaker(capabilities=settings)
+    taker = DirectSnapshotTaker(capabilities=capabilities)
     result = taker.take_snapshot()
     assert result.method == SnapshotMethod.DIRECT
     assert result.read_path == Path("/mngr")
@@ -48,21 +48,21 @@ def test_direct_snapshot_taker_defaults_read_path_when_unset() -> None:
 
 
 def test_make_snapshot_taker_raises_when_outer_trigger_missing_required_paths() -> None:
-    bad_settings = BackupCapabilities(method=SnapshotMethod.OUTER_TRIGGER)
+    bad_capabilities = BackupCapabilities(method=SnapshotMethod.OUTER_TRIGGER)
     with pytest.raises(SnapshotError):
-        make_snapshot_taker(bad_settings)
+        make_snapshot_taker(bad_capabilities)
 
 
 def test_make_snapshot_taker_raises_when_btrfs_local_missing_paths() -> None:
-    bad_settings = BackupCapabilities(method=SnapshotMethod.BTRFS_LOCAL)
+    bad_capabilities = BackupCapabilities(method=SnapshotMethod.BTRFS_LOCAL)
     with pytest.raises(SnapshotError):
-        make_snapshot_taker(bad_settings)
+        make_snapshot_taker(bad_capabilities)
 
 
 # --- OuterTriggerSnapshotTaker (faked outer helper) ---
 
 
-def _outer_trigger_settings(trigger_dir: Path) -> BackupCapabilities:
+def _outer_trigger_capabilities(trigger_dir: Path) -> BackupCapabilities:
     return BackupCapabilities(
         method=SnapshotMethod.OUTER_TRIGGER,
         btrfs_mount_path=Path("/mngr-btrfs"),
@@ -132,11 +132,11 @@ def _start_fake_outer_helper(
 
 
 def test_outer_trigger_snapshot_takes_then_returns_result(tmp_path: Path) -> None:
-    settings = _outer_trigger_settings(tmp_path / "trigger")
+    capabilities = _outer_trigger_capabilities(tmp_path / "trigger")
     stop = threading.Event()
     helper = _start_fake_outer_helper(tmp_path / "trigger", stop_event=stop)
     try:
-        taker = OuterTriggerSnapshotTaker(capabilities=settings)
+        taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
         result = taker.take_snapshot()
         assert result.method == SnapshotMethod.OUTER_TRIGGER
         # The read path is a fresh, uniquely-named child of the snapshots dir.
@@ -150,7 +150,7 @@ def test_outer_trigger_snapshot_takes_then_returns_result(tmp_path: Path) -> Non
 
 
 def test_outer_trigger_snapshot_propagates_helper_failure(tmp_path: Path) -> None:
-    settings = _outer_trigger_settings(tmp_path / "trigger")
+    capabilities = _outer_trigger_capabilities(tmp_path / "trigger")
     stop = threading.Event()
     helper = _start_fake_outer_helper(
         tmp_path / "trigger",
@@ -159,7 +159,7 @@ def test_outer_trigger_snapshot_propagates_helper_failure(tmp_path: Path) -> Non
         stop_event=stop,
     )
     try:
-        taker = OuterTriggerSnapshotTaker(capabilities=settings)
+        taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
         with pytest.raises(SnapshotError) as excinfo:
             taker.take_snapshot()
         # take_snapshot creates the snapshot directly (no pre-cleanup); the
@@ -173,7 +173,7 @@ def test_outer_trigger_snapshot_propagates_helper_failure(tmp_path: Path) -> Non
 def test_outer_trigger_snapshot_times_out_when_no_helper_responds(
     tmp_path: Path,
 ) -> None:
-    settings = BackupCapabilities(
+    capabilities = BackupCapabilities(
         method=SnapshotMethod.OUTER_TRIGGER,
         btrfs_mount_path=Path("/mngr-btrfs"),
         host_subvolume_path=Path("/mngr-btrfs/abcdef"),
@@ -182,18 +182,18 @@ def test_outer_trigger_snapshot_times_out_when_no_helper_responds(
         trigger_dir=tmp_path / "trigger",
         outer_helper_timeout_seconds=1.0,
     )
-    taker = OuterTriggerSnapshotTaker(capabilities=settings)
+    taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
     with pytest.raises(SnapshotError) as excinfo:
         taker.take_snapshot()
     assert "Timed out" in str(excinfo.value)
 
 
 def test_outer_trigger_writes_request_atomically(tmp_path: Path) -> None:
-    settings = _outer_trigger_settings(tmp_path / "trigger")
+    capabilities = _outer_trigger_capabilities(tmp_path / "trigger")
     stop = threading.Event()
     helper = _start_fake_outer_helper(tmp_path / "trigger", stop_event=stop)
     try:
-        taker = OuterTriggerSnapshotTaker(capabilities=settings)
+        taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
         taker.take_snapshot()
         # No leftover tmp file from atomic rename:
         assert not (tmp_path / "trigger" / "request.json.tmp").exists()
@@ -210,13 +210,13 @@ def test_outer_trigger_take_snapshot_uses_unique_timestamped_names(
     tmp_path: Path,
 ) -> None:
     """Two successive snapshots must land on distinct, never-reused paths."""
-    settings = _outer_trigger_settings(tmp_path / "trigger")
+    capabilities = _outer_trigger_capabilities(tmp_path / "trigger")
     stop = threading.Event()
     helper = _start_fake_outer_helper(
         tmp_path / "trigger", snapshot_path="", stop_event=stop
     )
     try:
-        taker = OuterTriggerSnapshotTaker(capabilities=settings)
+        taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
         # Each take_snapshot round-trips through the helper (~1s), so the two
         # microsecond-resolution timestamps are always distinct -- no sleep.
         first = taker.take_snapshot()
@@ -269,7 +269,7 @@ def test_list_snapshot_names_returns_empty_when_dir_missing(tmp_path: Path) -> N
 # --- OuterTriggerSnapshotTaker.cleanup_after_backup (keep-N GC) ---
 
 
-def _gc_settings(tmp_path: Path, *, max_local_snapshots: int) -> BackupCapabilities:
+def _gc_capabilities(tmp_path: Path, *, max_local_snapshots: int) -> BackupCapabilities:
     # snapshot_read_path's parent is the real, populated read dir we enumerate.
     return BackupCapabilities(
         method=SnapshotMethod.OUTER_TRIGGER,
@@ -290,7 +290,7 @@ def _make_snapshot_dirs(read_dir: Path, names: tuple[str, ...]) -> None:
 
 
 def test_cleanup_after_backup_deletes_oldest_beyond_cap(tmp_path: Path) -> None:
-    settings = _gc_settings(tmp_path, max_local_snapshots=2)
+    capabilities = _gc_capabilities(tmp_path, max_local_snapshots=2)
     names = (
         "2026-06-12T00:00:00.000000Z",
         "2026-06-12T01:00:00.000000Z",
@@ -301,7 +301,7 @@ def test_cleanup_after_backup_deletes_oldest_beyond_cap(tmp_path: Path) -> None:
     stop = threading.Event()
     helper = _start_fake_outer_helper(tmp_path / "trigger", stop_event=stop)
     try:
-        taker = OuterTriggerSnapshotTaker(capabilities=settings)
+        taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
         deleted = taker.cleanup_after_backup()
         # The two oldest are deleted; the newest two are kept.
         assert deleted == (
@@ -314,18 +314,18 @@ def test_cleanup_after_backup_deletes_oldest_beyond_cap(tmp_path: Path) -> None:
 
 
 def test_cleanup_after_backup_is_noop_when_at_or_under_cap(tmp_path: Path) -> None:
-    settings = _gc_settings(tmp_path, max_local_snapshots=5)
+    capabilities = _gc_capabilities(tmp_path, max_local_snapshots=5)
     _make_snapshot_dirs(
         tmp_path / "snapshots",
         ("2026-06-12T00:00:00.000000Z", "2026-06-12T01:00:00.000000Z"),
     )
-    taker = OuterTriggerSnapshotTaker(capabilities=settings)
+    taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
     # No helper needed: under the cap, no cleanup requests are sent.
     assert taker.cleanup_after_backup() == ()
 
 
 def test_cleanup_after_backup_raises_when_helper_fails(tmp_path: Path) -> None:
-    settings = _gc_settings(tmp_path, max_local_snapshots=1)
+    capabilities = _gc_capabilities(tmp_path, max_local_snapshots=1)
     _make_snapshot_dirs(
         tmp_path / "snapshots",
         ("2026-06-12T00:00:00.000000Z", "2026-06-12T01:00:00.000000Z"),
@@ -335,7 +335,7 @@ def test_cleanup_after_backup_raises_when_helper_fails(tmp_path: Path) -> None:
         tmp_path / "trigger", exit_code=2, error_message="boom", stop_event=stop
     )
     try:
-        taker = OuterTriggerSnapshotTaker(capabilities=settings)
+        taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
         with pytest.raises(SnapshotError) as excinfo:
             taker.cleanup_after_backup()
         assert "rc=2" in str(excinfo.value)
@@ -348,7 +348,7 @@ def test_cleanup_after_backup_partial_failure_reports_deleted_and_failed(
     tmp_path: Path,
 ) -> None:
     """A mid-way cleanup failure surfaces what was deleted and which target failed."""
-    settings = _gc_settings(tmp_path, max_local_snapshots=1)
+    capabilities = _gc_capabilities(tmp_path, max_local_snapshots=1)
     names = (
         "2026-06-12T00:00:00.000000Z",
         "2026-06-12T01:00:00.000000Z",
@@ -361,7 +361,7 @@ def test_cleanup_after_backup_partial_failure_reports_deleted_and_failed(
         tmp_path / "trigger", fail_after_requests=1, stop_event=stop
     )
     try:
-        taker = OuterTriggerSnapshotTaker(capabilities=settings)
+        taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
         with pytest.raises(SnapshotCleanupError) as excinfo:
             taker.cleanup_after_backup()
         err = excinfo.value
