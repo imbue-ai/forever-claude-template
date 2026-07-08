@@ -35,9 +35,15 @@ The store is served by a local HTTP API on `127.0.0.1:8731`. Start it if it
 isn't already running, then query it:
 
 ```bash
-# Start the local datalib API on demand (no-op if already up).
-curl -sf http://127.0.0.1:8731/api/health >/dev/null 2>&1 || \
+# Start the local datalib API on demand (no-op if already up), then wait
+# for it to accept connections before querying.
+if ! curl -sf http://127.0.0.1:8731/api/health >/dev/null 2>&1; then
   frankweiler-http "$FRANKWEILER_ROOT" --no-open >/tmp/frankweiler-http.log 2>&1 &
+  for _ in $(seq 1 30); do
+    curl -sf http://127.0.0.1:8731/api/health >/dev/null 2>&1 && break
+    sleep 1
+  done
+fi
 
 # Keyword / structured search over everything mirrored.
 curl -s 'http://127.0.0.1:8731/api/search?q=vacation%20plans&limit=20'
