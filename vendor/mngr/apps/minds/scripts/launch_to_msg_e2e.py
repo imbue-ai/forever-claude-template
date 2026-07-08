@@ -633,6 +633,40 @@ async def find_chat_window(ctx: BrowserContext) -> Page | None:
     return None
 
 
+async def pick_backend_page(ctx: BrowserContext, origin: str, timeout: float = 30.0) -> Page:
+    """Return the content page (the backend page NOT under ``/_chrome``).
+
+    An Electron window is several WebContentsViews -- chrome shell
+    (``/_chrome``), modal overlay (``/_chrome/overlay``), and the content view
+    (the landing page, e.g. ``/welcome``) -- and CDP's page ordering follows
+    attach timing, so ``ctx.pages[0]`` is a coin flip. Only the content view
+    is safe to drive end to end: driving the overlay breaks screenshots and
+    navigation (main.js keeps it collapsed and reloads it), and driving the
+    chrome shell navigates it off ``/_chrome``, killing the requests SSE
+    consumer that powers the inbox badge / auto-open, so the slack permission
+    flow never surfaces a Deny button. main.js points the content view at the
+    backend landing page once the backend is ready, which is what this
+    selector keys on: the loopback page on the backend port (pages use
+    ``localhost`` while ``wait_backend_url`` reports ``127.0.0.1``) whose path
+    is not under ``/_chrome``.
+    """
+    backend_port = urllib.parse.urlsplit(origin).port
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for p in all_pages(ctx):
+            with contextlib.suppress(Exception):
+                parts = urllib.parse.urlsplit(p.url)
+                if (
+                    parts.hostname in ("localhost", "127.0.0.1")
+                    and parts.port == backend_port
+                    and not parts.path.startswith("/_chrome")
+                ):
+                    return p
+        await asyncio.sleep(0.5)
+    urls = [p.url for p in all_pages(ctx)]
+    raise E2EFailure(f"no content page on backend origin {origin} after {timeout}s; page URLs: {urls}")
+
+
 # --- per-workspace helpers ---
 
 
@@ -1044,13 +1078,12 @@ async def amain() -> int:
         logger.info("backend up at {} (launch->ready={:.1f}s)", base, launch_to_ready_s)
         logger.info("[ci-metric] launch_to_ready_s={:.1f}", launch_to_ready_s)
         code = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
-        # ``win`` here is ``ctx.pages[0]``, which can be the file:// splash
-        # depending on Electron startup order. ``location.origin`` on the
-        # splash returns ``"file://"``, so navigation to ``origin + "/..."``
-        # would resolve to ``file:///...`` and fail. Use the known backend
-        # base URL instead; ``win.goto`` happily redirects any window
-        # (splash or http-served) to it.
+        # Re-pick ``win`` now that the backend is up: only the chrome-shell
+        # view is safe to drive (see pick_backend_page), and it is only on the
+        # backend origin after main.js's "Backend ready" load.
         origin = base
+        win = await pick_backend_page(ctx, origin)
+        logger.info("driving page {} (pages: {})", win.url, [p.url for p in all_pages(ctx)])
         await win.goto(origin + "/authenticate?one_time_code=" + code)
         await snap_page(win, "01-after-auth")
 
@@ -1721,6 +1754,8 @@ async def amain() -> int:
             logger.info("[relaunch] new backend up at {}", base2)
             code2 = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
             origin = base2
+            win = await pick_backend_page(ctx, origin)
+            logger.info("[relaunch] driving page {} (pages: {})", win.url, [p.url for p in all_pages(ctx)])
             await win.goto(origin + "/authenticate?one_time_code=" + code2)
             await snap_page(win, "24-after-relaunch-auth")
 
