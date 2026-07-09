@@ -351,11 +351,26 @@ def test_persist_initial_chat_agent_id_skips_when_host_dir_unset(
 
 
 class _StubSubprocess:
-    """Capture-and-replay double for subprocess.run used by the chat-create call."""
+    """Capture-and-replay double for subprocess.run used by the chat-create flow.
 
-    def __init__(self, returncode: int = 0, stdout: str = "") -> None:
+    `_maybe_create_initial_chat` now runs two mngr commands: `mngr list`
+    (the adopt-existing lookup) and `mngr create`. Replies dispatch on the
+    subcommand (cmd[1]); the default reply covers any other invocation. The
+    lookup defaults to "no existing agent" (rc=0, empty stdout) so create-path
+    tests exercise a clean first boot without extra setup.
+    """
+
+    def __init__(
+        self,
+        returncode: int = 0,
+        stdout: str = "",
+        list_returncode: int = 0,
+        list_stdout: str = "",
+    ) -> None:
         self.returncode = returncode
         self.stdout = stdout
+        self.list_returncode = list_returncode
+        self.list_stdout = list_stdout
         self.calls: list[list[str]] = []
 
     def run(
@@ -367,9 +382,20 @@ class _StubSubprocess:
     ) -> subprocess.CompletedProcess[str]:
         del capture_output, text, check  # keyword-only signature mirrors stdlib.
         self.calls.append(cmd)
+        if len(cmd) > 1 and cmd[0] == "mngr" and cmd[1] == "list":
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=self.list_returncode,
+                stdout=self.list_stdout,
+                stderr="",
+            )
         return subprocess.CompletedProcess(
             args=cmd, returncode=self.returncode, stdout=self.stdout, stderr=""
         )
+
+    def commands(self) -> list[str]:
+        """The mngr subcommands invoked, in order (e.g. ["list", "create"])."""
+        return [cmd[1] for cmd in self.calls if cmd and cmd[0] == "mngr"]
 
 
 @pytest.fixture
@@ -400,7 +426,7 @@ def test_maybe_create_initial_chat_creates_and_writes_signal(
     stub = _StubSubprocess(returncode=0)
     monkeypatch.setattr("bootstrap.manager.subprocess.run", stub.run)
     _maybe_create_initial_chat()
-    assert len(stub.calls) == 1
+    assert stub.commands() == ["list", "create"]
     assert (_bootstrap_env / "runtime" / "initial_chat_created").exists()
 
 
@@ -434,8 +460,49 @@ def test_maybe_create_initial_chat_skips_signal_on_failure(
     stub = _StubSubprocess(returncode=1)
     monkeypatch.setattr("bootstrap.manager.subprocess.run", stub.run)
     _maybe_create_initial_chat()
-    assert len(stub.calls) == 1
+    assert stub.commands() == ["list", "create"]
     assert not (_bootstrap_env / "runtime" / "initial_chat_created").exists()
+
+
+def test_maybe_create_initial_chat_adopts_agent_from_partial_create(
+    monkeypatch: pytest.MonkeyPatch, _bootstrap_env: Path
+) -> None:
+    """When an agent named after the host already exists (an earlier boot's
+    create died after registering it), the retry adopts it -- persisting its id
+    for the welcome resend and writing the signal -- instead of re-creating,
+    which would fail with a name collision on every boot."""
+    stub = _StubSubprocess(list_stdout="agent-partial\n")
+    monkeypatch.setattr("bootstrap.manager.subprocess.run", stub.run)
+    _maybe_create_initial_chat()
+    assert stub.commands() == ["list"]
+    assert (
+        _bootstrap_env / INITIAL_CHAT_AGENT_ID_FILENAME
+    ).read_text() == "agent-partial"
+    assert (_bootstrap_env / "runtime" / "initial_chat_created").exists()
+
+
+def test_maybe_create_initial_chat_creates_when_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, _bootstrap_env: Path
+) -> None:
+    """A failed adopt-lookup falls back to the plain create path rather than
+    aborting the boot's chat-agent creation."""
+    stub = _StubSubprocess(returncode=0, list_returncode=1)
+    monkeypatch.setattr("bootstrap.manager.subprocess.run", stub.run)
+    _maybe_create_initial_chat()
+    assert stub.commands() == ["list", "create"]
+    assert (_bootstrap_env / "runtime" / "initial_chat_created").exists()
+
+
+def test_maybe_create_initial_chat_skips_adopt_on_ambiguous_lookup(
+    monkeypatch: pytest.MonkeyPatch, _bootstrap_env: Path
+) -> None:
+    """Multiple same-named agents cannot be disambiguated; fall through to
+    create rather than guessing which survivor to adopt."""
+    stub = _StubSubprocess(returncode=0, list_stdout="agent-a\nagent-b\n")
+    monkeypatch.setattr("bootstrap.manager.subprocess.run", stub.run)
+    _maybe_create_initial_chat()
+    assert stub.commands() == ["list", "create"]
+    assert not (_bootstrap_env / INITIAL_CHAT_AGENT_ID_FILENAME).exists()
 
 
 def test_maybe_create_initial_chat_skips_when_host_name_missing(

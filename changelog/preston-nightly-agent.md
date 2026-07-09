@@ -85,3 +85,21 @@ web UI reconnects, with no need to reopen anything. Closing a blinking tab dismi
 that run (it will not immediately reopen), and a genuinely newer run brings it back.
 The system interface reads each agent's labels straight from the discovery stream,
 so the Caretaker is reliably recognized and the hidden services agent stays hidden.
+
+**Fixed: a fresh mind could deadlock on "No events yet" with no way to sign in.**
+When a workspace's first boot ran with no Claude credentials, claude sat at its
+interactive login screen and never signalled ready, so the bootstrap's
+`mngr create ... --message /welcome` timed out and exited nonzero after the agent
+was already registered. That single failure starved everything downstream: the
+transcript stayed empty, so the login modal -- which only opened in reaction to
+an auth-error transcript event -- could never appear; the welcome-resend had no
+recorded agent id to target; and every retry on later boots collided with the
+half-created agent's name and failed forever. Two changes unwind the deadlock.
+The bootstrap now looks up an existing agent named after the host before
+creating (the same lookup-first shape scripts/run_task_agent.sh uses): a
+survivor from a partial create is adopted -- its id persisted for the welcome
+resend, the signal written -- instead of colliding. And the chat panel now
+backstops the login modal: when a snapshot loads with zero events, it probes
+`GET /api/claude-auth/status` (previously unused) once per page load and opens
+the sign-in modal if logged out. After sign-in, the existing auth-success
+resend delivers the welcome as designed.

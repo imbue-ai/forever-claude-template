@@ -31,7 +31,7 @@ import { resolveSelectionRowRange, selectionStateWithin } from "./scroll-selecti
 import { createTranscriptScroll } from "./transcript-scroll";
 import { connectToStream, disconnectFromStream, loadSnapshotWithStream } from "../models/StreamingMessage";
 import { getAgentById, getProtoAgents } from "../models/AgentManager";
-import { openLoginModal } from "../models/ClaudeAuth";
+import { openLoginModal, openLoginModalForEmptyTranscript } from "../models/ClaudeAuth";
 import { apiUrl } from "../base-path";
 import { EmptySlot } from "./EmptySlot";
 import { uploadFilesToComposer } from "../models/ComposerAttachments";
@@ -358,6 +358,14 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
         loading = false;
         loadingError = null;
         checkLatestAssistantForAuthError(agentId);
+        // An entirely empty transcript can never produce the auth-error
+        // event the check above relies on -- the signature of a fresh mind
+        // whose /welcome was never delivered because claude sat at its
+        // login screen. Backstop: probe auth status directly and open the
+        // login modal if signed out (no-op when authenticated).
+        if (getEventsForAgent(agentId).length === 0) {
+          openLoginModalForEmptyTranscript();
+        }
       }
     } catch (error) {
       if (agentId === currentAgentId) {
