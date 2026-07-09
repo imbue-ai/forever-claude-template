@@ -243,6 +243,8 @@ See the `edit-services` skill for details.
 Commit your changes locally.
 `runtime/` is gitignored from the main branch (it includes `runtime/memory/` for Claude memory and other transient state).
 
+Chat file uploads (files a user attaches to a message) are stored in the top-level `uploads/` directory inside the repo working tree -- NOT under `runtime/`. Uploads can be arbitrarily large and any format, so they don't belong in version-controllable content; `uploads/` is gitignored. Being outside `runtime/`, uploads are NOT carried by the `runtime-backup` orphan branch (which ships only `runtime/`), but the host-level `host-backup` service (a restic snapshot of the whole host dir) does capture them, so uploads still survive container loss. See `libs/host_backup/README.md`.
+
 A `post-commit` hook installed via `core.hooksPath = /mngr/code/scripts/git_hooks` auto-pushes the active branch to `origin` in the background, but only when `GH_TOKEN` is set in the environment. You do not need to push manually. The hook never blocks the commit; output is captured at `/tmp/post-commit-push.log`.
 
 `runtime/` is backed up automatically by the `runtime-backup` service onto a separate orphan branch (`mindsbackup/$MNGR_AGENT_ID`) on the same `origin`, also gated on `GH_TOKEN`. See `libs/runtime_backup/README.md`.
