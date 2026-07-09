@@ -57,6 +57,41 @@ def _tool_result(tool_call_id: str) -> dict[str, Any]:
             False,
             id="skips_blocks_without_id",
         ),
+        # A tool_use orphaned by a hard mid-tool kill (auth-flow restart,
+        # container stop -- no synthetic interrupt tool_result is ever written)
+        # must age out once the conversation moves on, instead of pinning the
+        # indicator at TOOL_RUNNING forever.
+        pytest.param(
+            [_assistant_with_tool_calls("call_orphan"), {"type": "user_message", "content": "hi"}],
+            False,
+            id="orphan_cleared_by_next_user_message",
+        ),
+        pytest.param(
+            [_assistant_with_tool_calls("call_orphan"), {"type": "assistant_message", "tool_calls": []}],
+            False,
+            id="orphan_cleared_by_next_assistant_message",
+        ),
+        # The live case that motivated the scoping: an old orphan plus a fully
+        # completed later turn is IDLE, but a genuinely outstanding call in the
+        # LATEST assistant message still counts.
+        pytest.param(
+            [
+                _assistant_with_tool_calls("call_orphan"),
+                {"type": "user_message", "content": "what time is it"},
+                {"type": "assistant_message", "tool_calls": []},
+            ],
+            False,
+            id="orphan_plus_completed_later_turn",
+        ),
+        pytest.param(
+            [
+                _assistant_with_tool_calls("call_orphan"),
+                {"type": "user_message", "content": "next"},
+                _assistant_with_tool_calls("call_live"),
+            ],
+            True,
+            id="orphan_ages_out_but_live_call_still_counts",
+        ),
     ],
 )
 def test_has_unmatched_tool_use(events: list[dict[str, Any]], expected: bool) -> None:
