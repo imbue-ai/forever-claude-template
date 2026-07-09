@@ -396,6 +396,232 @@ body {
   }
 }
 
+/* ── File attachments: composer ── */
+
+.message-input-file-input {
+  display: none;
+}
+
+.message-input-attach-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition:
+    color 120ms,
+    background 120ms;
+  flex-shrink: 0;
+}
+
+.message-input-attach-button:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+
+.message-input-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 12px 0 16px;
+}
+
+.composer-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 240px;
+  padding: 6px 8px 6px 6px;
+  background: var(--color-bg-sidebar);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+}
+
+.composer-attachment--error {
+  border-color: #d4806a;
+}
+
+.composer-attachment-thumb {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.composer-attachment-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.composer-attachment-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: composer-attachment-spin 0.7s linear infinite;
+}
+
+@keyframes composer-attachment-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.composer-attachment-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.composer-attachment-name {
+  font-size: 13px;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-attachment-detail {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.composer-attachment-detail--error {
+  color: #b3573c;
+}
+
+.composer-attachment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    color 120ms,
+    background 120ms;
+}
+
+.composer-attachment-remove:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-active);
+}
+
+/* ── File attachments: chat drop overlay ── */
+
+.chat-drop-overlay {
+  z-index: 50;
+  background: color-mix(in srgb, var(--color-accent-light) 70%, transparent);
+  border: 2px dashed var(--color-accent);
+  border-radius: 12px;
+  margin: 8px;
+}
+
+.chat-drop-overlay-label {
+  padding: 10px 18px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-accent);
+  box-shadow: 0 2px 12px rgba(55, 53, 47, 0.12);
+}
+
+/* ── File attachments: message bubble ── */
+
+.message-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-attachment-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.message-attachment-image {
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  display: block;
+}
+
+.message-attachment-files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.message-attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 8px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  color: var(--color-text-primary);
+  text-decoration: none;
+  transition:
+    background 120ms,
+    border-color 120ms;
+}
+
+.message-attachment-file:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border);
+}
+
+.message-attachment-file-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.message-attachment-file-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.message-attachment-file-name {
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message-attachment-file-size {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
 /* ── Model selector ── */
 .model-selector-wrapper {
   position: relative;

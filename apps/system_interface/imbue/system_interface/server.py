@@ -32,6 +32,10 @@ from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.app_context import SystemInterfaceState
 from imbue.system_interface.app_context import attach_state
 from imbue.system_interface.app_context import get_state
+from imbue.system_interface.attachments import delete_upload
+from imbue.system_interface.attachments import get_uploads_directory
+from imbue.system_interface.attachments import resolve_upload_path
+from imbue.system_interface.attachments import store_uploaded_file
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.file_serving import try_serve_file
@@ -49,6 +53,8 @@ from imbue.system_interface.layout_ops import parse_tmux_sessions_output
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentListItem
 from imbue.system_interface.models import AgentListResponse
+from imbue.system_interface.models import AttachmentError
+from imbue.system_interface.models import AttachmentUploadResponse
 from imbue.system_interface.models import CreateAgentResponse
 from imbue.system_interface.models import CreateChatRequest
 from imbue.system_interface.models import CreateWorktreeRequest
@@ -357,6 +363,50 @@ def _send_message_endpoint(agent_id: str) -> Response:
         return _json_response(error.model_dump(), status_code=500)
 
     return _json_response(SendMessageResponse(status="ok").model_dump())
+
+
+def _upload_attachment() -> Response:
+    """Store a file the user attached to a chat message under uploads/.
+
+    The frontend uploads each attachment here as soon as the user drops, pastes,
+    or picks it, then appends the returned absolute path to the message text it
+    sends to the agent. Returns the stored path and size so the composer can show
+    a preview and reference the file.
+    """
+    file_storage = request.files.get("file")
+    if file_storage is None or not file_storage.filename:
+        error = ErrorResponse(detail="No file provided in the 'file' field")
+        return _json_response(error.model_dump(), status_code=400)
+
+    uploads_directory = get_uploads_directory()
+    try:
+        stored_path = store_uploaded_file(uploads_directory, file_storage.filename, file_storage)
+    except AttachmentError as e:
+        error = ErrorResponse(detail=str(e))
+        return _json_response(error.model_dump(), status_code=500)
+
+    size_bytes = stored_path.stat().st_size
+    response = AttachmentUploadResponse(path=str(stored_path), size=size_bytes)
+    return _json_response(response.model_dump(), status_code=201)
+
+
+def _serve_attachment(relative_path: str) -> Response:
+    """Serve a stored attachment for inline preview, confined to uploads/."""
+    resolved_path = resolve_upload_path(get_uploads_directory(), relative_path)
+    if resolved_path is None:
+        error = ErrorResponse(detail=f"Attachment '{relative_path}' not found")
+        return _json_response(error.model_dump(), status_code=404)
+    return send_file(resolved_path)
+
+
+def _delete_attachment(relative_path: str) -> Response:
+    """Delete a stored attachment when the user removes it before sending.
+
+    Idempotent: a path that is missing or escapes the uploads directory is a
+    no-op, so a double-remove or a stale id still reports success.
+    """
+    delete_upload(get_uploads_directory(), relative_path)
+    return _json_response({"status": "ok"})
 
 
 def _interrupt_agent_endpoint(agent_id: str) -> Response:
@@ -1141,6 +1191,14 @@ def create_application(state: SystemInterfaceState) -> Flask:
     application.add_url_rule("/api/agents/<agent_id>/events", view_func=_get_events, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/stream", view_func=_stream_events, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/message", view_func=_send_message_endpoint, methods=["POST"])
+    application.add_url_rule("/api/uploads", view_func=_upload_attachment, methods=["POST"])
+    application.add_url_rule("/api/uploads/<path:relative_path>", view_func=_serve_attachment, methods=["GET"])
+    application.add_url_rule(
+        "/api/uploads/<path:relative_path>",
+        view_func=_delete_attachment,
+        methods=["DELETE"],
+        endpoint="_delete_attachment",
+    )
     application.add_url_rule("/api/agents/<agent_id>/interrupt", view_func=_interrupt_agent_endpoint, methods=["POST"])
     application.add_url_rule("/api/layout", view_func=_get_layout, methods=["GET"])
     application.add_url_rule("/api/layout", view_func=_save_layout, methods=["POST"], endpoint="_save_layout")

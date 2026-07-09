@@ -1,0 +1,5 @@
+- Chat file attachments: you can now attach files to a message by dragging them anywhere over the chat, pasting an image, or using the new attach (paperclip) button in the composer. Each attachment uploads immediately and appears as a removable preview -- a thumbnail for images, or a filename/size chip for other files. Removing one before sending deletes it again.
+
+- When you send, your message keeps a visible "See attachment here:" line naming each file by its absolute path on the workspace, so the agent can open and work with what you shared. That line renders inline in your message: images show as inline pictures and other files as download links, the same way the agent shows files it produces. Uploads are kept under a top-level, gitignored `uploads/` directory so they never clutter the repo.
+
+- Images are shown inline only for formats browsers can actually display (png, jpeg, gif, webp, avif, bmp, svg, ico). A file the browser can't render inline -- such as HEIC/HEIF or TIFF, or any non-image (PDF, CSV, ...) -- appears as a download link instead.

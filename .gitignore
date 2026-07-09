@@ -13,6 +13,9 @@
 # the rest of runtime/.
 **/runtime/
 
+# chat attachment uploads (arbitrary size/format; kept out of version control)
+**/uploads/
+
 # Sculptor local config (per-checkout, not shared).
 **/.sculptor/
 
