@@ -187,6 +187,13 @@ Use your judgment on when to do work directly vs delegating. Delegation is usefu
 - Multi-file changes that benefit from verification before merging
 - Long-running operations you don't want to block on
 
+# Finding past work
+
+Chats from agents that have run on this host -- current or past, including ones
+that were destroyed -- are stored locally on this host and are recoverable, so
+never tell the user you can't access an earlier or deleted conversation without
+checking first. Use the `find-past-transcripts` skill to find and read them.
+
 # Self-modification
 
 You can (and should) modify your own configuration to improve yourself:
@@ -233,6 +240,8 @@ See the `edit-services` skill for details.
 
 Commit your changes locally.
 `runtime/` is gitignored from the main branch (it includes `runtime/memory/` for Claude memory and other transient state).
+
+Chat file uploads (files a user attaches to a message) are stored in the top-level `uploads/` directory inside the repo working tree -- NOT under `runtime/`. Uploads can be arbitrarily large and any format, so they don't belong in version-controllable content; `uploads/` is gitignored. Being outside `runtime/`, uploads are NOT carried by the `runtime-backup` orphan branch (which ships only `runtime/`), but the host-level `host-backup` service (a restic snapshot of the whole host dir) does capture them, so uploads still survive container loss. See `libs/host_backup/README.md`.
 
 A `post-commit` hook installed via `core.hooksPath = /mngr/code/scripts/git_hooks` auto-pushes the active branch to `origin` in the background, but only when `GH_TOKEN` is set in the environment. You do not need to push manually. The hook never blocks the commit; output is captured at `/tmp/post-commit-push.log`.
 
