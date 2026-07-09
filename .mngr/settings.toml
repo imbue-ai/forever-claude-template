@@ -565,6 +565,124 @@ systemctl enable minds-autostart.service
 """,
 ]
 
+# template for GCP Compute Engine VPS provider (gcp mode). Mirrors the aws
+# template above: minds addresses the create as
+# `system-services@<host>.byo-gcp-<slug>` (a bring-your-own account block minds
+# writes on account setup), so no `provider` is declared here. Zone / machine
+# type come from that provider block (`default_zone` / `default_machine_type`)
+# plus the matching `-b --gcp-zone=` / `-b --gcp-machine-type=` minds passes.
+[create_templates.gcp]
+target_path = "/mngr/code/"
+build_arg__extend = ["--file=Dockerfile", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown; the
+# machine is up for the whole user session (see the aws template's comment).
+idle_mode = "disabled"
+# Same container-hardening `docker run` args as the aws template. They are
+# runtime-agnostic (harmless under plain runc; required under gVisor's runsc if
+# the provider block opts into it): see the aws template for the rationale.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
+# Same forwarding as the docker template; see comment there.
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# Install the outer-VM boot unit so the agent recovers after a VM reboot even
+# without the desktop app; identical to the aws template's unit.
+post_host_create_outer_command__extend = [
+    """
+set -eu
+cat > /usr/local/sbin/minds-outer-autostart.sh <<'BOOT'
+#!/bin/sh
+# On VM boot, start every mngr-managed agent container and relaunch the
+# system-services agent inside it (in its full host+agent env, via the shared
+# in-container start script). Containers are found by the fixed mngr label, so
+# this survives container rebuilds. `docker start` is a no-op if the container's
+# --restart policy already brought it back; `mngr start` is idempotent + flock-
+# serialized, so racing the desktop client is safe.
+set -u
+for cid in $(docker ps -aq --filter "label=com.imbue.mngr.host-id"); do
+    docker start "$cid" >/dev/null 2>&1 || true
+    docker exec --workdir / "$cid" bash -lc 'exec /mngr/code/scripts/minds_start_services_agent.sh' || true
+done
+BOOT
+chmod +x /usr/local/sbin/minds-outer-autostart.sh
+cat > /etc/systemd/system/minds-autostart.service <<'UNIT'
+[Unit]
+Description=Start the minds system-services agent on boot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/minds-outer-autostart.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable minds-autostart.service
+""",
+]
+
+# template for Azure Virtual Machines VPS provider (azure mode). Mirrors the
+# aws template above: minds addresses the create as
+# `system-services@<host>.byo-azure-<slug>` (a bring-your-own account block
+# minds writes on account setup), so no `provider` is declared here. Region /
+# VM size come from that provider block (`default_region` / `default_vm_size`)
+# plus the matching `-b --azure-region=` / `-b --azure-vm-size=` minds passes.
+[create_templates.azure]
+target_path = "/mngr/code/"
+build_arg__extend = ["--file=Dockerfile", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown; the
+# machine is up for the whole user session (see the aws template's comment).
+idle_mode = "disabled"
+# Same container-hardening `docker run` args as the aws template. They are
+# runtime-agnostic (harmless under plain runc; required under gVisor's runsc if
+# the provider block opts into it): see the aws template for the rationale.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
+# Same forwarding as the docker template; see comment there.
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# Install the outer-VM boot unit so the agent recovers after a VM reboot even
+# without the desktop app; identical to the aws template's unit.
+post_host_create_outer_command__extend = [
+    """
+set -eu
+cat > /usr/local/sbin/minds-outer-autostart.sh <<'BOOT'
+#!/bin/sh
+# On VM boot, start every mngr-managed agent container and relaunch the
+# system-services agent inside it (in its full host+agent env, via the shared
+# in-container start script). Containers are found by the fixed mngr label, so
+# this survives container rebuilds. `docker start` is a no-op if the container's
+# --restart policy already brought it back; `mngr start` is idempotent + flock-
+# serialized, so racing the desktop client is safe.
+set -u
+for cid in $(docker ps -aq --filter "label=com.imbue.mngr.host-id"); do
+    docker start "$cid" >/dev/null 2>&1 || true
+    docker exec --workdir / "$cid" bash -lc 'exec /mngr/code/scripts/minds_start_services_agent.sh' || true
+done
+BOOT
+chmod +x /usr/local/sbin/minds-outer-autostart.sh
+cat > /etc/systemd/system/minds-autostart.service <<'UNIT'
+[Unit]
+Description=Start the minds system-services agent on boot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/minds-outer-autostart.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable minds-autostart.service
+""",
+]
+
 # Template for imbue_cloud-leased pool hosts. minds invokes this as
 # `--template main --template imbue_cloud` (mirroring how the other modes
 # use `--template main --template <provider>`), so the imbue_cloud-specific
