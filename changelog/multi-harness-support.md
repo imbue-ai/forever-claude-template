@@ -354,6 +354,11 @@ Original notes on what that version did, before deletion:
     telling it to also check the project workspace for `AGENTS.md` -- the
     documented real-world workaround (confirmed via a real source, not
     invented), not a guess.
+  - **SUPERSEDED, see "Correction: antigravity's `global_instructions_md`
+    was never needed" further down.** This whole fix was itself still
+    wrong -- "confirmed via a real source" above did not mean the installed
+    binary; agy does have native per-project `AGENTS.md` discovery, and the
+    entire mechanism described here was removed.
   - 2 new tests (write-when-set, no-write-when-unset); full
     `antigravity_config_test.py` + `plugin_test.py` suite re-run: 133
     passed (131 + 2). Synced into `vendor/mngr` after confirming the diff
@@ -931,6 +936,47 @@ touch-fallback fix had no dedicated test added, since `DockviewWorkspace.ts`
 has no existing test file/pattern to extend, matching the precedent noted
 in Phase 4's auth-detection work). `create_worker_test.py`: 66 passed (was
 65).
+
+## Correction: antigravity's `global_instructions_md` was never needed
+
+The earlier `mngr_antigravity` entry below (the `AGENTS.md` / `GEMINI.md`
+section) said agy "has NO per-project AGENTS.md/CLAUDE.md auto-discovery of
+its own." That claim was never checked against the real, installed `agy`
+binary -- only inferred. Pushed as part of a real deployment attempt this
+branch was actually spun up against, which surfaced it: `mngr create`
+rejected `.mngr/settings.toml`'s `agent_types.antigravity` block with
+`Unknown fields: ['global_instructions_md', 'mcp_servers']` when built from
+a fresh `origin/main` clone of `imbue-ai/mngr` -- the field only ever
+existed in a local, unpushed checkout.
+
+Fixing that surfaced the deeper issue: `strings` on the installed `agy`
+binary shows its own bundled documentation directly contradicts the
+original claim -- "The system walks up from the current working directory
+to the repository root" discovering `GEMINI.md`/`AGENTS.md`, the same
+hierarchical discovery codex/opencode/claude already have for
+`AGENTS.md`/`CLAUDE.md`. The `global_instructions_md` field (writing a
+"please check AGENTS.md" instruction to a per-agent `$HOME/.gemini/GEMINI.md`)
+was solving a problem that didn't exist -- agy already finds the project's
+real `AGENTS.md` on its own. Not a functional bug (the redundant global file
+was simply never read, since it sits outside the directory-walk agy actually
+does), but real, shipped inaccuracy.
+
+Removed entirely rather than left misdocumented: the `global_instructions_md`
+field, `get_antigravity_global_instructions_path()`, its three dedicated
+tests, and `.mngr/settings.toml`'s usage of it. `mcp_servers` is unaffected
+and separately re-verified correct -- directly against the binary
+(`"mcpServers"` JSON key literal, `mcp_config.json` path) and cross-checked
+against the real `~/.gemini/config/mcp_config.json` file that mechanism
+produces on this machine's actual agy install.
+
+Pushed as a second commit on `imbue-ai/mngr@multi-harness-support`
+(`8031b80`), tested against a fresh worktree off `origin/main` before
+pushing (132 passed, 0 failed -- down from 135 by the 3 removed tests, no
+new failures). fct's `vendor/mngr` copy and `.mngr/settings.toml` updated to
+match and re-validated by loading the real settings.toml through the fixed,
+freshly-built `mngr` binary (`agent_types.antigravity` resolves with
+`mcp_servers` present and `global_instructions_md` absent, confirmed via a
+direct field-presence check, not just "no error printed").
 
 ## Open issues
 

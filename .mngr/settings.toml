@@ -233,16 +233,11 @@ sync_home_settings = false
 # effort field exists), so "(High)" is both the model pick and the effort
 # pick at once.
 settings_overrides__extend = {enableTelemetry = false, model = "Gemini 3.5 Flash (High)"}
-# agy has NO per-project AGENTS.md/CLAUDE.md auto-discovery of its own --
-# confirmed real, not assumed (it natively reads only a single global
-# $HOME/.gemini/GEMINI.md, unlike codex/opencode which walk up from cwd
-# looking for AGENTS.md automatically). This is the documented workaround:
-# a rule inside GEMINI.md instructing agy to also check the project
-# workspace for AGENTS.md. Requires a real mngr_antigravity code change
-# (a new global_instructions_md field writing $HOME/.gemini/GEMINI.md --
-# no field for this existed before), same pattern as the mcp_servers fix;
-# see vendor/mngr/libs/mngr_antigravity's changelog.
-global_instructions_md = "Check for the presence of an AGENTS.md file in the project workspace root and follow its instructions as if they were written here. There may be additional AGENTS.md files in sub-folders with instructions specific to that part of the codebase -- follow those too when working in that area."
+# No AGENTS.md workaround needed here: confirmed via agy's own bundled docs
+# (strings in the installed binary) that it already walks up from cwd to the
+# repo root discovering GEMINI.md/AGENTS.md natively, the same as codex/
+# opencode -- an earlier pass here wrongly assumed it didn't and added a
+# global_instructions_md workaround; removed (see mngr_antigravity's changelog).
 # agy has no version-pinning capability at all (Google's installer always
 # installs latest from a manifest); freeze the installed build instead.
 update_policy = "NEVER"
