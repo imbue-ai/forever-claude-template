@@ -611,6 +611,14 @@ class AgentDetails(FrozenModel):
     state: AgentLifecycleState = Field(
         description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)"
     )
+    main_pid: int | None = Field(
+        default=None,
+        description=(
+            "PID of the agent's main process (e.g. claude) on the host, populated only for "
+            "local-provider agents that are running; None for remote providers and stopped agents. "
+            "Watchable via psutil only because a local agent runs on the same machine as the reader."
+        ),
+    )
     url: str | None = Field(default=None, description="Agent URL (reported)")
     start_time: datetime | None = Field(default=None, description="Last start time (reported)")
     runtime_seconds: float | None = Field(default=None, description="Runtime in seconds")
@@ -747,6 +755,14 @@ class BoundedProviderDiscoveryResult(FrozenModel):
 
     hosts: tuple[DiscoveredHost, ...] = Field(description="Hosts read within the per-host timeout")
     agents: tuple[DiscoveredAgent, ...] = Field(description="Agents read within the per-host timeout")
+    # Per-host SSH info the streaming discovery poller re-emits as ``HOST_SSH_INFO`` events.
+    # A remote provider that knows a host's SSH endpoint at discovery time populates this so
+    # consumers that tunnel to the host (e.g. the minds system_interface forward) get the
+    # endpoint from the streaming path, not only from an occasional full ``mngr list``. Empty
+    # for providers that surface no SSH info (local hosts, or providers that don't populate it).
+    host_ssh_infos: tuple[tuple[HostId, SSHInfo], ...] = Field(
+        default=(), description="Per-host SSH info to emit as HOST_SSH_INFO events"
+    )
     unknown_host_ids: tuple[HostId, ...] = Field(
         default=(), description="Hosts whose read exceeded the per-host timeout (state explicitly unknown)"
     )
