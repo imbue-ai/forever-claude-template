@@ -36,8 +36,20 @@ sys.path.insert(
 )
 
 from oom_priority import bands
-from oom_priority.agent_identity import is_worker_agent
+from oom_priority.agent_identity import is_primary_agent, is_worker_agent
 from oom_priority.registry import record_agent_pid
+
+
+def _band_for(agent_name: str, *, is_worker: bool) -> int:
+    """Pick the launch band for ``agent_name``.
+
+    The primary (services) agent is pinned to the never-shed ``PRIMARY_AGENT``
+    band; a worker to ``WORKER_AGENT``; everything else to ``USER_AGENT`` (the
+    system_interface prioritizer later re-tags live chats within their own range,
+    but this is the protected default until it does)."""
+    if is_primary_agent(agent_name):
+        return bands.PRIMARY_AGENT
+    return bands.WORKER_AGENT if is_worker else bands.USER_AGENT
 
 
 def _tag_self() -> None:
@@ -47,10 +59,12 @@ def _tag_self() -> None:
     if not agent_name:
         return
     is_worker = is_worker_agent(agent_name)
-    band = bands.WORKER_AGENT if is_worker else bands.USER_AGENT
+    band = _band_for(agent_name, is_worker=is_worker)
     pid = os.getpid()
     bands.set_oom_score_adj(pid, band)
-    record_agent_pid(pid, agent_name, is_worker)
+    # Record the stable agent id too (when mngr exposes it) so the prioritizer can
+    # resolve this pid by id to re-tag the chat at runtime.
+    record_agent_pid(pid, agent_name, is_worker, agent_id=os.environ.get("MNGR_AGENT_ID") or None)
 
 
 def main() -> None:

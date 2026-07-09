@@ -35,8 +35,14 @@ def is_process_alive(pid: int) -> bool:
     return (_PROC_DIR / str(pid)).exists()
 
 
-def record_agent_pid(pid: int, agent_name: str, is_worker: bool) -> None:
+def record_agent_pid(pid: int, agent_name: str, is_worker: bool, agent_id: str | None = None) -> None:
     """Register ``pid`` as the main process of ``agent_name``.
+
+    ``agent_id`` (mngr's stable per-agent id) is recorded alongside the name so a
+    consumer that knows only the id -- e.g. the system_interface OOM prioritizer,
+    which re-tags a chat by id -- can resolve the live pid via
+    ``lookup_pid_by_agent_id``. It is optional so older callers/tests that pass
+    only a name still work.
 
     Overwrites any prior entry for the same pid (a reused pid), and prunes
     entries whose process no longer exists so the directory does not grow without
@@ -48,7 +54,10 @@ def record_agent_pid(pid: int, agent_name: str, is_worker: bool) -> None:
     # the entry we are about to add (the caller's own pid is live, so it is never
     # the one pruned).
     prune_dead_pids()
-    payload = json.dumps({"agent_name": agent_name, "is_worker": is_worker})
+    record: dict[str, object] = {"agent_name": agent_name, "is_worker": is_worker}
+    if agent_id is not None:
+        record["agent_id"] = agent_id
+    payload = json.dumps(record)
     _entry_path(pid).write_text(payload)
 
 
@@ -62,6 +71,34 @@ def lookup_agent(pid: int) -> dict | None:
     if not isinstance(data, dict) or "agent_name" not in data:
         return None
     return data
+
+
+def lookup_pid_by_agent_id(agent_id: str, is_alive: Callable[[int], bool] = is_process_alive) -> int | None:
+    """Return the live main-process pid recorded for ``agent_id``, or None.
+
+    Scans the registry for an entry whose ``agent_id`` matches and whose pid is
+    still a running process, so a consumer holding only the id (the OOM
+    prioritizer) can re-tag that agent's ``oom_score_adj``. Returns None when no
+    live entry matches -- e.g. a dormant chat with no running process, an id
+    recorded before ``agent_id`` was captured, or a stale entry whose pid has
+    exited. ``is_alive`` is injectable for testing without a real process tree.
+    """
+    directory = agent_pids_dir()
+    if not directory.is_dir():
+        return None
+    for entry in directory.iterdir():
+        if entry.suffix != ".json" or not entry.stem.isdigit():
+            continue
+        try:
+            data = json.loads(entry.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict) or data.get("agent_id") != agent_id:
+            continue
+        pid = int(entry.stem)
+        if is_alive(pid):
+            return pid
+    return None
 
 
 def prune_dead_pids(is_alive: Callable[[int], bool] = is_process_alive) -> None:

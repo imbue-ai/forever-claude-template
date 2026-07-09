@@ -26,12 +26,12 @@ _spec.loader.exec_module(wrapper)
 from oom_priority.registry import lookup_agent
 
 
-def _write_agent_record(host_dir: Path, name: str, *, is_worker: bool) -> None:
-    """Seed the host agent record ``is_worker_agent`` reads to classify ``name``."""
+def _write_agent_record(host_dir: Path, name: str, *, is_worker: bool, labels: dict | None = None) -> None:
+    """Seed the host agent record the identity checks read to classify ``name``."""
     agent_dir = host_dir / "agents" / "id"
     agent_dir.mkdir(parents=True)
-    labels = {"agent_created": "true"} if is_worker else {"user_created": "true"}
-    (agent_dir / "data.json").write_text(json.dumps({"name": name, "labels": labels}))
+    resolved = labels if labels is not None else ({"agent_created": "true"} if is_worker else {"user_created": "true"})
+    (agent_dir / "data.json").write_text(json.dumps({"name": name, "labels": resolved}))
 
 
 def test_tag_self_classifies_worker_into_the_worker_band(
@@ -68,6 +68,40 @@ def test_tag_self_classifies_unlabelled_agent_into_the_user_band(
     entry = lookup_agent(os.getpid())
     assert entry is not None
     assert entry["is_worker"] is False
+
+
+def test_band_for_pins_the_primary_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The primary (services) agent is pinned to the never-shed PRIMARY_AGENT band,
+    ahead of the worker/user classification."""
+    host = tmp_path / "host"
+    _write_agent_record(host, "services", is_worker=False, labels={"is_primary": "true", "user_created": "true"})
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host))
+    assert wrapper._band_for("services", is_worker=False) == wrapper.bands.PRIMARY_AGENT
+
+
+def test_band_for_classifies_worker_and_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    host = tmp_path / "host"
+    _write_agent_record(host, "u1", is_worker=False)
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host))
+    # No is_primary label -> ordinary worker/user bands.
+    assert wrapper._band_for("u1", is_worker=True) == wrapper.bands.WORKER_AGENT
+    assert wrapper._band_for("u1", is_worker=False) == wrapper.bands.USER_AGENT
+
+
+def test_tag_self_records_the_agent_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stable agent id is recorded so the prioritizer can resolve the pid by id."""
+    monkeypatch.setenv("OOM_PRIORITY_RUNTIME_DIR", str(tmp_path / "rt"))
+    host = tmp_path / "host"
+    _write_agent_record(host, "u1", is_worker=False)
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host))
+    monkeypatch.setenv("MNGR_AGENT_NAME", "u1")
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-xyz")
+
+    wrapper._tag_self()
+
+    entry = lookup_agent(os.getpid())
+    assert entry is not None
+    assert entry["agent_id"] == "agent-xyz"
 
 
 def test_tag_self_noops_without_agent_name(

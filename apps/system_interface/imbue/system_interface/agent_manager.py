@@ -9,6 +9,8 @@ from typing import Any
 from typing import Final
 
 from loguru import logger as _loguru_logger
+from oom_priority.bands import set_oom_score_adj
+from oom_priority.registry import lookup_pid_by_agent_id
 from pydantic import Field
 from watchdog.events import FileMovedEvent
 from watchdog.events import FileSystemEvent
@@ -50,6 +52,7 @@ from imbue.system_interface.agent_discovery import read_claude_config_dir_from_e
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
+from imbue.system_interface.oom_prioritizer import ChatOomPrioritizer
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
@@ -347,6 +350,11 @@ class AgentManager:
     # both discovery paths -- the per-agent delta and the full snapshot -- open
     # each new assist chat exactly once without reopening it on later snapshots.
     _auto_opened_assist_ids: set[str]
+    # Re-tags chat agents' OOM ``oom_score_adj`` from live UI activity (open /
+    # visible / recently-messaged). Fed by the ``/api/activity`` endpoint (via
+    # ``record_activity``) and reapplied each lifecycle-poll tick so a revived
+    # chat's freshly-spawned process is tagged despite the launch race.
+    _oom_prioritizer: ChatOomPrioritizer
 
     @classmethod
     def build(
@@ -391,6 +399,13 @@ class AgentManager:
         manager._lifecycle_state_by_agent = {}
         manager._lifecycle_poll_stop = threading.Event()
         manager._auto_opened_assist_ids = set()
+        # Built last: its ``list_chat_agent_ids`` callback reads ``_agents`` /
+        # ``_lock``, which are set above.
+        manager._oom_prioritizer = ChatOomPrioritizer(
+            list_chat_agent_ids=manager.get_chat_agent_ids,
+            resolve_pid=lookup_pid_by_agent_id,
+            set_adj=set_oom_score_adj,
+        )
         return manager
 
     def start(self) -> None:
@@ -534,6 +549,36 @@ class AgentManager:
                 }
                 for a in self._agents.values()
             ]
+
+    def get_chat_agent_ids(self) -> list[str]:
+        """Ids of the agents the OOM prioritizer manages: chat agents only.
+
+        Excludes workers (``agent_created=true``) and the primary services agent
+        (``is_primary=true``); those keep their launch bands -- workers maximally
+        expendable, the primary pinned -- so no UI activity moves their score.
+        Remote agents are left in (they have no local pid, so the prioritizer's
+        pid lookup skips them harmlessly).
+        """
+        with self._lock:
+            return [
+                agent.id
+                for agent in self._agents.values()
+                if agent.labels.get("agent_created") != "true" and agent.labels.get("is_primary") != "true"
+            ]
+
+    def record_activity(
+        self,
+        *,
+        open_ids: list[str],
+        visible_ids: list[str],
+        messaged_id: str | None = None,
+    ) -> None:
+        """Feed a frontend activity report to the OOM prioritizer (re-tags chats)."""
+        self._oom_prioritizer.record_activity(
+            open_ids=open_ids,
+            visible_ids=visible_ids,
+            messaged_id=messaged_id,
+        )
 
     def get_proto_agents(self) -> list[dict[str, Any]]:
         """Return list of proto-agents (agents being created)."""
@@ -918,6 +963,10 @@ class AgentManager:
         while not self._lifecycle_poll_stop.wait(timeout=_LIFECYCLE_POLL_INTERVAL_SECONDS):
             try:
                 self._poll_lifecycle_states()
+                # Re-apply chat OOM bands each tick so a chat revived since the last
+                # activity report (its process spawned a beat after the message) is
+                # tagged, and a chat whose process just exited is dropped.
+                self._oom_prioritizer.reapply()
             except (OSError, ValueError, RuntimeError, MngrError) as e:
                 _loguru_logger.opt(exception=e).warning("Lifecycle poll iteration failed (continuing)")
 

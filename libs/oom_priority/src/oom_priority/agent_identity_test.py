@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from oom_priority.agent_identity import is_worker_agent
+from oom_priority.agent_identity import is_primary_agent, is_worker_agent
 
 
 def _write_agent(host_dir: Path, agent_id: str, name: str, labels: dict) -> None:
@@ -41,3 +41,25 @@ def test_unknown_agent_defaults_to_not_worker(
 def test_no_host_dir_defaults_to_not_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
     assert is_worker_agent("anything") is False
+
+
+def test_is_primary_label_is_recognised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    _write_agent(tmp_path, "id-1", "services", {"is_primary": "true", "user_created": "true"})
+    assert is_primary_agent("services") is True
+    # The primary agent is not a worker -- the two classes are disjoint.
+    assert is_worker_agent("services") is False
+
+
+def test_non_primary_agents_are_not_primary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    _write_agent(tmp_path, "id-1", "chat", {"user_created": "true"})
+    assert is_primary_agent("chat") is False
+
+
+def test_unknown_agent_is_not_primary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    _write_agent(tmp_path, "id-1", "someone-else", {"is_primary": "true"})
+    # Only an agent we can positively identify as primary is pinned; a miss falls
+    # back to the ordinary (shed-able) default rather than accidentally pinning.
+    assert is_primary_agent("missing") is False

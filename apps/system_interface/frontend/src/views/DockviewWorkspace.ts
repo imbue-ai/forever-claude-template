@@ -29,6 +29,7 @@ import {
   removeActivityOverlayListener,
 } from "../models/PendingMessages";
 import { reloadInterface } from "../reload";
+import { reportActivity } from "../models/activityReporter";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
   addAgentsUpdatedListener,
@@ -231,6 +232,9 @@ function createMithrilRenderer(
         // visibility -- in particular so ChatPanel restores its scroll position
         // on the first redraw after the tab is shown again.
         m.redraw();
+        // A tab switch changes which chat is visible; report so the OOM
+        // prioritizer re-scores (a visible chat is more protected).
+        reportChatTabActivity();
       });
       m.mount(element, { view: () => m(component, { ...attrs, isVisible: panelVisible }) });
     },
@@ -460,6 +464,27 @@ function createCustomTab(options: { id: string; name: string }): {
       disposables.length = 0;
     },
   };
+}
+
+/** Report the current open/visible chat tabs to the backend (OOM priority).
+ *
+ *  Computed from ``dockview.panels`` (the live panel set) rather than
+ *  ``panelParams`` so a just-removed panel isn't reported as still open when
+ *  this fires from ``onDidLayoutChange`` before ``onDidRemovePanel`` clears its
+ *  params. Only chat panels are reported; the report is debounced in the
+ *  reporter, so calling it on every layout/visibility change is cheap. */
+function reportChatTabActivity(): void {
+  if (!dockview) return;
+  const open: string[] = [];
+  const visible: string[] = [];
+  for (const panel of dockview.panels) {
+    const pp = panelParams.get(panel.id);
+    if (pp?.panelType !== "chat") continue;
+    const chatId = pp.chatAgentId ?? pp.agentId;
+    open.push(chatId);
+    if (panel.api.isVisible) visible.push(chatId);
+  }
+  reportActivity({ open, visible });
 }
 
 /** Get the set of agent IDs that currently have open chat panels. */
@@ -2261,6 +2286,9 @@ function initializeDockview(parentElement: HTMLElement): void {
   // Listen for layout changes and auto-save
   dv.api.onDidLayoutChange(() => {
     scheduleSave();
+    // Opening, closing, or moving a tab changes the open/visible chat set;
+    // report it so the OOM prioritizer re-scores the affected chats.
+    reportChatTabActivity();
   });
 
   // Clean up params on panel removal. We DON'T reopen anything when

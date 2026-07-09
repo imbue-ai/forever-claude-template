@@ -5,6 +5,7 @@
 
 import m from "mithril";
 import { apiUrl } from "../base-path";
+import { reportMessaged } from "./activityReporter";
 import { reconcilePendingMessages } from "./PendingMessages";
 
 export interface SubagentMetadata {
@@ -573,6 +574,9 @@ export async function sendMessage(agentId: string, message: string): Promise<voi
     params: { agentId },
     body: { message: message.trim() },
   });
+  // Bump this chat's OOM recency now that a message was accepted, so an actively
+  // messaged chat is more protected from a memory shed than idler ones.
+  reportMessaged(agentId);
 }
 
 export async function interruptAgent(agentId: string): Promise<void> {

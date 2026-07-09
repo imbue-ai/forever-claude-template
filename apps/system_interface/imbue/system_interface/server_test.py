@@ -10,6 +10,7 @@ import pytest
 from flask import Flask
 from flask.testing import FlaskClient
 from mngr_cli_contract.contract import assert_mngr_argv_valid
+from oom_priority import bands
 
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.errors import AgentStartError
@@ -21,6 +22,7 @@ from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.models import AgentStateItem
+from imbue.system_interface.oom_prioritizer import ChatOomPrioritizer
 from imbue.system_interface.server import _DEFAULT_TAIL_COUNT
 from imbue.system_interface.server import _build_destroy_command
 from imbue.system_interface.server import _stream_filtered_events
@@ -281,6 +283,61 @@ def test_send_message_success() -> None:
     # The endpoint routes through AgentManager.send_message_to_agent, which addresses
     # the agent by id (the live cache supplies the known location as the 3rd arg).
     assert messenger.sent == [(agent_id, "hello")]
+
+
+def _manager_with_capturing_prioritizer(
+    writes: list[tuple[int, int]], pids: dict[str, int]
+) -> AgentManager:
+    """An AgentManager whose OOM prioritizer captures its band writes.
+
+    The prioritizer collaborator is swapped for one wired to a fake pid resolver
+    and a capturing ``set_adj`` (mirrors how other tests seed ``_agents``), so a
+    POST to ``/api/activity`` drives the real endpoint -> ``record_activity`` ->
+    prioritizer -> ``get_chat_agent_ids`` -> ``set_adj`` path without touching
+    ``/proc``.
+    """
+    manager = AgentManager.build(WebSocketBroadcaster())
+    manager._oom_prioritizer = ChatOomPrioritizer(
+        list_chat_agent_ids=manager.get_chat_agent_ids,
+        resolve_pid=lambda cid: pids.get(cid),
+        set_adj=lambda pid, adj: (writes.append((pid, adj)), True)[1],
+    )
+    return manager
+
+
+def test_activity_endpoint_retags_a_chat_from_the_report() -> None:
+    """A well-formed report flows through to re-tag the reported chat's band."""
+    writes: list[tuple[int, int]] = []
+    manager = _manager_with_capturing_prioritizer(writes, pids={"chat": 4242})
+    with manager._lock:
+        manager._agents["chat"] = AgentStateItem(
+            id="chat", name="chat", state="RUNNING", labels={"user_created": "true"}, work_dir=None
+        )
+    client = create_application(build_test_state(agent_manager=manager)).test_client()
+
+    response = client.post("/api/activity", json={"open": ["chat"], "visible": ["chat"], "messaged": "chat"})
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "ok"
+    # Open + visible + most-recently messaged -> the most-protected chat band.
+    assert writes == [(4242, bands.chat_agent_oom_score_adj(is_open=True, is_visible=True, recency_rank=0))]
+
+
+def test_activity_endpoint_defaults_missing_fields() -> None:
+    """Omitted fields default to empty sets / no message, so a bare ping is valid
+    and re-tags a known chat as the most-expendable (closed, unmessaged) band."""
+    writes: list[tuple[int, int]] = []
+    manager = _manager_with_capturing_prioritizer(writes, pids={"chat": 4242})
+    with manager._lock:
+        manager._agents["chat"] = AgentStateItem(
+            id="chat", name="chat", state="RUNNING", labels={"user_created": "true"}, work_dir=None
+        )
+    client = create_application(build_test_state(agent_manager=manager)).test_client()
+
+    response = client.post("/api/activity", json={})
+
+    assert response.status_code == 200
+    assert writes == [(4242, bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=0))]
 
 
 def test_interrupt_agent_returns_404_for_unknown_agent(client: FlaskClient) -> None:

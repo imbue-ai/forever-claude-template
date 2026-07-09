@@ -212,6 +212,27 @@ def test_get_agents_serialized(agent_manager: AgentManager) -> None:
     assert by_id["a2"]["state"] == "DONE"
 
 
+def test_get_chat_agent_ids_excludes_workers_and_primary(agent_manager: AgentManager) -> None:
+    """Only chat agents are managed by the OOM prioritizer; workers and the
+    primary services agent are excluded so their launch bands are never moved."""
+    with agent_manager._lock:
+        agent_manager._agents["chat"] = AgentStateItem(
+            id="chat", name="chat", state="RUNNING", labels={"user_created": "true"}, work_dir=None
+        )
+        agent_manager._agents["worker"] = AgentStateItem(
+            id="worker", name="worker", state="RUNNING", labels={"agent_created": "true"}, work_dir=None
+        )
+        agent_manager._agents["primary"] = AgentStateItem(
+            id="primary", name="primary", state="RUNNING", labels={"is_primary": "true"}, work_dir=None
+        )
+        # An unlabelled agent is treated as a chat (the protective default).
+        agent_manager._agents["bare"] = AgentStateItem(
+            id="bare", name="bare", state="RUNNING", labels={}, work_dir=None
+        )
+
+    assert set(agent_manager.get_chat_agent_ids()) == {"chat", "bare"}
+
+
 def test_get_applications_serialized(agent_manager: AgentManager) -> None:
     with agent_manager._lock:
         agent_manager._applications = [

@@ -28,9 +28,56 @@ from typing import Final
 # oom_score_adj value per band, most protected first. Tunable. Spaced so the
 # ordering is unambiguous and there is room to interpose a band later.
 PROTECTED: Final[int] = 0
+# The workspace's primary (services) agent. Pinned to the same never-shed band as
+# the infrastructure (``PROTECTED``): shedding it would tear down the workspace's
+# supervised services and make it report a broken state, so it must outlive every
+# other agent and service. Positive-only bands cannot express a true "never kill"
+# (that needs ``CAP_SYS_RESOURCE``, which the container lacks), so this is the
+# strongest available protection -- shed dead last, tied with sshd/supervisord.
+PRIMARY_AGENT: Final[int] = PROTECTED
 USER_AGENT: Final[int] = 300
 WORKER_AGENT: Final[int] = 600
 AGENT_SUBPROCESS: Final[int] = 900
+
+# Dynamic chat-agent band. A chat agent's expendability is re-tagged at runtime
+# from live UI activity (see the system_interface ``ChatOomPrioritizer``): the
+# more a chat is engaged with, the more protected it is, but every chat always
+# stays strictly below ``WORKER_AGENT`` (workers are shed before any chat) and
+# strictly above the service bands (a chat revives on its next message, so it is
+# shed before a service). ``chat_agent_oom_score_adj`` maps the activity signals
+# to a value in ``[CHAT_AGENT_FLOOR, CHAT_AGENT_BASE]``.
+CHAT_AGENT_BASE: Final[int] = 560  # closed tab, least-recently messaged (most expendable chat)
+CHAT_AGENT_FLOOR: Final[int] = 300  # open + visible + most-recently messaged (most protected chat)
+_CHAT_OPEN_BONUS: Final[int] = 80
+_CHAT_VISIBLE_BONUS: Final[int] = 80
+_CHAT_RECENCY_MAX_BONUS: Final[int] = 120
+_CHAT_RECENCY_STEP: Final[int] = 15
+
+
+def chat_agent_oom_score_adj(*, is_open: bool, is_visible: bool, recency_rank: int) -> int:
+    """Map a chat agent's live activity to its ``oom_score_adj``.
+
+    Lower is more protected. Starting from ``CHAT_AGENT_BASE`` (a closed,
+    stale chat), each engagement signal lowers the score:
+
+    - ``is_open``: the chat has an open tab in the workspace UI.
+    - ``is_visible``: the chat's tab is currently visible (implies open).
+    - ``recency_rank``: this chat's position when all chats are sorted by
+      last-message time, newest first (0 = most recently messaged). The bonus
+      decays with rank, so more-recently-messaged chats are more protected than
+      their peers.
+
+    The result is clamped to ``[CHAT_AGENT_FLOOR, CHAT_AGENT_BASE]`` so it always
+    sits strictly between the service bands and ``WORKER_AGENT``.
+    """
+    recency_bonus = max(0, _CHAT_RECENCY_MAX_BONUS - _CHAT_RECENCY_STEP * max(0, recency_rank))
+    adj = CHAT_AGENT_BASE
+    if is_open:
+        adj -= _CHAT_OPEN_BONUS
+    if is_visible:
+        adj -= _CHAT_VISIBLE_BONUS
+    adj -= recency_bonus
+    return max(CHAT_AGENT_FLOOR, min(CHAT_AGENT_BASE, adj))
 
 # Supervisord service bands, keyed by the service key passed to
 # ``scripts/oom_tag_service.py``. Every value sits strictly between PROTECTED (0)
