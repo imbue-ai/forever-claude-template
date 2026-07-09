@@ -85,3 +85,18 @@ web UI reconnects, with no need to reopen anything. Closing a blinking tab dismi
 that run (it will not immediately reopen), and a genuinely newer run brings it back.
 The system interface reads each agent's labels straight from the discovery stream,
 so the Caretaker is reliably recognized and the hidden services agent stays hidden.
+
+**Reconnecting on wake so overnight runs actually surface.** The workspace UI now
+reconnects its live-updates WebSocket whenever the machine wakes, the window
+refocuses, or the network returns. That connection rides an SSH tunnel from the
+webview to the workspace's system interface; on sleep the tunnel dies but the
+browser never fires a close event -- it leaves the socket in a phantom "OPEN"
+state -- so the existing close-driven reconnect never ran, and a Caretaker run
+that fired overnight stayed invisible until you manually reloaded. Now returning
+to the workspace drops the stale socket and opens a fresh one, whose snapshot
+re-surfaces (and blinks) anything missed. The one case this cannot catch is a
+connection that dies while the window stays open and focused the whole time --
+rare on a local workspace, since nothing but sleep really breaks a tunneled
+localhost connection, but real once a workspace runs on a remote host where an
+idle connection can be reaped with no close event. A server-side heartbeat plus a
+client-side silence watchdog would close that gap and is a natural follow-up.

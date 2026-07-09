@@ -191,6 +191,52 @@ function scheduleReconnect(): void {
   }, reconnectBackoff.nextDelay());
 }
 
+// The live-updates WebSocket rides an SSH tunnel from this webview (on the
+// user's machine) to the workspace's system_interface (in the container). When
+// the machine sleeps, that tunnel dies but the browser never fires ``onclose``
+// -- the socket is left in a phantom "OPEN" state, so the ``onclose``-driven
+// reconnect above never runs and the view silently shows pre-sleep state (a
+// Caretaker run that started overnight, say, never surfaces). Nothing on the
+// client can distinguish a live socket from a dead one, so we treat "the user
+// came back" as the signal: on wake / refocus / network-restore we drop
+// whatever socket we hold and open a fresh one, whose snapshot re-surfaces
+// anything missed (see ``highlightSurface`` for why re-snapshotting is enough).
+let wakeReconnectScheduled = false;
+
+function reconnectOnWake(): void {
+  // A single wake fires visibilitychange + focus + online in the same tick;
+  // coalesce them into one reconnect (the flag clears on the next macrotask).
+  if (wakeReconnectScheduled) {
+    return;
+  }
+  wakeReconnectScheduled = true;
+  setTimeout(() => {
+    wakeReconnectScheduled = false;
+  }, 0);
+  if (ws !== null) {
+    // Detach handlers before closing so this dead socket's late ``onclose``
+    // can't null out the replacement we open below (which would also schedule
+    // a duplicate reconnect against the fresh socket).
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.close();
+    ws = null;
+  }
+  connect();
+}
+
+function registerWakeReconnect(): void {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      reconnectOnWake();
+    }
+  });
+  window.addEventListener("focus", reconnectOnWake);
+  window.addEventListener("online", reconnectOnWake);
+}
+
 function handleEvent(event: WsEvent): void {
   switch (event.type) {
     case "agents_updated": {
@@ -252,6 +298,7 @@ function handleEvent(event: WsEvent): void {
 
 export function initAgentManager(): void {
   connect();
+  registerWakeReconnect();
 }
 
 export function isConnected(): boolean {
