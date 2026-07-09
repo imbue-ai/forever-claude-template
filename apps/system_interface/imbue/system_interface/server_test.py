@@ -1,9 +1,11 @@
 """Tests for the Flask server."""
 
+import io
 import json
 import queue
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import quote
 
 import pytest
 from flask import Flask
@@ -24,6 +26,8 @@ from imbue.system_interface.server import _DEFAULT_TAIL_COUNT
 from imbue.system_interface.server import _build_destroy_command
 from imbue.system_interface.server import _stream_filtered_events
 from imbue.system_interface.server import create_application
+from imbue.system_interface.testing import RecordingMngrMessenger
+from imbue.system_interface.testing import build_test_state
 from imbue.system_interface.testing import close_ws
 from imbue.system_interface.testing import open_ws
 from imbue.system_interface.testing import serve_app
@@ -39,7 +43,7 @@ def config() -> Config:
 
 @pytest.fixture
 def app(config: Config) -> Flask:
-    return create_application(config)
+    return create_application(build_test_state(config=config))
 
 
 @pytest.fixture
@@ -54,7 +58,7 @@ def test_index_returns_html_when_static_exists(client: FlaskClient, tmp_path: Pa
     (static_dir / "index.html").write_text("<html><body>test</body></html>")
 
     with patch("imbue.system_interface.server.STATIC_DIRECTORY", static_dir):
-        test_client = create_application().test_client()
+        test_client = create_application(build_test_state()).test_client()
         response = test_client.get("/")
         assert response.status_code == 200
         assert "test" in response.text
@@ -66,7 +70,7 @@ def test_index_returns_not_built_when_no_static(client: FlaskClient, tmp_path: P
     empty_dir.mkdir()
 
     with patch("imbue.system_interface.server.STATIC_DIRECTORY", empty_dir):
-        test_client = create_application().test_client()
+        test_client = create_application(build_test_state()).test_client()
         response = test_client.get("/")
         assert response.status_code == 200
         assert "npm run build" in response.text
@@ -105,6 +109,80 @@ def test_send_message_for_unknown_agent(client: FlaskClient) -> None:
     with patch("imbue.system_interface.server.discover_agents", return_value=[]):
         response = client.post("/api/agents/nonexistent/message", json={"message": "hello"})
     assert response.status_code == 404
+
+
+def _upload_relative_path(stored_path: str) -> str:
+    """Extract the ``<subdir>/<name>`` part of an absolute upload path."""
+    return stored_path.split("/uploads/", 1)[1]
+
+
+def test_upload_attachment_stores_file_and_returns_path(client: FlaskClient) -> None:
+    """Uploading a file stores it under uploads/ and returns its path and size."""
+    response = client.post(
+        "/api/uploads",
+        data={"file": (io.BytesIO(b"image-bytes"), "diagram.png")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 201
+    data = response.get_json()
+    assert "/uploads/" in data["path"]
+    assert data["path"].endswith("/diagram.png")
+    assert data["size"] == len(b"image-bytes")
+    assert Path(data["path"]).read_bytes() == b"image-bytes"
+
+
+def test_upload_attachment_without_file_returns_400(client: FlaskClient) -> None:
+    """Posting with no file part is a 400."""
+    response = client.post("/api/uploads", data={}, content_type="multipart/form-data")
+
+    assert response.status_code == 400
+
+
+def test_serve_attachment_returns_stored_bytes(client: FlaskClient) -> None:
+    """A stored attachment can be fetched back for preview."""
+    upload = client.post(
+        "/api/uploads",
+        data={"file": (io.BytesIO(b"hello-bytes"), "note.txt")},
+        content_type="multipart/form-data",
+    )
+    relative_path = _upload_relative_path(upload.get_json()["path"])
+
+    response = client.get(f"/api/uploads/{relative_path}")
+
+    assert response.status_code == 200
+    assert response.data == b"hello-bytes"
+
+
+def test_serve_attachment_missing_returns_404(client: FlaskClient) -> None:
+    """Fetching an unknown attachment is a 404."""
+    response = client.get("/api/uploads/deadbeef/missing.png")
+
+    assert response.status_code == 404
+
+
+def test_delete_attachment_removes_stored_file(client: FlaskClient) -> None:
+    """Deleting an attachment removes it from disk and from later fetches."""
+    upload = client.post(
+        "/api/uploads",
+        data={"file": (io.BytesIO(b"bye-bytes"), "remove-me.txt")},
+        content_type="multipart/form-data",
+    )
+    stored_path = upload.get_json()["path"]
+    relative_path = _upload_relative_path(stored_path)
+
+    delete_response = client.delete(f"/api/uploads/{relative_path}")
+
+    assert delete_response.status_code == 200
+    assert not Path(stored_path).exists()
+    assert client.get(f"/api/uploads/{relative_path}").status_code == 404
+
+
+def test_delete_attachment_missing_is_ok(client: FlaskClient) -> None:
+    """Deleting an unknown attachment still reports success (idempotent)."""
+    response = client.delete("/api/uploads/deadbeef/missing.png")
+
+    assert response.status_code == 200
 
 
 def test_get_events_with_session_files(client: FlaskClient, tmp_path: Path) -> None:
@@ -257,7 +335,7 @@ def test_get_events_caps_initial_load_to_tail(client: FlaskClient, tmp_path: Pat
         assert len(zero_limit.get_json()["events"]) == _DEFAULT_TAIL_COUNT
 
 
-def test_send_message_success(client: FlaskClient) -> None:
+def test_send_message_success() -> None:
     """Sending a message to a known agent addresses it by id and succeeds."""
     agent_id = "agent-00000000000000000000000000000001"
     agent_info = AgentInfo(
@@ -267,19 +345,17 @@ def test_send_message_success(client: FlaskClient) -> None:
         agent_state_dir=Path("/tmp/test"),
         claude_config_dir=Path("/tmp/.claude"),
     )
-    with (
-        patch("imbue.system_interface.server._find_agent", return_value=agent_info),
-        patch("imbue.system_interface.agent_manager.send_message", return_value=True) as mock_send,
-    ):
+    messenger = RecordingMngrMessenger()
+    manager = AgentManager.build(WebSocketBroadcaster(), messenger=messenger)
+    client = create_application(build_test_state(agent_manager=manager)).test_client()
+    with patch("imbue.system_interface.server._find_agent", return_value=agent_info):
         response = client.post(f"/api/agents/{agent_id}/message", json={"message": "hello"})
 
     assert response.status_code == 200
     assert response.get_json()["status"] == "ok"
-    assert mock_send.call_count == 1
     # The endpoint routes through AgentManager.send_message_to_agent, which addresses
-    # the agent by id and supplies the live cache's known location as the 3rd arg.
-    assert mock_send.call_args.args[0] == agent_id
-    assert mock_send.call_args.args[1] == "hello"
+    # the agent by id (the live cache supplies the known location as the 3rd arg).
+    assert messenger.sent == [(agent_id, "hello")]
 
 
 def test_interrupt_agent_returns_404_for_unknown_agent(client: FlaskClient) -> None:
@@ -436,6 +512,101 @@ def test_save_layout_rejects_invalid_json(
     assert response.status_code == 400
 
 
+def test_terminal_banner_defaults_to_not_dismissed(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no saved preference, the terminal banner reports not-dismissed."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+    response = client.get("/api/terminals/banner-dismissed")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"dismissed": False}
+
+
+def test_terminal_banner_dismissal_round_trips(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A persisted "never show again" is reflected on the next read."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
+
+    post_response = client.post("/api/terminals/banner-dismissed", json={"dismissed": True})
+    assert post_response.status_code == 200
+    assert post_response.get_json()["dismissed"] is True
+
+    get_response = client.get("/api/terminals/banner-dismissed")
+    assert get_response.get_json() == {"dismissed": True}
+
+
+def test_destroy_terminal_refuses_agent_prefixed_session(client: FlaskClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The destroy endpoint never kills an mngr agent's tmux session."""
+    monkeypatch.setenv("MNGR_PREFIX", "mngr-")
+    response = client.post("/api/terminals/mngr-alice/destroy")
+
+    assert response.status_code == 400
+
+
+def test_terminal_notify_rejects_unknown_kind(client: FlaskClient) -> None:
+    """An unrecognized notify kind is a 400."""
+    response = client.post("/api/terminals/notify", json={"kind": "bogus"})
+
+    assert response.status_code == 400
+
+
+def test_terminal_notify_session_renamed_broadcasts(client: FlaskClient) -> None:
+    """A rename notification always broadcasts (matched by session_id downstream)."""
+    response = client.post(
+        "/api/terminals/notify",
+        json={"kind": "session-renamed", "session_name": "terminal-2", "session_id": "$4"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "broadcast": True}
+
+
+def test_terminal_notify_session_changed_skips_when_client_unresolved(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session switch from a client with no ttyd mapping does not broadcast."""
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    response = client.post(
+        "/api/terminals/notify",
+        json={
+            "kind": "session-changed",
+            "client_tty": "/dev/pts/9",
+            "session_name": "terminal-1",
+            "session_id": "$3",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "broadcast": False}
+
+
+def test_terminal_notify_session_changed_resolves_terminal_id_from_clients_map(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session switch broadcasts once the client tty maps to a known terminal tab."""
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path))
+    clients_dir = tmp_path / "commands" / "ttyd" / "clients"
+    clients_dir.mkdir(parents=True)
+    (clients_dir / "term-xyz").write_text("/dev/pts/7\n")
+
+    response = client.post(
+        "/api/terminals/notify",
+        json={
+            "kind": "session-changed",
+            "client_tty": "/dev/pts/7",
+            "session_name": "terminal-1",
+            "session_id": "$3",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "broadcast": True}
+
+
 def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
     """The index page includes a hostname meta tag."""
     static_dir = tmp_path / "static"
@@ -443,7 +614,7 @@ def test_index_injects_hostname_meta_tag(tmp_path: Path) -> None:
     (static_dir / "index.html").write_text("<html><head></head><body>test</body></html>")
 
     with patch("imbue.system_interface.server.STATIC_DIRECTORY", static_dir):
-        test_client = create_application().test_client()
+        test_client = create_application(build_test_state()).test_client()
         response = test_client.get("/")
         assert response.status_code == 200
         assert "system-interface-hostname" in response.text
@@ -462,7 +633,7 @@ def test_create_chat_agent_without_work_dir(monkeypatch: pytest.MonkeyPatch) -> 
     """Creating a chat agent without a primary agent work dir returns 400."""
     monkeypatch.delenv("MNGR_AGENT_WORK_DIR", raising=False)
     monkeypatch.delenv("MNGR_AGENT_ID", raising=False)
-    test_client = create_application().test_client()
+    test_client = create_application(build_test_state()).test_client()
     response = test_client.post(
         "/api/agents/create-chat",
         json={"name": "test-chat"},
@@ -697,7 +868,7 @@ def test_get_events_seeds_pending_tool_state(tmp_path: Path, monkeypatch: pytest
         )
     manager._ensure_activity_tracking(agent_id)
 
-    app = create_application(agent_manager=manager)
+    app = create_application(build_test_state(agent_manager=manager))
     agent_info = AgentInfo(
         id=agent_id,
         name="seed-agent",
@@ -989,3 +1160,166 @@ def test_destroy_argv_accepted_by_live_cli() -> None:
     tree, so a vendor/mngr rename of that subcommand/flag fails here at merge
     time rather than only surfacing at runtime."""
     assert_mngr_argv_valid(_build_destroy_command("demo"))
+
+
+# -- Agent file serving (markdown images + download links) --------------------
+#
+# An agent writes a file and references its absolute on-disk path in markdown;
+# the catch-all serves that file -- images inline so they render, any other file
+# as a download. These exercise the catch-all dispatch end to end via the Flask
+# test client.
+
+
+def test_serves_image_at_its_absolute_path(client: FlaskClient, tmp_path: Path) -> None:
+    """A request for an existing image file's absolute path streams its bytes inline."""
+    image_path = tmp_path / "chart.png"
+    image_bytes = b"fake-png-bytes"
+    image_path.write_bytes(image_bytes)
+
+    response = client.get(str(image_path))
+
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+    assert response.data == image_bytes
+    # Inline (rendered), not a forced download.
+    assert "attachment" not in response.headers.get("Content-Disposition", "")
+    # Cached aggressively: filenames are unique per image by convention.
+    assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+
+
+def test_serves_image_in_nested_subdirectory(client: FlaskClient, tmp_path: Path) -> None:
+    """Nested paths under the write directory are served (agents may organize per run)."""
+    nested_dir = tmp_path / "chat-images" / "run-3"
+    nested_dir.mkdir(parents=True)
+    image_path = nested_dir / "diagram.webp"
+    image_path.write_bytes(b"fake-webp-bytes")
+
+    response = client.get(str(image_path))
+
+    assert response.status_code == 200
+    assert response.content_type == "image/webp"
+
+
+def test_serves_image_with_uppercase_extension(client: FlaskClient, tmp_path: Path) -> None:
+    """Image extensions are matched case-insensitively."""
+    image_path = tmp_path / "SHOT.PNG"
+    image_path.write_bytes(b"fake-png-bytes")
+
+    response = client.get(str(image_path))
+
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+
+
+def test_serves_svg_with_hardened_headers(client: FlaskClient, tmp_path: Path) -> None:
+    """SVG is served as an image but locked down for direct navigation."""
+    image_path = tmp_path / "plot.svg"
+    image_path.write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+
+    response = client.get(str(image_path))
+
+    assert response.status_code == 200
+    # Werkzeug appends "; charset=utf-8" to the XML-based svg type; harmless.
+    assert response.content_type.startswith("image/svg+xml")
+    assert response.headers["Content-Security-Policy"] == "default-src 'none'; style-src 'unsafe-inline'"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_missing_image_path_returns_404_not_app_shell(client: FlaskClient, tmp_path: Path) -> None:
+    """A typo'd image path renders a broken image (404), never the SPA shell."""
+    missing_path = tmp_path / "nope.png"
+
+    response = client.get(str(missing_path))
+
+    assert response.status_code == 404
+
+
+def test_directory_with_image_extension_returns_404(client: FlaskClient, tmp_path: Path) -> None:
+    """A directory whose name ends in an image extension is not a servable file."""
+    directory = tmp_path / "weird.png"
+    directory.mkdir()
+
+    response = client.get(str(directory))
+
+    assert response.status_code == 404
+
+
+def test_nonexistent_path_falls_through_to_app_shell(client: FlaskClient, tmp_path: Path) -> None:
+    """A path matching no file is a client-side route: it returns the app shell, not a 404.
+
+    Only paths that resolve to a real file are served; everything else falls
+    through so the single-page-app's client-side routing keeps working.
+    """
+    response = client.get(str(tmp_path / "some" / "client" / "route"))
+
+    assert response.status_code == 200
+    assert "text/html" in response.content_type
+
+
+def test_serves_image_with_spaces_in_filename(client: FlaskClient, tmp_path: Path) -> None:
+    """A descriptive filename with spaces (percent-encoded in the URL) still serves.
+
+    The whole feature relies on the framework percent-decoding the catch-all path
+    before the handler reconstructs the on-disk path; pin that for a filename an
+    agent told to use 'descriptive' names could realistically produce.
+    """
+    image_path = tmp_path / "my chart 2026.png"
+    image_bytes = b"fake-png-bytes"
+    image_path.write_bytes(image_bytes)
+
+    response = client.get(quote(str(image_path)))
+
+    assert response.status_code == 200
+    assert response.content_type == "image/png"
+    assert response.data == image_bytes
+
+
+def test_serves_image_with_unicode_filename(client: FlaskClient, tmp_path: Path) -> None:
+    """A non-ASCII filename (percent-encoded in the URL) serves the right bytes."""
+    image_path = tmp_path / "gráfico.png"
+    image_bytes = b"fake-png-bytes"
+    image_path.write_bytes(image_bytes)
+
+    response = client.get(quote(str(image_path)))
+
+    assert response.status_code == 200
+    assert response.data == image_bytes
+
+
+def test_serves_non_image_file_as_download(client: FlaskClient, tmp_path: Path) -> None:
+    """A non-image file is served as an attachment (download), not rendered inline."""
+    file_path = tmp_path / "q4-report.pdf"
+    file_bytes = b"%PDF-1.4 fake-pdf-bytes"
+    file_path.write_bytes(file_bytes)
+
+    response = client.get(str(file_path))
+
+    assert response.status_code == 200
+    assert response.data == file_bytes
+    disposition = response.headers.get("Content-Disposition", "")
+    assert "attachment" in disposition
+    assert "q4-report.pdf" in disposition
+    # Downloaded, not sniffed into an inline-executable type.
+    assert response.headers.get("X-Content-Type-Options") == "nosniff"
+
+
+def test_serves_extensionless_file_as_download(client: FlaskClient, tmp_path: Path) -> None:
+    """A file with no extension is still served as a download when it exists."""
+    file_path = tmp_path / "server-log"
+    file_bytes = b"line one\nline two\n"
+    file_path.write_bytes(file_bytes)
+
+    response = client.get(str(file_path))
+
+    assert response.status_code == 200
+    assert response.data == file_bytes
+    assert "attachment" in response.headers.get("Content-Disposition", "")
+
+
+def test_missing_non_image_path_is_not_a_download(client: FlaskClient, tmp_path: Path) -> None:
+    """A non-image path with no file behind it falls through to the app shell, not a download."""
+    response = client.get(str(tmp_path / "does-not-exist.pdf"))
+
+    assert response.status_code == 200
+    assert "text/html" in response.content_type
+    assert "attachment" not in response.headers.get("Content-Disposition", "")

@@ -10,6 +10,12 @@ class AgentCreationError(ValueError):
     ...
 
 
+class AttachmentError(ValueError):
+    """Raised when a chat attachment cannot be stored or located."""
+
+    ...
+
+
 class AgentListItem(FrozenModel):
     """An agent entry in the agent list response."""
 
@@ -34,6 +40,13 @@ class SendMessageResponse(FrozenModel):
     """Response from the message endpoint."""
 
     status: str = Field(description="Status of the send operation")
+
+
+class AttachmentUploadResponse(FrozenModel):
+    """Response from the chat attachment upload endpoint."""
+
+    path: str = Field(description="Absolute path to the stored upload on the agent VM")
+    size: int = Field(description="Size of the stored upload in bytes")
 
 
 class InterruptAgentResponse(FrozenModel):
@@ -71,6 +84,14 @@ class ApplicationEntry(FrozenModel):
 
     name: str = Field(description="Application name (e.g., 'web', 'terminal')")
     url: str = Field(description="Local URL where the application is accessible")
+
+
+class TerminalSessionInfo(FrozenModel):
+    """A live user-terminal tmux session (one per ad-hoc dockview terminal tab)."""
+
+    session_name: str = Field(description="The tmux session name (e.g. 'terminal-1')")
+    session_id: str = Field(description="The immutable tmux session id (e.g. '$3'), stable across rename")
+    cwd: str = Field(description="The session's current working directory (tmux session_path)")
 
 
 class CreateWorktreeRequest(FrozenModel):

@@ -12,10 +12,13 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # ============================================================================
 # System toolchain (repo-independent). Shared verbatim with the Lima provider,
-# which runs this exact script in the VM. Copied alone so this expensive, stable
-# layer caches against the script + pinned versions, not application source.
+# which runs this exact script in the VM. Copied with its sibling
+# _provision_guard.sh (which setup_system.sh sources via `dirname "$0"`) and
+# nothing else, so this expensive, stable layer caches against the scripts +
+# pinned versions, not application source.
 # ============================================================================
 COPY scripts/setup_system.sh /usr/local/bin/fct-setup-system
+COPY scripts/_provision_guard.sh /usr/local/bin/_provision_guard.sh
 RUN chmod +x /usr/local/bin/fct-setup-system && fct-setup-system
 
 # Safety-net symlinks: /code -> /mngr/code and /worktree -> /mngr/worktree.
@@ -43,7 +46,6 @@ COPY libs/app_watcher/pyproject.toml /mngr/code/libs/app_watcher/pyproject.toml
 COPY libs/bootstrap/pyproject.toml /mngr/code/libs/bootstrap/pyproject.toml
 COPY libs/cloudflare_tunnel/pyproject.toml /mngr/code/libs/cloudflare_tunnel/pyproject.toml
 COPY libs/runtime_backup/pyproject.toml /mngr/code/libs/runtime_backup/pyproject.toml
-COPY libs/telegram_bot/pyproject.toml /mngr/code/libs/telegram_bot/pyproject.toml
 COPY libs/web_server/pyproject.toml /mngr/code/libs/web_server/pyproject.toml
 COPY apps/system_interface/pyproject.toml /mngr/code/apps/system_interface/pyproject.toml
 

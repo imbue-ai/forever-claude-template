@@ -162,6 +162,24 @@ class WebSocketBroadcaster(MutableModel):
         """
         self.broadcast({"type": "layout_op", "op": op, "args": args, "requester_agent_id": requester_agent_id})
 
+    def broadcast_terminal_session(self, terminal_id: str | None, session_id: str, session_name: str) -> None:
+        """Broadcast that a terminal tab's tmux client switched to / renamed a session.
+
+        ``terminal_id`` identifies the dockview tab whose ttyd client changed
+        session (resolved server-side from the client tty for a session switch);
+        it is ``None`` for a rename, where the frontend matches the affected tab
+        by ``session_id`` instead. The frontend updates the matching tab's title
+        to ``session_name``.
+        """
+        self.broadcast(
+            {
+                "type": "terminal_session",
+                "terminal_id": terminal_id,
+                "session_id": session_id,
+                "session_name": session_name,
+            }
+        )
+
     def shutdown(self) -> None:
         """Signal all clients to disconnect by sending None sentinel."""
         with self._lock:

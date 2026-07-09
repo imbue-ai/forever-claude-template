@@ -5,6 +5,11 @@ Houses deterministic stand-ins for outside-world dependencies that
 (`command_runner`, `pexpect_spawner`). Both `claude_auth_test.py` and
 `claude_auth_endpoints_test.py` need the same fakes, so they live here
 rather than being copy-pasted into each test module.
+
+Also houses `build_test_state`, the test-side composition root: it builds a
+`SystemInterfaceState` with fakes for whichever collaborators a test overrides
+and cheap real instances for the rest, mirroring `main.build_production_state`
+without ever starting the agent manager.
 """
 
 from __future__ import annotations
@@ -14,13 +19,84 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
+from collections.abc import Sequence
 from contextlib import closing
 from contextlib import contextmanager
 
+import httpx
 import simple_websocket
 from flask import Flask
 
+from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.primitives import AgentId
+from imbue.system_interface.agent_discovery import MngrMessenger
+from imbue.system_interface.agent_manager import AgentManager
+from imbue.system_interface.app_context import SystemInterfaceState
+from imbue.system_interface.claude_auth import ClaudeAuthService
+from imbue.system_interface.config import Config
+from imbue.system_interface.event_queues import AgentEventQueues
+from imbue.system_interface.layout_ops import LayoutMutex
+from imbue.system_interface.welcome_resend import WelcomeResender
+from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 from imbue.system_interface.wsgi import make_threaded_server
+
+
+class RecordingMngrMessenger(MngrMessenger):
+    """A `MngrMessenger` that records sends and never contacts mngr.
+
+    Overrides `send_to_agent` to record each `(agent_id, message)` and return a
+    fixed result, so a test exercises the manager's send path without building a
+    real mngr context or hitting the network. Inject via
+    `AgentManager.build(broadcaster, messenger=RecordingMngrMessenger())`.
+    """
+
+    sent: list[tuple[str, str]] = []
+    succeeds: bool = True
+
+    def send_to_agent(self, agent_id: AgentId, message: str, known_locations: Sequence[AgentMatch]) -> bool:
+        self.sent.append((str(agent_id), message))
+        return self.succeeds
+
+
+def build_test_state(
+    *,
+    config: Config | None = None,
+    agent_manager: AgentManager | None = None,
+    claude_auth_service: ClaudeAuthService | None = None,
+    welcome_resender: WelcomeResender | None = None,
+    latchkey_http_client: httpx.Client | None = None,
+) -> SystemInterfaceState:
+    """Build a `SystemInterfaceState` for tests, injecting fakes where provided.
+
+    Every collaborator left unset gets a cheap default production instance;
+    pass one to substitute a fake. The agent manager is built but never started,
+    so no `mngr observe` pipeline is spawned. The state's broadcaster is derived
+    from the agent manager, so injecting `agent_manager` (often built with a fake
+    `MngrMessenger`) repoints the broadcaster too.
+
+    Only the collaborators tests actually override are parameters; the agent
+    filters and the service-proxy http client (which no test substitutes) are
+    fixed to their production defaults inline.
+    """
+    manager = agent_manager if agent_manager is not None else AgentManager.build(WebSocketBroadcaster())
+    return SystemInterfaceState(
+        config=config if config is not None else Config(),
+        provider_names=None,
+        include_filters=(),
+        exclude_filters=(),
+        agent_manager=manager,
+        event_queues=AgentEventQueues(),
+        layout_mutex=LayoutMutex(),
+        claude_auth_service=claude_auth_service if claude_auth_service is not None else ClaudeAuthService(),
+        welcome_resender=welcome_resender
+        if welcome_resender is not None
+        else WelcomeResender(
+            resolve_agent=manager.get_agent_info_by_id,
+            send_message_fn=manager.send_message_to_agent,
+        ),
+        http_client=httpx.Client(follow_redirects=False, timeout=30.0),
+        latchkey_http_client=latchkey_http_client if latchkey_http_client is not None else httpx.Client(timeout=30.0),
+    )
 
 
 class FakeFinishedProcess:
