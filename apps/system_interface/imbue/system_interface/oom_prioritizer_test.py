@@ -43,9 +43,9 @@ def test_open_and_visible_chat_is_more_protected_than_a_closed_one() -> None:
     h = _Harness(chat_ids=["a", "b"], pids={"a": 10, "b": 20})
     h.prioritizer.record_activity(open_ids=["a"], visible_ids=["a"], messaged_id=None)
     latest = h.latest_adj_by_pid()
-    # ``a`` is open+visible; ``b`` is closed. Both unmessaged, so recency is equal.
-    assert latest[10] == bands.chat_agent_oom_score_adj(is_open=True, is_visible=True, recency_rank=0)
-    assert latest[20] == bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=0)
+    # ``a`` is open+visible; ``b`` is closed. Neither messaged, so no recency bonus.
+    assert latest[10] == bands.chat_agent_oom_score_adj(is_open=True, is_visible=True, recency_rank=None)
+    assert latest[20] == bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=None)
     assert latest[10] < latest[20]
 
 
@@ -67,7 +67,7 @@ def test_visible_without_open_is_treated_as_open() -> None:
     # defensive): visible implies open, so it scores as open+visible.
     h.prioritizer.record_activity(open_ids=[], visible_ids=["a"], messaged_id=None)
     assert h.latest_adj_by_pid()[10] == bands.chat_agent_oom_score_adj(
-        is_open=True, is_visible=True, recency_rank=0
+        is_open=True, is_visible=True, recency_rank=None
     )
 
 
@@ -86,6 +86,7 @@ def test_revived_chat_is_tagged_on_the_next_reapply() -> None:
     # The lifecycle poll finds the revived process and reapplies.
     h.pids["a"] = 10
     h.prioritizer.reapply()
+    # ``a`` was messaged (rank 0), so it earns the recency bonus on top of open+visible.
     assert h.latest_adj_by_pid()[10] == bands.chat_agent_oom_score_adj(
         is_open=True, is_visible=True, recency_rank=0
     )
@@ -108,4 +109,4 @@ def test_later_report_replaces_presence_wholesale() -> None:
     h.prioritizer.record_activity(open_ids=[], visible_ids=[], messaged_id=None)
     reverted = h.latest_adj_by_pid()[10]
     assert reverted > protected
-    assert reverted == bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=0)
+    assert reverted == bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=None)

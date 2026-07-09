@@ -103,15 +103,15 @@ class ChatOomPrioritizer:
         chat_ids = list(self._list_chat_agent_ids())
 
         # Rank the chats that have been messaged, newest first (rank 0 = most
-        # recent). A chat never messaged this session gets no recency bonus -- it
-        # ranks past the end of this list.
+        # recent). A chat never messaged this session is absent from this map, so
+        # ``rank_by_id.get`` returns None and it gets no recency bonus -- it must
+        # not be treated as if it were the most recently messaged.
         messaged_newest_first = sorted(
             (cid for cid in chat_ids if cid in last_message_at),
             key=lambda cid: last_message_at[cid],
             reverse=True,
         )
         rank_by_id = {cid: rank for rank, cid in enumerate(messaged_newest_first)}
-        no_recency_rank = len(messaged_newest_first)
 
         for chat_id in chat_ids:
             pid = self._resolve_pid(chat_id)
@@ -123,6 +123,6 @@ class ChatOomPrioritizer:
             adj = bands.chat_agent_oom_score_adj(
                 is_open=is_open,
                 is_visible=is_visible,
-                recency_rank=rank_by_id.get(chat_id, no_recency_rank),
+                recency_rank=rank_by_id.get(chat_id),
             )
             self._set_adj(pid, adj)

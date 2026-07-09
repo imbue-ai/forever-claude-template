@@ -337,7 +337,7 @@ def test_activity_endpoint_defaults_missing_fields() -> None:
     response = client.post("/api/activity", json={})
 
     assert response.status_code == 200
-    assert writes == [(4242, bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=0))]
+    assert writes == [(4242, bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=None))]
 
 
 def test_interrupt_agent_returns_404_for_unknown_agent(client: FlaskClient) -> None:

@@ -54,7 +54,7 @@ _CHAT_RECENCY_MAX_BONUS: Final[int] = 120
 _CHAT_RECENCY_STEP: Final[int] = 15
 
 
-def chat_agent_oom_score_adj(*, is_open: bool, is_visible: bool, recency_rank: int) -> int:
+def chat_agent_oom_score_adj(*, is_open: bool, is_visible: bool, recency_rank: int | None) -> int:
     """Map a chat agent's live activity to its ``oom_score_adj``.
 
     Lower is more protected. Starting from ``CHAT_AGENT_BASE`` (a closed,
@@ -62,15 +62,19 @@ def chat_agent_oom_score_adj(*, is_open: bool, is_visible: bool, recency_rank: i
 
     - ``is_open``: the chat has an open tab in the workspace UI.
     - ``is_visible``: the chat's tab is currently visible (implies open).
-    - ``recency_rank``: this chat's position when all chats are sorted by
-      last-message time, newest first (0 = most recently messaged). The bonus
-      decays with rank, so more-recently-messaged chats are more protected than
-      their peers.
+    - ``recency_rank``: this chat's position when the chats that have been
+      messaged are sorted by last-message time, newest first (0 = most recently
+      messaged). The bonus decays with rank, so more-recently-messaged chats are
+      more protected than their peers. ``None`` means the chat has not been
+      messaged (this session) and so gets no recency bonus -- a never-messaged
+      chat must not be treated as if it were the most recent.
 
     The result is clamped to ``[CHAT_AGENT_FLOOR, CHAT_AGENT_BASE]`` so it always
     sits strictly between the service bands and ``WORKER_AGENT``.
     """
-    recency_bonus = max(0, _CHAT_RECENCY_MAX_BONUS - _CHAT_RECENCY_STEP * max(0, recency_rank))
+    recency_bonus = 0
+    if recency_rank is not None:
+        recency_bonus = max(0, _CHAT_RECENCY_MAX_BONUS - _CHAT_RECENCY_STEP * max(0, recency_rank))
     adj = CHAT_AGENT_BASE
     if is_open:
         adj -= _CHAT_OPEN_BONUS

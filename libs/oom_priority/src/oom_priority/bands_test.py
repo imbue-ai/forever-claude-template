@@ -68,11 +68,20 @@ def test_chat_band_range_sits_strictly_between_services_and_workers() -> None:
 
 def test_chat_score_is_most_protected_when_fully_engaged() -> None:
     engaged = bands.chat_agent_oom_score_adj(is_open=True, is_visible=True, recency_rank=0)
-    idle = bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=99)
+    idle = bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=None)
     assert engaged == bands.CHAT_AGENT_FLOOR
     assert idle == bands.CHAT_AGENT_BASE
-    # A fully engaged chat is the most protected; a closed, stale one the least.
+    # A fully engaged chat is the most protected; a closed, never-messaged one the least.
     assert engaged < idle
+
+
+def test_never_messaged_chat_gets_no_recency_bonus() -> None:
+    # ``None`` (never messaged) must not be treated as the most-recent (rank 0):
+    # an open+visible chat that was never messaged is less protected than one that
+    # was just messaged.
+    never = bands.chat_agent_oom_score_adj(is_open=True, is_visible=True, recency_rank=None)
+    just_messaged = bands.chat_agent_oom_score_adj(is_open=True, is_visible=True, recency_rank=0)
+    assert just_messaged < never
 
 
 def test_chat_score_monotonic_in_each_signal() -> None:
@@ -80,16 +89,19 @@ def test_chat_score_monotonic_in_each_signal() -> None:
     opened = bands.chat_agent_oom_score_adj(is_open=True, is_visible=False, recency_rank=5)
     visible = bands.chat_agent_oom_score_adj(is_open=True, is_visible=True, recency_rank=5)
     more_recent = bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=2)
+    never = bands.chat_agent_oom_score_adj(is_open=False, is_visible=False, recency_rank=None)
     # Each engagement signal only ever lowers (more-protects) the score.
     assert opened < base
     assert visible < opened
     assert more_recent < base
+    # Any messaged rank is at least as protected as never-messaged.
+    assert base <= never
 
 
 def test_chat_score_always_within_the_chat_band() -> None:
     for is_open in (True, False):
         for is_visible in (True, False):
-            for rank in (0, 1, 3, 10, 100):
+            for rank in (0, 1, 3, 10, 100, None):
                 adj = bands.chat_agent_oom_score_adj(is_open=is_open, is_visible=is_visible, recency_rank=rank)
                 assert bands.CHAT_AGENT_FLOOR <= adj <= bands.CHAT_AGENT_BASE
                 assert bands.USER_SERVICE < adj < bands.WORKER_AGENT
