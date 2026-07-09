@@ -633,6 +633,35 @@ systemctl enable minds-autostart.service
 """,
 ]
 
+# Modal provider template. Was missing entirely -- minds' agent_creator.py
+# (apps/minds/.../agent_creator.py) already stacks `--new-host --template main
+# --template modal` for MODAL-mode creates ("Same remote shape as vultr/aws:
+# the main + modal templates"), so this fills a real, pre-existing gap, not
+# something new agent_creator.py needed to learn about.
+#
+# NOT a copy-paste of vultr/aws: those SSH into a persistent VM and run
+# `docker run` inside it (hence their `start_arg` docker-run flags and
+# `post_host_create_outer_command` systemd VM-reboot-recovery script). Modal
+# is a serverless sandbox -- mngr_modal builds the image and runs it directly
+# via Modal's own SDK (see instance.py's `_build_image_from_dockerfile_contents`),
+# no SSH-to-a-VM layer exists to reboot or wrap `docker run` around. Those two
+# VM-specific mechanisms are deliberately omitted rather than carried over
+# unverified; everything kept below (`target_path`, `build_arg`, `idle_mode`,
+# `pass_host_env`, `post_host_create_command`) is a generic, provider-agnostic
+# mngr create-template field (confirmed in imbue.mngr.config.data_types, not
+# provider-plugin-specific code), so it applies the same way here as it does
+# on every other provider template in this file.
+[create_templates.modal]
+provider = "modal"
+target_path = "/mngr/code/"
+build_arg__extend = ["--file=Dockerfile", "."]
+# Disable idle detection entirely -- the host should never auto-shutdown.
+idle_mode = "disabled"
+# Same forwarding as the docker template; see comment there.
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+# Same first-boot seed as the docker template; see comment there.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+
 # Provider-agnostic FCT pool-host build recipe (the imbue-cloud pool bake stacks
 # this on top of `main` for BOTH OVH VPSes and lima slices -- they build the same
 # container image). No `provider` is declared: the create address selects it

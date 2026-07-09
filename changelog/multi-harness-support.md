@@ -978,6 +978,36 @@ freshly-built `mngr` binary (`agent_types.antigravity` resolves with
 `mcp_servers` present and `global_instructions_md` absent, confirmed via a
 direct field-presence check, not just "no error printed").
 
+## Added: missing `create_templates.modal`
+
+A genuinely pre-existing gap surfaced while testing the branch through minds
+against a Modal-provider workspace: `.mngr/settings.toml` had provider
+overlay templates for docker/lima/vultr/aws/imbue_cloud but none for modal,
+even though `apps/minds/.../agent_creator.py` (in the mngr repo) already
+stacks `--new-host --template main --template modal` for a MODAL-mode
+create -- unrelated to the antigravity fix above, just another instance of
+"referenced but never built."
+
+Modeled on vultr/aws (`agent_creator.py`'s own comment: "Same remote shape
+as vultr/aws"), but not copy-pasted: those SSH into a persistent VM and
+`docker run` inside it, hence their `start_arg` docker-run flags and
+`post_host_create_outer_command` systemd VM-reboot-recovery script. Modal
+is a serverless sandbox -- `mngr_modal` builds and runs the image directly
+via Modal's own SDK, no VM layer to reboot or wrap `docker run` around --
+so those two VM-specific mechanisms were deliberately left out rather than
+carried over unverified. Everything kept (`target_path`, `build_arg`,
+`idle_mode`, `pass_host_env`, `post_host_create_command`) was confirmed
+generic in `imbue.mngr.config.data_types` (not provider-plugin-specific),
+so it applies the same way it already does on every other provider
+template in this file.
+
+Verified: `mngr config get create_templates.modal` resolves cleanly against
+the fixed mngr build with the exact intended fields. Did not run a real
+`mngr create --new-host --template main --template modal` (no `--dry-run`
+flag exists on `mngr create`, and a real Modal sandbox is a genuine
+provisioning side effect, not a config check) -- that first real create is
+still the one thing only a live click-through proves.
+
 ## Open issues
 
 Genuine dead ends, confirmed by testing against the live installed CLIs
