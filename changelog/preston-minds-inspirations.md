@@ -126,6 +126,18 @@
   represent their inspiration while confirming the title, description, repo
   name, and visibility.
 
+- The post-assembly confirmation is now a hard gate too. A live publish ran
+  the scope gate correctly, then -- after assembly -- verified the gates
+  itself, announced "everything checks out," and pushed in the same turn:
+  the user never saw the final title, description, or thumbnail before the
+  repo existed on their account. The confirmation section now requires
+  ending the turn after presenting the final details (thumbnail embedded)
+  and proceeding to repo-creation + push only on an explicit reply to that
+  message; it spells out that no earlier approval counts (scope
+  confirmation, a pre-assembly "go ahead," or the GitHub permission
+  approvals) and that the agent's own gate checks are verification, never
+  confirmation.
+
 - The setup Q&A now ends in a SCOPE gate, not just a name check. A live
   publish laid out its proposal and dispatched the assembly worker in the
   same turn, declaring the include set "confirmed" without any user reply.

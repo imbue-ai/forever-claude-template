@@ -482,10 +482,25 @@ mechanism. Present the proposal to the user ONCE, in plain language:
   (substitute the real absolute worktree path), and note you can adjust it if
   they'd like.
 
-Let the user edit any of these in their replies, then proceed with the agreed
-values. Do not re-ask what they already answered in §1; this is a
-confirm-and-adjust pass, not a second interview. If the user asks to abort,
-stop here and leave the assembled commit intact (§10's failure path).
+Then END YOUR TURN and WAIT. **This is a hard gate, exactly like §1's:** §8
+(create the repo + push) may only run after an explicit go-ahead in the
+user's reply TO THIS MESSAGE. No earlier approval counts -- not the §1 scope
+confirmation, not a "go ahead and publish" given before assembly, not
+approving the GitHub permission requests in the minds app. The final title,
+description, and thumbnail only came into existence during assembly, so the
+user cannot have approved them yet. Your own gate checks (the FILL-IN /
+placeholder / safety greps, generalization spot-checks) are VERIFICATION,
+not confirmation -- they never substitute for the user's reply. (A real
+publish run verified everything itself, announced "everything checks out,"
+and pushed in the same turn -- the user never saw the thumbnail or final
+details before the repo existed on their account. This gate exists to
+prevent exactly that.)
+
+Take edits in their replies and apply them; once their reply is an explicit
+go-ahead, proceed with the agreed values. Do not re-ask what they already
+answered in §1; this is a confirm-and-adjust pass, not a second interview.
+If the user asks to abort, stop here and leave the assembled commit intact
+(§10's failure path).
 
 - Validate an edited repo name against `^[A-Za-z0-9._-]+$` (no leading `-`)
   before using it.
