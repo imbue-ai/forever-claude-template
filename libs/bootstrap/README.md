@@ -50,7 +50,8 @@ writes separate, rotated, container-local logs under
 
 To add, change, or remove a service, edit `supervisord.conf` and run
 `supervisorctl reread && supervisorctl update` (and `supervisorctl restart
-<name>` to bounce one). See the `edit-services` skill for details.
+<name>` to bounce one). See the `update-service` skill, or
+`.agents/shared/references/service-processes.md`, for details.
 
 ## Deferred-install service
 

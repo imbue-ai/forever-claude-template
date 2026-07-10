@@ -37,22 +37,18 @@ Run via bare ``python3`` (standard library only), like ``forward_port.py`` and
 ``reload_system_interface``'s predecessor -- it orchestrates the environment, so
 it must not depend on any particular venv being synced.
 
-The same script also owns the deterministic halves of the *pre-merge preview*
-gate, where the user clicks around the change before it is merged. The worker is
-a local git-worktree sub-agent in this same container, so its work_dir is just a
-folder it has already built -- the preview serves it in place:
-
-- ``preview`` boots the worker's ``--work-dir`` on a free port (layout
-  persistence neutered so it can't clobber the live ``layout.json``) and
-  registers it as the ``si-preview-app`` service, then boots a small wrapper page
-  (``preview_wrapper_server.py``) that embeds it in a labeled "preview" frame and
-  registers that as the user-facing ``si-preview`` service. The live UI proxies
-  ``si-preview`` as a tab that reads as a clearly-marked proposed change rather
-  than a nested clone of the live UI. No fetch, no second checkout, no rebuild;
-  it never touches the served tree or the worker's folder. The worker must still
-  exist at preview time.
-- ``unpreview`` tears that down (kill both servers, deregister both services).
-  Idempotent.
+The ``preview`` / ``unpreview`` subcommands are thin system-interface adapters
+over the shared ``serve_isolated_instance.py`` motion (the previewable-instance
+substrate every service flow shares). They hand it the system-interface
+specifics -- boot ``uv run system-interface`` from the worker's already-built
+``--work-dir`` on a free port, with layout persistence neutered (drop
+MNGR_AGENT_ID so it can't clobber the live ``layout.json``) but agent discovery
+kept, probe ``/api/agents``, and register the inner app plus the labeled
+"preview" wrapper frame the user opens. The shared script owns the ports, the
+process/service teardown, and the state file; no fetch, checkout, or rebuild
+happens, and the served tree and the worker's folder are never touched. The
+worker is a local git-worktree sub-agent whose work_dir is a folder it has
+already built, and it must still exist at preview time.
 
 The non-deterministic part -- opening the tab and gating on the user's judgment
 -- stays with the agent.
@@ -85,8 +81,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -110,46 +104,34 @@ FRONTEND_DIR = f"{APP_DIR}/frontend"
 TOOL_NAME = "system-interface"
 RELOAD_OP = "reload_system_interface"
 
-# Pre-merge preview: boot the worker's own (already-built) work_dir as a service
-# the live UI proxies, so the user can click around the change before it is
-# merged. The worker is a local git-worktree sub-agent in this same container,
-# so its work_dir is just a built folder on disk -- no fetch or rebuild needed.
-# See ``preview`` / ``unpreview``.
-#
-# The preview is registered under fixed service names -- the
-# update-system-interface flow runs one preview at a time, and ``preview``
-# tears down any stale preview for the slug first. State (the detached pids, the
-# ports, the service names, the worker work_dir) lives under the lead's
-# ``runtime/`` so it is gitignored and survives between the separate ``preview``
-# and ``unpreview`` invocations.
-#
-# Two services are registered, not one: the inner service points at the worker's
-# booted app, and the outer "wrapper" service the user actually opens points at a
-# tiny chrome page (``preview_wrapper_server.py``) that embeds the inner service
-# in a labeled "preview" frame. Wrapping it this way keeps the preview from
-# reading as a confusing nested clone of the live UI. The two live at disjoint
-# ``/service/<name>/`` scopes so the dispatcher's scoped service workers do not
-# interfere.
-PREVIEW_SERVICE_NAME = "si-preview"
+# Pre-merge preview: the deterministic boot + teardown of a previewable instance
+# is the shared ``serve_isolated_instance.py`` motion that every service flow
+# reuses. ``preview`` / ``unpreview`` below are thin adapters that hand it the
+# system-interface specifics; the shared script owns the ports, the
+# process/service teardown, and the state file. It lives two levels up under
+# ``.agents/shared/scripts/`` and is stdlib-only, so it runs under the same
+# interpreter as this script.
+_SHARED_SERVE_SCRIPT = (
+    Path(__file__).resolve().parents[3]
+    / "shared"
+    / "scripts"
+    / "serve_isolated_instance.py"
+)
+# The proxied service names the preview registers: the inner booted app and the
+# outer wrapper the user actually opens. Fixed because the flow runs one preview
+# at a time; the shared script clears any stale instance of the same name first.
 PREVIEW_INNER_SERVICE_NAME = "si-preview-app"
-PREVIEW_WRAPPER_SCRIPT = "preview_wrapper_server.py"
-PREVIEW_STATE_ROOT = "runtime/system-interface-preview"
-PREVIEW_STATE_FILENAME = "preview.json"
-PREVIEW_LOG_FILENAME = "preview.log"
-PREVIEW_WRAPPER_LOG_FILENAME = "preview-wrapper.log"
-# The wrapper server ships beside this script and is stdlib-only, so it runs
-# under the same bare ``python3`` that runs this script -- no venv resolution.
-_WRAPPER_SCRIPT_PATH = Path(__file__).resolve().parent / PREVIEW_WRAPPER_SCRIPT
-# forward_port.py imports tomlkit (a venv dependency), but this script is run via
-# bare python3 with no venv assumed, and the ambient ``python3`` need not have
-# tomlkit. Invoke it through ``uv run`` (like scripts/run_ttyd.sh) so the
-# dependency is always resolved regardless of the caller's environment.
-FORWARD_PORT_CMD = ("uv", "run", "python3", "scripts/forward_port.py")
+PREVIEW_SERVICE_NAME = "si-preview"
+# The system interface reads its bind host/port from the environment; the shared
+# script injects the free port into PORT and 127.0.0.1 into HOST.
+PREVIEW_PORT_ENV = "SYSTEM_INTERFACE_PORT"
+PREVIEW_HOST_ENV = "SYSTEM_INTERFACE_HOST"
 
 # Endpoints used to probe liveness. ``/api/agents`` exercises the mngr plugin
 # discovery path -- exactly what a missing backend dependency or a broken
 # plugin-config parse would take down -- so a 200 there is a strong "the backend
-# actually works" signal, not just "the server is listening".
+# actually works" signal, not just "the server is listening". It is also handed
+# to the shared preview script as its ``--health-path``.
 HEALTH_PATH = "/api/agents"
 SERVE_PATH = "/"
 
@@ -160,11 +142,6 @@ _HEALTH_INTERVAL_SECONDS = 1.0
 # Pre-flight boot is a fresh process on a throwaway port; give it the same grace.
 _PREFLIGHT_ATTEMPTS = 30
 _PREFLIGHT_INTERVAL_SECONDS = 1.0
-# A preview boots a full instance from the worker's work_dir; give it a longer
-# grace than the pre-flight since first import + startup runs alongside the live
-# service on the same box.
-_PREVIEW_ATTEMPTS = 60
-_PREVIEW_INTERVAL_SECONDS = 1.0
 
 
 class RevealError(Exception):
@@ -223,22 +200,6 @@ class Runner:
     def run(self, argv: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
         return subprocess.run(list(argv), **kwargs)
 
-    def kill_process_group(self, pid: int, sig: int = signal.SIGTERM) -> None:
-        """Send ``sig`` to the whole process group led by ``pid``; a no-op if the
-        group is already gone.
-
-        Uses ``os.killpg`` directly rather than shelling out to ``kill -<sig>
-        -<pid>``. The external procps-ng ``kill`` mis-parses a bare negative-pid
-        argument (one not preceded by ``--``) and can deliver the signal to PID 1
-        / unrelated process groups instead of the intended one (procps-ng issue
-        #65). Inside a container whose PID 1 traps SIGTERM and exits, that bare
-        ``kill`` restarts the entire container (taking down every agent in it).
-        """
-        try:
-            os.killpg(pid, sig)
-        except ProcessLookupError:
-            pass
-
 
 class HttpClient:
     """Indirection over the loopback HTTP calls (health probe + reload broadcast)."""
@@ -283,13 +244,10 @@ class Spawned:
 
 
 class Spawner:
-    """Indirection over ``subprocess.Popen`` for spawned servers.
+    """Indirection over ``subprocess.Popen`` for the pre-flight throwaway boot.
 
-    ``spawn`` returns a managed child (terminated in a ``finally``) for the
-    pre-flight throwaway boot. ``spawn_detached`` starts a process in its own
-    session and returns only its pid -- used for the preview server, which must
-    outlive this ``preview`` invocation so the user can explore the tab; it is
-    later killed by ``unpreview`` via the recorded pid.
+    ``spawn`` returns a managed child (terminated in a ``finally``) used to boot
+    the merged backend on a throwaway port before touching the live service.
     """
 
     def spawn(self, argv: Sequence[str], cwd: str, env: dict) -> Spawned:
@@ -301,38 +259,6 @@ class Spawner:
             stderr=subprocess.DEVNULL,
         )
         return Spawned(_process=process)
-
-    def spawn_detached(
-        self, argv: Sequence[str], cwd: str, env: dict, log_path: str | None = None
-    ) -> int:
-        """Start a long-lived process in its own session; return its pid.
-
-        ``start_new_session=True`` makes the child a session/process-group
-        leader so it survives this script exiting and so ``unpreview`` can
-        signal the whole group (``kill -- -<pid>``), reaping any grandchildren
-        ``uv run`` spawns. Output goes to ``log_path`` (appended) when given so
-        a failed boot is diagnosable, else to ``/dev/null``.
-        """
-        if log_path is not None:
-            with open(log_path, "ab") as log_file:
-                process = subprocess.Popen(
-                    list(argv),
-                    cwd=cwd,
-                    env=env,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            return int(process.pid)
-        process = subprocess.Popen(
-            list(argv),
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return int(process.pid)
 
 
 def classify_changes(paths: Sequence[str]) -> ChangeSet:
@@ -736,105 +662,27 @@ def reveal(
     return 0
 
 
-def _preview_state_dir(repo_root: Path, slug: str) -> Path:
-    return repo_root / PREVIEW_STATE_ROOT / slug
+def _preview_instance_name(slug: str) -> str:
+    """The name the shared script files this preview's instance under (its state
+    dir + the stable id ``unpreview`` tears down). One preview per slug."""
+    return f"{PREVIEW_SERVICE_NAME}-{slug}"
 
 
-def _preview_state_path(repo_root: Path, slug: str) -> Path:
-    return _preview_state_dir(repo_root, slug) / PREVIEW_STATE_FILENAME
+def preview(slug: str, work_dir: str, repo_root: Path, *, runner: Runner) -> int:
+    """Stand up a pre-merge preview of the worker's ``work_dir``.
 
-
-def _teardown_preview(
-    repo_root: Path,
-    runner: Runner,
-    *,
-    pids: Sequence[int],
-    services: Sequence[str],
-) -> None:
-    """Best-effort teardown of whatever a preview set up. Every step is
-    unchecked so partial state still fully unwinds and re-runs are no-ops.
-
-    A preview stands up two detached servers (the worker's inner app and the
-    wrapper chrome page) and registers two proxied services, so both lists may
-    hold more than one entry. Order: kill every detached server (by process
-    group), then deregister every proxied service so the live UI stops routing to
-    a dead port. There is no worktree to remove -- the preview serves the
-    worker's own work_dir in place.
-    """
-    for pid in pids:
-        # Kill the whole process group the detached server leads (see
-        # ``spawn_detached``, which starts each server in its own session).
-        runner.kill_process_group(pid)
-    for service in services:
-        runner.run(
-            [*FORWARD_PORT_CMD, "--remove", "--name", service],
-            cwd=str(repo_root),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-
-def unpreview(slug: str, repo_root: Path, *, runner: Runner) -> int:
-    """Tear down the preview for ``slug``: kill the server, deregister the
-    service, and delete the state directory.
-
-    Idempotent: a missing state file is a no-op success, so this is safe to run
-    on reject, after a successful reveal, or to recover from a half-set-up
-    preview. Returns 0 unless the state file is unreadable.
-    """
-    state_path = _preview_state_path(repo_root, slug)
-    if not state_path.exists():
-        sys.stderr.write(f"no active preview for '{slug}'; nothing to tear down.\n")
-        return 0
-    try:
-        state = json.loads(state_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        sys.stderr.write(f"error: could not read preview state {state_path}: {exc}\n")
-        return 1
-    # Newer state records lists (inner app + wrapper); fall back to the legacy
-    # single-server keys so a preview created before the wrapper still tears down.
-    pids = state.get("pids")
-    if pids is None:
-        pids = [state["pid"]] if state.get("pid") is not None else []
-    services = state.get("services")
-    if services is None:
-        services = [state["service"]] if state.get("service") is not None else []
-    _teardown_preview(repo_root, runner, pids=pids, services=services)
-    shutil.rmtree(_preview_state_dir(repo_root, slug), ignore_errors=True)
-    sys.stderr.write(f"preview for '{slug}' torn down.\n")
-    return 0
-
-
-def preview(
-    slug: str,
-    work_dir: str,
-    repo_root: Path,
-    *,
-    runner: Runner,
-    http: HttpClient,
-    spawner: Spawner,
-    sleeper: Callable[[float], None] = time.sleep,
-) -> int:
-    """Stand up a pre-merge preview of the worker's ``work_dir`` as two proxied services.
-
-    The worker is a local git-worktree sub-agent in this same container, so
-    ``work_dir`` is a folder on disk that the worker has already built (its
-    ``done`` contract runs ``uv sync`` + ``npm run build``). We boot that built
-    instance detached on a free port -- with layout persistence neutered -- and
-    register it as the inner service. We then boot the small wrapper chrome page
-    (``preview_wrapper_server.py``) on a second port and register it as the
-    user-facing service, so the tab the user opens reads as a labeled "preview"
-    frame around the change rather than a confusing nested clone of the live UI.
-    No fetch, no second checkout, no rebuild; the worker's folder is never
-    modified (the logs and state live under the lead's ``runtime/``).
-
-    On any failure the partial state is torn down and 1 is returned; on success
-    the state file lets ``unpreview`` find both servers + services later.
-    ``work_dir`` must still exist -- run this before the worker is destroyed.
+    Thin system-interface adapter over the shared ``serve_isolated_instance.py``
+    ``up`` motion: validate the worker's app dir, then hand the shared script the
+    system-interface specifics -- boot ``uv run system-interface`` from the
+    worker's already-built app dir on a free port; neuter layout persistence by
+    dropping MNGR_AGENT_ID (so the preview can't clobber the live ``layout.json``)
+    while keeping discovery, so the real conversations still render; probe
+    ``/api/agents``; register the inner app and the labeled wrapper frame. The
+    shared script owns the ports, the process/service teardown, and the state
+    file. ``work_dir`` must still exist -- run this before the worker is destroyed.
     """
     # Sanity-check the work_dir before disturbing anything: a wrong --work-dir
-    # should fail fast, not tear down an existing good preview for this slug.
+    # should fail fast rather than reaching the shared script.
     worker_app_dir = Path(work_dir) / APP_DIR
     if not worker_app_dir.is_dir():
         sys.stderr.write(
@@ -842,143 +690,60 @@ def preview(
             "and is the worker still alive (not destroyed)?\n"
         )
         return 1
-
-    # Clear any stale preview for this slug first so the fixed service names and
-    # state dir can be reused cleanly.
-    unpreview(slug, repo_root, runner=runner)
-
-    state_dir = _preview_state_dir(repo_root, slug)
-    inner_log_path = state_dir / PREVIEW_LOG_FILENAME
-    wrapper_log_path = state_dir / PREVIEW_WRAPPER_LOG_FILENAME
-    state_dir.mkdir(parents=True, exist_ok=True)
-
-    # Track what has been stood up so teardown unwinds exactly the partial state
-    # on any failure (each server is appended right after it is spawned/registered).
-    pids: list[int] = []
-    services: list[str] = []
-    try:
-        # 1. Boot the worker's already-built app (the inner service).
-        inner_port = find_free_port()
-        env = dict(os.environ)
-        env["SYSTEM_INTERFACE_HOST"] = "127.0.0.1"
-        env["SYSTEM_INTERFACE_PORT"] = str(inner_port)
-        # Drop MNGR_AGENT_ID so the preview cannot persist layout over the live
-        # workspace's layout.json (the server treats a missing id as "no layout
-        # dir"). MNGR_HOST_DIR is kept, so the preview still discovers and
-        # renders the real agents/conversations -- a faithful look at the change.
-        env.pop("MNGR_AGENT_ID", None)
-        # Boot from the worker's own work_dir; ``uv run`` resolves that worktree's
-        # already-synced ``.venv`` and serves its already-built ``static/`` bundle.
-        pids.append(
-            spawner.spawn_detached(
-                ["uv", "run", TOOL_NAME],
-                cwd=str(worker_app_dir),
-                env=env,
-                log_path=str(inner_log_path),
-            )
-        )
-        if not wait_healthy(
-            http,
-            f"http://127.0.0.1:{inner_port}{HEALTH_PATH}",
-            _PREVIEW_ATTEMPTS,
-            _PREVIEW_INTERVAL_SECONDS,
-            sleeper,
-        ):
-            raise RevealFailed(
-                f"preview instance did not become healthy on port {inner_port} "
-                f"(see {inner_log_path})"
-            )
-        _run_checked(
-            runner,
-            [
-                *FORWARD_PORT_CMD,
-                "--name",
-                PREVIEW_INNER_SERVICE_NAME,
-                "--url",
-                f"http://localhost:{inner_port}",
-            ],
-            repo_root,
-            "forward_port register (inner)",
-        )
-        services.append(PREVIEW_INNER_SERVICE_NAME)
-
-        # 2. Boot the wrapper chrome page (the outer, user-facing service). It
-        # embeds the inner service by its ``/service/<name>/`` path -- it needs
-        # only the name, not the inner port. It is stdlib-only, so it runs under
-        # the same interpreter as this script (no venv resolution).
-        wrapper_port = find_free_port()
-        pids.append(
-            spawner.spawn_detached(
-                [
-                    sys.executable,
-                    str(_WRAPPER_SCRIPT_PATH),
-                    "--port",
-                    str(wrapper_port),
-                    "--inner-service",
-                    PREVIEW_INNER_SERVICE_NAME,
-                    "--title",
-                    slug,
-                ],
-                cwd=str(repo_root),
-                env=dict(os.environ),
-                log_path=str(wrapper_log_path),
-            )
-        )
-        if not wait_healthy(
-            http,
-            f"http://127.0.0.1:{wrapper_port}{SERVE_PATH}",
-            _PREVIEW_ATTEMPTS,
-            _PREVIEW_INTERVAL_SECONDS,
-            sleeper,
-        ):
-            raise RevealFailed(
-                f"preview wrapper did not become healthy on port {wrapper_port} "
-                f"(see {wrapper_log_path})"
-            )
-        _run_checked(
-            runner,
-            [
-                *FORWARD_PORT_CMD,
-                "--name",
-                PREVIEW_SERVICE_NAME,
-                "--url",
-                f"http://localhost:{wrapper_port}",
-            ],
-            repo_root,
-            "forward_port register (wrapper)",
-        )
-        services.append(PREVIEW_SERVICE_NAME)
-
-        state = {
-            "slug": slug,
-            "work_dir": str(work_dir),
-            "inner_port": inner_port,
-            "wrapper_port": wrapper_port,
-            "pids": pids,
-            "services": services,
-            # The user-facing tab to open (the wrapper).
-            "service": PREVIEW_SERVICE_NAME,
-            "inner_log": str(inner_log_path),
-            "wrapper_log": str(wrapper_log_path),
-        }
-        _preview_state_path(repo_root, slug).write_text(json.dumps(state, indent=2))
-    except (RevealError, OSError) as exc:
-        # OSError as well as RevealError: the boot can fail by raising rather than
-        # exiting non-zero -- a missing ``uv`` binary surfaces as FileNotFoundError,
-        # and ``find_free_port`` can raise a socket OSError. Either way a server may
-        # already be running, so teardown must run to honor "on any failure the
-        # partial state is torn down".
-        sys.stderr.write(f"preview failed: {exc}\ntearing down partial preview...\n")
-        _teardown_preview(repo_root, runner, pids=pids, services=services)
-        shutil.rmtree(state_dir, ignore_errors=True)
-        return 1
-
-    sys.stderr.write(
-        f"preview up: open the '{PREVIEW_SERVICE_NAME}' service tab to explore the "
-        f"change (serving {work_dir} on port {inner_port}, wrapped on port "
-        f"{wrapper_port}). Run 'unpreview --slug {slug}' to tear it down.\n"
+    result = runner.run(
+        [
+            sys.executable,
+            str(_SHARED_SERVE_SCRIPT),
+            "up",
+            "--name",
+            _preview_instance_name(slug),
+            "--cwd",
+            str(worker_app_dir),
+            "--port-env",
+            PREVIEW_PORT_ENV,
+            "--host-env",
+            PREVIEW_HOST_ENV,
+            "--unset-env",
+            ENV_MNGR_AGENT_ID,
+            "--health-path",
+            HEALTH_PATH,
+            "--service-name",
+            PREVIEW_INNER_SERVICE_NAME,
+            "--preview-service-name",
+            PREVIEW_SERVICE_NAME,
+            "--preview-title",
+            slug,
+            "--repo-root",
+            str(repo_root),
+            "--",
+            "uv",
+            "run",
+            TOOL_NAME,
+        ],
+        cwd=str(repo_root),
+        check=False,
     )
-    return 0
+    return int(getattr(result, "returncode", 0))
+
+
+def unpreview(slug: str, repo_root: Path, *, runner: Runner) -> int:
+    """Tear down the preview for ``slug`` via the shared script. Idempotent: a
+    missing instance is a no-op success, so this is safe on reject, after a
+    successful reveal, or to recover from a half-set-up preview."""
+    result = runner.run(
+        [
+            sys.executable,
+            str(_SHARED_SERVE_SCRIPT),
+            "down",
+            "--name",
+            _preview_instance_name(slug),
+            "--repo-root",
+            str(repo_root),
+        ],
+        cwd=str(repo_root),
+        check=False,
+    )
+    return int(getattr(result, "returncode", 0))
 
 
 def _add_repo_root_arg(subparser: argparse.ArgumentParser) -> None:
@@ -1053,8 +818,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.work_dir,
                 repo_root,
                 runner=Runner(),
-                http=HttpClient(),
-                spawner=Spawner(),
             )
         if args.command == "unpreview":
             return unpreview(args.slug, repo_root, runner=Runner())
