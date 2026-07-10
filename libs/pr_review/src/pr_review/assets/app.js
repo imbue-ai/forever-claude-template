@@ -683,6 +683,7 @@ function renderDetailShell() {
       <div class="detail-sub">${statusBadges(pr)}
         <span>${esc(pr.head)} &rarr; ${esc(pr.base)}</span>
         <span class="diffstat"><span class="add">+${pr.diffstat.additions}</span> <span class="del">&minus;${pr.diffstat.deletions}</span> &middot; ${pr.diffstat.changed_files} files</span>
+        <span class="types-pill" id="typesPill" hidden></span>
       </div>
       <div class="detail-tabs">
         <button class="dtab on" data-dtab="files">Files changed <span class="tcount">${DETAIL.files.length}</span></button>
@@ -715,6 +716,69 @@ function renderDetailShell() {
   d.querySelector("#editTitleBtn").addEventListener("click", editTitle);
   bindDetailActions(pr);
   renderConversation();
+  refreshTypesPill();
+}
+
+// ---- rich-types ("prepare") control ----
+// A subtle pill in the detail header showing whether this repo has rich
+// (TypeScript language server) types, with an opt-in to install them.
+let TYPES_POLL = null;
+let TYPES_LAST_STATE = null;
+function typesBase() {
+  const pr = DETAIL.pr;
+  const [owner, name] = pr.head_repo.split("/");
+  return `api/repo/${owner}/${name}/${pr.head_sha}/prepare`;
+}
+function startTypesPoll() { if (!TYPES_POLL) TYPES_POLL = setInterval(refreshTypesPill, 4000); }
+function stopTypesPoll() { if (TYPES_POLL) { clearInterval(TYPES_POLL); TYPES_POLL = null; } }
+
+async function refreshTypesPill() {
+  const pill = document.getElementById("typesPill");
+  if (!pill || !DETAIL) return;
+  let st;
+  try { st = await api(`${typesBase()}/status`); } catch (e) { return; }
+  const state = st.state || "absent";
+  if (TYPES_LAST_STATE === "installing" && state === "ready") flashNote("Rich types are ready — hover to see resolved types.");
+  TYPES_LAST_STATE = state;
+  pill.hidden = false;
+  pill.className = "types-pill " + state;
+  if (state === "ready") {
+    pill.innerHTML = "Types: rich";
+    pill.title = "Real TypeScript type resolution is active for this repo. Click to rebuild or clear.";
+    pill.onclick = typesReadyMenu;
+    stopTypesPoll();
+  } else if (state === "installing") {
+    pill.innerHTML = "Types: preparing…";
+    pill.title = "Installing dependencies and starting a type server; this can take a few minutes.";
+    pill.onclick = () => flashNote("Still preparing rich types…");
+    startTypesPoll();
+  } else if (state === "failed") {
+    pill.innerHTML = "Types: setup failed";
+    pill.title = (st.error || "Preparation failed") + " — click to retry.";
+    pill.onclick = () => enableRichTypes(true);
+    stopTypesPoll();
+  } else {
+    pill.innerHTML = 'Types: basic <span class="types-cta">Enable rich</span>';
+    pill.title = "Basic syntax types. Enable rich types to install this repo's dependencies and resolve real types via a TypeScript language server.";
+    pill.onclick = () => enableRichTypes(false);
+    stopTypesPoll();
+  }
+}
+
+async function enableRichTypes(isRetry) {
+  const ok = confirm("Enable rich types for this repo?\n\nThis launches an agent that installs the repo's dependencies (running their install scripts) so a TypeScript language server can resolve real types. It can take a few minutes and uses your Claude usage.");
+  if (!ok) return;
+  try { await api2(typesBase(), isRetry ? { force: true } : {}); }
+  catch (e) { flashNote("Couldn't start: " + e.message); return; }
+  flashNote("Preparing rich types — installing dependencies…");
+  refreshTypesPill();
+}
+
+function typesReadyMenu() {
+  flashAction("Rich types are active for this repo.", "Clear", async () => {
+    try { await api2(`${typesBase()}/clear`, {}); flashNote("Cleared prepared data."); TYPES_LAST_STATE = null; refreshTypesPill(); }
+    catch (e) { flashNote("Clear failed: " + e.message); }
+  });
 }
 
 function switchDetailTab(which) {
@@ -1399,6 +1463,8 @@ async function openRepoFile(path, line) {
 
 function closeDetail() {
   disposeEditors();
+  stopTypesPoll();
+  TYPES_LAST_STATE = null;
   const bar = document.getElementById("reviewBar");
   if (bar) bar.remove();
   pendingComments = [];

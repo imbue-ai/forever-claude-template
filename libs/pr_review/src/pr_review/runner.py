@@ -20,7 +20,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, request
 from werkzeug.serving import run_simple
 
-from pr_review import github, jsintel, pyintel
+from pr_review import github, jsintel, prepare, pyintel, tsintel
 
 app = Flask("pr_review", static_folder=None)
 
@@ -266,7 +266,10 @@ def api_jshover(owner: str, repo: str, sha: str) -> Response:
         return _err("path is required", status=400)
     try:
         tree = github.ensure_repo_tree(full, sha)
-        result = jsintel.hover(tree, path, line, col)
+        # Rich types (tsserver) for prepared repos, tree-sitter otherwise or as a
+        # fallback when the language service has nothing / errors.
+        result = tsintel.hover(tree, path, line, col) if prepare.is_ready(tree) else None
+        result = result or jsintel.hover(tree, path, line, col)
         return jsonify(result or {"contents": ""})
     except github.GitHubError as exc:
         return _err(str(exc))
@@ -286,8 +289,47 @@ def api_jsdef(owner: str, repo: str, sha: str) -> Response:
         return _err("path is required", status=400)
     try:
         tree = github.ensure_repo_tree(full, sha)
-        result = jsintel.definition(tree, path, line, col)
+        result = tsintel.definition(tree, path, line, col) if prepare.is_ready(tree) else None
+        result = result or jsintel.definition(tree, path, line, col)
         return jsonify(result or {"found": False})
+    except github.GitHubError as exc:
+        return _err(str(exc))
+
+
+@app.route("/api/repo/<owner>/<repo>/<sha>/prepare", methods=["POST"])
+def api_prepare(owner: str, repo: str, sha: str) -> Response:
+    """Opt-in: launch the agent that installs deps + sets up rich (tsserver) types."""
+    full = f"{owner}/{repo}"
+    force = bool((request.get_json(silent=True) or {}).get("force"))
+    try:
+        tree = github.ensure_repo_tree(full, sha)
+        # PREPARE_LAUNCHER lets tests inject a fake launcher; None -> real agent.
+        launcher = app.config.get("PREPARE_LAUNCHER")
+        return jsonify(prepare.start_prepare(tree, launcher=launcher, force=force))
+    except github.GitHubError as exc:
+        return _err(str(exc))
+
+
+@app.route("/api/repo/<owner>/<repo>/<sha>/prepare/status")
+def api_prepare_status(owner: str, repo: str, sha: str) -> Response:
+    """Current rich-types preparation state for a repo tree, with a log tail."""
+    full = f"{owner}/{repo}"
+    try:
+        tree = github.ensure_repo_tree(full, sha)
+        status = prepare.prepare_status(tree)
+        status["log_tail"] = prepare.log_tail(tree)
+        return jsonify(status)
+    except github.GitHubError as exc:
+        return _err(str(exc))
+
+
+@app.route("/api/repo/<owner>/<repo>/<sha>/prepare/clear", methods=["POST"])
+def api_prepare_clear(owner: str, repo: str, sha: str) -> Response:
+    """Drop prepared state + installed node_modules for a repo tree (reclaim disk)."""
+    full = f"{owner}/{repo}"
+    try:
+        tree = github.ensure_repo_tree(full, sha)
+        return jsonify(prepare.clear_prepared(tree))
     except github.GitHubError as exc:
         return _err(str(exc))
 

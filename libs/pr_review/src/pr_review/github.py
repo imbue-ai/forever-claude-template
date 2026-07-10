@@ -393,8 +393,13 @@ def list_tree_files(tree: RepoTree) -> list[str]:
     root = tree.root
     out: list[str] = []
     for path in root.rglob("*"):
-        if path.is_file() and ".git/" not in str(path):
-            out.append(str(path.relative_to(root)))
+        rel = str(path.relative_to(root)) if path.is_file() else ""
+        # Skip VCS internals and installed dependencies: node_modules is only
+        # present after an opt-in "prepare" install and would otherwise swamp
+        # the file list and search results with third-party code.
+        skip = ".git/" in str(path) or "node_modules/" in (rel + "/") or ".pr-review-prep/" in (rel + "/")
+        if rel and not skip:
+            out.append(rel)
     out.sort()
     return out
 
@@ -425,7 +430,9 @@ def find_usages(tree: "RepoTree", symbol: str, limit: int = 400) -> dict:
     if not _SYMBOL_RE.fullmatch(symbol):
         raise GitHubError(f"invalid symbol: {symbol!r}")
     proc = subprocess.run(
-        [_RG, "--json", "--word-regexp", "--fixed-strings", "--", symbol, "."],
+        # Exclude node_modules: it is only present after an opt-in "prepare"
+        # install, and searching third-party dependency code is noise.
+        [_RG, "--json", "--word-regexp", "--fixed-strings", "--glob", "!node_modules", "--", symbol, "."],
         cwd=tree.root,
         capture_output=True,
         text=True,

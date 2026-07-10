@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 from flask.testing import FlaskClient
+from pr_review import github, prepare
+from pr_review.runner import app
 from pr_review.testing import seed_repo_cache
 
 _SHA = "abc123"
@@ -223,3 +225,50 @@ def test_jsdef_resolves_in_repo(client: FlaskClient, tmp_path: Path, monkeypatch
     body = resp.get_json()
     assert body["in_repo"] is True
     assert body["path"] == "util.ts"
+
+
+def test_prepare_status_absent_before_prepare(client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_ts(tmp_path, monkeypatch)
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/prepare/status")
+    assert resp.status_code == 200
+    assert resp.get_json()["state"] == "absent"
+
+
+def test_prepare_launches_and_reports_installing(client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_ts(tmp_path, monkeypatch)
+    launched: list = []
+    app.config["PREPARE_LAUNCHER"] = launched.append
+    try:
+        resp = client.post(f"/api/repo/{_REPO}/{_SHA}/prepare", json={})
+        assert resp.status_code == 200
+        assert resp.get_json()["state"] == "installing"
+        assert len(launched) == 1
+        status = client.get(f"/api/repo/{_REPO}/{_SHA}/prepare/status")
+        assert status.get_json()["state"] == "installing"
+    finally:
+        app.config.pop("PREPARE_LAUNCHER", None)
+
+
+def test_jshover_falls_back_to_treesitter_when_rich_unavailable(client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_ts(tmp_path, monkeypatch)
+    # Mark the tree "ready" but point at a typescript_dir that does not exist, so
+    # the rich engine cannot start and the route must fall back to tree-sitter.
+    tree = github.ensure_repo_tree(_REPO, _SHA)
+    prepare._write_status(tree, {"state": "ready", "typescript_dir": "does-not-exist"})
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/jshover?path=main.ts&line=3&col=1")
+    assert resp.status_code == 200
+    assert "widget" in resp.get_json()["contents"]
+
+
+def test_prepare_clear_resets_state(client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_ts(tmp_path, monkeypatch)
+    app.config["PREPARE_LAUNCHER"] = lambda _tree: None
+    try:
+        client.post(f"/api/repo/{_REPO}/{_SHA}/prepare", json={})
+        resp = client.post(f"/api/repo/{_REPO}/{_SHA}/prepare/clear", json={})
+        assert resp.status_code == 200
+        assert resp.get_json()["state"] == "absent"
+        status = client.get(f"/api/repo/{_REPO}/{_SHA}/prepare/status")
+        assert status.get_json()["state"] == "absent"
+    finally:
+        app.config.pop("PREPARE_LAUNCHER", None)
