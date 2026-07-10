@@ -1,15 +1,19 @@
-"""One-shot: deliver a test case's first prompt to this workspace's chat agent as a user
-message -- the exact call the Minds chat box makes -- once the agent finishes its opening
-turn and is idle (state WAITING).
+"""In-sandbox eval driver: multi-turn conversation + a state file the retriever reads.
 
-Reads the slotted-in test-case data file ``scripts/first_command.json``
-(``{"id", "persona", "first_prompt"}``). Absent -> no-op (normal, non-eval workspaces).
-Runs under supervisord as a one-shot; a marker file guards against re-posting on a container
-restart. No LLM, no external controller: everything is loopback to the local system_interface
-at 127.0.0.1:8000, which is unauthenticated from inside the sandbox.
+Watches the workspace's chat agent and steps a small conversation, gated on the agent's idle
+(WAITING) state -- exactly the calls the UI chat box makes, i.e. "as if the user typed it":
 
-This intentionally does NOT parse the /welcome text; it gates on the generic agent state so it
-never races a mid-turn agent, and so the same wait->send loop can be extended to multi-turn later.
+  wait #1 (idle after /welcome)      -> send the test case's first_prompt
+  wait #2 (idle after that reply)    -> send "OK"           (placeholder second turn, for now)
+  wait #3 (idle after that reply)    -> stop; the test is finished
+
+Each observed WAITING increments a turn counter. Progress is written to a JSON state file OUTSIDE
+the agent's repo (under MNGR_HOST_DIR, i.e. /mngr) so the agent never touches it:
+
+  {"waits_processed_count": <int>, "test_state": "ongoing" | "finished"}
+
+`retrieve-test-results` reads that file to know whether a case is done. No LLM, no external
+controller: everything is loopback to the local system_interface at 127.0.0.1:8000.
 """
 
 from __future__ import annotations
@@ -24,9 +28,13 @@ from pathlib import Path
 _SYSTEM_INTERFACE = "http://127.0.0.1:8000"
 # Paths are relative to /mngr/code (the cwd supervisord runs services in).
 _CONFIG_PATH = Path("scripts/first_command.json")
-_MARKER_PATH = Path("runtime/first_command_sent")
 _CHAT_AGENT_ID_FILENAME = "initial_chat_agent_id"
-_OVERALL_TIMEOUT_SECONDS = 900.0
+# State file lives under MNGR_HOST_DIR (/mngr), one level above the agent's repo (/mngr/code),
+# so the agent can't accidentally edit/commit it. retrieve-test-results reads this exact path.
+_STATE_PATH = Path(os.environ.get("MNGR_HOST_DIR", "/mngr")) / "eval_state.json"
+
+_TOTAL_TURNS = 3
+_OVERALL_TIMEOUT_SECONDS = 3600.0
 _POLL_INTERVAL_SECONDS = 3.0
 
 
@@ -59,6 +67,19 @@ def _read_first_prompt() -> str | None:
     return prompt or None
 
 
+def _write_state(waits_processed_count: int, test_state: str) -> None:
+    _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"waits_processed_count": waits_processed_count, "test_state": test_state}
+    _STATE_PATH.write_text(json.dumps(payload, indent=2))
+
+
+def _already_finished() -> bool:
+    try:
+        return json.loads(_STATE_PATH.read_text()).get("test_state") == "finished"
+    except (ValueError, OSError):
+        return False
+
+
 def _resolve_chat_agent_id(deadline: float) -> str | None:
     host_dir = os.environ.get("MNGR_HOST_DIR", "")
     id_path = Path(host_dir) / _CHAT_AGENT_ID_FILENAME if host_dir else None
@@ -82,9 +103,11 @@ def _agent_state(agent_id: str) -> str | None:
     return None
 
 
-def _wait_for_idle(agent_id: str, deadline: float) -> bool:
+def _wait_until(agent_id: str, *, waiting: bool, deadline: float) -> bool:
+    """Block until the agent is WAITING (waiting=True) or has left WAITING (waiting=False)."""
     while time.time() < deadline:
-        if _agent_state(agent_id) == "WAITING":
+        state = _agent_state(agent_id)
+        if state is not None and (state == "WAITING") == waiting:
             return True
         time.sleep(_POLL_INTERVAL_SECONDS)
     return False
@@ -101,13 +124,24 @@ def _send_with_retry(agent_id: str, message: str, deadline: float) -> bool:
     return False
 
 
+def _turn_action(turn: int, first_prompt: str, total: int = _TOTAL_TURNS) -> tuple[str | None, bool]:
+    """(message_to_send_or_None, is_final) for a 1-based WAITING turn.
+
+    turn 1 -> the test case's first_prompt; turn 2 -> "OK" (placeholder second turn);
+    the final turn (>= total) sends nothing and ends the test.
+    """
+    if turn >= total:
+        return None, True
+    return {1: first_prompt, 2: "OK"}.get(turn), False
+
+
 def main() -> None:
     prompt = _read_first_prompt()
     if prompt is None:
         print("[chat-watcher] no first_command.json / first_prompt -- nothing to do")
         return
-    if _MARKER_PATH.exists():
-        print("[chat-watcher] first prompt already sent (marker present) -- skipping")
+    if _already_finished():
+        print("[chat-watcher] test already finished (state file present) -- skipping")
         return
 
     deadline = time.time() + _OVERALL_TIMEOUT_SECONDS
@@ -115,16 +149,43 @@ def main() -> None:
     if agent_id is None:
         print("[chat-watcher] could not resolve chat agent id within timeout -- exiting")
         return
-    if not _wait_for_idle(agent_id, deadline):
-        print("[chat-watcher] agent {} never reached WAITING within timeout -- exiting".format(agent_id))
-        return
-    if _send_with_retry(agent_id, prompt, deadline):
-        _MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _MARKER_PATH.write_text("")
-        print("[chat-watcher] delivered first prompt to {}".format(agent_id))
-    else:
-        print("[chat-watcher] failed to deliver first prompt to {} within timeout".format(agent_id))
+
+    for turn in range(1, _TOTAL_TURNS + 1):
+        if not _wait_until(agent_id, waiting=True, deadline=deadline):
+            print("[chat-watcher] timed out before wait #{} -- leaving state ongoing".format(turn))
+            _write_state(turn - 1, "ongoing")
+            return
+
+        message, is_final = _turn_action(turn, prompt)
+        if is_final:
+            _write_state(turn, "finished")
+            print("[chat-watcher] finished after {} waits".format(turn))
+            return
+
+        _write_state(turn, "ongoing")
+        if message is not None:
+            if not _send_with_retry(agent_id, message, deadline):
+                print("[chat-watcher] failed to deliver message on turn {} -- exiting".format(turn))
+                return
+            print("[chat-watcher] wait #{}: delivered {!r}".format(turn, message[:60]))
+        # Let the agent leave WAITING (start processing) so the next wait is a fresh turn.
+        _wait_until(agent_id, waiting=False, deadline=deadline)
+
+
+def _self_check() -> None:
+    import tempfile
+
+    assert _turn_action(1, "hi") == ("hi", False)
+    assert _turn_action(2, "hi") == ("OK", False)
+    assert _turn_action(3, "hi") == (None, True)
+    global _STATE_PATH
+    _STATE_PATH = Path(tempfile.mkdtemp()) / "eval_state.json"
+    _write_state(2, "ongoing")
+    assert json.loads(_STATE_PATH.read_text()) == {"waits_processed_count": 2, "test_state": "ongoing"}
+    print("self-check OK")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    _self_check() if "--self-check" in sys.argv else main()
