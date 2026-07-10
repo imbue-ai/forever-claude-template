@@ -195,7 +195,7 @@ def clear_prepared(tree: RepoTree) -> dict:
     root = tree.root.resolve()
     for node_modules in root.rglob("node_modules"):
         resolved = node_modules.resolve()
-        if resolved.is_dir() and str(resolved).startswith(str(root)):
+        if resolved.is_dir() and resolved.is_relative_to(root):
             shutil.rmtree(resolved, ignore_errors=True)
     shutil.rmtree(_prep_dir(tree), ignore_errors=True)
     return {"state": "absent"}
@@ -259,7 +259,7 @@ def _verify(tree: RepoTree, findings: dict) -> tuple[bool, str]:
         return False, "prepare agent did not report a typescript_dir"
     root = tree.root.resolve()
     abs_dir = (tree.root / ts_dir).resolve()
-    if not str(abs_dir).startswith(str(root)) or not abs_dir.is_dir():
+    if not abs_dir.is_relative_to(root) or not abs_dir.is_dir():
         return False, f"typescript_dir {ts_dir!r} is not a directory inside the tree"
     probe = subprocess.run(
         ["node", "-e", "require.resolve('typescript')"],

@@ -27,6 +27,11 @@ from pr_review.github import RepoTree
 
 _HELPER = Path(__file__).parent / "assets" / "tsintel_server.mjs"
 _IDLE_SECONDS = 600
+# Bound the startup handshake: the helper emits its ready line synchronously
+# right after loading typescript, so a spawn that has not spoken within this
+# window is wedged. Without the bound its blocking readline would run under the
+# global registry lock (see _get_server) and freeze JS intel for every tree.
+_STARTUP_TIMEOUT_S = 30
 
 
 class _ServerError(RuntimeError):
@@ -68,16 +73,26 @@ class _Server:
             return data
 
     def close(self) -> None:
-        for stream in (self._proc.stdin, self._proc.stdout):
-            try:
-                if stream is not None:
-                    stream.close()
-            except OSError:
-                pass
+        _terminate(self._proc)
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """Close the parent-side pipes and terminate ``proc`` (idempotent, best-effort).
+
+    Used both when retiring a live server and when tearing down a helper that
+    failed to start, so the pipe file descriptors are always released rather than
+    left dangling until garbage collection.
+    """
+    for stream in (proc.stdin, proc.stdout):
         try:
-            self._proc.terminate()
+            if stream is not None:
+                stream.close()
         except OSError:
             pass
+    try:
+        proc.terminate()
+    except OSError:
+        pass
 
 
 # Registry of one server per prepared tree. Guarded by a lock because the Flask
@@ -107,16 +122,23 @@ def _spawn_server(tree: RepoTree) -> _Server | None:
         )
     except OSError:
         return None
-    ready_line = proc.stdout.readline() if proc.stdout is not None else ""
+    # Kill a helper that never emits its ready line so the readline below cannot
+    # block forever under the caller's registry lock.
+    killer = threading.Timer(_STARTUP_TIMEOUT_S, proc.kill)
+    killer.start()
+    try:
+        ready_line = proc.stdout.readline() if proc.stdout is not None else ""
+    except (OSError, ValueError):
+        # A kill (startup timeout) can close the pipe out from under readline.
+        ready_line = ""
+    finally:
+        killer.cancel()
     try:
         ready = json.loads(ready_line)
     except ValueError:
         ready = {}
     if not (isinstance(ready, dict) and ready.get("ready")):
-        try:
-            proc.terminate()
-        except OSError:
-            pass
+        _terminate(proc)
         return None
     return _Server(proc)
 

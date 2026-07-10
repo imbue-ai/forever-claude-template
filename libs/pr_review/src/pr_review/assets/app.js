@@ -53,6 +53,7 @@ function spineColor(s) {
 
 const EXT_LANG = {
   py: "python", js: "javascript", jsx: "javascript", ts: "typescript", tsx: "typescript",
+  mjs: "javascript", cjs: "javascript", mts: "typescript", cts: "typescript",
   json: "json", md: "markdown", html: "html", css: "css", scss: "scss", sh: "shell",
   bash: "shell", yml: "yaml", yaml: "yaml", toml: "ini", ini: "ini", cfg: "ini",
   c: "c", h: "cpp", cc: "cpp", cpp: "cpp", hpp: "cpp", cxx: "cpp", rs: "rust",
