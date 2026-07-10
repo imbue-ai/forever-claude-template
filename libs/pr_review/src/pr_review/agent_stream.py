@@ -2,11 +2,14 @@
 
 Shared by the rich-types "prepare" agent (``prepare.py``) and the per-line
 "ask an agent" investigator (``ask.py``). Both spawn a one-shot ``claude -p``
-inside a cached repo checkout and want to show the user live progress while it
-runs, so this module owns the common plumbing: the subprocess spawn (with the
-env tweaks that let a headless child run and stop cleanly under the mngr hooks),
-the stream-json parsing loop, and rendering each event into human-readable log
-lines.
+to work against a cached repo checkout and want to show the user live progress
+while it runs, so this module owns the common plumbing: the subprocess spawn
+(with the env tweaks that let a headless child run and stop cleanly under the
+mngr hooks), the stream-json parsing loop, and rendering each event into
+human-readable log lines. The caller chooses the working directory: ``prepare``
+runs *inside* the checkout (it installs the repo's deps), while ``ask`` runs in
+a neutral throwaway dir and reads the checkout by absolute path (so the
+read-only investigator never inherits the reviewed repo's hooks / CLAUDE.md).
 
 Each rendered line carries a lightweight kind marker the frontend styles by:
 ``"● "`` agent narration, ``"$ "`` a shell command, ``"» "`` another tool call,
