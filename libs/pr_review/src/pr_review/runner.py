@@ -17,14 +17,10 @@ page's own fetches, so the app serves at ``/`` and its frontend uses
 
 from pathlib import Path
 
-from flask import Flask
-from flask import Response
-from flask import jsonify
-from flask import request
+from flask import Flask, Response, jsonify, request
 from werkzeug.serving import run_simple
 
-from pr_review import github
-from pr_review import pyintel
+from pr_review import github, jsintel, pyintel
 
 app = Flask("pr_review", static_folder=None)
 
@@ -251,6 +247,46 @@ def api_pydef(owner: str, repo: str, sha: str) -> Response:
     try:
         tree = github.ensure_repo_tree(full, sha)
         result = pyintel.definition(tree, path, line, col)
+        return jsonify(result or {"found": False})
+    except github.GitHubError as exc:
+        return _err(str(exc))
+
+
+@app.route("/api/repo/<owner>/<repo>/<sha>/jshover")
+def api_jshover(owner: str, repo: str, sha: str) -> Response:
+    """Declaration-aware hover for a JavaScript/TypeScript symbol (tree-sitter)."""
+    full = f"{owner}/{repo}"
+    path = request.args.get("path", "")
+    try:
+        line = int(request.args.get("line", "0"))
+        col = int(request.args.get("col", "0"))
+    except ValueError:
+        return _err("line and col must be integers", status=400)
+    if not path:
+        return _err("path is required", status=400)
+    try:
+        tree = github.ensure_repo_tree(full, sha)
+        result = jsintel.hover(tree, path, line, col)
+        return jsonify(result or {"contents": ""})
+    except github.GitHubError as exc:
+        return _err(str(exc))
+
+
+@app.route("/api/repo/<owner>/<repo>/<sha>/jsdef")
+def api_jsdef(owner: str, repo: str, sha: str) -> Response:
+    """Go-to-definition for a JavaScript/TypeScript symbol (tree-sitter)."""
+    full = f"{owner}/{repo}"
+    path = request.args.get("path", "")
+    try:
+        line = int(request.args.get("line", "0"))
+        col = int(request.args.get("col", "0"))
+    except ValueError:
+        return _err("line and col must be integers", status=400)
+    if not path:
+        return _err("path is required", status=400)
+    try:
+        tree = github.ensure_repo_tree(full, sha)
+        result = jsintel.definition(tree, path, line, col)
         return jsonify(result or {"found": False})
     except github.GitHubError as exc:
         return _err(str(exc))

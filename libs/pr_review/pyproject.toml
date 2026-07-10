@@ -9,6 +9,8 @@ dependencies = [
     "flask-sock>=0.7",
     "werkzeug>=3.0",
     "jedi>=0.19",
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.7",
 ]
 
 [project.scripts]

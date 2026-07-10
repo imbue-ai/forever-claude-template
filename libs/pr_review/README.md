@@ -15,7 +15,9 @@ A code-aware web interface for reviewing your GitHub pull requests, served at
    the PR head commit (GitHub tarball) and caches it under
    `runtime/pr-review/repos/`, then renders changed files as full-file diffs in a
    Monaco editor. You can open any file in the repo, find-usages across the whole
-   tree (ripgrep), and get type-aware hover / go-to-definition for Python (Jedi).
+   tree (ripgrep), and get code-aware hover / go-to-definition for Python (Jedi)
+   and for JavaScript / TypeScript (tree-sitter -- `.js/.jsx/.ts/.tsx` and their
+   `.mjs/.cjs/.mts/.cts` variants).
 3. **Write-back.** Post general comments, submit line-comment reviews
    (comment / approve / request-changes), edit the PR title/description, and
    close / reopen or merge a PR (merge / squash / rebase) -- from the detail
@@ -40,7 +42,10 @@ which would otherwise wrongly override a clean check-runs result.
 - `src/pr_review/runner.py` -- the Flask app and routes.
 - `src/pr_review/github.py` -- GitHub access, status enrichment, the repo-tree
   cache, and ripgrep find-usages.
-- `src/pr_review/pyintel.py` -- Jedi-backed hover and go-to-definition.
+- `src/pr_review/pyintel.py` -- Jedi-backed hover and go-to-definition (Python).
+- `src/pr_review/jsintel.py` -- tree-sitter-backed hover and go-to-definition
+  (JavaScript / TypeScript): declaration signatures + doc comments, and
+  definitions resolved locally and across relative imports in the cached tree.
 - `src/pr_review/assets/` -- the frontend (`index.html`, `app.js`, `app.css`);
   Monaco loads from a CDN and all fetches are relative so the app works behind
   the system_interface proxy.
@@ -55,4 +60,5 @@ cd libs/pr_review && uv run pytest
 Tests never make real network calls, real `latchkey` calls, or real writes: the
 `curl` transport is injected as a `FakeCurl`, and repo-tree-backed routes are
 served from a pre-seeded on-disk cache. On-disk behavior (the cache, ripgrep,
-Jedi, the path-traversal guards) runs for real against trees built in `tmp_path`.
+Jedi, tree-sitter, the path-traversal guards) runs for real against trees built
+in `tmp_path`.

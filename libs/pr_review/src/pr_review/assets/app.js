@@ -500,6 +500,25 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeRowMe
 // ===================================================================
 // DETAIL VIEW (Monaco)
 // ===================================================================
+// Register a hover provider that asks the backend for code intelligence at the
+// cursor. Only head-content models (the "head" side of the diff / open files)
+// are eligible, matching the side we have a checked-out source tree for.
+function registerIntelHover(languages, endpoint) {
+  monaco.languages.registerHoverProvider(languages, {
+    provideHover: async (model, pos) => {
+      const meta = MODEL_META.get(model.uri.toString());
+      if (!meta || meta.side !== "head" || !DETAIL) return null;
+      const pr = DETAIL.pr;
+      const [owner, name] = pr.head_repo.split("/");
+      try {
+        const d = await api(`api/repo/${owner}/${name}/${pr.head_sha}/${endpoint}?path=${encodeURIComponent(meta.path)}&line=${pos.lineNumber}&col=${pos.column}`);
+        if (!d || !d.contents) return null;
+        return { contents: [{ value: d.contents }] };
+      } catch (e) { return null; }
+    },
+  });
+}
+
 let monacoReady = null;
 function loadMonaco() {
   if (!monacoReady) {
@@ -509,20 +528,10 @@ function loadMonaco() {
           base: "vs-dark", inherit: true, rules: [],
           colors: { "editor.background": "#0A0D13", "editorGutter.background": "#0A0D13", "diffEditor.insertedTextBackground": "#15331f88", "diffEditor.removedTextBackground": "#3a1d1f88" },
         });
-        // Type-aware hover for Python (Jedi), on head-content models only.
-        monaco.languages.registerHoverProvider("python", {
-          provideHover: async (model, pos) => {
-            const meta = MODEL_META.get(model.uri.toString());
-            if (!meta || meta.side !== "head" || !DETAIL) return null;
-            const pr = DETAIL.pr;
-            const [owner, name] = pr.head_repo.split("/");
-            try {
-              const d = await api(`api/repo/${owner}/${name}/${pr.head_sha}/pyhover?path=${encodeURIComponent(meta.path)}&line=${pos.lineNumber}&col=${pos.column}`);
-              if (!d || !d.contents) return null;
-              return { contents: [{ value: d.contents }] };
-            } catch (e) { return null; }
-          },
-        });
+        // Code-aware hover on head-content models only: Python via Jedi,
+        // JavaScript/TypeScript via tree-sitter (see registerIntelHover).
+        registerIntelHover(["python"], "pyhover");
+        registerIntelHover(["javascript", "typescript"], "jshover");
         resolve(monaco);
       });
     });
@@ -1154,11 +1163,14 @@ async function selectChangedFile(path) {
   renderFileComments(path);
 }
 
-// ---- Python go-to-definition (Jedi) ----
+// ---- go-to-definition (Python via Jedi, JS/TS via tree-sitter) ----
+// Which backend endpoint answers go-to-definition for a given file, or null if
+// the language has no code intelligence.
+const DEF_ENDPOINT = { python: "pydef", javascript: "jsdef", typescript: "jsdef" };
 function attachPyDefAction(editor) {
   editor.addAction({
     id: "pr-review-pydef",
-    label: "Go to definition (Python)",
+    label: "Go to definition",
     contextMenuGroupId: "navigation",
     contextMenuOrder: 0.5,
     keybindings: [monaco.KeyCode.F12],
@@ -1175,12 +1187,14 @@ function attachPyDefAction(editor) {
 async function runPyDef(ed, pos) {
   const model = ed.getModel();
   const meta = MODEL_META.get(model.uri.toString());
-  if (!meta || meta.side !== "head" || !DETAIL || langFor(meta.path) !== "python") return;
+  if (!meta || meta.side !== "head" || !DETAIL) return;
+  const endpoint = DEF_ENDPOINT[langFor(meta.path)];
+  if (!endpoint) return;
   const pr = DETAIL.pr;
   const [owner, name] = pr.head_repo.split("/");
   let d;
   try {
-    d = await api(`api/repo/${owner}/${name}/${pr.head_sha}/pydef?path=${encodeURIComponent(meta.path)}&line=${pos.lineNumber}&col=${pos.column}`);
+    d = await api(`api/repo/${owner}/${name}/${pr.head_sha}/${endpoint}?path=${encodeURIComponent(meta.path)}&line=${pos.lineNumber}&col=${pos.column}`);
   } catch (e) { flashNote("Definition lookup failed: " + e.message); return; }
   if (!d || d.found === false) { flashNote("No definition found"); return; }
   if (d.in_repo) {

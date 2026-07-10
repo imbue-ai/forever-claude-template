@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 from flask.testing import FlaskClient
-
 from pr_review.testing import seed_repo_cache
 
 _SHA = "abc123"
@@ -110,6 +109,21 @@ def test_pydef_requires_path(client: FlaskClient) -> None:
     assert resp.status_code == 400
 
 
+def test_jshover_requires_path(client: FlaskClient) -> None:
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/jshover?line=1&col=1")
+    assert resp.status_code == 400
+
+
+def test_jshover_rejects_non_integer_position(client: FlaskClient) -> None:
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/jshover?path=mod.ts&line=x&col=1")
+    assert resp.status_code == 400
+
+
+def test_jsdef_requires_path(client: FlaskClient) -> None:
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/jsdef?line=1&col=1")
+    assert resp.status_code == 400
+
+
 # --- cache-backed repo routes (served from disk, no network) ---
 
 
@@ -181,3 +195,31 @@ def test_pydef_resolves_in_repo(client: FlaskClient, tmp_path: Path, monkeypatch
     body = resp.get_json()
     assert body["in_repo"] is True
     assert body["path"] == "defs.py"
+
+
+def _seed_ts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    seed_repo_cache(
+        _REPO,
+        _SHA,
+        {
+            "util.ts": "export function widget(): number {\n  return 1;\n}\n",
+            "main.ts": 'import { widget } from "./util";\n\nwidget();\n',
+        },
+    )
+
+
+def test_jshover_returns_contents(client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_ts(tmp_path, monkeypatch)
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/jshover?path=main.ts&line=3&col=1")
+    assert resp.status_code == 200
+    assert "widget" in resp.get_json()["contents"]
+
+
+def test_jsdef_resolves_in_repo(client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_ts(tmp_path, monkeypatch)
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/jsdef?path=main.ts&line=3&col=1")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["in_repo"] is True
+    assert body["path"] == "util.ts"
