@@ -250,11 +250,17 @@ hardening worker in the same turn you make the change: end the turn by
 surfacing the change and asking the user whether it's what they wanted, and
 only invoke the turn-end skill below once they've given a clear go-ahead
 (next turn). This holds for *every* change, contained or larger-scope -- a
-one-line copy tweak still gets shown and confirmed before it's hardened. If
-the user asks for adjustments, make them live and ask again; the hardening
-pass runs only against a version the user has actually signed off on. (For a
-larger-scope change this gate is the *working* result, not just the mock,
-exactly as `build-web-service`'s Step 5 gates on the working site.)
+one-line copy tweak still gets shown and confirmed before it's hardened.
+
+Just like any incremental work, this can take **several rounds**: the user
+may respond with adjustments, then more adjustments. Treat each response as
+another live iteration -- make the change, show it, and ask again -- and do
+**not** launch the harden worker until you are sure the user is satisfied
+with the update. A single "looks fine" mid-thread isn't the same as being
+done; if the user is still tweaking, keep iterating live and hold the
+hardening pass. (For a larger-scope change this gate is the *working* result,
+not just the mock, exactly as `build-web-service`'s Step 5 gates on the
+working site.)
 
 - **A change you and the user discussed and applied live, or repeatable
   work you did by hand** -> invoke `update-artifact` with
