@@ -342,3 +342,6 @@ scripts/notify_user.local.sh
 # the app or its tests)
 apps/system_interface/frontend/permission-demo.html
 apps/system_interface/frontend/src/permission-demo.ts
+
+# Core dumps (e.g. from a crashed process during a session).
+**/core
