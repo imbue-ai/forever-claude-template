@@ -123,6 +123,52 @@ def test_hover_stops_comment_block_at_blank_line(tmp_path: Path) -> None:
     assert "Unrelated section header." not in contents
 
 
+def test_hover_and_definition_for_destructured_require_binding(tmp_path: Path) -> None:
+    # CommonJS destructuring from an external module: the name should resolve to
+    # its binding (hover shows the shape + source; go-to-def jumps to the line).
+    tree = write_tree(
+        tmp_path,
+        {"main.js": "const { session, app } = require('electron');\nsession.fromPartition('x');\n"},
+    )
+    hover = jsintel.hover(tree, "main.js", line=2, column=1)
+    assert hover is not None
+    assert "session" in hover["contents"]
+    assert "require('electron')" in hover["contents"]
+    definition = jsintel.definition(tree, "main.js", line=2, column=1)
+    assert definition is not None
+    assert definition["in_repo"] is True
+    assert definition["path"] == "main.js"
+    assert definition["line"] == 1
+    assert definition["name"] == "session"
+
+
+def test_definition_follows_relative_require(tmp_path: Path) -> None:
+    tree = write_tree(
+        tmp_path,
+        {
+            "util.js": "function helper() {\n  return 1;\n}\nmodule.exports = { helper };\n",
+            "main.js": "const { helper } = require('./util');\nhelper();\n",
+        },
+    )
+    # Go to definition of the ``helper`` call on line 2 -> into util.js.
+    result = jsintel.definition(tree, "main.js", line=2, column=1)
+    assert result is not None
+    assert result["in_repo"] is True
+    assert result["path"] == "util.js"
+    assert result["line"] == 1
+
+
+def test_definition_returns_none_for_member_access(tmp_path: Path) -> None:
+    # A property/method access needs type inference, which a syntactic parser
+    # cannot do; it should resolve to nothing rather than a wrong answer.
+    tree = write_tree(
+        tmp_path,
+        {"main.js": "const { session } = require('electron');\nsession.fromPartition('x');\n"},
+    )
+    # Hover/def on ``fromPartition`` (the member, ~column 9 on line 2).
+    assert jsintel.definition(tree, "main.js", line=2, column=9) is None
+
+
 def test_definition_resolves_import_across_files(tmp_path: Path) -> None:
     tree = write_tree(
         tmp_path,

@@ -158,16 +158,89 @@ def _decl_name_node(decl: Node) -> Node | None:
     return None
 
 
+def _enclosing_declaration_keyword(node: Node) -> str | None:
+    """The ``const``/``let``/``var`` keyword of the variable declaration binding
+    ``node`` (a declarator or an identifier inside a destructuring pattern), or
+    None if ``node`` is not part of a variable declaration (e.g. a parameter)."""
+    current = node.parent
+    while current is not None:
+        if current.type in ("formal_parameters",) or current.type in _FUNC_TYPES:
+            return None
+        if current.type in ("lexical_declaration", "variable_declaration"):
+            keyword = current.child_by_field_name("kind")
+            return keyword.text.decode() if keyword is not None else "const"
+        current = current.parent
+    return None
+
+
 def _decl_kind(decl: Node) -> str:
     if decl.type == "variable_declarator":
         parent = decl.parent
         kind = parent.child_by_field_name("kind") if parent is not None else None
         return "constant" if kind is not None and kind.text == b"const" else "variable"
+    if decl.type in _IDENT_TYPES:
+        # A destructuring / pattern binding (e.g. ``const { session } = ...``).
+        keyword = _enclosing_declaration_keyword(decl)
+        if keyword is not None:
+            return "constant" if keyword == "const" else "variable"
+        return "symbol"
     return _NAMED_DECL_KINDS.get(decl.type, "symbol")
 
 
 def _binding_target(decl: Node) -> Node:
     return _decl_name_node(decl) or decl
+
+
+def _pattern_identifiers(pattern: Node) -> list[tuple[str, Node]]:
+    """(name, identifier-node) for every binding a destructuring pattern introduces.
+
+    Handles object shorthand (``{ a }``), renamed pairs (``{ a: b }``), array
+    elements, rest (``...rest``), defaults (``{ a = 1 }``), and nesting.
+    """
+    out: list[tuple[str, Node]] = []
+    for child in pattern.named_children:
+        kind = child.type
+        if kind in ("shorthand_property_identifier_pattern", "identifier"):
+            out.append((child.text.decode("utf-8", errors="replace"), child))
+        elif kind == "pair_pattern":
+            value = child.child_by_field_name("value")
+            if value is None:
+                continue
+            if value.type == "identifier":
+                out.append((value.text.decode("utf-8", errors="replace"), value))
+            elif value.type in ("object_pattern", "array_pattern"):
+                out.extend(_pattern_identifiers(value))
+            elif value.type == "assignment_pattern":
+                left = value.child_by_field_name("left")
+                if left is not None and left.type == "identifier":
+                    out.append((left.text.decode("utf-8", errors="replace"), left))
+        elif kind in ("object_pattern", "array_pattern"):
+            out.extend(_pattern_identifiers(child))
+        elif kind == "assignment_pattern":
+            left = child.child_by_field_name("left")
+            if left is not None and left.type == "identifier":
+                out.append((left.text.decode("utf-8", errors="replace"), left))
+        elif kind == "rest_pattern":
+            for grandchild in child.named_children:
+                if grandchild.type == "identifier":
+                    out.append((grandchild.text.decode("utf-8", errors="replace"), grandchild))
+    return out
+
+
+def _require_source(value: Node | None) -> str | None:
+    """The module string of a ``require("...")`` call expression, or None."""
+    if value is None or value.type != "call_expression":
+        return None
+    function = value.child_by_field_name("function")
+    if function is None or function.text != b"require":
+        return None
+    arguments = value.child_by_field_name("arguments")
+    if arguments is None:
+        return None
+    for argument in arguments.named_children:
+        if argument.type == "string":
+            return _string_value(argument)
+    return None
 
 
 def _iter_params(func: Node) -> list[tuple[str, Node, Node]]:
@@ -205,10 +278,17 @@ def _iter_scope_bindings(scope: Node) -> list[tuple[str, Node]]:
             node = decl
         if node.type in ("lexical_declaration", "variable_declaration"):
             for declarator in node.named_children:
-                if declarator.type == "variable_declarator":
-                    name = _decl_name_node(declarator)
-                    if name is not None:
-                        out.append((name.text.decode("utf-8", errors="replace"), declarator))
+                if declarator.type != "variable_declarator":
+                    continue
+                name = declarator.child_by_field_name("name")
+                if name is None:
+                    continue
+                if name.type == "identifier":
+                    out.append((name.text.decode("utf-8", errors="replace"), declarator))
+                elif name.type in ("object_pattern", "array_pattern"):
+                    # Destructured binding (incl. CommonJS ``const { x } =
+                    # require(...)``): each name binds to its own identifier node.
+                    out.extend(_pattern_identifiers(name))
         elif node.type in _NAMED_DECL_KINDS:
             name = _decl_name_node(node)
             if name is not None:
@@ -233,9 +313,40 @@ def _find_default_export(root: Node) -> Node | None:
     return None
 
 
+def _collect_require_imports(root: Node, imports: dict[str, tuple[str, str]]) -> None:
+    """Add CommonJS ``require`` bindings to ``imports`` without overriding existing
+    ES-import entries. ``const x = require("m")`` binds the whole module (``"*"``);
+    ``const { a, b: c } = require("m")`` binds each named export.
+    """
+    for stmt in root.named_children:
+        node = stmt
+        if node.type == "export_statement":
+            declaration = node.child_by_field_name("declaration")
+            if declaration is None:
+                continue
+            node = declaration
+        if node.type not in ("lexical_declaration", "variable_declaration"):
+            continue
+        for declarator in node.named_children:
+            if declarator.type != "variable_declarator":
+                continue
+            spec = _require_source(declarator.child_by_field_name("value"))
+            if spec is None:
+                continue
+            name = declarator.child_by_field_name("name")
+            if name is None:
+                continue
+            if name.type == "identifier":
+                imports.setdefault(name.text.decode("utf-8", errors="replace"), (spec, "*"))
+            elif name.type in ("object_pattern", "array_pattern"):
+                for bound_name, _ident in _pattern_identifiers(name):
+                    imports.setdefault(bound_name, (spec, bound_name))
+
+
 def _collect_imports(root: Node) -> dict[str, tuple[str, str]]:
     """local-name -> (module-specifier, imported-name), where imported-name is the
     real export name, ``"default"`` for a default import, or ``"*"`` for a namespace.
+    Covers both ES ``import`` statements and CommonJS ``require`` bindings.
     """
     imports: dict[str, tuple[str, str]] = {}
     for stmt in root.named_children:
@@ -266,6 +377,7 @@ def _collect_imports(root: Node) -> dict[str, tuple[str, str]]:
                     imported = name_node.text.decode("utf-8", errors="replace")
                     local = (alias_node or name_node).text.decode("utf-8", errors="replace")
                     imports[local] = (spec, imported)
+    _collect_require_imports(root, imports)
     return imports
 
 
@@ -343,7 +455,12 @@ def _resolve(tree: RepoTree, rel_path: str, line: int, column: int) -> _Decl | N
     name = ident.text.decode("utf-8", errors="replace")
     imports = _collect_imports(root)
     if name in imports:
-        return _resolve_import(tree, rel_path, imports[name], name)
+        imported = _resolve_import(tree, rel_path, imports[name], name)
+        if imported is not None:
+            return imported
+        # The module is external (not in the repo, e.g. ``require("electron")``);
+        # fall back to the local binding so hover/go-to still resolve to where the
+        # name is declared in this file.
     return _resolve_local(source, rel_path, ident, name)
 
 
@@ -363,6 +480,27 @@ def _signature(container: Node, source: bytes) -> str:
         body = container.child_by_field_name("body")
         end = body.start_byte if body is not None else container.end_byte
         return _bounded(text_of(container.start_byte, end))
+    if kind in _IDENT_TYPES:
+        # A destructuring / pattern binding (e.g. ``session`` in
+        # ``const { session } = require('electron')``). Show the shape and, when
+        # short, the initializer -- honest about where the name comes from.
+        keyword = _enclosing_declaration_keyword(container)
+        if keyword is not None:
+            name_text = text_of(container.start_byte, container.end_byte)
+            declarator = container
+            while declarator is not None and declarator.type != "variable_declarator":
+                declarator = declarator.parent
+            pattern = declarator.child_by_field_name("name") if declarator is not None else None
+            if pattern is not None and pattern.type in ("object_pattern", "array_pattern"):
+                wrapped = f"{{ {name_text} }}" if pattern.type == "object_pattern" else f"[ {name_text} ]"
+                signature = f"{keyword} {wrapped}"
+                value = declarator.child_by_field_name("value")
+                if value is not None:
+                    value_text = text_of(value.start_byte, value.end_byte)
+                    if "\n" not in value_text and len(value_text) <= 80:
+                        signature += f" = {value_text}"
+                return _bounded(signature)
+            return _bounded(f"{keyword} {name_text}")
     if kind == "variable_declarator":
         parent = container.parent
         keyword_node = parent.child_by_field_name("kind") if parent is not None else None
@@ -408,7 +546,17 @@ def _clean_comment(text: str) -> str:
 # is: a ``const``/``let``/``var`` declarator sits inside a (possibly exported)
 # lexical/variable declaration, so the comment is a sibling of that outer node,
 # not of the declarator itself.
-_STATEMENT_WRAPPERS = frozenset({"lexical_declaration", "variable_declaration", "export_statement"})
+_STATEMENT_WRAPPERS = frozenset(
+    {
+        "lexical_declaration",
+        "variable_declaration",
+        "export_statement",
+        "variable_declarator",
+        "object_pattern",
+        "array_pattern",
+        "pair_pattern",
+    }
+)
 
 
 def _statement_node(container: Node) -> Node:
