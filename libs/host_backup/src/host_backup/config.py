@@ -1,114 +1,52 @@
-"""Backup configuration loading and default-template writing.
+"""Backup configuration loading: optional user settings + injected secrets.
 
-The config lives in two on-disk files written by `libs/bootstrap` on first
-boot:
+Two on-disk inputs, both optional from the service's point of view:
 
-- `runtime/backup.toml` -- non-secret script settings (interval, retention,
-  excludes, snapshot method, and the `allow_empty_password` restic knob).
+- `runtime/backup.toml` -- purely *user* settings (interval, retention,
+  excludes). Entirely optional: when absent the service runs on built-in
+  defaults. Loading is deliberately tolerant: unknown keys (including the
+  `[snapshot]` section old bootstraps keep writing forever) and malformed
+  values produce log warnings and fall back to defaults -- they never crash
+  the service and never block the remaining valid settings from applying.
   Rides the runtime-backup git push.
 - `runtime/secrets/restic.env` -- restic's repository address + all secrets
   (`RESTIC_REPOSITORY`, `RESTIC_PASSWORD`, and any backend credentials restic
   reads from the environment, e.g. `AWS_ACCESS_KEY_ID` /
-  `AWS_SECRET_ACCESS_KEY` for an S3/R2 backend). Gitignored.
+  `AWS_SECRET_ACCESS_KEY` for an S3/R2 backend). Written only by minds
+  (injected whole); a missing file simply means backups are not configured.
+  Gitignored.
 
-This module defines the frozen `BackupConfig` model and helpers for
-loading both files, including the merge logic that bootstrap uses to
-preserve user-customized fields when re-detecting the environment.
+Snapshot mechanics are NOT configuration: see `host_backup.capabilities`,
+which the service detects in memory at startup.
 """
 
 import os
 import tomllib
-from enum import auto
 from pathlib import Path
 from typing import Final
 
-import tomlkit
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
-from pydantic import Field
+from loguru import logger
+from pydantic import Field, ValidationError
+
+from host_backup.capabilities import BackupCapabilities
+from host_backup.capabilities import (
+    SnapshotMethod as SnapshotMethod,  # compat re-export
+)
 
 BACKUP_TOML_PATH: Final[Path] = Path("runtime/backup.toml")
 RESTIC_ENV_PATH: Final[Path] = Path("runtime/secrets/restic.env")
 PRUNE_TIMESTAMP_PATH: Final[Path] = Path("runtime/last-restic-prune")
 
+# Top-level backup.toml keys that are known-stale rather than unknown: old
+# bootstraps rewrite a `[snapshot]` section into backup.toml on every boot
+# forever. It is ignored (capabilities are detected at runtime instead), at
+# debug level so it doesn't spam warnings on every reload.
+_KNOWN_STALE_KEYS: Final[tuple[str, ...]] = ("snapshot",)
+
 
 class BackupConfigError(ValueError):
-    """Raised when backup.toml cannot be loaded or validated."""
-
-
-class SnapshotMethod(UpperCaseStrEnum):
-    """How the script obtains a consistent view of /mngr/ before restic reads it."""
-
-    BTRFS_LOCAL = auto()
-    OUTER_TRIGGER = auto()
-    DIRECT = auto()
-
-
-class SnapshotSettings(FrozenModel):
-    """Filesystem paths + protocol used by the snapshot step.
-
-    Bootstrap populates this section by probing the environment; the script
-    just reads it.
-    """
-
-    method: SnapshotMethod = Field(description="Snapshot mechanism for this provider")
-    btrfs_mount_path: Path | None = Field(
-        default=None,
-        description=(
-            "Outer-side btrfs mount root, e.g. /mngr-btrfs. Used by "
-            "outer_trigger to construct the snapshot_path; ignored for direct. "
-            "For btrfs_local, set to the in-VM btrfs mount path."
-        ),
-    )
-    host_subvolume_path: Path | None = Field(
-        default=None,
-        description=(
-            "Absolute path of the host's btrfs subvolume on the (outer or in-VM) "
-            "btrfs filesystem, e.g. /mngr-btrfs/<host_id_hex>. Required for "
-            "btrfs_local and outer_trigger."
-        ),
-    )
-    snapshot_current_path: Path | None = Field(
-        default=None,
-        description=(
-            "Where the live snapshot's `current/` slot is created on the btrfs "
-            "filesystem (the outer's perspective for outer_trigger, the in-VM "
-            "view for btrfs_local). Required for btrfs_local and outer_trigger. "
-            "For outer_trigger only the PARENT directory is used (snapshots get "
-            "unique per-tick names under it); the `current` basename is vestigial."
-        ),
-    )
-    snapshot_read_path: Path | None = Field(
-        default=None,
-        description=(
-            "Path the in-container restic actually reads from. For outer_trigger "
-            "this is /mngr-snapshots/current (the bind mount of the outer's "
-            "snapshot dir); for btrfs_local it equals snapshot_current_path. "
-            "For outer_trigger only the PARENT directory is used (the per-tick "
-            "snapshot name is appended at runtime); the `current` basename is "
-            "vestigial."
-        ),
-    )
-    trigger_dir: Path | None = Field(
-        default=None,
-        description=(
-            "Inner-container dir where request.json / result.json live for "
-            "outer_trigger (e.g. /mngr-snapshot). Required only for outer_trigger."
-        ),
-    )
-    outer_helper_timeout_seconds: float = Field(
-        default=120.0,
-        description="Hard cap on how long to wait for the outer helper's result.json",
-    )
-    max_local_snapshots: int = Field(
-        default=5,
-        ge=1,
-        description=(
-            "outer_trigger only: how many on-host btrfs snapshots to retain. "
-            "Each tick creates a new timestamped snapshot and deletes the "
-            "oldest beyond this count. Ignored by btrfs_local and direct."
-        ),
-    )
+    """Raised when restic.env cannot be read (backup.toml loading never raises)."""
 
 
 class RetentionSettings(FrozenModel):
@@ -133,7 +71,7 @@ class RetentionSettings(FrozenModel):
 
 
 class BackupConfig(FrozenModel):
-    """Top-level backup script configuration loaded from runtime/backup.toml."""
+    """User-tunable backup settings loaded (tolerantly) from runtime/backup.toml."""
 
     backup_interval_seconds: float = Field(
         default=3600.0,
@@ -150,7 +88,6 @@ class BackupConfig(FrozenModel):
         default=15.0,
         description="Mtime poll interval for backup.toml + restic.env",
     )
-    snapshot: SnapshotSettings = Field(description="Snapshot mechanism + paths")
     retention: RetentionSettings = Field(default_factory=RetentionSettings)
     excludes: tuple[str, ...] = Field(
         default=(
@@ -170,17 +107,58 @@ class BackupConfig(FrozenModel):
 
 
 def load_backup_config(path: Path = BACKUP_TOML_PATH) -> BackupConfig:
-    """Load and validate backup.toml; raises BackupConfigError on any failure."""
+    """Load backup.toml tolerantly; always returns a usable config.
+
+    Absent file -> all defaults. Unparseable file -> warning + all defaults.
+    Unknown keys -> warning (debug for the known-stale `[snapshot]` section)
+    and ignored. A field that fails validation -> warning and that field's
+    default, while every other valid field still applies.
+    """
     if not path.exists():
-        raise BackupConfigError(f"Backup config not found at {path}")
+        return BackupConfig()
     try:
         raw = tomllib.loads(path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as e:
-        raise BackupConfigError(f"Failed to read/parse {path}: {e}") from e
-    try:
-        return BackupConfig.model_validate(raw)
-    except ValueError as e:
-        raise BackupConfigError(f"Invalid backup config in {path}: {e}") from e
+        logger.warning("Ignoring unparseable backup config at {}: {}", path, e)
+        return BackupConfig()
+    return _build_backup_config_tolerantly(raw, source=str(path))
+
+
+def _build_backup_config_tolerantly(
+    raw: dict[str, object], *, source: str
+) -> BackupConfig:
+    """Build a BackupConfig from raw toml data, warning on (and skipping) bad input."""
+    known_field_names = set(BackupConfig.model_fields)
+    accepted: dict[str, object] = {}
+    for key, value in raw.items():
+        if key in _KNOWN_STALE_KEYS:
+            logger.debug(
+                "Ignoring stale `{}` section in {} (capabilities are detected at runtime)",
+                key,
+                source,
+            )
+            continue
+        if key not in known_field_names:
+            logger.warning("Ignoring unknown backup config key `{}` in {}", key, source)
+            continue
+        accepted[key] = value
+
+    # Validate field-by-field so one malformed value cannot take down the
+    # rest of the user's settings.
+    valid: dict[str, object] = {}
+    for key, value in accepted.items():
+        try:
+            candidate = BackupConfig.model_validate({key: value})
+        except ValidationError as e:
+            logger.warning(
+                "Ignoring invalid backup config value for `{}` in {}: {}",
+                key,
+                source,
+                e,
+            )
+            continue
+        valid[key] = getattr(candidate, key)
+    return BackupConfig.model_validate(valid)
 
 
 def parse_restic_env_file(content: str) -> dict[str, str]:
@@ -242,124 +220,39 @@ def get_events_dir() -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# Default-template writer (called by bootstrap)
+# Backwards-compatibility shims for pre-refactor bootstraps.
+#
+# Old workspaces keep their old `libs/bootstrap` forever (the minds backup
+# update mechanism replaces only `libs/host_backup/**`), and that old
+# bootstrap imports the names below from this module at container boot --
+# a missing name would crash boot before supervisord starts. Each shim is a
+# harmless no-op: templates are no longer written and `[snapshot]` is no
+# longer maintained in backup.toml. Removable once every pre-refactor host
+# has rotated out.
 # ---------------------------------------------------------------------------
 
-
-def write_default_restic_env_template(path: Path = RESTIC_ENV_PATH) -> bool:
-    """Write a commented-out restic.env template if absent. Returns True if written."""
-    if path.exists():
-        return False
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_DEFAULT_RESTIC_ENV_TEMPLATE)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        # Best-effort; failure to tighten perms shouldn't block template creation.
-        pass
-    return True
-
-
-_DEFAULT_RESTIC_ENV_TEMPLATE: Final[str] = """# Restic backup repository + secrets.
-#
-# In the minds app this whole file is written for you when you pick a backup
-# provider on the create form; you should not need to edit it by hand.
-#
-# host_backup will not run until both RESTIC_REPOSITORY and RESTIC_PASSWORD
-# are set.
-#
-# RESTIC_REPOSITORY is the repository address restic backs up to, e.g.
-# 's3:https://<account>.r2.cloudflarestorage.com/<bucket>' for Cloudflare R2.
-#
-# RESTIC_PASSWORD is this workspace's repository password.
-#
-# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are the credentials for an
-# S3/R2 backend. Other backends read other env vars -- see
-# https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables
-
-# RESTIC_REPOSITORY=
-# RESTIC_PASSWORD=
-# AWS_ACCESS_KEY_ID=
-# AWS_SECRET_ACCESS_KEY=
-"""
-
-
-def render_default_backup_toml(snapshot: SnapshotSettings) -> str:
-    """Render a fresh backup.toml document with bootstrap-detected snapshot section."""
-    doc = tomlkit.document()
-    doc.add(tomlkit.comment("Backup script configuration. Read by libs/host_backup."))
-    doc.add(
-        tomlkit.comment(
-            "Settings in [snapshot] are overwritten by bootstrap on every boot;"
-        )
-    )
-    doc.add(tomlkit.comment("all other sections are preserved if you edit them."))
-    doc.add(tomlkit.nl())
-
-    doc["backup_interval_seconds"] = 3600
-    doc["minimum_backup_gap_seconds"] = 60
-    doc["config_poll_interval_seconds"] = 15
-
-    snapshot_table = _snapshot_to_toml_table(snapshot)
-    doc["snapshot"] = snapshot_table
-
-    doc.add(
-        tomlkit.comment(
-            "Repository + credentials live in runtime/secrets/restic.env (RESTIC_REPOSITORY,"
-        )
-    )
-    doc.add(tomlkit.comment("RESTIC_PASSWORD, and any backend creds), not here."))
-
-    retention = tomlkit.table()
-    retention["keep_hourly"] = 24
-    retention["keep_daily"] = 30
-    retention["keep_weekly"] = 12
-    retention["keep_monthly"] = 24
-    retention["prune_interval_hours"] = 24
-    doc["retention"] = retention
-
-    excludes = tomlkit.array()
-    for pattern in BackupConfig.model_fields["excludes"].default:
-        excludes.append(pattern)
-    excludes.multiline(True)
-    doc["excludes"] = excludes
-
-    return tomlkit.dumps(doc)
-
-
-def _snapshot_to_toml_table(snapshot: SnapshotSettings) -> tomlkit.items.Table:
-    """Render a SnapshotSettings into a tomlkit table, skipping None fields."""
-    table = tomlkit.table()
-    table["method"] = snapshot.method.value
-    if snapshot.btrfs_mount_path is not None:
-        table["btrfs_mount_path"] = str(snapshot.btrfs_mount_path)
-    if snapshot.host_subvolume_path is not None:
-        table["host_subvolume_path"] = str(snapshot.host_subvolume_path)
-    if snapshot.snapshot_current_path is not None:
-        table["snapshot_current_path"] = str(snapshot.snapshot_current_path)
-    if snapshot.snapshot_read_path is not None:
-        table["snapshot_read_path"] = str(snapshot.snapshot_read_path)
-    if snapshot.trigger_dir is not None:
-        table["trigger_dir"] = str(snapshot.trigger_dir)
-    table["outer_helper_timeout_seconds"] = snapshot.outer_helper_timeout_seconds
-    # max_local_snapshots only governs the outer_trigger retention loop; keep
-    # it out of btrfs_local / direct configs so those stay untouched.
-    if snapshot.method == SnapshotMethod.OUTER_TRIGGER:
-        table["max_local_snapshots"] = snapshot.max_local_snapshots
-    return table
+# Old bootstraps construct this to describe the detected snapshot mechanism;
+# the capabilities model still carries every field they pass.
+SnapshotSettings = BackupCapabilities
 
 
 def merge_snapshot_into_existing_toml(
-    existing_text: str, snapshot: SnapshotSettings
+    existing_text: str, snapshot: BackupCapabilities
 ) -> str:
-    """Replace the `[snapshot]` table in `existing_text` with one derived from `snapshot`.
+    """Compat no-op: returns the existing text unchanged (never rewrites `[snapshot]`)."""
+    return existing_text
 
-    Preserves all other sections + user-added comments. Used by bootstrap on
-    every boot so an environment change (workspace restored on a different
-    provider) gets its `snapshot.method` corrected automatically without
-    clobbering the user's retention / excludes / repo URL edits.
-    """
-    doc = tomlkit.parse(existing_text)
-    new_table = _snapshot_to_toml_table(snapshot)
-    doc["snapshot"] = new_table
-    return tomlkit.dumps(doc)
+
+def render_default_backup_toml(snapshot: BackupCapabilities) -> str:
+    """Compat shim: renders a comment-only pointer instead of a real default config."""
+    return (
+        "# Optional user settings for the host_backup service (interval, retention,\n"
+        "# excludes). All settings have built-in defaults; this file may be deleted.\n"
+        "# Snapshot mechanics are detected by the service at runtime and are not\n"
+        "# configured here. See libs/host_backup/README.md.\n"
+    )
+
+
+def write_default_restic_env_template(path: Path = RESTIC_ENV_PATH) -> bool:
+    """Compat no-op: restic.env templates are no longer written (minds injects the file)."""
+    return False

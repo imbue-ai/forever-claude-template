@@ -205,6 +205,8 @@ You can (and should) modify your own configuration to improve yourself:
 
 Commit your changes to git after making modifications.
 
+Inspirations are a publishable, reusable, bootable snapshot of the apps and features a mind has built (one repo can accumulate several); another mind can adapt one into itself.
+
 # Updates
 
 Use the `update-self` skill to pull improvements from the upstream template repo, and the `submit-upstream-changes` skill to push shared changes (skills, scripts, config) back upstream.

@@ -8,7 +8,6 @@ dependencies = [
     "loguru>=0.7.0",
     "imbue-common",
     "click>=8.1",
-    "tomlkit>=0.12",
 ]
 
 [project.scripts]

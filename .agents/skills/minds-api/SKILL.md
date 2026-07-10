@@ -132,6 +132,12 @@ Many optional fields exist (`host_name`, `branch`, `launch_mode`, `ai_provider`,
 schema. A `400` with `{error, field}` means a field-level problem; a `422`
 `{"errors":[{field,message}]}` means a structurally invalid body.
 
+**Backups: always create with backups unconfigured.** Leave every `backup_*`
+field unset (the default is `backup_provider=CONFIGURE_LATER`). Configuring
+backups can require the user's backup *master password*, which is a secret you
+must NEVER ask the user for and never send through this API -- the user enables
+backups themselves from the minds desktop app afterwards.
+
 ### SSH into another workspace (`minds-workspaces-ssh`)
 
 You generate a keypair locally; only the public key leaves you, and the grant is
