@@ -109,7 +109,7 @@ def _resolve_in_tree(tree: RepoTree, rel_path: str) -> tuple[Path, str] | None:
     if grammar is None:
         return None
     abs_path = (tree.root / rel_path).resolve()
-    if not str(abs_path).startswith(str(tree.root.resolve())) or not abs_path.is_file():
+    if not abs_path.is_relative_to(tree.root.resolve()) or not abs_path.is_file():
         return None
     return abs_path, grammar
 
@@ -400,7 +400,7 @@ def _resolve_module(tree_root: Path, from_rel: str, spec: str) -> Path | None:
     candidates += [base / f"index{ext}" for ext in _MODULE_EXTS]
     for candidate in candidates:
         resolved = candidate.resolve()
-        if str(resolved).startswith(str(root_res)) and resolved.is_file():
+        if resolved.is_relative_to(root_res) and resolved.is_file():
             return resolved
     return None
 

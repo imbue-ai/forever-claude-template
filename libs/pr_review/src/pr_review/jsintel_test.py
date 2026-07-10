@@ -40,6 +40,18 @@ def test_hover_returns_none_for_missing_file(tmp_path: Path) -> None:
     assert jsintel.hover(tree, "nope.ts", line=1, column=1) is None
 
 
+def test_hover_rejects_prefix_sibling_escape(tmp_path: Path) -> None:
+    # A sibling directory whose name shares the tree root's name as a *prefix*
+    # must not be treated as inside the tree (a plain string-prefix check would
+    # wrongly admit it). Containment is by path boundary, not string prefix.
+    tree = write_tree(tmp_path / "myrepo", {"a.ts": "const x = 1;\n"})
+    sibling = tmp_path / "myrepo-secret"
+    sibling.mkdir()
+    (sibling / "leak.ts").write_text("const secret = 1;\n")
+    assert jsintel.hover(tree, "../myrepo-secret/leak.ts", line=1, column=7) is None
+    assert jsintel.definition(tree, "../myrepo-secret/leak.ts", line=1, column=7) is None
+
+
 def test_hover_shows_variable_type_annotation(tmp_path: Path) -> None:
     tree = write_tree(
         tmp_path,
@@ -245,6 +257,31 @@ def test_definition_returns_none_for_external_import(tmp_path: Path) -> None:
 def test_definition_returns_none_for_missing_file(tmp_path: Path) -> None:
     tree = write_tree(tmp_path, {"main.ts": "const x = 1;\n"})
     assert jsintel.definition(tree, "ghost.ts", line=1, column=1) is None
+
+
+def test_resolves_across_mjs_and_mts_variants(tmp_path: Path) -> None:
+    # The .mjs/.cjs/.mts/.cts variants share the JS/TS grammars, so hover and
+    # go-to-definition (incl. relative-import following) must work for them too.
+    tree = write_tree(
+        tmp_path,
+        {
+            "util.mts": "export function helper(): number {\n  return 1;\n}\n",
+            "main.mjs": 'import { helper } from "./util.mts";\n\nhelper();\n',
+            "conf.cjs": "const { join } = require('path');\njoin('a', 'b');\n",
+        },
+    )
+    hover = jsintel.hover(tree, "util.mts", line=1, column=17)
+    assert hover is not None
+    assert "function helper(): number" in hover["contents"]
+    definition = jsintel.definition(tree, "main.mjs", line=3, column=1)
+    assert definition is not None
+    assert definition["in_repo"] is True
+    assert definition["path"] == "util.mts"
+    assert definition["name"] == "helper"
+    # A CommonJS destructure in a .cjs file resolves to its local binding.
+    cjs_hover = jsintel.hover(tree, "conf.cjs", line=2, column=1)
+    assert cjs_hover is not None
+    assert "join" in cjs_hover["contents"]
 
 
 def test_definition_resolves_tsx_component(tmp_path: Path) -> None:

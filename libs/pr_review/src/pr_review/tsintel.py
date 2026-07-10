@@ -27,6 +27,11 @@ from pr_review.github import RepoTree
 
 _HELPER = Path(__file__).parent / "assets" / "tsintel_server.mjs"
 _IDLE_SECONDS = 600
+# Bound the startup handshake: the helper emits its ready line synchronously
+# right after loading typescript, so a spawn that has not spoken within this
+# window is wedged. Without the bound its blocking readline would run under the
+# global registry lock (see _get_server) and freeze JS intel for every tree.
+_STARTUP_TIMEOUT_S = 30
 
 
 class _ServerError(RuntimeError):
@@ -107,7 +112,14 @@ def _spawn_server(tree: RepoTree) -> _Server | None:
         )
     except OSError:
         return None
-    ready_line = proc.stdout.readline() if proc.stdout is not None else ""
+    # Kill a helper that never emits its ready line so the readline below cannot
+    # block forever under the caller's registry lock.
+    killer = threading.Timer(_STARTUP_TIMEOUT_S, proc.kill)
+    killer.start()
+    try:
+        ready_line = proc.stdout.readline() if proc.stdout is not None else ""
+    finally:
+        killer.cancel()
     try:
         ready = json.loads(ready_line)
     except ValueError:
