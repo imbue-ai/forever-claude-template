@@ -655,6 +655,20 @@ Not yet root-caused. Hypotheses, in the order worth checking:
    reordered for modal only, before assuming a fix to shared code is
    required.
 
+### Local docker-provider CLI prep (confirmed, not yet exercised)
+
+Checked once, in this repo's own checkout, nothing further attempted:
+Docker Desktop daemon is running locally (`docker info` succeeds); `uv
+sync` in `~/imbue/forever-claude-template` produces a working local `mngr`
+CLI at `.venv/bin/mngr` (`mngr 0.2.17`), confirming the editable
+`vendor/mngr` install resolves and the CLI itself runs. **No real `mngr
+create` has been attempted locally yet** — this is plumbing-only
+confirmation that the tool exists and starts, not evidence any create
+path works. `mngr create --help` confirms the exact flag shape needed:
+`mngr create <name> --new-host --template main --template docker
+--project <path> [...]`, matching `agent_creator.py`'s DOCKER-mode
+command construction referenced above.
+
 ### Explicit authorization for the next agent (from the user, verbatim intent)
 
 "You have permission to directly do `mngr create` with docker and test
