@@ -106,20 +106,6 @@ finished building while the laptop slept can no longer strand a tab on
 connection that dies while the window stays open and focused -- only a real
 concern for remote-host workspaces) remains a known follow-up.
 
-**Fixed: an agent could show "Running (tool)" with a stop button forever while
-actually idle.** The activity indicator matched tool calls against results
-across the agent's ENTIRE merged transcript, so a single orphaned tool call --
-left behind when a claude process is hard-killed mid-tool, which is exactly
-what the in-UI sign-in flow's restart and a container stop do (only a graceful
-Esc writes the synthetic interrupt result) -- kept the state pinned at
-TOOL_RUNNING for the rest of the workspace's life. The existing
-mid-turn-restart guard could not help: it only compares the FINAL transcript
-event's timestamp against the process-start marker, so it stopped protecting
-the moment any post-restart turn completed. Pending-tool matching is now
-scoped to the latest assistant message (per protocol, the only one that can
-have work outstanding; a new user message starts a turn the dead one cannot
-outlive), so orphans age out as soon as the conversation moves on.
-
 **Fixed: a fresh mind could deadlock on "No events yet" with no way to sign in.**
 When a workspace's first boot ran with no Claude credentials, claude sat at its
 interactive login screen and never signalled ready, so the bootstrap's

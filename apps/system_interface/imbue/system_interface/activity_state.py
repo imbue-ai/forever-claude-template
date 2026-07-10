@@ -37,31 +37,18 @@ class ActivityState(UpperCaseStrEnum):
 
 @pure
 def has_unmatched_tool_use(events: Sequence[dict[str, Any]]) -> bool:
-    """True iff the LATEST assistant message has a ``tool_use`` without a matching ``tool_result``.
+    """True iff the transcript has at least one ``tool_use`` without a matching ``tool_result``.
 
-    Only the most recent assistant message can have work genuinely
-    outstanding: the protocol delivers a ``tool_result`` for every call
-    (success or error) before the assistant can produce its next message, and
-    a new ``user_message`` starts a turn that a prior turn's calls cannot
-    outlive. An earlier revision scanned the entire merged transcript, which
-    pinned the indicator at TOOL_RUNNING forever whenever history contained an
-    orphaned ``tool_use``: a claude process hard-killed mid-tool never writes
-    the synthetic interrupt ``tool_result`` (only a graceful TUI Esc does),
-    and both the in-UI auth flow's restart and a container stop kill it
-    exactly like that -- while the ``claude_process_started`` staleness guard
-    stops protecting the moment any post-restart turn completes, because it
-    only looks at the FINAL event's timestamp. Scoping ``pending`` to the
-    latest assistant message makes such orphans age out as soon as the
-    conversation moves on. ``matched`` intentionally spans the whole walk so a
-    ``tool_result`` that arrives before its ``tool_use`` (theoretical) still
-    matches.
+    Walks every event so that an unmatched ``tool_use`` from any prior assistant
+    turn still counts -- in practice Claude only ever has outstanding tool calls
+    from its most recent assistant message, but the matching is order-independent
+    so we don't have to care.
     """
     pending: set[str] = set()
     matched: set[str] = set()
     for event in events:
         event_type = event.get("type")
         if event_type == "assistant_message":
-            pending.clear()
             for tool_call in event.get("tool_calls") or ():
                 tool_call_id = tool_call.get("tool_call_id")
                 if tool_call_id:
@@ -70,10 +57,9 @@ def has_unmatched_tool_use(events: Sequence[dict[str, Any]]) -> bool:
             tool_call_id = event.get("tool_call_id")
             if tool_call_id:
                 matched.add(tool_call_id)
-        elif event_type == "user_message":
-            # A new turn: whatever a prior turn left unfinished can never
-            # complete now (the dead turn will not emit its results).
-            pending.clear()
+        else:
+            # user_message or other event types we don't care about for tool tracking.
+            pass
     return bool(pending - matched)
 
 
