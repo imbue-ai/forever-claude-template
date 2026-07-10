@@ -735,12 +735,21 @@ function stopTypesPoll() { if (TYPES_POLL) { clearInterval(TYPES_POLL); TYPES_PO
 
 // Show the live install log while preparing (and on failure, so the error is
 // visible); hide it once basic/ready.
+// Render one log line, styled by its kind marker: "● " agent narration,
+// "$ " a shell command, "» " another tool call, otherwise tool output.
+function typesLogLineHTML(line) {
+  if (line.startsWith("● ")) return `<span class="tl-text">${esc(line.slice(2))}</span>`;
+  if (line.startsWith("$ ")) return `<span class="tl-cmd">${esc(line)}</span>`;
+  if (line.startsWith("» ")) return `<span class="tl-call">${esc(line)}</span>`;
+  return `<span class="tl-out">${esc(line)}</span>`;
+}
 function updateTypesLog(state, tail) {
   const box = document.getElementById("typesLog");
   if (!box) return;
   if (state === "installing" || state === "failed") {
     const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
-    box.textContent = tail || (state === "installing" ? "Starting…" : "");
+    if (tail) box.innerHTML = tail.split("\n").map(typesLogLineHTML).join("\n");
+    else box.textContent = state === "installing" ? "Starting…" : "";
     box.hidden = false;
     if (atBottom) box.scrollTop = box.scrollHeight;  // keep pinned to newest unless scrolled up
   } else {
@@ -783,16 +792,29 @@ async function refreshTypesPill() {
   }
 }
 
+const TYPES_MODELS = [
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6 — balanced (default)" },
+  { id: "claude-opus-4-8", label: "Opus 4.8 — most capable, pricier" },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5 — fastest, cheapest" },
+];
+function lastTypesModel() {
+  try { return localStorage.getItem("prr.typesModel") || "claude-sonnet-4-6"; } catch (_e) { return "claude-sonnet-4-6"; }
+}
 async function enableRichTypes(isRetry) {
   // Use the in-app modal, not window.confirm() -- the app runs in a sandboxed
   // iframe (no allow-modals), so confirm()/alert()/prompt() are ignored.
-  const ok = await confirmDialog({
+  const sel = lastTypesModel();
+  const opts = TYPES_MODELS.map(m => `<option value="${m.id}"${m.id === sel ? " selected" : ""}>${esc(m.label)}</option>`).join("");
+  const model = await confirmDialog({
     title: "Enable rich types?",
     message: "This launches an agent that installs this repo's dependencies (running their install scripts) so a TypeScript language server can resolve real types. It can take a few minutes and uses your Claude usage.",
     confirmLabel: "Enable",
+    extraHTML: `<label class="modal-field">Model for the setup agent
+      <select data-modal-input>${opts}</select></label>`,
   });
-  if (!ok) return;
-  try { await api2(typesBase(), isRetry ? { force: true } : {}); }
+  if (!model) return;
+  try { localStorage.setItem("prr.typesModel", model); } catch (_e) { /* not persisted */ }
+  try { await api2(typesBase(), { model, force: !!isRetry }); }
   catch (e) { flashNote("Couldn't start: " + e.message); return; }
   flashNote("Preparing rich types — installing dependencies…");
   refreshTypesPill();

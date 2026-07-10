@@ -34,6 +34,24 @@ def test_start_prepare_sets_installing_and_invokes_launcher(tmp_path: Path) -> N
     assert prepare.prepare_status(tree)["state"] == "installing"
 
 
+def test_normalize_model_validates() -> None:
+    assert prepare.normalize_model("claude-opus-4-8") == "claude-opus-4-8"
+    assert prepare.normalize_model(None) == prepare.DEFAULT_MODEL
+    assert prepare.normalize_model("gpt-4") == prepare.DEFAULT_MODEL
+
+
+def test_start_prepare_records_chosen_model(tmp_path: Path) -> None:
+    tree = _tree(tmp_path)
+    prepare.start_prepare(tree, launcher=lambda _t: None, model="claude-opus-4-8")
+    assert prepare.prepare_status(tree)["model"] == "claude-opus-4-8"
+
+
+def test_start_prepare_defaults_invalid_model(tmp_path: Path) -> None:
+    tree = _tree(tmp_path)
+    prepare.start_prepare(tree, launcher=lambda _t: None, model="nonsense")
+    assert prepare.prepare_status(tree)["model"] == prepare.DEFAULT_MODEL
+
+
 def test_start_prepare_is_idempotent_while_installing(tmp_path: Path) -> None:
     tree = _tree(tmp_path)
     calls: list[RepoTree] = []
@@ -91,7 +109,7 @@ def test_render_stream_event_logs_bash_command() -> None:
 
 def test_render_stream_event_logs_assistant_text() -> None:
     ev = {"type": "assistant", "message": {"content": [{"type": "text", "text": "Installing dependencies now."}]}}
-    assert prepare._render_stream_event(ev) == ["Installing dependencies now."]
+    assert prepare._render_stream_event(ev) == ["● Installing dependencies now."]
 
 
 def test_render_stream_event_logs_tool_output_tail() -> None:

@@ -300,12 +300,14 @@ def api_jsdef(owner: str, repo: str, sha: str) -> Response:
 def api_prepare(owner: str, repo: str, sha: str) -> Response:
     """Opt-in: launch the agent that installs deps + sets up rich (tsserver) types."""
     full = f"{owner}/{repo}"
-    force = bool((request.get_json(silent=True) or {}).get("force"))
+    payload = request.get_json(silent=True) or {}
+    force = bool(payload.get("force"))
+    model = payload.get("model")
     try:
         tree = github.ensure_repo_tree(full, sha)
         # PREPARE_LAUNCHER lets tests inject a fake launcher; None -> real agent.
         launcher = app.config.get("PREPARE_LAUNCHER")
-        return jsonify(prepare.start_prepare(tree, launcher=launcher, force=force))
+        return jsonify(prepare.start_prepare(tree, launcher=launcher, force=force, model=model))
     except github.GitHubError as exc:
         return _err(str(exc))
 

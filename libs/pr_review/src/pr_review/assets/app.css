@@ -180,6 +180,10 @@ header.top{position:sticky;top:0;z-index:20;background:rgba(10,13,19,.78);backdr
 @keyframes types-pulse{0%,100%{opacity:1}50%{opacity:.5}}
 /* live install log while preparing */
 .types-log{margin:9px 0 0;padding:8px 11px;max-height:150px;overflow:auto;background:var(--surface);border:1px solid var(--border-soft);border-radius:var(--r-sm);font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--muted);white-space:pre-wrap;word-break:break-word}
+.types-log .tl-text{color:var(--text)}
+.types-log .tl-cmd{color:var(--accent);font-weight:600}
+.types-log .tl-call{color:var(--accent-dim)}
+.types-log .tl-out{color:var(--faint)}
 .statusbadge .dot{width:8px;height:8px;border-radius:50%}
 .detail-title-edit{font-family:var(--display);font-size:20px;font-weight:600;width:100%;background:var(--bg);border:1px solid var(--accent);border-radius:var(--r-sm);color:var(--text);padding:6px 10px}
 .detail-title-edit:focus{outline:none;box-shadow:0 0 0 3px var(--accent-soft)}

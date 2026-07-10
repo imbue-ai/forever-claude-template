@@ -41,9 +41,16 @@ from pr_review.github import RepoTree
 PREP_DIRNAME = ".pr-review-prep"
 
 # Setting up an install across an unfamiliar repo is real agentic reasoning, so
-# use a stronger model than the haiku default; the run is explicit and rare.
-_AGENT_MODEL = "claude-sonnet-4-6"
+# default to a stronger model than the haiku default; the run is explicit and
+# rare. The user can pick a different one per run from the dialog.
+DEFAULT_MODEL = "claude-sonnet-4-6"
+_ALLOWED_MODELS = ("claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5")
 _AGENT_TIMEOUT_S = 1800
+
+
+def normalize_model(model: str | None) -> str:
+    """The requested model if it is one we allow, else the default."""
+    return model if model in _ALLOWED_MODELS else DEFAULT_MODEL
 
 _AGENT_PROMPT = """\
 You are preparing a checked-out copy of a Git repository so that a TypeScript \
@@ -85,8 +92,14 @@ concise final summary."""
 _AGENT_APPEND_SYSTEM = (
     "You are preparing a repository checkout for type analysis. Only create or "
     "modify files inside the current working directory (the checkout). Do not "
-    "touch anything outside it. The only shell commands you should run are for "
-    "dependency installation and verification -- no destructive operations."
+    "touch anything outside it, and do NOT modify the host system: no `apt`/`brew`/"
+    "`curl | sh`, no global or system-wide installs, no changing the installed "
+    "Node/npm/pnpm versions. Use the package managers already on PATH; if a "
+    "lockfile's engine constraints reject the available version, install with the "
+    "engine check relaxed (e.g. `npm install --engine-strict=false`) rather than "
+    "installing a different runtime. The only shell commands you should run are "
+    "for in-tree dependency installation and verification -- no destructive "
+    "operations."
 )
 
 
@@ -160,17 +173,21 @@ def _write_status(tree: RepoTree, status: dict) -> None:
     _status_path(tree).write_text(json.dumps(status, indent=2))
 
 
-def start_prepare(tree: RepoTree, launcher: Launcher | None = None, force: bool = False) -> dict:
+def start_prepare(
+    tree: RepoTree, launcher: Launcher | None = None, force: bool = False, model: str | None = None
+) -> dict:
     """Kick off preparation for ``tree`` (idempotent).
 
     Returns the current status without relaunching when a run is already in
     flight (``installing``) or complete (``ready``), unless ``force`` is set.
+    ``model`` selects the agent model (validated against the allow-list).
     """
-    launcher = launcher or _default_launcher
+    chosen = normalize_model(model)
+    launcher = launcher or (lambda t: _default_launcher(t, chosen))
     current = prepare_status(tree)
     if not force and current.get("state") in ("installing", "ready"):
         return current
-    status = {"state": "installing", "error": None}
+    status = {"state": "installing", "model": chosen, "error": None}
     _write_status(tree, status)
     launcher(tree)
     return status
@@ -190,17 +207,18 @@ def clear_prepared(tree: RepoTree) -> dict:
     return {"state": "absent"}
 
 
-def _default_launcher(tree: RepoTree) -> None:
-    threading.Thread(target=_run_prepare, args=(tree,), daemon=True).start()
+def _default_launcher(tree: RepoTree, model: str = DEFAULT_MODEL) -> None:
+    threading.Thread(target=_run_prepare, args=(tree, model), daemon=True).start()
 
 
-def _run_prepare(tree: RepoTree) -> None:
+def _run_prepare(tree: RepoTree, model: str = DEFAULT_MODEL) -> None:
     try:
-        run = _run_agent(tree)
+        run = _run_agent(tree, model)
         findings = _read_agent_findings(tree)
         ok, detail = _verify(tree, findings)
         status = {
             "state": "ready" if ok else "failed",
+            "model": model,
             "package_manager": findings.get("package_manager"),
             "roots": findings.get("roots") or [],
             "typescript_dir": findings.get("typescript_dir"),
@@ -211,7 +229,7 @@ def _run_prepare(tree: RepoTree) -> None:
     except (PrepareError, OSError, subprocess.SubprocessError, ValueError) as exc:
         # Any expected failure in this background thread becomes a failed status
         # the UI can show, rather than a silently dead thread.
-        status = {"state": "failed", "error": str(exc)[:1000]}
+        status = {"state": "failed", "model": model, "error": str(exc)[:1000]}
     _write_status(tree, status)
 
 
@@ -233,15 +251,17 @@ def _render_stream_event(ev: dict) -> list[str]:
     agent runs (npm/pnpm installs) and their output, plus the agent's own
     narration -- and drops the noise (hooks, thinking, token counters).
     """
+    # Each line carries a lightweight kind marker the UI styles by: "● " agent
+    # narration, "$ "/"» " a tool call, and no marker for tool output.
     out: list[str] = []
     etype = ev.get("type")
     if etype == "assistant":
         for block in (ev.get("message") or {}).get("content") or []:
             btype = block.get("type")
             if btype == "text":
-                text = (block.get("text") or "").strip()
-                if text:
-                    out.append(text)
+                for line in (block.get("text") or "").splitlines():
+                    if line.strip():
+                        out.append("● " + line.strip())
             elif btype == "tool_use":
                 name = block.get("name") or "tool"
                 inp = block.get("input") or {}
@@ -249,7 +269,7 @@ def _render_stream_event(ev: dict) -> list[str]:
                     out.append("$ " + _first_line(inp.get("command") or "", 300))
                 else:
                     target = inp.get("file_path") or inp.get("path") or inp.get("description") or ""
-                    out.append(f"[{name}] {_first_line(str(target), 200)}".rstrip())
+                    out.append(f"» {name} {_first_line(str(target), 200)}".rstrip())
     elif etype == "user":
         text = ""
         result = ev.get("tool_use_result")
@@ -269,18 +289,24 @@ def _render_stream_event(ev: dict) -> list[str]:
     return out
 
 
-def _run_agent(tree: RepoTree) -> _AgentRun:
+def _run_agent(tree: RepoTree, model: str = DEFAULT_MODEL) -> _AgentRun:
     """Run the headless prepare agent in the tree, streaming its activity to the
     log line-by-line so the UI can show live progress while it installs."""
     argv = [
         "claude", "-p", _AGENT_PROMPT,
         "--output-format", "stream-json", "--verbose",
-        "--model", _AGENT_MODEL,
+        "--model", model,
         "--permission-mode", "bypassPermissions",
         "--append-system-prompt", _AGENT_APPEND_SYSTEM,
     ]
     env = dict(os.environ)
     env.pop("MAIN_CLAUDE_SESSION_ID", None)
+    # The agent runs with cwd inside the extracted tree, which carries the repo's
+    # own `.claude` hooks and has no `.git`. Without this marker the mngr Stop
+    # hooks (e.g. the "return to repo root" guard) fire `exit 2` and block the
+    # headless agent from ever stopping -- it hangs after finishing its work.
+    # This is the same flag those hooks check to skip for proxied subagents.
+    env["MNGR_CLAUDE_SUBAGENT_PROXY_CHILD"] = "1"
     log_path = _log_path(tree)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen(
@@ -298,7 +324,7 @@ def _run_agent(tree: RepoTree) -> _AgentRun:
     result_text, cost = "", 0.0
     try:
         with open(log_path, "w") as log:
-            log.write(f"Preparing rich types for {tree.repo} — this can take a few minutes.\n")
+            log.write(f"● Preparing rich types for {tree.repo} — this can take a few minutes.\n")
             log.flush()
             for raw in proc.stdout or []:
                 line = raw.strip()
