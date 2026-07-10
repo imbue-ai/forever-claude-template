@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 
-import pytest
-import tomlkit
-
+from host_backup.capabilities import SnapshotMethod
 from host_backup.config import (
     BackupConfig,
-    BackupConfigError,
-    SnapshotMethod,
     SnapshotSettings,
     load_backup_config,
     load_restic_env,
@@ -21,32 +16,6 @@ from host_backup.config import (
     render_default_backup_toml,
     write_default_restic_env_template,
 )
-
-
-def _direct_snapshot() -> SnapshotSettings:
-    return SnapshotSettings(method=SnapshotMethod.DIRECT)
-
-
-def _outer_trigger_snapshot() -> SnapshotSettings:
-    return SnapshotSettings(
-        method=SnapshotMethod.OUTER_TRIGGER,
-        btrfs_mount_path=Path("/mngr-btrfs"),
-        host_subvolume_path=Path("/mngr-btrfs/deadbeef"),
-        snapshot_current_path=Path("/mngr-btrfs/snapshots/current"),
-        snapshot_read_path=Path("/mngr-snapshots/current"),
-        trigger_dir=Path("/mngr-snapshot"),
-    )
-
-
-def _btrfs_local_snapshot() -> SnapshotSettings:
-    return SnapshotSettings(
-        method=SnapshotMethod.BTRFS_LOCAL,
-        btrfs_mount_path=Path("/mnt/host-volume"),
-        host_subvolume_path=Path("/mnt/host-volume/host_dir"),
-        snapshot_current_path=Path("/mnt/host-volume/snapshots/current"),
-        snapshot_read_path=Path("/mnt/host-volume/snapshots/current"),
-    )
-
 
 # --- parse_restic_env_file ---
 
@@ -122,118 +91,120 @@ def test_missing_required_restic_keys_treats_empty_value_as_missing() -> None:
     assert missing_required_restic_keys(env) == ["RESTIC_REPOSITORY"]
 
 
-# --- write_default_restic_env_template ---
+# --- load_backup_config (tolerant loading) ---
 
 
-def test_write_default_restic_env_template_creates_when_absent(tmp_path: Path) -> None:
-    path = tmp_path / "secrets" / "restic.env"
-    assert write_default_restic_env_template(path) is True
-    assert path.exists()
-    assert "RESTIC_PASSWORD" in path.read_text()
+def test_load_backup_config_returns_defaults_when_absent(tmp_path: Path) -> None:
+    config = load_backup_config(tmp_path / "missing.toml")
+    assert config == BackupConfig()
 
 
-def test_write_default_restic_env_template_is_noop_when_present(tmp_path: Path) -> None:
-    path = tmp_path / "restic.env"
-    path.write_text("user content\n")
-    assert write_default_restic_env_template(path) is False
-    assert path.read_text() == "user content\n"
-
-
-def test_write_default_restic_env_template_does_not_set_live_keys(
-    tmp_path: Path,
-) -> None:
-    """The template must be all commented out so script refuses to run unless user fills it in."""
-    path = tmp_path / "restic.env"
-    write_default_restic_env_template(path)
-    parsed = parse_restic_env_file(path.read_text())
-    # No active (uncommented) keys should be present in the template.
-    assert parsed == {}
-
-
-# --- render_default_backup_toml ---
-
-
-def test_render_default_backup_toml_parses_into_valid_config() -> None:
-    rendered = render_default_backup_toml(_outer_trigger_snapshot())
-    parsed = tomllib.loads(rendered)
-    config = BackupConfig.model_validate(parsed)
-    assert config.snapshot.method == SnapshotMethod.OUTER_TRIGGER
-    assert config.snapshot.trigger_dir == Path("/mngr-snapshot")
-    assert config.retention.keep_hourly == 24
-    assert "**/.venv" in config.excludes
-    # The repository + credentials live in restic.env, not backup.toml; the
-    # default document carries no [restic] section.
-    assert "restic" not in parsed
-
-
-def test_render_default_backup_toml_includes_max_local_snapshots_for_outer_trigger() -> (
-    None
-):
-    rendered = render_default_backup_toml(_outer_trigger_snapshot())
-    config = BackupConfig.model_validate(tomllib.loads(rendered))
-    assert config.snapshot.max_local_snapshots == 5
-
-
-def test_render_default_backup_toml_omits_max_local_snapshots_for_other_methods() -> (
-    None
-):
-    # btrfs_local / direct ignore the knob, so it must not appear in their config.
-    for snapshot in (_btrfs_local_snapshot(), _direct_snapshot()):
-        parsed = tomllib.loads(render_default_backup_toml(snapshot))
-        assert "max_local_snapshots" not in parsed["snapshot"]
-
-
-def test_backup_config_loads_without_restic_section() -> None:
-    config = BackupConfig(snapshot=_direct_snapshot())
-    assert config.snapshot.method == SnapshotMethod.DIRECT
-
-
-# --- merge_snapshot_into_existing_toml ---
-
-
-def test_merge_snapshot_into_existing_toml_preserves_user_fields() -> None:
-    existing = render_default_backup_toml(_direct_snapshot())
-    # User edits retention.
-    existing_doc = tomlkit.parse(existing)
-    existing_doc["retention"]["keep_hourly"] = 48
-    user_edited = tomlkit.dumps(existing_doc)
-
-    merged = merge_snapshot_into_existing_toml(user_edited, _outer_trigger_snapshot())
-    parsed = tomllib.loads(merged)
-    # Snapshot section was rewritten:
-    assert parsed["snapshot"]["method"] == SnapshotMethod.OUTER_TRIGGER.value
-    assert parsed["snapshot"]["trigger_dir"] == "/mngr-snapshot"
-    # User edits are preserved:
-    assert parsed["retention"]["keep_hourly"] == 48
-
-
-def test_merge_snapshot_into_existing_toml_drops_optional_paths_for_direct() -> None:
-    existing = render_default_backup_toml(_outer_trigger_snapshot())
-    merged = merge_snapshot_into_existing_toml(existing, _direct_snapshot())
-    parsed = tomllib.loads(merged)
-    assert parsed["snapshot"]["method"] == SnapshotMethod.DIRECT.value
-    assert "trigger_dir" not in parsed["snapshot"]
-    assert "snapshot_current_path" not in parsed["snapshot"]
-
-
-# --- load_backup_config ---
-
-
-def test_load_backup_config_raises_on_missing_file(tmp_path: Path) -> None:
-    with pytest.raises(BackupConfigError):
-        load_backup_config(tmp_path / "missing.toml")
-
-
-def test_load_backup_config_raises_on_malformed_toml(tmp_path: Path) -> None:
+def test_load_backup_config_returns_defaults_on_malformed_toml(tmp_path: Path) -> None:
     path = tmp_path / "bad.toml"
     path.write_text("[snapshot\nbroken")
-    with pytest.raises(BackupConfigError):
-        load_backup_config(path)
+    assert load_backup_config(path) == BackupConfig()
 
 
-def test_load_backup_config_round_trips_default_template(tmp_path: Path) -> None:
+def test_load_backup_config_applies_user_settings(tmp_path: Path) -> None:
     path = tmp_path / "backup.toml"
-    path.write_text(render_default_backup_toml(_btrfs_local_snapshot()))
+    path.write_text(
+        "backup_interval_seconds = 1800\n"
+        "excludes = ['**/only-this']\n"
+        "[retention]\n"
+        "keep_hourly = 48\n"
+    )
     config = load_backup_config(path)
-    assert config.snapshot.method == SnapshotMethod.BTRFS_LOCAL
-    assert config.snapshot.host_subvolume_path == Path("/mnt/host-volume/host_dir")
+    assert config.backup_interval_seconds == 1800.0
+    assert config.excludes == ("**/only-this",)
+    assert config.retention.keep_hourly == 48
+    # Untouched fields keep their defaults.
+    assert config.retention.keep_daily == 30
+    assert config.minimum_backup_gap_seconds == 60.0
+
+
+def test_load_backup_config_ignores_unknown_keys_but_applies_the_rest(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backup.toml"
+    path.write_text("no_such_setting = true\nbackup_interval_seconds = 120\n")
+    config = load_backup_config(path)
+    assert config.backup_interval_seconds == 120.0
+
+
+def test_load_backup_config_ignores_stale_snapshot_section(tmp_path: Path) -> None:
+    # Old bootstraps rewrite a [snapshot] section forever; it must be ignored
+    # (capabilities are detected at runtime) without disturbing user settings.
+    path = tmp_path / "backup.toml"
+    path.write_text(
+        "backup_interval_seconds = 240\n"
+        "[snapshot]\n"
+        "method = 'outer_trigger'\n"
+        "trigger_dir = '/mngr-snapshot'\n"
+    )
+    config = load_backup_config(path)
+    assert config.backup_interval_seconds == 240.0
+
+
+def test_load_backup_config_skips_invalid_value_but_applies_valid_ones(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backup.toml"
+    path.write_text(
+        "backup_interval_seconds = 'not-a-number'\nminimum_backup_gap_seconds = 5\n"
+    )
+    config = load_backup_config(path)
+    # The malformed field falls back to its default; the valid one applies.
+    assert config.backup_interval_seconds == 3600.0
+    assert config.minimum_backup_gap_seconds == 5.0
+
+
+def test_load_backup_config_skips_invalid_retention_but_applies_valid_fields(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backup.toml"
+    path.write_text(
+        "backup_interval_seconds = 300\n[retention]\nkeep_hourly = 'lots'\n"
+    )
+    config = load_backup_config(path)
+    assert config.backup_interval_seconds == 300.0
+    assert config.retention.keep_hourly == 24
+
+
+# --- backwards-compatibility shims for pre-refactor bootstraps ---
+
+
+def _shim_snapshot_settings() -> SnapshotSettings:
+    # Constructed exactly the way an old bootstrap constructs it.
+    return SnapshotSettings(
+        method=SnapshotMethod.OUTER_TRIGGER,
+        btrfs_mount_path=Path("/mngr-btrfs"),
+        host_subvolume_path=Path("/mngr-btrfs/<host_id_hex>"),
+        snapshot_current_path=Path("/mngr-btrfs/snapshots/current"),
+        snapshot_read_path=Path("/mngr-snapshots/current"),
+        trigger_dir=Path("/mngr-snapshot"),
+    )
+
+
+def test_shim_write_default_restic_env_template_never_writes(tmp_path: Path) -> None:
+    path = tmp_path / "secrets" / "restic.env"
+    assert write_default_restic_env_template(path) is False
+    assert not path.exists()
+
+
+def test_shim_merge_snapshot_into_existing_toml_returns_text_unchanged() -> None:
+    existing = "backup_interval_seconds = 77\n[snapshot]\nmethod = 'direct'\n"
+    assert merge_snapshot_into_existing_toml(existing, _shim_snapshot_settings()) == (
+        existing
+    )
+
+
+def test_shim_render_default_backup_toml_is_comment_only(tmp_path: Path) -> None:
+    rendered = render_default_backup_toml(_shim_snapshot_settings())
+    stripped_lines = [line for line in rendered.splitlines() if line.strip()]
+    assert stripped_lines
+    assert all(line.startswith("#") for line in stripped_lines)
+    # An old bootstrap may write this to backup.toml when the file is absent;
+    # it must load as an all-defaults config.
+    path = tmp_path / "backup.toml"
+    path.write_text(rendered)
+    assert load_backup_config(path) == BackupConfig()

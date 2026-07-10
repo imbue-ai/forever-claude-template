@@ -341,17 +341,13 @@ name = "bootstrap"
 version = "0.1.0"
 source = { editable = "libs/bootstrap" }
 dependencies = [
-    { name = "host-backup" },
     { name = "loguru" },
-    { name = "tomlkit" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "host-backup", editable = "libs/host_backup" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
-    { name = "tomlkit", specifier = ">=0.12" },
 ]
 
 [[package]]
@@ -1573,7 +1569,6 @@ dependencies = [
     { name = "click" },
     { name = "imbue-common" },
     { name = "loguru" },
-    { name = "tomlkit" },
 ]
 
 [package.metadata]
@@ -1581,7 +1576,6 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
     { name = "loguru", specifier = ">=0.7.0" },
-    { name = "tomlkit", specifier = ">=0.12" },
 ]
 
 [[package]]

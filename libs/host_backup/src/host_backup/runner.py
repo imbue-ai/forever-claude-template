@@ -13,12 +13,12 @@ from uuid import uuid4
 
 from loguru import logger
 
+from host_backup.capabilities import BackupCapabilities, detect_backup_capabilities
 from host_backup.config import (
     BACKUP_TOML_PATH,
     PRUNE_TIMESTAMP_PATH,
     RESTIC_ENV_PATH,
     BackupConfig,
-    BackupConfigError,
     get_events_dir,
     load_backup_config,
     load_restic_env,
@@ -40,15 +40,30 @@ LOG_FILE = Path("/tmp/host-backup.log")
 
 
 def main() -> None:
-    """Entry point: tee logs to disk, then loop forever."""
+    """Entry point: tee logs to disk, detect capabilities, then loop forever."""
     logger.add(LOG_FILE, level="INFO")
     logger.info("Starting host-backup")
-    _run_loop()
+    _run_loop(detect_backup_capabilities())
 
 
-def _run_loop() -> None:
+def _run_loop(capabilities: BackupCapabilities) -> None:
     """The actual loop. Extracted for testability."""
-    state = _LoopState()
+    state = _LoopState(capabilities)
+    logger.info(
+        "Detected backup capabilities: method={} (read_path={}, trigger_dir={})",
+        capabilities.method.value,
+        capabilities.snapshot_read_path,
+        capabilities.trigger_dir,
+    )
+    write_event(
+        state.events_dir,
+        make_event(
+            BackupEventType.CAPABILITIES_DETECTED,
+            method=capabilities.method.value,
+            snapshot_read_path=str(capabilities.snapshot_read_path),
+            trigger_dir=str(capabilities.trigger_dir),
+        ),
+    )
     while True:
         try:
             _service_iteration(state)
@@ -68,12 +83,16 @@ def _run_loop() -> None:
 class _LoopState:
     """Mutable state carried across iterations of the tick loop."""
 
-    def __init__(self) -> None:
+    def __init__(self, capabilities: BackupCapabilities) -> None:
+        self.capabilities = capabilities
         self.events_dir = get_events_dir()
         self.last_backup_toml_mtime: float | None = None
         self.last_restic_env_mtime: float | None = None
         self.last_tick_end_monotonic: float | None = None
         self.last_known_config: BackupConfig | None = None
+        # Mtime of backup.toml when the config was last (re)loaded; used to skip
+        # redundant reloads (and their tolerant-parse warnings) between edits.
+        self.last_loaded_backup_toml_mtime: float | None = None
         # Per-tick id (reset every iteration); falls back to "no-tick" before the
         # first tick fires so the very first crash still has a correlation id.
         self.current_tick_id: str = "no-tick"
@@ -85,11 +104,10 @@ def _service_iteration(state: _LoopState) -> None:
     Sleeps for `config_poll_interval_seconds`, then asks `_should_tick_now`
     whether the next tick should fire. If yes, runs one tick.
     """
-    config = _safe_load_config(state)
-    poll_interval = config.config_poll_interval_seconds if config else 15.0
-
     backup_mtime = _safe_mtime(BACKUP_TOML_PATH)
     env_mtime = _safe_mtime(RESTIC_ENV_PATH)
+    config = _load_config_if_changed(state, backup_mtime)
+    poll_interval = config.config_poll_interval_seconds
 
     should_tick, reason = _should_tick_now(
         state=state,
@@ -105,56 +123,53 @@ def _service_iteration(state: _LoopState) -> None:
     state.current_tick_id = uuid4().hex
     state.last_backup_toml_mtime = backup_mtime
     state.last_restic_env_mtime = env_mtime
-    if config is None:
-        # Should not happen: _should_tick_now refuses when config is None.
-        time.sleep(poll_interval)
-        return
     _run_one_tick(state=state, config=config, trigger_reason=reason)
     state.last_tick_end_monotonic = time.monotonic()
 
 
-def _safe_load_config(state: _LoopState) -> BackupConfig | None:
-    """Reload backup.toml; emits CONFIG_RELOADED on success, logs+returns None on failure."""
-    try:
-        config = load_backup_config()
-    except BackupConfigError as e:
-        logger.warning("Cannot load backup.toml: {}", e)
+def _load_config_if_changed(
+    state: _LoopState, backup_mtime: float | None, path: Path = BACKUP_TOML_PATH
+) -> BackupConfig:
+    """(Re)load backup.toml only when its mtime moved since the last load.
+
+    Tolerant loading never fails, but re-parsing an unchanged file every poll
+    would repeat its warnings every few seconds; caching on mtime keeps each
+    problem reported once per edit.
+    """
+    if (
+        state.last_known_config is not None
+        and backup_mtime == state.last_loaded_backup_toml_mtime
+    ):
         return state.last_known_config
+    config = load_backup_config(path)
     state.last_known_config = config
+    state.last_loaded_backup_toml_mtime = backup_mtime
     return config
 
 
 def _should_tick_now(
     *,
     state: _LoopState,
-    config: BackupConfig | None,
+    config: BackupConfig,
     backup_mtime: float | None,
     env_mtime: float | None,
 ) -> tuple[bool, str]:
     """Decide whether to fire a tick now; returns (decision, reason_string).
 
     Reasons: 'startup' (first tick after process start), 'config_change'
-    (either file's mtime differs from last seen), 'interval' (the
-    wall-clock backup interval elapsed).
+    (either file's mtime differs from last seen -- including the file
+    appearing or disappearing, since neither file exists until written:
+    minds injects restic.env and host-backup-now may create backup.toml),
+    'interval' (the wall-clock backup interval elapsed).
     """
-    if config is None:
-        return False, "no_config"
     if state.last_tick_end_monotonic is None:
         return True, "startup"
     elapsed_since_last_tick_end = time.monotonic() - state.last_tick_end_monotonic
     if elapsed_since_last_tick_end < config.minimum_backup_gap_seconds:
         return False, "min_gap_not_elapsed"
-    if (
-        backup_mtime is not None
-        and state.last_backup_toml_mtime is not None
-        and backup_mtime != state.last_backup_toml_mtime
-    ):
+    if backup_mtime != state.last_backup_toml_mtime:
         return True, "config_change"
-    if (
-        env_mtime is not None
-        and state.last_restic_env_mtime is not None
-        and env_mtime != state.last_restic_env_mtime
-    ):
+    if env_mtime != state.last_restic_env_mtime:
         return True, "config_change"
     if elapsed_since_last_tick_end >= config.backup_interval_seconds:
         return True, "interval"
@@ -205,7 +220,7 @@ def _run_one_tick(
     # (and keyed) by the minds app, so host_backup just backs up to it -- it
     # never probes-then-inits the repo itself.
     env_overrides = dict(env)
-    snapshot_result = _take_snapshot(state=state, config=config)
+    snapshot_result = _take_snapshot(state=state)
     if snapshot_result is None:
         return
     try:
@@ -216,7 +231,7 @@ def _run_one_tick(
             env_overrides=env_overrides,
         )
     finally:
-        _cleanup_snapshot(state=state, config=config, snapshot=snapshot_result)
+        _cleanup_snapshot(state=state, snapshot=snapshot_result)
     if not backup_succeeded:
         return
     _run_forget(state=state, config=config, env_overrides=env_overrides)
@@ -246,10 +261,10 @@ def _check_secrets_present(*, state: _LoopState) -> dict[str, str] | None:
     return env
 
 
-def _take_snapshot(*, state: _LoopState, config: BackupConfig) -> SnapshotResult | None:
+def _take_snapshot(*, state: _LoopState) -> SnapshotResult | None:
     """Build the snapshot taker and call it; emit SNAPSHOT_CREATED on success."""
     try:
-        taker = make_snapshot_taker(config.snapshot)
+        taker = make_snapshot_taker(state.capabilities)
         result = taker.take_snapshot()
     except SnapshotError as e:
         # A failed snapshot aborts the whole tick before restic runs, so surface
@@ -262,7 +277,7 @@ def _take_snapshot(*, state: _LoopState, config: BackupConfig) -> SnapshotResult
             make_event(
                 BackupEventType.SNAPSHOT_FAILED,
                 tick_id=state.current_tick_id,
-                method=config.snapshot.method.value,
+                method=state.capabilities.method.value,
                 error_message=str(e),
             ),
         )
@@ -283,9 +298,7 @@ def _take_snapshot(*, state: _LoopState, config: BackupConfig) -> SnapshotResult
     return result
 
 
-def _cleanup_snapshot(
-    *, state: _LoopState, config: BackupConfig, snapshot: SnapshotResult
-) -> None:
+def _cleanup_snapshot(*, state: _LoopState, snapshot: SnapshotResult) -> None:
     """Reclaim snapshots after the backup; emit one SNAPSHOT_DELETED per deletion.
 
     For outer_trigger this prunes old snapshots down to max_local_snapshots; for
@@ -293,7 +306,7 @@ def _cleanup_snapshot(
     no-op (and emits nothing).
     """
     try:
-        taker = make_snapshot_taker(config.snapshot)
+        taker = make_snapshot_taker(state.capabilities)
         deleted_paths = taker.cleanup_after_backup()
     except SnapshotCleanupError as e:
         # A keep-N cleanup failed partway: log the deletions that did succeed,

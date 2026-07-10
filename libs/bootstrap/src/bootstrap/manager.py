@@ -4,7 +4,7 @@
 extra_window). It performs first-boot setup -- global git config, ensuring
 runtime/ exists as a git worktree of the per-agent backup branch
 (mindsbackup/$MNGR_AGENT_ID), writing CLAUDE_CONFIG_DIR into the host env,
-seeding the host-backup config, and creating the initial chat agent -- and then
+and creating the initial chat agent -- and then
 `exec`s the system supervisord in the foreground. supervisord (configured by
 supervisord.conf) owns every background service from then on.
 
@@ -19,15 +19,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from host_backup.config import (
-    BACKUP_TOML_PATH,
-    RESTIC_ENV_PATH,
-    SnapshotMethod,
-    SnapshotSettings,
-    merge_snapshot_into_existing_toml,
-    render_default_backup_toml,
-    write_default_restic_env_template,
-)
 from loguru import logger
 
 # Path (relative to the repo root, which is bootstrap's cwd) of the supervisord
@@ -697,140 +688,6 @@ def _init_runtime_worktree() -> None:
         logger.info("No GH_TOKEN; skipping initial push")
 
 
-def detect_snapshot_settings(
-    *,
-    trigger_dir: Path,
-    host_dir: Path,
-) -> SnapshotSettings:
-    """Probe the container's filesystem to choose the right snapshot mechanism.
-
-    Decision tree:
-      - If `trigger_dir` exists as a directory, we are inside a vps-docker
-        agent container with the snapshot-trigger volume mounted.
-      - Else if `host_dir` is on a btrfs filesystem (lima), we can take
-        snapshots directly via `sudo btrfs subvolume snapshot`.
-      - Else (plain docker / any unrecognized provider) fall back to DIRECT
-        with no snapshot.
-
-    The returned settings carry the well-known paths each provider's
-    cloud-init / lima provisioning makes available. Bootstrap is the
-    single source of truth for these paths.
-    """
-    if trigger_dir.is_dir():
-        # vps-docker: snapshots dir is bind-mounted at /mngr-snapshots; the
-        # outer helper resolves <btrfs-mount>/<host_id_hex>/snapshots/current
-        # at request time, so the inner script doesn't need to know the
-        # outer-side path -- it just hands back what's at /mngr-snapshots/current.
-        return SnapshotSettings(
-            method=SnapshotMethod.OUTER_TRIGGER,
-            btrfs_mount_path=Path("/mngr-btrfs"),
-            host_subvolume_path=Path("/mngr-btrfs/<host_id_hex>"),
-            snapshot_current_path=Path("/mngr-btrfs/snapshots/current"),
-            snapshot_read_path=Path("/mngr-snapshots/current"),
-            trigger_dir=trigger_dir,
-        )
-    fstype = _findmnt_fstype(host_dir)
-    if fstype == "btrfs":
-        # lima attaches a btrfs additional disk and symlinks host_dir to its
-        # mount point, so the btrfs filesystem *is* host_dir. The snapshot must
-        # live on that same btrfs (you cannot snapshot a subvolume onto another
-        # filesystem), so derive every path from host_dir. The previous
-        # hardcoded /mnt/host-volume only ever existed in the docker/vps layout,
-        # which takes the OUTER_TRIGGER branch above -- never this one -- so on
-        # lima it pointed snapshots at a plain dir on the root fs and the
-        # `btrfs subvolume snapshot` failed with "not a btrfs filesystem".
-        return SnapshotSettings(
-            method=SnapshotMethod.BTRFS_LOCAL,
-            btrfs_mount_path=host_dir,
-            host_subvolume_path=host_dir,
-            snapshot_current_path=host_dir / "snapshots" / "current",
-            snapshot_read_path=host_dir / "snapshots" / "current",
-        )
-    return SnapshotSettings(
-        method=SnapshotMethod.DIRECT,
-        snapshot_read_path=host_dir,
-    )
-
-
-def _findmnt_fstype(path: Path) -> str:
-    """Return the filesystem type for `path` via `findmnt`; empty string on any failure."""
-    result = subprocess.run(
-        ["findmnt", "-n", "-o", "FSTYPE", str(path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return ""
-    return result.stdout.strip()
-
-
-def init_backup_config_with_settings(
-    snapshot: SnapshotSettings,
-    *,
-    backup_toml_path: Path,
-    restic_env_path: Path,
-) -> None:
-    """Write/merge backup.toml and write default restic.env (if absent).
-
-    Pure-ish: takes its inputs by argument so tests can target it directly
-    without monkeypatching environment detection or filesystem paths. Best-
-    effort: logs and returns rather than raising on any failure.
-    """
-    logger.info(
-        "host_backup snapshot method: {} (subvolume={}, trigger_dir={})",
-        snapshot.method.value,
-        snapshot.host_subvolume_path,
-        snapshot.trigger_dir,
-    )
-    backup_toml_path.parent.mkdir(parents=True, exist_ok=True)
-    if backup_toml_path.exists():
-        try:
-            existing = backup_toml_path.read_text()
-            merged = merge_snapshot_into_existing_toml(existing, snapshot)
-        except (OSError, ValueError) as e:
-            logger.warning(
-                "Failed to merge new snapshot section into {}: {}", backup_toml_path, e
-            )
-            return
-        if merged != existing:
-            backup_toml_path.write_text(merged)
-            logger.info("Updated [snapshot] section of {}", backup_toml_path)
-    else:
-        try:
-            backup_toml_path.write_text(render_default_backup_toml(snapshot))
-        except OSError as e:
-            logger.warning("Failed to write default {}: {}", backup_toml_path, e)
-            return
-        logger.info("Wrote default {}", backup_toml_path)
-    try:
-        written = write_default_restic_env_template(restic_env_path)
-    except OSError as e:
-        logger.warning("Failed to write restic.env template: {}", e)
-        return
-    if written:
-        logger.info(
-            "Wrote default restic.env template (must be populated before backups run)"
-        )
-
-
-def _init_backup_config() -> None:
-    """Top-level orchestrator: detect env, then delegate to init_backup_config_with_settings."""
-    try:
-        snapshot = detect_snapshot_settings(
-            trigger_dir=Path("/mngr-snapshot"),
-            host_dir=Path("/mngr"),
-        )
-    except OSError as e:
-        logger.warning("Failed to detect snapshot environment: {}", e)
-        return
-    init_backup_config_with_settings(
-        snapshot,
-        backup_toml_path=BACKUP_TOML_PATH,
-        restic_env_path=RESTIC_ENV_PATH,
-    )
-
-
 def main() -> None:
     logger.info("Bootstrap starting: first-boot setup, then supervisord")
 
@@ -849,13 +706,6 @@ def main() -> None:
     _init_runtime_worktree()
 
     _bootstrap_init_chat_dir()
-
-    # Detect the snapshot environment and write runtime/backup.toml +
-    # runtime/secrets/restic.env so the host-backup service comes up with a
-    # coherent default config. Re-runs on every boot to keep snapshot.method in
-    # sync with the detected provider; user-customized fields in backup.toml are
-    # preserved via toml-merge.
-    _init_backup_config()
 
     # Make sure supervisord's log directory exists, then hand off: replace this
     # process with supervisord in the foreground. supervisord owns every
