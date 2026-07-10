@@ -51,6 +51,50 @@ def test_hover_shows_variable_type_annotation(tmp_path: Path) -> None:
     assert "const total: number" in result["contents"]
 
 
+def test_hover_collects_full_line_comment_block(tmp_path: Path) -> None:
+    # A run of ``//`` lines is one comment node per line; the whole block above
+    # the declaration should surface, not just the last line. The declaration is
+    # a ``const``, whose comment is a sibling of the outer lexical_declaration.
+    tree = write_tree(
+        tmp_path,
+        {
+            "main.ts": (
+                "// First line of the note.\n"
+                "// Second line of the note.\n"
+                "// Third line of the note.\n"
+                "const LIMIT = 50;\n"
+            )
+        },
+    )
+    result = jsintel.hover(tree, "main.ts", line=4, column=7)
+    assert result is not None
+    contents = result["contents"]
+    assert "First line of the note." in contents
+    assert "Second line of the note." in contents
+    assert "Third line of the note." in contents
+
+
+def test_hover_stops_comment_block_at_blank_line(tmp_path: Path) -> None:
+    # A blank line separates an unrelated earlier comment from the declaration's
+    # own doc block; only the adjacent block should surface.
+    tree = write_tree(
+        tmp_path,
+        {
+            "main.ts": (
+                "// Unrelated section header.\n"
+                "\n"
+                "// Doc for the constant.\n"
+                "const LIMIT = 50;\n"
+            )
+        },
+    )
+    result = jsintel.hover(tree, "main.ts", line=4, column=7)
+    assert result is not None
+    contents = result["contents"]
+    assert "Doc for the constant." in contents
+    assert "Unrelated section header." not in contents
+
+
 def test_definition_resolves_import_across_files(tmp_path: Path) -> None:
     tree = write_tree(
         tmp_path,

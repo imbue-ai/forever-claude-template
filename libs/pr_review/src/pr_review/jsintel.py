@@ -396,14 +396,45 @@ def _clean_comment(text: str) -> str:
     return text
 
 
-def _leading_comment(container: Node, source: bytes) -> str | None:
+# Wrappers between a declaration and the statement whose sibling the doc comment
+# is: a ``const``/``let``/``var`` declarator sits inside a (possibly exported)
+# lexical/variable declaration, so the comment is a sibling of that outer node,
+# not of the declarator itself.
+_STATEMENT_WRAPPERS = frozenset({"lexical_declaration", "variable_declaration", "export_statement"})
+
+
+def _statement_node(container: Node) -> Node:
+    """Climb out of declarator / export wrappers to the statement that carries the
+    preceding doc comment as a sibling."""
     node = container
-    if node.parent is not None and node.parent.type == "export_statement":
+    while node.parent is not None and node.parent.type in _STATEMENT_WRAPPERS:
         node = node.parent
+    return node
+
+
+def _leading_comment(container: Node, source: bytes) -> str | None:
+    """The full contiguous block of comment lines directly above the declaration.
+
+    A ``/** ... */`` block is a single comment node, but a run of ``//`` lines is
+    one node per line, so we walk backwards collecting every comment that is
+    directly above the previous one (no blank-line gap) and join them in source
+    order. A blank line ends the block, so an unrelated earlier comment is left
+    out.
+    """
+    node = _statement_node(container)
+    comments: list[Node] = []
+    anchor_row = node.start_point[0]
     prev = node.prev_sibling
-    if prev is not None and prev.type == "comment":
-        return _clean_comment(prev.text.decode("utf-8", errors="replace")) or None
-    return None
+    while prev is not None and prev.type == "comment" and anchor_row - prev.end_point[0] <= 1:
+        comments.append(prev)
+        anchor_row = prev.start_point[0]
+        prev = prev.prev_sibling
+    if not comments:
+        return None
+    comments.reverse()
+    cleaned = (_clean_comment(node.text.decode("utf-8", errors="replace")) for node in comments)
+    joined = "\n".join(part for part in cleaned if part).strip()
+    return joined or None
 
 
 def hover(tree: RepoTree, rel_path: str, line: int, column: int) -> dict | None:
