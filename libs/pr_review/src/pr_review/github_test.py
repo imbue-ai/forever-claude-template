@@ -13,14 +13,15 @@ from pathlib import Path
 import pytest
 
 from pr_review import github
-from pr_review.testing import json_route
-from pr_review.testing import make_curl
-from pr_review.testing import make_evil_tarball_bytes
-from pr_review.testing import make_tarball_bytes
-from pr_review.testing import parse_write_call
-from pr_review.testing import seed_repo_cache
-from pr_review.testing import write_tree
-
+from pr_review.testing import (
+    json_route,
+    make_curl,
+    make_evil_tarball_bytes,
+    make_tarball_bytes,
+    parse_write_call,
+    seed_repo_cache,
+    write_tree,
+)
 
 # --- gh_json / gh_request transport ---
 
