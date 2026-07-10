@@ -20,8 +20,13 @@
 #     incl. secrets). No upstream fetch/pull -- provenance link only.
 #   - Overlay via `rsync -a "$STAGE/" "$REPO/"` (root-to-root), NEVER
 #     `cp -a "$STAGE/apps" "$REPO/apps"` (nests into apps/apps).
-#   - Secret scan is a hard-failing (exit-non-zero, abort-before-commit) gate on
-#     token patterns and credential filenames -- the authoritative blocker.
+#   - Secret scan is a hard-failing (exit-non-zero, abort-before-commit) gate
+#     -- the authoritative blocker. It runs gitleaks (with the sibling
+#     gitleaks.toml config: the default ruleset plus the credential-filename
+#     blocklist and a broader Anthropic key rule) when the binary is
+#     installed (the deferred-install service provides it), and otherwise
+#     falls back to a filename+grep scan over the same blocklist and token
+#     patterns.
 #   - Boot smoke-check via the supervisor python lib (realize/process_config),
 #     NEVER `supervisord -t` (in supervisord, -t means --strip_ansi and LAUNCHES
 #     the daemon).
@@ -35,6 +40,11 @@ set -euo pipefail
 # Version of the inspirations flow (and of the manifest format this script
 # writes into the generated manifest's `format:` front-matter key).
 INSPIRATION_FLOW_VERSION="v1"
+
+# Resolve this script's own directory up front, before any cd: the sibling
+# gitleaks.toml config lives next to this script, and the script is invoked
+# by a path that may be relative to the caller's cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- argument parsing --------------------------------------------------------
 
@@ -143,8 +153,23 @@ fi
 # them first. Also stage any pre-existing accumulated inspiration manifests +
 # thumbnails so they carry forward (step 4).
 STAGE="$(mktemp -d)"
-cleanup() { rm -rf "$STAGE"; }
+cleanup() {
+    rm -rf "$STAGE"
+    if [ -n "${GITLEAKS_CONFIG:-}" ]; then
+        rm -f "$GITLEAKS_CONFIG"
+    fi
+}
 trap cleanup EXIT
+
+# Snapshot the gitleaks config OUT of the worktree before step 2's reset:
+# BASE_REF may predate the config file, in which case the read-tree would
+# delete it from the worktree before step 5's scan runs. Empty means "no
+# config available" and step 5 uses the fallback scanner.
+GITLEAKS_CONFIG=""
+if [ -f "$SCRIPT_DIR/gitleaks.toml" ]; then
+    GITLEAKS_CONFIG="$(mktemp)"
+    cp "$SCRIPT_DIR/gitleaks.toml" "$GITLEAKS_CONFIG"
+fi
 
 stage_one() {
     # Stage a single repo-root-relative path if it exists in the live worktree.
@@ -191,10 +216,13 @@ rsync -a "$STAGE/" "$REPO/"
 
 # --- 5. secret scan (authoritative, hard-failing blocker) --------------------
 
-# Token patterns and credential filenames. A hit prints the offending path (and
-# a redacted marker for value hits) and exits non-zero so the worker reports
-# `stuck` and NOTHING is committed or pushed. This is the enforced gate on top
-# of the .gitignore denylist -- not LLM prose.
+# A hit prints the offending path (value redacted, never printed) and exits
+# non-zero so the worker reports `stuck` and NOTHING is committed or pushed.
+# This is the enforced gate on top of the .gitignore denylist -- not LLM
+# prose. The scanner is gitleaks (installed post-boot by the deferred-install
+# service; configured by the sibling gitleaks.toml: default ruleset +
+# credential-filename blocklist + a broader Anthropic key rule) with a
+# filename+grep fallback for containers where gitleaks is not (yet) installed.
 
 scan_failed=0
 
@@ -225,71 +253,146 @@ if [ "${#SCAN_ROOTS[@]}" -gt 0 ]; then
     mapfile -d '' ALL_FILES < <(find "${SCAN_ROOTS[@]}" -type f -print0)
 fi
 
-# 5a. credential filenames (basename or path-suffix match).
-CREDENTIAL_BASENAMES=(
-    ".git-credentials"
-    ".netrc"
-    ".claude.json"
-    ".sesskey"
-    ".pypirc"
-)
-# Path-suffix credential locations (not just basename).
-CREDENTIAL_SUFFIXES=(
-    ".config/gh/hosts.yml"
-)
-# Paths in ALL_FILES are already repo-root-relative (that is how they were
-# overlaid), so they can be printed as-is.
-for f in "${ALL_FILES[@]}"; do
-    base="$(basename "$f")"
-    for bad in "${CREDENTIAL_BASENAMES[@]}"; do
-        if [ "$base" = "$bad" ]; then
-            echo "build_inspiration.sh: SECRET SCAN FAILED: credential file present: ${f}" >&2
-            scan_failed=1
-        fi
-    done
-    for suffix in "${CREDENTIAL_SUFFIXES[@]}"; do
-        case "$f" in
-            *"$suffix")
+# Fallback scanner (5a + 5b): the historical filename+grep scan, used when
+# gitleaks (or its config) is unavailable -- e.g. an older container where the
+# deferred install has not run or finished -- or when gitleaks itself fails to
+# run. It enforces the same credential-filename blocklist and token patterns
+# that gitleaks.toml encodes.
+run_fallback_secret_scan() {
+    # 5a. credential filenames (basename or path-suffix match).
+    local CREDENTIAL_BASENAMES=(
+        ".git-credentials"
+        ".netrc"
+        ".claude.json"
+        ".sesskey"
+        ".pypirc"
+    )
+    # Path-suffix credential locations (not just basename).
+    local CREDENTIAL_SUFFIXES=(
+        ".config/gh/hosts.yml"
+    )
+    # Paths in ALL_FILES are already repo-root-relative (that is how they were
+    # overlaid), so they can be printed as-is.
+    local f base bad suffix hit
+    for f in "${ALL_FILES[@]}"; do
+        base="$(basename "$f")"
+        for bad in "${CREDENTIAL_BASENAMES[@]}"; do
+            if [ "$base" = "$bad" ]; then
                 echo "build_inspiration.sh: SECRET SCAN FAILED: credential file present: ${f}" >&2
                 scan_failed=1
-                ;;
-        esac
-    done
-    # .env / .env.* (but not .env.example / .env.sample templates, which are
-    # deliberately non-secret; a bare .env or .env.<anything-else> is blocked).
-    case "$base" in
-        .env | .env.*)
-            case "$base" in
-                .env.example | .env.sample | .env.template) ;;
-                *)
-                    echo "build_inspiration.sh: SECRET SCAN FAILED: env file present: ${f}" >&2
+            fi
+        done
+        for suffix in "${CREDENTIAL_SUFFIXES[@]}"; do
+            case "$f" in
+                *"$suffix")
+                    echo "build_inspiration.sh: SECRET SCAN FAILED: credential file present: ${f}" >&2
                     scan_failed=1
                     ;;
             esac
-            ;;
-    esac
-done
+        done
+        # .env / .env.* (but not .env.example / .env.sample templates, which are
+        # deliberately non-secret; a bare .env or .env.<anything-else> is blocked).
+        case "$base" in
+            .env | .env.*)
+                case "$base" in
+                    .env.example | .env.sample | .env.template) ;;
+                    *)
+                        echo "build_inspiration.sh: SECRET SCAN FAILED: env file present: ${f}" >&2
+                        scan_failed=1
+                        ;;
+                esac
+                ;;
+        esac
+    done
 
-# 5b. token / key value patterns inside file contents.
-# Patterns match the token PREFIX immediately followed by enough secret-body
-# characters to be a real credential, so short placeholder values that share a
-# prefix (e.g. "sk-ant-test", "ghp_example") do NOT fire:
-#   - GitHub PATs:    ghp_ / gho_ + 36 base62 chars; github_pat_ + 22+ base62/_.
-#   - Anthropic keys: sk-ant- + 24+ chars of [A-Za-z0-9-_] (real keys are ~90+;
-#                     "sk-ant-test" is only 4 trailing chars and is skipped).
-#   - AWS access ids: AKIA + 16 upper alnum.
-#   - PEM headers:    a private-key header line.
-TOKEN_PATTERN='ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{24,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
-if [ "${#ALL_FILES[@]}" -gt 0 ]; then
-    # -I skips binary files, -E enables the alternation, -l lists matching paths.
-    # One grep over the overlaid file list (not a fork per file). Paths are
-    # already repo-root-relative. grep exits 1 (no matches) or 2 (only
-    # unreadable-file warnings) harmlessly; a real hit prints the path here.
-    while IFS= read -r hit; do
-        [ -n "$hit" ] || continue
-        echo "build_inspiration.sh: SECRET SCAN FAILED: token/key pattern in: ${hit} (value redacted)" >&2
+    # 5b. token / key value patterns inside file contents.
+    # Patterns match the token PREFIX immediately followed by enough secret-body
+    # characters to be a real credential, so short placeholder values that share a
+    # prefix (e.g. "sk-ant-test", "ghp_example") do NOT fire:
+    #   - GitHub PATs:    ghp_ / gho_ + 36 base62 chars; github_pat_ + 22+ base62/_.
+    #   - Anthropic keys: sk-ant- + 24+ chars of [A-Za-z0-9-_] (real keys are ~90+;
+    #                     "sk-ant-test" is only 4 trailing chars and is skipped).
+    #   - AWS access ids: AKIA + 16 upper alnum.
+    #   - PEM headers:    a private-key header line.
+    local TOKEN_PATTERN='ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{24,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+    if [ "${#ALL_FILES[@]}" -gt 0 ]; then
+        # -I skips binary files, -E enables the alternation, -l lists matching paths.
+        # One grep over the overlaid file list (not a fork per file). Paths are
+        # already repo-root-relative. grep exits 1 (no matches) or 2 (only
+        # unreadable-file warnings) harmlessly; a real hit prints the path here.
+        while IFS= read -r hit; do
+            [ -n "$hit" ] || continue
+            echo "build_inspiration.sh: SECRET SCAN FAILED: token/key pattern in: ${hit} (value redacted)" >&2
+            scan_failed=1
+        done < <(grep -IElE -- "$TOKEN_PATTERN" "${ALL_FILES[@]}" 2>/dev/null)
+    fi
+}
+
+# Primary scanner: gitleaks over the STAGING dir, which contains exactly the
+# overlaid files (the same set ALL_FILES enumerates in the assembled tree), so
+# the trusted base is never traversed. --redact keeps secret values out of all
+# output; findings are printed from the JSON report as rule+file, with staged
+# paths mapped back to repo-root-relative ones (rsync -aR staged every file at
+# its repo-relative path, so stripping the stage prefix recovers it).
+run_gitleaks_secret_scan() {
+    local report gitleaks_status
+    report="$(mktemp)"
+    gitleaks_status=0
+    gitleaks dir "$STAGE" \
+        --config "$GITLEAKS_CONFIG" \
+        --redact \
+        --no-banner \
+        --report-format json \
+        --report-path "$report" \
+        || gitleaks_status=$?
+    if [ "$gitleaks_status" -eq 1 ]; then
+        # Exit 1 is gitleaks' "leaks found" code; anything else is an error.
         scan_failed=1
-    done < <(grep -IElE -- "$TOKEN_PATTERN" "${ALL_FILES[@]}" 2>/dev/null)
+        if ! python3 - "$report" "$STAGE" <<'PYEOF'
+import json
+import os
+import sys
+
+report_path, stage = sys.argv[1], sys.argv[2]
+with open(report_path) as fh:
+    findings = json.load(fh)
+stage_real = os.path.realpath(stage)
+for finding in findings:
+    path = finding.get("File", "")
+    if os.path.isabs(path):
+        # Map the staged path back to the repo-root-relative one. realpath on
+        # both sides tolerates a symlinked temp dir (e.g. /var -> /private/var).
+        path = os.path.realpath(path)
+        for prefix in (stage_real + os.sep, stage + os.sep):
+            if path.startswith(prefix):
+                path = path[len(prefix) :]
+                break
+    rule = finding.get("RuleID", "unknown-rule")
+    print(
+        f"build_inspiration.sh: SECRET SCAN FAILED: {rule}: {path} (value redacted)",
+        file=sys.stderr,
+    )
+PYEOF
+        then
+            echo "build_inspiration.sh: SECRET SCAN FAILED (could not read the gitleaks report for details)" >&2
+        fi
+    elif [ "$gitleaks_status" -ne 0 ]; then
+        # gitleaks itself broke (bad config, crash). Never skip the gate --
+        # run the fallback scanner instead.
+        echo "build_inspiration.sh: warning: gitleaks exited ${gitleaks_status} (not a findings exit); falling back to the filename+grep secret scanner" >&2
+        run_fallback_secret_scan
+    fi
+    rm -f "$report"
+}
+
+if ! command -v gitleaks > /dev/null 2>&1; then
+    echo "build_inspiration.sh: warning: gitleaks not installed (deferred install may not have finished); using the fallback filename+grep secret scanner" >&2
+    run_fallback_secret_scan
+elif [ -z "$GITLEAKS_CONFIG" ]; then
+    echo "build_inspiration.sh: warning: gitleaks.toml not found next to this script; using the fallback filename+grep secret scanner" >&2
+    run_fallback_secret_scan
+else
+    run_gitleaks_secret_scan
 fi
 
 if [ "$scan_failed" -ne 0 ]; then

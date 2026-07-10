@@ -277,9 +277,20 @@ worktree to a clean template base and deletes gitignored state -- including
    channel with a neutral default the adopter sets" -- or the single line
    "None requested.">
 
-   After applying them, re-run the secret token scan over every file you
-   modified (the same pattern the assembly script enforces); it must print
-   nothing:
+   After applying them, re-run the secret scan over every file you modified.
+   With gitleaks installed (the deferred-install service normally provides
+   it) and this skill's config present, each file must scan clean (gitleaks
+   exits 1 on a leak):
+
+   ```bash
+   CFG=.agents/skills/publish-inspiration/scripts/gitleaks.toml
+   for f in <each modified file>; do
+       gitleaks dir "$f" --config "$CFG" --redact --no-banner
+   done
+   ```
+
+   If gitleaks or the config is unavailable (older container or base), fall
+   back to the assembly script's grep pattern; it must print nothing:
 
    ```bash
    grep -nIE -- 'ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{24,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----' <each modified file>
@@ -787,8 +798,12 @@ What it does, in order (see the script for the exact commands):
 5. Carries forward any existing accumulated `inspiration-*.md` + `.svg` at the
    repo root.
 6. Runs a deterministic secret scan that HARD-FAILS (non-zero, abort before any
-   commit/push) on token patterns and credential filenames. This is the
-   authoritative blocker, not LLM prose.
+   commit/push). The scanner is gitleaks over the staged overlay (configured by
+   the sibling `gitleaks.toml`: gitleaks' default ruleset plus the
+   credential-filename blocklist and a broader Anthropic key rule), falling
+   back to the historical filename+grep scan when gitleaks is not installed
+   (e.g. the deferred install has not finished). This is the authoritative
+   blocker, not LLM prose.
 7. Generates the manifest `inspiration-<slug>.md` at the repo root (with the
    FILL-IN blocks the worker must replace).
 8. Generates a placeholder thumbnail `inspiration-<slug>.svg` carrying a

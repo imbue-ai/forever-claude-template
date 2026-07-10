@@ -211,3 +211,21 @@
   started from, including any uncommitted source state a dev-flow clone
   carried). The first-parent root remains only as a last resort for repos
   with no marker at all.
+
+- The publish flow's secret scan is now gitleaks-first. After a survey of
+  standalone secret scanners, gitleaks (MIT, single static Go binary) was
+  chosen; the pinned release (v8.30.1) is delivered by the deferred-install
+  service (`scripts/deferred_install.sh` downloads the arch-appropriate
+  binary and verifies it against sha256 checksums hard-coded from the
+  release's checksums file). `build_inspiration.sh`'s section-5 scan now runs
+  `gitleaks dir` over the staged overlay with a skill-local `gitleaks.toml`
+  config: gitleaks' default ruleset extended with path-only rules replicating
+  the credential-filename blocklist (.env variants, .netrc,
+  .git-credentials, .claude.json, .pypirc, .sesskey, gh hosts.yml) and a
+  broader Anthropic key rule (any `sk-ant-*` shape, with placeholder
+  stopwords). Findings print rule + repo-relative path with values redacted
+  and abort before commit exactly as before. The historical filename+grep
+  scanner is retained as an explicit fallback (one warning line) for
+  containers where gitleaks is not yet installed, and the worker's
+  published-version-modification re-scan uses the same gitleaks-with-grep-
+  fallback contract.

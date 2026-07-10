@@ -57,8 +57,15 @@ To add, change, or remove a service, edit `supervisord.conf` and run
 The `deferred-install` program in `supervisord.conf` runs
 `scripts/deferred_install.sh`, which installs packages that are too heavy to
 bake into the Docker image but aren't required by any boot-time service.
-Currently it covers Playwright's Chromium browser + its apt system libraries
-(`uv run playwright install --with-deps chromium`).
+Currently it covers:
+
+- Playwright's Chromium browser + its apt system libraries
+  (`uv run playwright install --with-deps chromium`).
+- The `gitleaks` secret scanner (used by the publish-inspiration skill's
+  secret scan): a pinned release binary downloaded from GitHub, verified
+  against sha256 checksums hard-coded in the script (never fetched at install
+  time), and installed to `/usr/local/bin/gitleaks`. Consumers fall back to a
+  grep-based scan while the install has not finished.
 
 It is a one-shot supervisord program (`autorestart=false`, `startsecs=0`,
 `exitcodes=0`): supervisord starts it once on boot and leaves it stopped after a

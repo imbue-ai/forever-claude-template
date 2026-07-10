@@ -1,0 +1,62 @@
+# Gitleaks config for build_inspiration.sh's secret scan (section 5).
+#
+# Scope: the scan runs `gitleaks dir` over the STAGING directory, which holds
+# exactly the files overlaid out of the live mind (the selected --include /
+# --data-include paths plus carried-forward inspiration-*.md/.svg). The clean
+# FCT base is trusted, public, and never scanned -- its own test fixtures
+# legitimately contain placeholder token strings.
+#
+# Regex notes: gitleaks compiles rules with Go's RE2 engine -- no lookaheads,
+# which is why the .env exceptions below are expressed as a rule-level
+# allowlist instead of a negative lookahead in the path pattern.
+
+# Extend gitleaks' default ruleset (GitHub PATs, AWS keys, private-key
+# headers, and hundreds of provider-specific value rules) rather than
+# replacing it. Everything below is ADDED on top of those defaults.
+[extend]
+useDefault = true
+
+# --- credential FILENAMES ----------------------------------------------------
+# The default ruleset matches secret VALUES inside files; these path-only
+# rules replicate build_inspiration.sh's credential-filename blocklist (the
+# same list its grep fallback enforces) so a credential-bearing file is
+# blocked by NAME even when its contents evade every value pattern.
+
+[[rules]]
+id = "minds-env-file"
+description = "Env file present (.env / .env.*) -- these carry real credentials"
+path = '''(^|/)\.env(\.[^/]+)?$'''
+# .env.example / .env.sample / .env.template are deliberately non-secret
+# placeholder templates and are allowed to ship.
+[[rules.allowlists]]
+paths = [
+    '''(^|/)\.env\.example$''',
+    '''(^|/)\.env\.sample$''',
+    '''(^|/)\.env\.template$''',
+]
+
+[[rules]]
+id = "minds-credential-file"
+description = "Well-known credential-store filename present (git/gh/pypi/claude/session credentials)"
+path = '''(^|/)(\.netrc|\.git-credentials|\.claude\.json|\.pypirc|\.sesskey)$'''
+
+[[rules]]
+id = "minds-gh-hosts-file"
+description = "gh CLI hosts.yml present -- it stores OAuth tokens (matched by path suffix, not basename)"
+path = '''(^|/)\.config/gh/hosts\.yml$'''
+
+# --- broader Anthropic key rule ----------------------------------------------
+# The default ruleset's Anthropic rule only matches the strict
+# `sk-ant-api03-...` shape; real Anthropic tokens come in other `sk-ant-*`
+# shapes (admin keys, OAuth tokens), so match any sk-ant- prefix followed by a
+# plausibly-secret body. Requiring 24+ body characters keeps short
+# placeholders like `sk-ant-test` from firing (real keys are ~90+ chars).
+[[rules]]
+id = "minds-anthropic-key-broad"
+description = "Anthropic sk-ant-* API key/token of any shape"
+regex = '''sk-ant-[A-Za-z0-9_-]{24,}'''
+keywords = ["sk-ant-"]
+# Long documentation placeholders that would otherwise satisfy the 24+ char
+# body (stopwords are matched against the captured secret value).
+[[rules.allowlists]]
+stopwords = ["example", "placeholder", "redacted", "xxxxxxxx"]

@@ -17,8 +17,19 @@
 # only on success.
 set -euo pipefail
 
-readonly MARKER_DIR=/var/lib/minds/deferred-install
+# Both dirs are env-overridable for unit tests only; the supervisord program
+# never sets them, so production always uses the container-local defaults.
+readonly MARKER_DIR="${DEFERRED_INSTALL_MARKER_DIR:-/var/lib/minds/deferred-install}"
 readonly REPO_ROOT=/mngr/code
+readonly GITLEAKS_INSTALL_DIR="${GITLEAKS_INSTALL_DIR:-/usr/local/bin}"
+
+# gitleaks release pin. The sha256s are hard-coded (never fetched at install
+# time) from the checksums file published with the release:
+# https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt
+# Bump all three values together when upgrading.
+readonly GITLEAKS_VERSION="8.30.1"
+readonly GITLEAKS_SHA256_LINUX_X64="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+readonly GITLEAKS_SHA256_LINUX_ARM64="e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
 
 _log() {
     printf '[deferred-install] %s\n' "$*"
@@ -91,9 +102,101 @@ _install_playwright() {
     fi
 }
 
+_sha256_of() {
+    # Print a file's sha256 hex digest. Debian containers ship sha256sum;
+    # the shasum fallback keeps the function runnable in macOS test envs.
+    if command -v sha256sum > /dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+_gitleaks_asset_for_arch() {
+    # Print "<release-asset-filename> <pinned-sha256>" for a `uname -m`
+    # architecture; exits non-zero for architectures without a pinned binary.
+    case "$1" in
+        x86_64)
+            printf '%s %s\n' "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" "$GITLEAKS_SHA256_LINUX_X64"
+            ;;
+        aarch64 | arm64)
+            printf '%s %s\n' "gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz" "$GITLEAKS_SHA256_LINUX_ARM64"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+_fetch_verify_install_gitleaks() {
+    # Download a gitleaks release tarball from $1, verify it against the
+    # pinned sha256 in $2, and install the extracted `gitleaks` binary to the
+    # path in $3. All-or-nothing: any failure (download, checksum mismatch,
+    # extract, install) leaves nothing installed and returns non-zero.
+    local url="$1" expected_sha="$2" dest="$3"
+    local tmpdir tarball actual_sha rc=0
+    tmpdir="$(mktemp -d)"
+    tarball="$tmpdir/gitleaks.tar.gz"
+    if ! curl -fsSL --retry 3 -o "$tarball" "$url"; then
+        _log "gitleaks: download failed: $url"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    actual_sha="$(_sha256_of "$tarball")"
+    if [ "$actual_sha" != "$expected_sha" ]; then
+        _log "gitleaks: sha256 MISMATCH for $url (expected ${expected_sha}, got ${actual_sha}); refusing to install"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    if ! tar -xzf "$tarball" -C "$tmpdir" gitleaks; then
+        _log "gitleaks: could not extract the 'gitleaks' binary from the tarball"
+        rc=1
+    elif ! { mkdir -p "$(dirname "$dest")" && install -m 0755 "$tmpdir/gitleaks" "$dest"; }; then
+        _log "gitleaks: failed to install binary to $dest"
+        rc=1
+    fi
+    rm -rf "$tmpdir"
+    return "$rc"
+}
+
+_install_gitleaks() {
+    # Static secret-scanner binary (MIT, single Go binary) used by the
+    # publish-inspiration skill's secret scan (.agents/skills/
+    # publish-inspiration/scripts/build_inspiration.sh). That script falls
+    # back to a grep-based scan while this install has not finished, so a
+    # failure here degrades scan quality but never blocks a publish outright.
+    local marker
+    marker="$(_marker_for gitleaks)"
+    if [ -f "$marker" ]; then
+        _log "gitleaks: marker present at $marker, skipping"
+        return 0
+    fi
+    local arch asset_and_sha asset sha url
+    arch="$(uname -m)"
+    if ! asset_and_sha="$(_gitleaks_asset_for_arch "$arch")"; then
+        _log "gitleaks: no pinned binary for architecture '${arch}'; skipping (marker not written)"
+        return 1
+    fi
+    asset="${asset_and_sha% *}"
+    sha="${asset_and_sha#* }"
+    url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${asset}"
+    _log "gitleaks: installing v${GITLEAKS_VERSION} from ${url}"
+    if _fetch_verify_install_gitleaks "$url" "$sha" "$GITLEAKS_INSTALL_DIR/gitleaks"; then
+        touch "$marker"
+        _log "gitleaks: install complete, marker written to $marker"
+    else
+        _log "gitleaks: install FAILED; marker not written so the next boot retries"
+        return 1
+    fi
+}
+
 main() {
     mkdir -p "$MARKER_DIR"
     local rc=0
+    # gitleaks first: a small single-binary download, so it becomes available
+    # quickly instead of queueing behind playwright's multi-minute apt run.
+    # Installs stay independent: each runs regardless of the others' results.
+    _install_gitleaks || rc=$?
     _install_playwright || rc=$?
     if [ "$rc" -eq 0 ]; then
         _log "all deferred installs complete"
@@ -103,4 +206,8 @@ main() {
     return "$rc"
 }
 
-main "$@"
+# Run main only when executed directly; unit tests source this file to
+# exercise individual _install_<name> functions in isolation.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi
