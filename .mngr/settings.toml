@@ -654,7 +654,12 @@ systemctl enable minds-autostart.service
 [create_templates.modal]
 provider = "modal"
 target_path = "/mngr/code/"
-build_arg__extend = ["--file=Dockerfile", "."]
+# Unlike docker/vultr/aws, Modal's build-arg parser (mngr_modal/instance.py
+# _parse_build_args) has no positional arg at all -- only --file/--context-dir/etc
+# named flags, so a bare "." is rejected ("Unknown build arguments: ['.']"). No
+# --context-dir needed either: when omitted it defaults to the Dockerfile's own
+# parent dir (instance.py:902), which is "." here since --file=Dockerfile is bare.
+build_arg__extend = ["--file=Dockerfile"]
 # Disable idle detection entirely -- the host should never auto-shutdown.
 idle_mode = "disabled"
 # Same forwarding as the docker template; see comment there.
