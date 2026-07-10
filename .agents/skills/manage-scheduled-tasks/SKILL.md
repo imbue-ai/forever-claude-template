@@ -5,11 +5,16 @@ description: Query and edit the recurring scheduled jobs that run on this host. 
 
 # Managing scheduled tasks
 
-Recurring jobs on this host run through the stock **cron** daemon plus one
-small helper script. There is no other scheduler: what runs and when is
-exactly what the drop-in files in `/etc/cron.d/` say. Daily jobs get
-missed-run catch-up from `scripts/run_daily_job.sh`, a due-checker that an
-every-minute cron line ticks.
+Recurring jobs on this host run through the stock **cron** daemon: what runs
+and when is exactly what the drop-in files in `/etc/cron.d/` say. Cron has
+one failure mode that drives every choice below: **it only fires when the
+machine is up at that moment** -- a job whose time passes while the container
+is off or asleep is simply skipped, never made up. When a job must not be
+missed, run it through a small script, `scripts/run_daily_job.sh` (~50
+lines): an every-minute cron line ticks it, and it runs the job at its due
+hour when the machine is up -- or the first minute the machine is back up
+after a missed day. The built-in nightly **Caretaker** is the worked example
+of that pattern (see below).
 
 ## First: choose the daily-job pattern or a plain cron line
 
@@ -23,8 +28,7 @@ Pick per job, based on what matters more:
   first minute the container is back up after a missed day -- at any hour.
 - **plain cron line** -- for jobs that need a **precise time or a sub-daily
   cadence** (every 15 minutes, 9:30 on Mondays, ...). Cron fires exactly on
-  schedule -- but **only if the machine is up at that moment**; a missed run
-  is simply skipped, never made up.
+  schedule, with the caveat above: a missed run is skipped, never made up.
 
 If the user asks for "daily-ish and reliable", use the daily-job pattern. If
 they ask for "at exactly HH:MM" or "every N minutes/hours", use a plain cron

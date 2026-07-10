@@ -14,11 +14,11 @@ most once per calendar day: at its due hour (3 AM local for the Caretaker)
 when the container is up, or within the first minute the container is back up
 after a fully missed day, at any hour -- and the night after a successful run,
 nothing fires at midnight. The stamp is written before the job starts, so a
-failed run retries the next day rather than every minute. Anacron is no longer
-installed: its day-granular stamps cannot express "due at 3 AM, but catch up a
-missed day the first minute the container is back, at any hour" -- any anacron
-wiring gives one of those up, with either a midnight false-fire, a catch-up
-dead zone, or a start delay that also postpones catch-up. The Caretaker never
+failed run retries the next day rather than every minute. Plain cron alone
+cannot provide this: it fires only when the machine is up at that moment and
+never backfills a missed run -- the checker exists precisely to add "due at
+3 AM, but catch up a missed day the first minute the container is back, at
+any hour". The Caretaker never
 runs at workspace creation: the bootstrap seeds its stamp with today's date at
 first boot, so its first run is the next day's 3 AM -- and when the user's
 timezone cannot be fetched, the bootstrap adopts a fixed-offset zone that
@@ -33,10 +33,9 @@ every scheduled job runs through it. The container's clock is set to the
 user's local timezone at each boot: the bootstrap pulls it from the minds
 desktop client's `GET /api/v1/timezone` through the latchkey gateway (falling
 back to UTC when unreachable), so schedules run in the user's local time. (An
-earlier iteration of this branch built a custom `libs/scheduler` service for
-the catch-up behavior, and a later one used anacron; both were replaced by the
-checker, which keeps the near-zero-maintenance shape -- about 50 lines of
-shell -- while reading the clock, the one thing anacron cannot do.)
+earlier iteration of this branch built a custom `libs/scheduler` service --
+about 635 lines -- for the catch-up behavior; the checker replaced it with
+about 50 lines of shell.)
 
 **Scheduled agent tasks and the Caretaker.** A scheduled job can wake an agent
 that runs a skill on a cadence, in its own chat tab. `scripts/run_task_agent.sh
