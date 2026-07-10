@@ -452,10 +452,15 @@ def test_http_handoff_returns_a_consistent_on_loop_control_snapshot(monkeypatch:
     assert body["lifecycle"] == "running"
 
 
+@pytest.mark.flaky
 def test_http_cast_closes_a_failed_launch_name_terminally(monkeypatch: pytest.MonkeyPatch) -> None:
     # A name whose background launch FAILED is closed 1008 (terminal) by the cast handler,
     # so a late/retrying optimistic viewer stops looping on 1013 (finding [7]). We boot a
     # real server because the close CODE is only observable over a real socket.
+    # Flaky under parallel full-suite load: the client can observe the TCP drop
+    # before it has parsed the close frame, reading close_reason 1005
+    # (NO_STATUS_RCVD) instead of the server's 1008. No client-side wait can
+    # recover a close status that was never parsed, so retry instead.
     runner.manager._browsers.clear()
     runner.manager._failed_launch_names.append("alex-smith")  # valid name, but launch failed
     with _BootedServer() as server:
