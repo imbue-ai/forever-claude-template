@@ -519,6 +519,23 @@ function registerIntelHover(languages, endpoint) {
   });
 }
 
+// Turn off every provider the bundled TypeScript/JavaScript language service
+// registers (definitions, hover, completions, diagnostics, ...) so it neither
+// duplicates our context-menu actions nor shows a go-to-definition that can't
+// work without repo context. Guarded in case a Monaco build ships without it.
+function disableBuiltinTsProviders() {
+  const ts = monaco.languages.typescript;
+  if (!ts) return;
+  const off = {
+    completionItems: false, hovers: false, documentSymbols: false, definitions: false,
+    references: false, documentHighlights: false, rename: false, diagnostics: false,
+    documentRangeFormattingEdits: false, signatureHelp: false, onTypeFormattingEdits: false,
+    codeActions: false, inlayHints: false,
+  };
+  ts.typescriptDefaults.setModeConfiguration(off);
+  ts.javascriptDefaults.setModeConfiguration(off);
+}
+
 let monacoReady = null;
 function loadMonaco() {
   if (!monacoReady) {
@@ -528,6 +545,13 @@ function loadMonaco() {
           base: "vs-dark", inherit: true, rules: [],
           colors: { "editor.background": "#0A0D13", "editorGutter.background": "#0A0D13", "diffEditor.insertedTextBackground": "#15331f88", "diffEditor.removedTextBackground": "#3a1d1f88" },
         });
+        // Monaco bundles a TypeScript/JavaScript language service that
+        // auto-registers its own hover + go-to-definition providers. Left on, it
+        // duplicates our menu items and its go-to-definition fails (it only sees
+        // the single open model, with no repo/project context). Turn its
+        // feature providers off so ours -- backed by the whole cached tree -- are
+        // the only ones; syntax highlighting is a separate grammar and stays.
+        disableBuiltinTsProviders();
         // Code-aware hover on head-content models only: Python via Jedi,
         // JavaScript/TypeScript via tree-sitter (see registerIntelHover).
         registerIntelHover(["python"], "pyhover");

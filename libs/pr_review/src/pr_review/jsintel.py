@@ -377,6 +377,14 @@ def _signature(container: Node, source: bytes) -> str:
         signature = f"{keyword} {name_node.text.decode() if name_node else ''}"
         if type_node is not None:
             signature += type_node.text.decode()
+        # Show the initializer for a simple, short value (a literal, a small
+        # expression) -- for a const this is the value the reader wants. Skip
+        # long or multi-line initializers (objects, big arrays, IIFEs) to keep
+        # the hover tidy.
+        if value is not None:
+            value_text = text_of(value.start_byte, value.end_byte)
+            if "\n" not in value_text and len(value_text) <= 80:
+                signature += f" = {value_text}"
         return _bounded(signature)
     if kind in ("required_parameter", "optional_parameter", "identifier"):
         return _bounded(text_of(container.start_byte, container.end_byte))

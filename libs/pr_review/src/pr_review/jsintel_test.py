@@ -51,6 +51,34 @@ def test_hover_shows_variable_type_annotation(tmp_path: Path) -> None:
     assert "const total: number" in result["contents"]
 
 
+def test_hover_shows_constant_value(tmp_path: Path) -> None:
+    tree = write_tree(
+        tmp_path,
+        {"main.ts": "const CONTENT_PARTITION = 'persist:workspace-content';\nconsole.log(CONTENT_PARTITION);\n"},
+    )
+    # Hover over the ``CONTENT_PARTITION`` usage on line 2.
+    result = jsintel.hover(tree, "main.ts", line=2, column=13)
+    assert result is not None
+    contents = result["contents"]
+    assert "CONTENT_PARTITION" in contents
+    assert "'persist:workspace-content'" in contents
+
+
+def test_hover_omits_long_initializer(tmp_path: Path) -> None:
+    long_obj = "{ " + ", ".join(f"k{i}: {i}" for i in range(40)) + " }"  # well over 80 chars
+    tree = write_tree(
+        tmp_path,
+        {"main.ts": f"const CONFIG = {long_obj};\nconsole.log(CONFIG);\n"},
+    )
+    # A long / bulky initializer is not dumped into the hover; the declaration
+    # still shows.
+    result = jsintel.hover(tree, "main.ts", line=2, column=13)
+    assert result is not None
+    contents = result["contents"]
+    assert "const CONFIG" in contents
+    assert "k39" not in contents
+
+
 def test_hover_collects_full_line_comment_block(tmp_path: Path) -> None:
     # A run of ``//`` lines is one comment node per line; the whole block above
     # the declaration should surface, not just the last line. The declaration is
