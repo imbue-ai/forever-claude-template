@@ -8,8 +8,8 @@
   import / refresh sources with `frankweiler-sync`. Web-API sources authenticate
   through the existing latchkey gateway, reusing the same permission flow.
 
-- `scripts/setup_system.sh` installs the `frankweiler-sync` / `frankweiler-http`
-  binaries into the image (pinned via `FRANKWEILER_VERSION`), and
+- `scripts/setup_system.sh` installs the fully-static musl `frankweiler-sync` /
+  `frankweiler-http` binaries into the image (pinned to `v0.16.0`), and
   `.mngr/settings.toml` sets `FRANKWEILER_ROOT=/mngr/datalib` -- a persistent,
   non-git-backed data root on the `/mngr` volume.
 
