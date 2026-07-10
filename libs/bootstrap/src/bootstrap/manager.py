@@ -1041,7 +1041,6 @@ def _ensure_caretaker_dir() -> None:
         logger.warning("Failed to create caretaker runtime dir: {}", e)
 
 
-
 def main() -> None:
     logger.info("Bootstrap starting: first-boot setup, then supervisord")
 
