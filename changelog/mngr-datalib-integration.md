@@ -10,8 +10,9 @@
 
 - `scripts/setup_system.sh` installs the fully-static musl `frankweiler-sync` /
   `frankweiler-http` binaries into the image (pinned to `v0.16.0`), and
-  `.mngr/settings.toml` sets `FRANKWEILER_ROOT=/mngr/datalib` -- a persistent,
-  non-git-backed data root on the `/mngr` volume.
+  `.mngr/settings.toml` sets `FRANKWEILER_CONFIG=/mngr/datalib/config.yaml` --
+  the config inside a persistent, non-git-backed data root on the `/mngr`
+  volume.
 
 - Steered agents toward the skill from `CLAUDE.md` for questions about the
   user's own history.

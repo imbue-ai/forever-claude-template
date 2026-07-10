@@ -33,13 +33,15 @@ host_env__extend = [
     # subdirs too. /mngr/code/ is the container WORKDIR (set by the Dockerfile);
     # a /code -> /mngr/code symlink is kept in the image as a safety net.
     "TICKETS_DIR=/mngr/code/runtime/tickets",
-    # datalib (frankweiler) data root -- the local mirror of the user's personal
-    # data, driven by the `datalib` skill. Deliberately OUTSIDE /mngr/code (the
-    # git workspace) and OUTSIDE runtime/: it lives on the /mngr persistent
-    # volume so it survives container restarts, but is large (doltlite stores +
-    # a qmd index) and must not ride the runtime-backup git branch. The skill
-    # creates it on first use.
-    "FRANKWEILER_ROOT=/mngr/datalib",
+    # datalib (frankweiler) config path -- points at the config inside the local
+    # data root (/mngr/datalib) that mirrors the user's personal data, driven by
+    # the `datalib` skill. frankweiler-sync reads FRANKWEILER_CONFIG; the data
+    # root is that file's parent dir. Deliberately OUTSIDE /mngr/code (the git
+    # workspace) and OUTSIDE runtime/: it lives on the /mngr persistent volume so
+    # it survives container restarts, but is large (doltlite stores + a qmd
+    # index) and must not ride the runtime-backup git branch. The skill creates
+    # the root + config on first use.
+    "FRANKWEILER_CONFIG=/mngr/datalib/config.yaml",
     # Workaround for an Apple M5 lima-VZ guest CPU mismatch: the Debian 12
     # guest kernel advertises SVE / SVE2 in /proc/cpuinfo, but lima-VZ on M5
     # traps the `cntb` SVE instruction emitted by OpenSSL's
