@@ -1,6 +1,6 @@
 ---
 name: update-service
-description: "Use whenever you are about to change an existing service -- edit, fix, restyle, extend, or restart its backend or frontend logic, or change how it runs. Covers both user-facing web services (a tab the user can open) and background daemons (runtime-backup, cloudflared, and other supervisord programs with no tab). This is the front door for service edits: it owns the live change loop (apply the change so it takes effect, refresh the user's view, verify) and hands the change to the turn-end hardening flow. For creating a brand-new web view use build-web-service; for the workspace UI itself use update-system-interface."
+description: "Use immediately whenever the user asks you to update, change, fix, restyle, extend, restart, or otherwise modify an existing service -- load this BEFORE touching the service's code. Applies to any change to a service's backend or frontend logic, or how it runs. Covers both user-facing web services (a tab the user can open) and background daemons (runtime-backup, cloudflared, and other supervisord programs with no tab). This is the front door for service edits: it owns the live change loop (apply the change so it takes effect, refresh the user's view, verify) and hands the change to the turn-end hardening flow. For creating a brand-new web view use build-web-service; for the workspace UI itself use update-system-interface."
 ---
 
 # Changing an existing service
@@ -238,14 +238,29 @@ Teardown stops at the code and the process. **Leave the service's data
 delete the user's records. Delete the data dir only if the user explicitly
 asks, and confirm before you do.
 
-## Turn-end: harden the change
+## Turn-end: get feedback, then harden the change
 
 The live loop above delivers the change to the user interactively. At
 turn-end, formalize it through the background worker pipeline -- the main
-agent never runs the thorough test passes or the review gates itself. For a
-larger-scope change, hand off only once the user has confirmed the *working*
-result (not just the mock), exactly as `build-web-service`'s Step 5 gates on
-the working site; a contained change can hand off as soon as it verifies.
+agent never runs the thorough test passes or the review gates itself.
+
+**Get the user's feedback before you start any hardening pass.** Delivering
+the change live is not the same as the user *wanting* it. Do not dispatch the
+hardening worker in the same turn you make the change: end the turn by
+surfacing the change and asking the user whether it's what they wanted, and
+only invoke the turn-end skill below once they've given a clear go-ahead
+(next turn). This holds for *every* change, contained or larger-scope -- a
+one-line copy tweak still gets shown and confirmed before it's hardened.
+
+Just like any incremental work, this can take **several rounds**: the user
+may respond with adjustments, then more adjustments. Treat each response as
+another live iteration -- make the change, show it, and ask again -- and do
+**not** launch the harden worker until you are sure the user is satisfied
+with the update. A single "looks fine" mid-thread isn't the same as being
+done; if the user is still tweaking, keep iterating live and hold the
+hardening pass. (For a larger-scope change this gate is the *working* result,
+not just the mock, exactly as `build-web-service`'s Step 5 gates on the
+working site.)
 
 - **A change you and the user discussed and applied live, or repeatable
   work you did by hand** -> invoke `update-artifact` with
