@@ -225,6 +225,36 @@ def test_page_loads_and_shows_title(e2e_server: tuple[str, list[AgentInfo], Path
     expect(page).to_have_title("System Interface")
 
 
+def test_chat_transcript_area_is_pure_white(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
+    """The chat transcript area (``.app-content``) renders on a pure-white background.
+
+    Regression test for the request to make the conversation area exactly
+    ``#ffffff`` (it was previously the shared off-white ``--color-bg``). The
+    change is scoped to the transcript area only: the surrounding shell chrome
+    (the ``.app-footer`` composer strip and the dockview tab bar) must keep the
+    off-white shell color, so this also guards against a future edit accidentally
+    whitening the whole shell via the shared variable.
+    """
+    base_url, _, _ = e2e_server
+    page.goto(base_url)
+
+    # The transcript container must exist and actually hold the message list, so
+    # the assertion below cannot pass against an empty or wrong tree.
+    content = page.locator(".app-content")
+    expect(content).to_be_visible(timeout=15000)
+    expect(content.locator(".message-list")).to_have_count(1)
+
+    content_bg = page.eval_on_selector(".app-content", "e => getComputedStyle(e).backgroundColor")
+    assert content_bg == "rgb(255, 255, 255)", f"chat transcript area should be pure white, got {content_bg}"
+
+    # Scoping guard: the composer footer stays on the off-white shell color, i.e.
+    # the change did not leak onto the shared shell background.
+    footer_bg = page.eval_on_selector(".app-footer", "e => getComputedStyle(e).backgroundColor")
+    assert footer_bg != "rgb(255, 255, 255)", (
+        f"footer should keep the off-white shell color, not turn white too, got {footer_bg}"
+    )
+
+
 @_STALE_DOCKVIEW_SKIP
 def test_sidebar_shows_agent_list(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
     """The sidebar lists the available agents."""

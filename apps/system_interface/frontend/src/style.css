@@ -8,6 +8,7 @@
   --color-bg-active: #e8e6e1;
   --color-bg-user-bubble: #eae8e4;
   --color-bg-composer: #ffffff;
+  --color-bg-chat: #ffffff;
   --color-text-primary: #37352f;
   --color-text-secondary: #787774;
   --color-text-faint: #b4b4b0;
@@ -88,7 +89,9 @@ body {
 
 /* ── Messages area ── */
 .app-content {
-  background: var(--color-bg);
+  /* The chat transcript area is pure white, distinct from the shared off-white
+     --color-bg used by the surrounding shell (footer, tabs, other panels). */
+  background: var(--color-bg-chat);
   /* Native scroll anchoring stays ON (the browser default) so the viewport holds
      steady when rows above it load or measure to their real height, with no
      per-frame JS scrollTop writes. The virtualization spacers opt out of anchoring
