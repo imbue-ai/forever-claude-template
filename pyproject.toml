@@ -1,5 +1,5 @@
 [project]
-name = "forever-claude-template"
+name = "default-workspace-template"
 version = "0.1.0"
 description = "Template repo for a persistent Claude agent"
 requires-python = ">=3.11"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# First-boot seed script for forever-claude-template containers.
+# First-boot seed script for default-workspace-template containers.
 #
 # Run synchronously by mngr (via the `post_host_create_command` create-
 # template hook) once the host is online but before any agent work_dir
@@ -20,7 +20,7 @@
 #      safety-net symlink (created in the image layer by the Dockerfile)
 #      always resolves, even on a fresh volume with no worktrees yet.
 #
-# This script is installed at /usr/local/bin/fct-seed by an image-layer
+# This script is installed at /usr/local/bin/default-workspace-template-seed by an image-layer
 # COPY (not via the volume-bound /mngr/code/) so that it is available
 # before the seed step itself runs.
 #
@@ -43,7 +43,7 @@ seed_workspace_onto_volume() {
     # A prior boot crashed between staging and the atomic rename. Wipe
     # the half-staged copy and re-stage from /docker_build_code below.
     if [ -e "$SEED_STAGING" ]; then
-        echo "fct-seed: wiping stale $SEED_STAGING from a prior interrupted seed"
+        echo "default-workspace-template-seed: wiping stale $SEED_STAGING from a prior interrupted seed"
         rm -rf "$SEED_STAGING"
     fi
 
@@ -52,7 +52,7 @@ seed_workspace_onto_volume() {
     # issue surfaces in mngr/docker logs, rather than the container
     # silently sleeping forever with no workspace.
     if [ ! -e "$SEED_SOURCE" ]; then
-        echo "fct-seed: ERROR: $SEED_TARGET missing AND $SEED_SOURCE missing -- volume is in a broken state and cannot be seeded" >&2
+        echo "default-workspace-template-seed: ERROR: $SEED_TARGET missing AND $SEED_SOURCE missing -- volume is in a broken state and cannot be seeded" >&2
         exit 1
     fi
 
@@ -60,7 +60,7 @@ seed_workspace_onto_volume() {
     # `cp -a` preserves mode/owner/timestamps. Land on a sibling path so
     # the final rename below is a single inode-level operation on the
     # same filesystem.
-    echo "fct-seed: staging $SEED_SOURCE -> $SEED_STAGING"
+    echo "default-workspace-template-seed: staging $SEED_SOURCE -> $SEED_STAGING"
     cp -a "$SEED_SOURCE" "$SEED_STAGING"
 
     # Remove any pre-existing empty target so the atomic mv below
@@ -76,7 +76,7 @@ seed_workspace_onto_volume() {
     # all, so an interrupted seed either has the workspace fully in
     # place or still has /mngr/code.moving to re-stage from on the next
     # invocation.
-    echo "fct-seed: atomic-renaming $SEED_STAGING -> $SEED_TARGET"
+    echo "default-workspace-template-seed: atomic-renaming $SEED_STAGING -> $SEED_TARGET"
     mv "$SEED_STAGING" "$SEED_TARGET"
 }
 
@@ -84,7 +84,7 @@ cleanup_seed_source() {
     # Only safe to remove the image-layer source AFTER the volume target
     # is in place. Skip silently if a prior seed already cleaned it up.
     if [ -e "$SEED_SOURCE" ]; then
-        echo "fct-seed: cleaning up $SEED_SOURCE"
+        echo "default-workspace-template-seed: cleaning up $SEED_SOURCE"
         rm -rf "$SEED_SOURCE"
     fi
 }

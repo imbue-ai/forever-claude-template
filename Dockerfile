@@ -17,12 +17,12 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 # nothing else, so this expensive, stable layer caches against the scripts +
 # pinned versions, not application source.
 # ============================================================================
-COPY scripts/setup_system.sh /usr/local/bin/fct-setup-system
+COPY scripts/setup_system.sh /usr/local/bin/default-workspace-template-setup-system
 COPY scripts/_provision_guard.sh /usr/local/bin/_provision_guard.sh
-RUN chmod +x /usr/local/bin/fct-setup-system && fct-setup-system
+RUN chmod +x /usr/local/bin/default-workspace-template-setup-system && default-workspace-template-setup-system
 
 # Safety-net symlinks: /code -> /mngr/code and /worktree -> /mngr/worktree.
-# All FCT-owned paths are written as /mngr/code/... and /mngr/worktree/...
+# All default-workspace-template-owned paths are written as /mngr/code/... and /mngr/worktree/...
 # (so the workspace and worktrees ride the /mngr/ persistent volume for
 # backup snapshots), but anything that straggled with a hard-coded /code/...
 # or /worktree/... reference still resolves through these symlinks. The
@@ -68,8 +68,8 @@ COPY vendor/mngr/libs/concurrency_group/pyproject.toml /mngr/code/vendor/mngr/li
 COPY apps/system_interface/frontend/package.json apps/system_interface/frontend/package-lock.json /mngr/code/apps/system_interface/frontend/
 
 # Dependency install (manifests only). Shared verbatim with the Lima provider.
-COPY scripts/install_dependencies.sh /usr/local/bin/fct-install-dependencies
-RUN chmod +x /usr/local/bin/fct-install-dependencies && fct-install-dependencies
+COPY scripts/install_dependencies.sh /usr/local/bin/default-workspace-template-install-dependencies
+RUN chmod +x /usr/local/bin/default-workspace-template-install-dependencies && default-workspace-template-install-dependencies
 
 # ============================================================================
 # End pre-COPY manifest layer. Source-changing layers begin below.
@@ -106,5 +106,5 @@ RUN mv /mngr/code /docker_build_code
 #
 # Source mode bits are already +x; chmod is defensive in case the file
 # is checked out without exec bits.
-COPY scripts/fct_seed.sh /usr/local/bin/fct-seed
-RUN chmod +x /usr/local/bin/fct-seed
+COPY scripts/default_workspace_template_seed.sh /usr/local/bin/default-workspace-template-seed
+RUN chmod +x /usr/local/bin/default-workspace-template-seed
