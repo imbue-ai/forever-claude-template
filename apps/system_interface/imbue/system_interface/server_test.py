@@ -493,9 +493,7 @@ def test_get_empty_layout_returns_null_content(
     assert response.get_json() == {"slug": "mobile", "display_name": "mobile", "layout": None}
 
 
-def test_get_unknown_layout_returns_404(
-    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_get_unknown_layout_returns_404(client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
     response = client.get("/api/layouts/nonexistent")
@@ -612,9 +610,7 @@ def test_legacy_layout_json_migrates_to_desktop(
     assert (layout_dir / "layout.json.migrated").exists()
 
 
-def test_send_message_records_client_activity_event(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_send_message_records_client_activity_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A message POST carrying client metadata appends a message event."""
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     monkeypatch.setenv("MNGR_AGENT_ID", "agent-123")
