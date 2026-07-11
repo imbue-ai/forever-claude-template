@@ -9,11 +9,13 @@
   --color-bg-user-bubble: #eae8e4;
   --color-bg-composer: #ffffff;
   --color-bg-chat: #ffffff;
-  --color-text-primary: #37352f;
-  --color-text-secondary: #787774;
-  --color-text-faint: #b4b4b0;
+  --color-bg-code: #f0f0f0;
+  --color-text-primary: #202020;
+  --color-text-secondary: #666666;
+  --color-text-faint: #8c8c8c;
   --color-border: #e4e3df;
   --color-border-faint: #efeeeb;
+  --color-border-code: #e0e0e0;
   --color-accent: #2f6b4f;
   --color-accent-hover: #24573f;
   --color-accent-light: #e9f2ee;
@@ -117,7 +119,7 @@ body {
   border-radius: var(--radius-bubble) var(--radius-bubble) 4px var(--radius-bubble);
   padding: 12px 18px;
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.5;
   color: var(--color-text-primary);
   /* Break long unbreakable tokens (e.g. API keys, URLs) so they wrap inside
      the bubble instead of overflowing past its edge. */
@@ -127,9 +129,10 @@ body {
 .message-user-bubble code {
   font-family: var(--font-family-mono);
   font-size: 0.85em;
-  background: rgba(0, 0, 0, 0.06);
-  padding: 1px 5px;
-  border-radius: 3px;
+  background-color: var(--color-bg-code);
+  border: 1px solid var(--color-border-code);
+  border-radius: 0.25em;
+  padding: 0.08em 0.2em;
 }
 
 /* ── Optimistic (pending) message ── */
@@ -258,7 +261,7 @@ body {
 .app-footer {
   padding: 0 32px 24px;
   flex-shrink: 0;
-  background: var(--color-bg);
+  background: var(--color-bg-chat);
   border: none;
 }
 
@@ -266,7 +269,7 @@ body {
   margin-top: 6px;
   text-align: center;
   font-size: 11px;
-  color: var(--color-text-muted, #94a3b8);
+  color: var(--color-text-faint);
 }
 
 .chat-agent-terminal-link button {
@@ -858,7 +861,7 @@ body {
 
 /* ── Markdown content styling ── */
 .markdown-content {
-  line-height: 1.75;
+  line-height: 1.5;
   font-size: 15px;
   color: var(--color-text-primary);
 }
@@ -932,9 +935,10 @@ body {
 .markdown-content code {
   font-family: var(--font-family-mono);
   font-size: 0.85em;
-  background-color: var(--color-bg-active);
-  border-radius: 3px;
-  padding: 2px 5px;
+  background-color: var(--color-bg-code);
+  border: 1px solid var(--color-border-code);
+  border-radius: 0.25em;
+  padding: 0.08em 0.2em;
 }
 
 .markdown-content pre {
@@ -2080,7 +2084,7 @@ body {
   --pv-done: #5a564a;
   --pv-pending: #c2bfb6;
   font-size: 14.5px;
-  line-height: 1.55;
+  line-height: 1.5;
   color: var(--pv-fg);
 }
 
@@ -2183,7 +2187,7 @@ body {
 .pv-tl-bullet {
   position: relative;
   z-index: 1;
-  background: var(--color-bg);
+  background: var(--color-bg-chat);
   padding: 1px 0;
   flex-shrink: 0;
   width: 16px;
@@ -2211,7 +2215,7 @@ body {
   border-left: 2px solid var(--pv-line);
   font-size: 13px;
   color: var(--pv-fg-muted);
-  line-height: 1.55;
+  line-height: 1.5;
 }
 
 .pv-tl-narration {
@@ -2221,7 +2225,7 @@ body {
   font-size: 13px;
   font-style: italic;
   color: var(--pv-fg-muted);
-  line-height: 1.55;
+  line-height: 1.5;
   background: linear-gradient(90deg, var(--pv-fg-muted) 0%, var(--pv-fg-faint) 40%, var(--pv-fg-muted) 80%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -2249,7 +2253,7 @@ body {
   font-size: 13px;
   font-style: italic;
   color: var(--pv-fg-muted);
-  line-height: 1.55;
+  line-height: 1.5;
 }
 .pv-tl-narration p,
 .pv-tl-narration--static p {
@@ -2269,6 +2273,12 @@ body {
   -webkit-text-fill-color: var(--pv-fg-muted);
   -webkit-background-clip: padding-box;
   background-clip: padding-box;
+}
+/* The live (shimmering) narration keeps its pre-unification borderless code
+   chip; only the settled/static narration adopts the bordered chip. Both still
+   draw their fill/text from the shared --pv-* tokens above. */
+.pv-tl-narration code {
+  border: none;
 }
 .pv-tl-narration pre,
 .pv-tl-narration--static pre {
@@ -2345,7 +2355,7 @@ body {
 }
 .pv-expanded p {
   margin: 0 0 0.6em;
-  line-height: 1.65;
+  line-height: 1.5;
   color: var(--pv-fg);
 }
 .pv-expanded p:last-child {
@@ -2360,7 +2370,7 @@ body {
   margin-top: 16px;
   padding: 0;
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.5;
   color: var(--pv-fg);
 }
 
@@ -2370,7 +2380,7 @@ body {
   margin-bottom: 16px;
   padding: 0;
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.5;
   color: var(--pv-fg);
 }
 
@@ -2394,7 +2404,7 @@ body {
   position: relative;
   z-index: 2;
   margin: 6px 0 14px 0;
-  background: var(--color-bg);
+  background: var(--color-bg-chat);
 }
 
 /* Agent permission request, lifted out of any open step so it is always
