@@ -73,6 +73,16 @@ _install_playwright() {
         _log "playwright: marker present at $marker, skipping"
         return 0
     fi
+    if ! command -v apt-get >/dev/null || ! command -v dpkg >/dev/null; then
+        _log "playwright: apt/dpkg unavailable; installing browser without OS dependency step"
+        if (cd "$REPO_ROOT" && uv run playwright install chromium); then
+            touch "$marker"
+            _log "playwright: browser install complete, marker written to $marker"
+            return 0
+        fi
+        _log "playwright: browser install FAILED; marker not written so the next boot retries"
+        return 1
+    fi
     # `playwright install --with-deps` shells out to apt; recover any
     # interrupted dpkg state first so an install the bake interrupted can
     # actually complete on retry.

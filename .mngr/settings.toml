@@ -137,6 +137,9 @@ isolate_host_volumes = true
 # forever. A tmpfs /run makes the hard link work. Mirrors the tmpfs /run that the
 # aws-<region> provider start args and the ovh/vultr/imbue_cloud host setup apply.
 default_start_args = ["--tmpfs", "/run"]
+# First-time nix/Dockerfile builds pull a large Nix base and closure; keep the
+# Docker provider timeout wide enough for that separate template path.
+build_timeout_seconds = 5400
 
 [providers.lima]
 # is_enabled=false (mirrors [providers.docker]) is load-bearing: the lima backend
@@ -263,6 +266,20 @@ pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # per-host volume. Runs synchronously after the host is online but
 # before any agent work_dir setup, so the workspace is in place by the
 # time the user's git refs land on top. See scripts/fct_seed.sh.
+post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+
+# template for docker provider using the Nix-based FCT image
+[create_templates.docker-nixos]
+provider = "docker"
+target_path = "/mngr/code/"
+# Keep this as a separate mode rather than stacking after the docker template:
+# docker already contributes --file=Dockerfile and the build context.
+setting__extend = ["providers.docker.is_enabled=true"]
+build_arg__extend = ["--file=nix/Dockerfile", "."]
+# Same runtime contract as create_templates.docker; only the build Dockerfile differs.
+start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
+idle_mode = "disabled"
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
 
 # gVisor (runsc) runtime overlay for the docker provider. Always stacked on top

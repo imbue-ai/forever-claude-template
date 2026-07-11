@@ -32,6 +32,11 @@ specs/login-modal-reshape/
 # clones, separate from the read-only vendor/ subtrees. See CLAUDE.md.
 **/.external_worktrees/
 
+# Git metadata is never part of the workspace image. This is especially
+# important for linked worktrees, where `.git` is a file pointing at a host-only
+# gitdir that is invalid inside Docker build layers.
+**/.git
+
 # The generic harden worker installed into a worker's tree at provision time by
 # install_worker_skills.sh (from the single source at .agents/shared/worker/).
 # It is a scratch copy that must never be committed -- otherwise a worker's
