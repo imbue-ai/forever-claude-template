@@ -38,7 +38,7 @@ agent, identified by its `MNGR_AGENT_ID`, or the human).
   its own persistent Chromium profile under `$MNGR_HOST_DIR/browser-profiles/`
   (Tier A -- on the workspace volume), so cookies/logins/history come back; Chromium
   does this itself, we just point `user_data_dir` at a durable dir. A tiny manifest
-  (`runtime/browser-fleet.json`, Tier B -- git-backed to the mindsbackup branch)
+  (`runtime/browser-fleet.json`, Tier B -- covered by the opt-in GitHub sync)
   records which browsers existed and their tab URLs, so even a full rebuild restores
   the tab list (logged out, since profiles are volume-only). On daemon startup the
   fleet is restored **eager-sequentially** (one browser at a time, no cold-boot

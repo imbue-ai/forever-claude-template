@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
-# Auto-push the active branch after every commit, gated on GH_TOKEN being set.
+# Auto-push the active branch after every commit, part of the opt-in GitHub
+# sync (see libs/github_sync/README.md and the github-sync skill).
 #
-# Installed for every checkout in the container via:
-#   git config --global core.hooksPath /mngr/code/scripts/git_hooks
-# (set up by the git_auth_setup extra_window in .mngr/settings.toml).
+# This hook is inert by default: it only takes effect once the github-sync
+# skill points `git config --global core.hooksPath` at this directory (done
+# by `uv run github-sync wire-git`). The same wiring makes plain `git push`
+# authenticate through the latchkey gateway, so this hook needs no
+# credentials of its own -- no token ever enters the container.
 #
-# Skips silently in three cases that are normal, not errors:
-#   1. GH_TOKEN is unset (e.g. local dev, or worker sub-agents that should
-#      never push).
+# Because core.hooksPath is global, the hook fires for every checkout in the
+# container: the main /mngr/code repo and every worker worktree, each pushing
+# its own current branch.
+#
+# Skips silently in these cases that are normal, not errors:
+#   1. GitHub sync is not configured (github_sync.toml absent).
 #   2. HEAD is detached (no branch to push to).
-#   3. The current branch is under mindsbackup/ -- those branches belong to
-#      the runtime-backup polling service, which handles its own pushes.
+#   3. The current branch is runtime-sync -- that branch belongs to the
+#      github-sync polling service, which handles its own pushes.
+#   4. The github-sync service has halted pushes because the sync repo is
+#      public or its visibility could not be confirmed.
 #
 # Runs the push in the background so the commit never blocks. All output
 # (success or failure) is appended to /tmp/post-commit-push.log for debugging;
@@ -18,10 +26,12 @@
 
 set -u
 
+CONFIG_FILE=/mngr/code/github_sync.toml
+STATUS_FILE=/tmp/github-sync-status.json
 LOG_FILE=/tmp/post-commit-push.log
 
-# 1. No token, nothing to do.
-if [ -z "${GH_TOKEN:-}" ]; then
+# 1. Sync not configured, nothing to do.
+if [ ! -f "$CONFIG_FILE" ]; then
     exit 0
 fi
 
@@ -31,17 +41,36 @@ if [ -z "$branch" ]; then
     exit 0
 fi
 
-# 3. Runtime backup branches push themselves via the runtime-backup service.
+# 3. The runtime-sync branch pushes itself via the github-sync service.
 case "$branch" in
-    mindsbackup/*) exit 0 ;;
+    runtime-sync) exit 0 ;;
 esac
 
+# 4. Respect a visibility halt: the service refuses to push while the sync
+#    repo is public (or unconfirmed), and so must we.
+if [ -f "$STATUS_FILE" ] && command -v jq >/dev/null 2>&1; then
+    allowed="$(jq -r '.is_push_allowed // true' "$STATUS_FILE" 2>/dev/null)"
+    if [ "$allowed" = "false" ]; then
+        echo "[$(date -Is)] skipping push of $branch: sync repo not confirmed private" >> "$LOG_FILE"
+        exit 0
+    fi
+fi
+
 # Background push, never blocking the commit. First try a plain push; if the
-# branch has no upstream yet, fall back to setting upstream as we push.
+# branch has no upstream yet, fall back to setting upstream as we push. If the
+# primary latchkey gateway is unreachable and a secondary (per-VPS) gateway
+# exists, push the proxied URL directly through it (password header only --
+# the secondary takes no permissions override).
 {
     echo "[$(date -Is)] post-commit push for $branch"
     if ! git push 2>&1; then
-        git push --set-upstream origin "$branch" 2>&1
+        if ! git push --set-upstream origin "$branch" 2>&1; then
+            repo_url="$(sed -n 's/^repo_url *= *"\(.*\)".*/\1/p' "$CONFIG_FILE")"
+            if [ -n "${LATCHKEY_GATEWAY_SECONDARY:-}" ] && [ -n "${LATCHKEY_GATEWAY_PASSWORD:-}" ] && [ -n "$repo_url" ]; then
+                git -c "http.extraHeader=X-Latchkey-Gateway-Password: $LATCHKEY_GATEWAY_PASSWORD" \
+                    push "${LATCHKEY_GATEWAY_SECONDARY%/}/gateway/$repo_url.git" "$branch" 2>&1
+            fi
+        fi
     fi
 } >> "$LOG_FILE" 2>&1 &
 

@@ -43,7 +43,7 @@ RESERVED_NAMES = frozenset(
         "cloudflare-tunnel",
         "app-watcher",
         "bootstrap",
-        "runtime-backup",
+        "github-sync",
         "host-backup",
         "terminal",
         "deferred-install",

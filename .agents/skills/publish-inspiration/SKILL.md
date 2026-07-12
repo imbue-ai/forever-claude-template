@@ -591,7 +591,7 @@ exit 1
 
 If the user never approves, surface a clear message and stop, leaving the
 assembled commit intact. Do NOT fall back to any other credential or
-mechanism (no `GH_TOKEN`-in-URL pushes, no partial-tree API uploads -- see
+mechanism (no token-in-URL pushes, no partial-tree API uploads -- see
 the "MUST BE BOOTABLE" callout).
 
 ## 8. Create the repo and push

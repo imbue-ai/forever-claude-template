@@ -5,7 +5,7 @@
 type = "claude"
 connect = false
 ensure_clean = false
-pass_env__extend = ["REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY", "GH_TOKEN"]
+pass_env__extend = ["REMOTE_SERVICE_CONNECTOR_URL", "LATCHKEY_GATEWAY"]
 host_env__extend = [
     "IS_SANDBOX=1",
     "IS_AUTONOMOUS=1",
@@ -28,7 +28,8 @@ host_env__extend = [
     # Disable claude.ai account MCP connector sync -- it's an OAuth side
     # channel to third-party services that bypasses the latchkey gateway.
     "ENABLE_CLAUDEAI_MCP_SERVERS=false",
-    # Tickets live inside runtime/ so they ride the runtime-backup branch.
+    # Tickets live inside runtime/ so they are covered by the opt-in GitHub
+    # sync (github-sync skill) when the user enables it.
     # tk reads TICKETS_DIR if set; absolute path so it works from worktree
     # subdirs too. /mngr/code/ is the container WORKDIR (set by the Dockerfile);
     # a /code -> /mngr/code symlink is kept in the image as a safety net.
@@ -193,13 +194,13 @@ type = "main"
 # to it instead.
 #
 # bootstrap is the only extra_window now. It runs first-boot setup (git config,
-# runtime worktree, CLAUDE_CONFIG_DIR host-env write, backup config, initial
-# chat agent) and then launches supervisord, which runs every background
-# service (system_interface, web, cloudflared, app-watcher, runtime-backup,
-# host-backup, terminal, and the one-shot deferred-install -- see
-# supervisord.conf). The old git_auth_setup window is gone (the git config it
-# performed now runs inside bootstrap), and terminal is a supervisord service
-# rather than its own window.
+# CLAUDE_CONFIG_DIR host-env write, initial chat agent) and then launches
+# supervisord, which runs every background service (system_interface, web,
+# cloudflared, app-watcher, host-backup, terminal, and the one-shot
+# deferred-install -- see supervisord.conf; the opt-in github-sync service is
+# added by its skill). The old git_auth_setup window is gone (the git config
+# it performed now runs inside bootstrap), and terminal is a supervisord
+# service rather than its own window.
 extra_window = ["bootstrap='uv run bootstrap'"]
 # Write a sane default tmux config on every minds host. tuple-typed
 # `extra_provision_command` stacks across templates (see
@@ -254,11 +255,11 @@ start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--resta
 # Disable idle detection entirely -- the host should never auto-shutdown.
 # This also prevents shutdown when all agent tmux sessions exit.
 idle_mode = "disabled"
-# Forward Anthropic creds + GH_TOKEN from minds' subprocess env onto the
+# Forward Anthropic creds from minds' subprocess env onto the
 # new container's env. The agent process inherits the container env, so
 # this is what gives the agent its ANTHROPIC_API_KEY (etc.) in
 # non-IMBUE_CLOUD compute modes.
-pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
 # Seed /mngr/code from /docker_build_code (baked into the image) onto the
 # per-host volume. Runs synchronously after the host is online but
 # before any agent work_dir setup, so the workspace is in place by the
@@ -299,7 +300,7 @@ start_arg__extend = ["--cpus=2", "--memory=4", "--disk=20"]
 # version-check disable is needed.
 setting__extend = ["providers.lima.is_enabled=true"]
 # Same forwarding as the docker template; see comment there.
-pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
 # Run the SAME setup as a Dockerfile-built workspace, directly in the VM as root.
 # These run after the project is synced to /mngr/code (agent-level provisioning,
 # post work_dir sync) and reuse the exact scripts the Dockerfile RUNs. There is
@@ -347,7 +348,7 @@ setting__extend = [
     "providers.modal.default_idle_timeout=86400",
 ]
 # Same forwarding as the docker/lima templates so the agent inherits its creds.
-pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
 # Modal has no Dockerfile build (like lima): run the same setup a Dockerfile-built
 # workspace would, directly in the sandbox over SSH.
 extra_provision_command__extend = [
@@ -382,7 +383,7 @@ idle_mode = "disabled"
 # agent container back after a VPS reboot; the entrypoint then self-heals sshd.
 start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 # Same forwarding as the docker template; see comment there.
-pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
 # Same first-boot seed as the docker template; see comment there.
 post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-seed"]
 # Install the outer-VM boot unit so the agent recovers after a VPS reboot even
@@ -449,7 +450,7 @@ idle_mode = "disabled"
 # relaunched by the outer boot unit installed below.
 start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 # Same forwarding as the docker template; see comment there.
-pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
 # Same first-boot seed as the docker template; see comment there.
 post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-seed"]
 # Install a systemd unit on the OUTER pool/slice VM that, on every VM boot,
@@ -523,7 +524,7 @@ idle_mode = "disabled"
 # agent container back after an EC2 reboot; the entrypoint then self-heals sshd.
 start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--restart=unless-stopped"]
 # Same forwarding as the docker template; see comment there.
-pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"]
 # Same first-boot seed as the docker template; see comment there.
 post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-seed"]
 # Install the outer-VM boot unit so the agent recovers after an EC2 reboot even
@@ -594,12 +595,12 @@ build_arg__extend = ["--file=Dockerfile", "."]
 # pre-baked container, which already carries this policy.
 start_arg__extend = ["--restart=unless-stopped"]
 # Forward the LiteLLM-minted ANTHROPIC creds + the minds-side MNGR_PREFIX
-# + an optional GH_TOKEN from minds' subprocess env onto the host's
+# from minds' subprocess env onto the host's
 # ``/mngr/env``. minds writes these into the subprocess env it hands
 # ``mngr create`` (see ``run_mngr_create`` in
 # ``vendor/mngr/apps/minds/imbue/minds/desktop_client/agent_creator.py``)
 # so the host actually has them at the moment ``--pass-host-env`` reads.
-pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX", "GH_TOKEN"]
+pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX"]
 # Seed /mngr/code from the baked image on first boot (idempotent warm-boot
 # fast path). Runs after create_host for both paths; on the fast path the
 # code is already present so default-workspace-template-seed is a no-op. Same as the vultr/ovh

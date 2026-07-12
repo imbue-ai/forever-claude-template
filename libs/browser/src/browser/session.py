@@ -208,8 +208,8 @@ _SCREENSHOT_DIR = Path(os.environ.get("BROWSER_SCREENSHOT_DIR", "runtime/browser
 # Per-browser persistent Chromium profiles (cookies/logins/history) live here, on the
 # workspace volume under $MNGR_HOST_DIR -- Tier A durability: they survive stop/start
 # and restart of a single workspace (lost only on a permanent delete). They are NOT
-# under runtime/ (which is git-backed to the mindsbackup branch) -- a fat, churny
-# profile would bloat that branch. Override the root for tests / alternate layouts.
+# under runtime/ (which the opt-in GitHub sync ships to a git branch) -- a fat,
+# churny profile would bloat that branch. Override the root for tests / alternate layouts.
 _PROFILE_ROOT = Path(
     os.environ.get(
         "BROWSER_PROFILE_ROOT",

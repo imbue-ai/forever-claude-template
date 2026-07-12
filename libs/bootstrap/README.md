@@ -14,22 +14,17 @@ service.
 
 `uv run bootstrap` runs, in order:
 
-1. **Global git config** - rewrites `git@`/`ssh://` GitHub remotes to `https://`
-   and points `core.hooksPath` at `scripts/git_hooks`. (This replaces the old
-   `git_auth_setup` extra_window, minus the retired `gh auth setup-git`.)
-2. **runtime/ worktree init** - ensures `runtime/` is a git worktree of the
-   per-agent backup branch `mindsbackup/$MNGR_AGENT_ID`, so anything written
-   under `runtime/` (Claude memory, tickets, transcripts, the
-   `initial_chat_created` signal, etc.) is replicated off-box by the
-   `runtime-backup` service. Done before supervisord starts so the
-   runtime-backup / host-backup services find `runtime/` in place.
-3. **CLAUDE_CONFIG_DIR host-env write** - records the services agent's per-agent
+1. **Global git config** - rewrites `git@`/`ssh://` GitHub remotes to `https://`.
+   (`core.hooksPath` is deliberately NOT set here: the post-commit auto-push
+   hook only becomes active when the opt-in github-sync skill wires it up --
+   see `libs/github_sync/README.md`.)
+2. **CLAUDE_CONFIG_DIR host-env write** - records the services agent's per-agent
    Claude config dir in `$MNGR_HOST_DIR/env` so every other agent on the host
    inherits it.
-4. **Initial chat agent** - on first boot only (gated by
+3. **Initial chat agent** - on first boot only (gated by
    `runtime/initial_chat_created`), commits the rsynced workspace onto a clean
    `main` branch and creates the welcome chat agent (`--message /welcome`).
-5. **Launch supervisord** - `exec supervisord -n -c supervisord.conf`. Running
+4. **Launch supervisord** - `exec supervisord -n -c supervisord.conf`. Running
    via `exec` keeps the bootstrap tmux window alive as supervisord and lets the
    supervised services inherit this shell's already-sourced agent environment.
 

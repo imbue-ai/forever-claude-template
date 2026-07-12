@@ -419,7 +419,7 @@ def _interrupt_agent_endpoint(agent_id: str) -> Response:
 
     Refuses to interrupt agents carrying the ``is_primary=true`` label: that's
     the services agent for the workspace, and restarting it would stop the
-    bootstrap, web, cloudflared, and runtime-backup services. The
+    bootstrap, web, cloudflared, and other supervised services. The
     frontend already hides ``is_primary=true`` agents from the visible agent
     list; this is defense-in-depth for callers that hit the endpoint directly
     (curl, scripted use, etc.).
@@ -952,7 +952,7 @@ def _destroy_agent(agent_id: str) -> Response:
 
     Refuses to destroy agents carrying the ``is_primary=true`` label: that's
     the services agent for the workspace, and destroying it would tear down
-    the bootstrap, web, cloudflared, and runtime-backup services
+    the bootstrap, web, cloudflared, and other supervised services
     along with it. The frontend already hides ``is_primary=true`` agents
     from the visible agent list; this is defense-in-depth for callers that
     hit the endpoint directly (curl, scripted use, etc.).

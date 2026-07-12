@@ -57,7 +57,7 @@ Key fields:
   instead.
 
 Services inherit the agent environment (`MNGR_AGENT_STATE_DIR`,
-`CLAUDE_CONFIG_DIR`, `MNGR_HOST_DIR`, `GH_TOKEN`, ...) from the bootstrap shell
+`CLAUDE_CONFIG_DIR`, `MNGR_HOST_DIR`, `LATCHKEY_*`, ...) from the bootstrap shell
 that launched supervisord -- you do not need a per-program `environment=`.
 
 ## Adding a service

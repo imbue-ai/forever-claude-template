@@ -1,0 +1,20 @@
+[project]
+name = "github-sync"
+version = "0.1.0"
+description = "Opt-in service that syncs runtime/ (and, via a post-commit hook, every branch) to a private GitHub repo through the latchkey gateway"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "loguru>=0.7.0",
+]
+
+[project.scripts]
+github-sync = "github_sync.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/github_sync"]
