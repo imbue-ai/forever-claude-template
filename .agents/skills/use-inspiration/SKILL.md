@@ -158,7 +158,8 @@ one never removes or overwrites the manifests of the others.
 
 ## 7. Commit
 
-Commit the adaptation per the repo's git conventions (a plain local commit; the
-post-commit hook handles any push). Include the merged-in tree, the modified
+Commit the adaptation per the repo's git conventions (a plain local commit;
+when the user has enabled GitHub sync, the post-commit hook handles any push).
+Include the merged-in tree, the modified
 files from filling holes, and the updated manifest with its new `Adaptation
 history` entry.
