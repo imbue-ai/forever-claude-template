@@ -316,7 +316,20 @@ def _do_tick(state: _SyncState) -> None:
         )
         _write_status(state)
         return
-    state.repo_url = repo_url
+    if repo_url != state.repo_url:
+        if state.repo_url is not None:
+            # The confirmed visibility answer belongs to the previously
+            # configured repo; a swapped-in repo must earn its own
+            # confirmed-private answer before any push.
+            logger.info(
+                "Sync repo changed from {} to {}; holding pushes until the "
+                "new repo is confirmed private",
+                state.repo_url,
+                repo_url,
+            )
+            state.visibility = VISIBILITY_UNKNOWN
+            state.visibility_checked_at = None
+        state.repo_url = repo_url
 
     if not is_runtime_worktree():
         # Self-healing path for a workspace recreated from a synced repo: the

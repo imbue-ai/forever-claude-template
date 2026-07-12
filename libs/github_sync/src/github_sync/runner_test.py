@@ -280,6 +280,33 @@ def test_refresh_visibility_rechecks_stale_answer_and_halts_on_public(
     assert state.visibility_checked_at > checked_at_before
 
 
+def test_do_tick_rechecks_visibility_when_repo_url_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_git_and_gateway_env: Path,
+    fake_latchkey_bin: Path,
+) -> None:
+    """A repointed github_sync.toml must not inherit the previous repo's
+    confirmed-private answer: the new repo has to earn its own confirmation
+    before any push (here the re-check fails, so pushes stay held)."""
+    main, origin = _set_up_synced_workspace(tmp_path, monkeypatch)
+    install_fake_latchkey(fake_latchkey_bin, "exit 7")
+    (main / "runtime" / "memory.txt").write_text("important state\n")
+    # State carried over from ticks against a different, previously-configured
+    # repo, with a still-fresh private confirmation.
+    state = _confirmed_private_state(age_seconds=1)
+    state.repo_url = "https://github.com/some-user/previous-repo"
+
+    _do_tick(state)
+
+    assert state.repo_url == _REPO_URL
+    remote_branch = _git_out(origin, "rev-parse", "--verify", "runtime-sync")
+    assert remote_branch.returncode != 0
+    status = json.loads(status_file_path().read_text())
+    assert status["is_push_allowed"] is False
+    assert status["visibility"] == "unknown"
+
+
 def test_do_tick_restores_missing_worktree_from_origin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
