@@ -114,6 +114,32 @@ def test_init_defers_when_origin_unreachable(
     assert (runtime / "precious.txt").read_text() == "keep\n"
 
 
+def test_init_reattach_writes_missing_secrets_gitignore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A runtime-sync branch left behind by an interrupted prior init (the
+    branch is created just before the `worktree add` that failed) has no
+    .gitignore in its history. Reattaching to it must still put the secrets
+    exclusion in place, or the next sync tick's `git add -A` would push
+    runtime/secrets to the remote."""
+    main, origin = init_repo_with_origin(tmp_path)
+    monkeypatch.chdir(main)
+    # Mirror what the interrupted init leaves: a parentless empty-tree commit
+    # on runtime-sync and no worktree.
+    empty_tree = _git_out(main, "hash-object", "-w", "-t", "tree", "/dev/null").strip()
+    orphan_commit = _git_out(
+        main, "commit-tree", empty_tree, "-m", "runtime sync: init"
+    ).strip()
+    run_git(main, "branch", "runtime-sync", orphan_commit)
+
+    assert init_runtime_worktree() is True
+
+    runtime = main / "runtime"
+    assert (runtime / ".gitignore").read_text() == "secrets\n"
+    # Committed, not just written: the worktree is clean afterwards.
+    assert _git_out(runtime, "status", "--porcelain").strip() == ""
+
+
 def test_init_noops_when_already_a_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

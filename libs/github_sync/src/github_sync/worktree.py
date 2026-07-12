@@ -234,11 +234,19 @@ def init_runtime_worktree() -> bool:
         # Make sure the local branch tracks the remote (some git versions
         # don't set this automatically with -B + an explicit ref).
         git_runtime("branch", "--set-upstream-to", remote_ref)
-    elif not has_local_branch:
-        # Fresh orphan branch: write the .gitignore for secrets and make an
-        # initial commit so push has something to push. runtime/secrets holds
-        # e.g. the Cloudflare tunnel token, which must never reach the remote.
-        gitignore = RUNTIME_DIR / ".gitignore"
+
+    # Every path must end with the secrets-excluding .gitignore in place:
+    # runtime/secrets holds e.g. the Cloudflare tunnel token, which must never
+    # reach the remote. A restored or reattached branch normally already
+    # carries the file in its history, but a branch left behind by an
+    # interrupted prior init (created just before its `worktree add` failed)
+    # does not -- and without it the next sync tick's `git add -A` would ship
+    # the secrets. So write and commit it whenever it is missing, never
+    # clobbering an existing (possibly customized) one. On the fresh-orphan
+    # path this doubles as the initial commit that gives push something to
+    # push.
+    gitignore = RUNTIME_DIR / ".gitignore"
+    if not gitignore.exists():
         gitignore.write_text("secrets\n")
         git_runtime("add", ".gitignore")
         commit = git_runtime("commit", "-m", "runtime sync: init")
@@ -248,11 +256,6 @@ def init_runtime_worktree() -> bool:
                 commit.returncode,
                 commit.stderr.strip(),
             )
-    else:
-        # Reattached to an existing local runtime-sync branch: its history
-        # (including the secrets .gitignore) is already in place, and there is
-        # no remote ref to track yet, so there is nothing to set up.
-        pass
 
     # Restore staged-aside content. Calling unconditionally (rather than
     # gating on the `staged_aside` flag) also recovers content left by a
