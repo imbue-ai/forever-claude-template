@@ -270,7 +270,14 @@ def _push_runtime(state: _SyncState, repo_url: str) -> None:
 
 
 def _write_status(state: _SyncState) -> None:
-    """Mirror the sync state to the status file for the hook and the skill."""
+    """Mirror the sync state to the status file for the hook and the skill.
+
+    Written atomically (temp file in the same directory + ``os.replace``) so
+    the post-commit hook -- which reads this file concurrently to decide
+    whether a visibility halt is in effect -- can never observe a truncated
+    file. A truncated read would make jq fail and the hook would default to
+    allowing the push, silently defeating the halt.
+    """
     payload = {
         "timestamp": _iso_or_none(_now_utc()),
         "repo_url": state.repo_url,
@@ -282,8 +289,10 @@ def _write_status(state: _SyncState) -> None:
         "last_error": state.last_error,
     }
     status_path = status_file_path()
+    tmp_path = status_path.with_name(status_path.name + ".tmp")
     try:
-        status_path.write_text(json.dumps(payload, indent=2) + "\n")
+        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
+        os.replace(tmp_path, status_path)
     except OSError as e:
         logger.warning("Failed to write status file {}: {}", status_path, e)
 
