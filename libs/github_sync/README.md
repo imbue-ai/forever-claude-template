@@ -37,9 +37,12 @@ Once enabled, three pieces work together:
   machine is offline. A failed push is retried on the next tick; `--force` is
   never used (the service is the branch's only writer).
 - **Private-only enforcement**: the service re-checks the repo's visibility
-  through latchkey every 15 minutes and refuses to push while the repo is
-  public or its visibility cannot be confirmed. The post-commit hook consults
-  the same status and skips pushes during a halt.
+  through latchkey every 15 minutes; pushes are held until the first
+  confirmed-private answer and halted whenever the repo is confirmed public.
+  A re-check that fails outright (e.g. the gateway is offline -- in which
+  case pushes would fail too) keeps the last confirmed answer and is retried
+  every tick. The post-commit hook consults the same status and skips pushes
+  during a halt.
 - `runtime/secrets` is excluded via the worktree's own `.gitignore` (written
   at init), so e.g. the Cloudflare tunnel token never reaches the remote.
 - Each tick first clears a stale `index.lock` from the runtime worktree if

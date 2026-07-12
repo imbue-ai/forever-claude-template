@@ -3,8 +3,10 @@
 Polls runtime/ every TICK_INTERVAL_SECONDS; if there are uncommitted changes,
 makes a sync commit on the runtime-sync branch checked out at runtime/ and
 pushes it to origin through the latchkey gateway. Periodically re-verifies
-that the sync repo is still private and halts pushes when it is public or its
-visibility cannot be established.
+that the sync repo is still private: pushes are held until visibility is
+first confirmed private and halted whenever the repo is confirmed public. A
+re-check that fails outright keeps the last confirmed answer and is retried
+every tick (see _refresh_visibility).
 
 The service only exists when the github-sync skill has enabled sync (it adds
 the [program:github-sync] block to supervisord.conf). The skill normally also
