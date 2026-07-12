@@ -27,6 +27,14 @@
 
 set -u
 
+# Never prompt for credentials on the controlling TTY: the gateway wiring
+# authenticates pushes via injected headers, so a prompt (e.g. after a 401
+# from a lapsed gateway permission) can never succeed -- it would only write
+# a stray username prompt into the committing agent's tmux session and hang
+# the background push forever. With prompts disabled the push fails fast and
+# the failure lands in the log file.
+export GIT_TERMINAL_PROMPT=0
+
 # Env overrides exist for tests; production always uses the defaults.
 # GITHUB_SYNC_STATUS_FILE is the same override the github-sync service honors
 # when writing the file this hook reads.
