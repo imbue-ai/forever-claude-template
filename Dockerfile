@@ -26,9 +26,10 @@ RUN chmod +x /usr/local/bin/default-workspace-template-setup-system && default-w
 # time so the publish-inspiration skill's scan gate (scan_secrets.sh) can
 # hard-require betterleaks + trufflehog + kingfisher from the first second of
 # every docker-built container. The script is the single source of truth for
-# the version pins and per-arch sha256s, skips any scanner already present at
-# its pinned version, and is re-run by the deferred-install service as a
-# backstop on providers that do not build from this Dockerfile (e.g. Lima).
+# the version pins and per-arch sha256s and skips any scanner already present
+# at its pinned version. If a binary is ever missing (an environment not built
+# from this Dockerfile, or a failed bake), the script is runnable by hand to
+# install all three -- the scan gate's error names that command.
 # Kept above the `COPY . /mngr/code/` layer so it caches against the script
 # content (the pins live inside it), not application source.
 # ============================================================================
