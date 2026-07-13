@@ -474,7 +474,7 @@ def slice_advertised_attributes(sizing: dict[str, int]) -> dict[str, Any]:
 # carry the box address + per-slice carve sizing into the create.
 _SLICE_PROVIDER_INSTANCE: str = "imbue_cloud_slice"
 
-# Per-slice ``mngr create`` hard timeout (carve + FCT container build + agent
+# Per-slice ``mngr create`` hard timeout (carve + DEFAULT_WORKSPACE_TEMPLATE container build + agent
 # bootstrap). 45 min gives headroom for the build under concurrency; the bake's
 # semaphore keeps concurrency low enough that any single create stays well under
 # it. Applied per create, so one slice timing out never aborts the others.
@@ -497,7 +497,7 @@ def _build_slice_create_args(
     ssh_user: str,
     port_range_start: int,
     port_range_end: int,
-    fct_cache_tag: str | None,
+    default_workspace_template_cache_tag: str | None,
 ) -> list[str]:
     """Render the ``-S`` provider-config overrides that point one slice bake at this box.
 
@@ -542,10 +542,10 @@ def _build_slice_create_args(
     # absent, so the provider falls back to legacy un-stamped names.
     if env_name is not None:
         overrides["slice_env_name"] = env_name
-    # Production (--from-tag) bakes enable the per-box FCT image cache: the first
+    # Production (--from-tag) bakes enable the per-box DEFAULT_WORKSPACE_TEMPLATE image cache: the first
     # slice builds + seeds the box tar, the rest docker-load it. Omitted for dev bakes.
-    if fct_cache_tag is not None:
-        overrides["fct_cache_tag"] = fct_cache_tag
+    if default_workspace_template_cache_tag is not None:
+        overrides["default_workspace_template_cache_tag"] = default_workspace_template_cache_tag
     args: list[str] = []
     for key, value in overrides.items():
         args.extend(["-S", f"{prefix}.{key}={value}"])
@@ -586,7 +586,7 @@ def _slice_run_in_container(
     memory, so a fresh ``mngr`` can't resolve it -- instead we SSH straight to the
     container's box-forwarded port (``baked.ssh_port``) with the container key the
     create recorded. Wrapped in ``bash -lc`` so ``uv``/``mngr`` are on PATH in the
-    FCT image. Returns ``(returncode, stdout, stderr)``.
+    DEFAULT_WORKSPACE_TEMPLATE image. Returns ``(returncode, stdout, stderr)``.
     """
     if not baked.ssh_host or baked.ssh_port is None or not baked.ssh_key_path:
         return 1, "", f"baked slice {baked.host_name} missing container SSH connection info"
@@ -642,7 +642,7 @@ def _bake_one_slice(
     port_range_start: int,
     port_range_end: int,
     is_deferred_install_wait_skipped: bool,
-    fct_cache_tag: str | None,
+    default_workspace_template_cache_tag: str | None,
 ) -> SliceBakeOutcome:
     """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
@@ -676,7 +676,7 @@ def _bake_one_slice(
                 ssh_user=ssh_user,
                 port_range_start=port_range_start,
                 port_range_end=port_range_end,
-                fct_cache_tag=fct_cache_tag,
+                default_workspace_template_cache_tag=default_workspace_template_cache_tag,
             ),
             mngr_create_timeout_seconds=_SLICE_MNGR_CREATE_TIMEOUT_SECONDS,
         )
@@ -689,7 +689,7 @@ def _bake_one_slice(
                     f"container={baked.ssh_port})"
                 )
             finalize_baked_pool_host(_slice_run_in_container, baked, host_name=host_name)
-            # Let the FCT deferred-install (heavy apt + browser download) finish before we stop the
+            # Let the DEFAULT_WORKSPACE_TEMPLATE deferred-install (heavy apt + browser download) finish before we stop the
             # services agent: stopping mid-apt corrupts dpkg (see wait_for_deferred_install). Dev
             # bakes may skip this wait to save the few minutes; the tradeoff is the baked container's
             # deferred-install can be left incomplete/corrupt (acceptable for slow-path dev bakes,
@@ -703,7 +703,7 @@ def _bake_one_slice(
                 wait_for_deferred_install(_slice_run_in_container, baked, host_name=host_name)
             # Stop the services agent so it lands in the pool STOPPED.
             # The fast-path lease then *starts* the adopted agent, which re-runs the
-            # FCT bootstrap -- and because finalize removed the initial-chat sentinel,
+            # DEFAULT_WORKSPACE_TEMPLATE bootstrap -- and because finalize removed the initial-chat sentinel,
             # the bootstrap re-creates the chat agent under the leasing user's
             # workspace name. Without this stop the agent stays running from bake
             # through lease, the one-shot bootstrap never re-runs, and the workspace
@@ -1270,7 +1270,7 @@ def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> Poo
 
 
 def _resolve_vendored_mngr_source(*, mngr_source: str | None, repo_root: Path, is_from_tag: bool) -> Path | None:
-    """Return the mngr tree to vendor into the FCT clone's ``vendor/mngr``, or None to keep the clone's own.
+    """Return the mngr tree to vendor into the DEFAULT_WORKSPACE_TEMPLATE clone's ``vendor/mngr``, or None to keep the clone's own.
 
     An explicit ``--mngr-source`` always wins. Otherwise a ``--from-tag`` bake keeps
     the mngr already vendored at the pinned tag (returns None -- byte-for-byte tag
@@ -1305,7 +1305,7 @@ def allocate_slices(
     The slice backend of ``admin pool create``. Bakes onto the operator-named
     ``server_id`` (one server per invocation: a server's per-slice vCPU/RAM/disk
     are fixed by its registration, so a batch is homogeneous), vendors the resolved
-    mngr source into the FCT workspace once (see ``_resolve_vendored_mngr_source``:
+    mngr source into the DEFAULT_WORKSPACE_TEMPLATE workspace once (see ``_resolve_vendored_mngr_source``:
     a ``--from-tag`` bake keeps the tag's own vendored mngr), then bakes the slices concurrently -- at most
     ``max_concurrency`` at a time (the rest queue) so the box isn't over-contended,
     which would push each ``mngr create`` past its timeout. Each ``mngr create``
@@ -1384,7 +1384,7 @@ def allocate_slices(
             )
             return
 
-        # Resolve which mngr tree (if any) to vendor into the FCT workspace's
+        # Resolve which mngr tree (if any) to vendor into the DEFAULT_WORKSPACE_TEMPLATE workspace's
         # vendor/mngr (the baked container builds its mngr from there). For a
         # --from-tag bake we keep the mngr already vendored at the pinned tag so the
         # slice is byte-for-byte tag content; only --workspace-dir (dev) or an
@@ -1397,12 +1397,14 @@ def allocate_slices(
             sync_mngr_into_template(mngr_source_to_vendor, workspace_dir)
 
         pool_public_key = _derive_public_key(private_key_path)
-        # Enable the per-box FCT image cache only for production (--from-tag) bakes, whose
+        # Enable the per-box default-workspace-template image cache only for production (--from-tag) bakes, whose
         # content is an immutable tag: the first slice builds + seeds a box-local tar
-        # (tagged fct:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
-        # mutable content under a branch label, so they always build (fct_cache_tag=None).
+        # (tagged default-workspace-template:<tag>), the rest docker-load it. Dev (--workspace-dir) bakes have
+        # mutable content under a branch label, so they always build (default_workspace_template_cache_tag=None).
         repo_branch_or_tag = lease_attributes.get("repo_branch_or_tag")
-        fct_cache_tag = f"fct:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
+        default_workspace_template_cache_tag = (
+            f"default-workspace-template:{repo_branch_or_tag}" if (is_from_tag and repo_branch_or_tag) else None
+        )
         # One worker per slice, capped at ``max_concurrency`` at once by the shared
         # fan-out: each bake blocks on the semaphore before its ``mngr create``, so
         # the box is never contended by more than K simultaneous carves+builds
@@ -1422,7 +1424,7 @@ def allocate_slices(
             port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
             port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
             is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
-            fct_cache_tag=fct_cache_tag,
+            default_workspace_template_cache_tag=default_workspace_template_cache_tag,
         )
         logger.info("Baking {} slice(s) on {} ({} at a time)", count, server.public_address, max_concurrency)
 
@@ -1702,6 +1704,16 @@ def _wait_for_ssh_ready(
     ),
 )
 @click.option("--yes", is_flag=True, default=False, help="Skip the interactive confirmation and place the order.")
+@click.option(
+    "--dry-run",
+    "is_dry_run",
+    is_flag=True,
+    default=False,
+    help=(
+        "Build + assign a non-committal cart, print the real OVH price preview + derived specs, then delete "
+        "the cart without ordering. No charge and no prompt -- use it to confirm price/specs before ordering."
+    ),
+)
 @click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
 def order(
     plan_code: str,
@@ -1712,6 +1724,7 @@ def order(
     cpu_overcommit: float,
     option_codes: tuple[str, ...],
     yes: bool,
+    is_dry_run: bool,
     database_url: str | None,
 ) -> None:
     """Order a bare-metal server from OVH (THIS CHARGES the account) and record it at status 'ordered'.
@@ -1719,7 +1732,8 @@ def order(
     Builds + assigns the eco cart, shows the real OVH price preview for confirmation, places the order, and
     inserts a bare_metal_servers row (specs derived from the catalog). Then run ``await-delivery`` + ``setup``.
     Any mandatory option family with more than one offer (e.g. bandwidth, vrack) must be chosen explicitly
-    via ``--option``; needs OVH_* credentials and the pool DSN.
+    via ``--option``; needs OVH_* credentials and the pool DSN. Pass ``--dry-run`` to price + preview only
+    (no charge, no prompt, no DB write); ``--dry-run`` wins over ``--yes``.
     """
     config = _require_ovh_config()
     client = build_ovh_client(config)
@@ -1745,6 +1759,12 @@ def order(
         f"{disk_gb}GB usable disk ({raid_level}) -> {slot_count} slices of {memory_per_slice_gb}GB.\n"
         f"OVH price preview:\n{summarize_checkout_prices(preview)}"
     )
+    # A dry run stops here (before any prompt or charge), deleting the non-committal cart. Checked ahead of
+    # --yes so an accidental `--dry-run --yes` never charges.
+    if is_dry_run:
+        delete_cart_quietly(client, cart_id)
+        write_human_line("Dry run: cart deleted, no order placed.")
+        return
     if not yes and not click.confirm("Place this order now (this charges the account)?", default=False):
         delete_cart_quietly(client, cart_id)
         write_human_line("Aborted; cart deleted, no order placed.")
