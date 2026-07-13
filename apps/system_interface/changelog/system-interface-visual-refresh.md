@@ -9,3 +9,7 @@ Visual refresh of the system interface UI.
 
 - General visual refresh pass across the Claude login modal, message input,
   progress blocks, permission cards, and lightbox.
+
+- Timeline and tab-strip polish: refined the run timeline (masked the connector
+  line above ungrouped runs, bolder titles) and user message bubbles, plus
+  tab-strip tweaks (bleed and a centered "+" button).
