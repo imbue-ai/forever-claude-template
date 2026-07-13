@@ -736,8 +736,8 @@ def test_apply_container_timezone_tolerates_oserror(tmp_path: Path) -> None:
 def test_write_agent_env_snapshot_quotes_values_and_restricts_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("FCT_TEST_SPACES", "two words")
-    monkeypatch.setenv("FCT_TEST_QUOTES", "he said \"hi\" and 'bye'")
+    monkeypatch.setenv("MINDS_TEST_SPACES", "two words")
+    monkeypatch.setenv("MINDS_TEST_QUOTES", "he said \"hi\" and 'bye'")
     snapshot = tmp_path / "agent-env"
 
     _write_agent_env_snapshot(snapshot)
@@ -750,8 +750,8 @@ def test_write_agent_env_snapshot_quotes_values_and_restricts_mode(
         assert words[0] == "export"
         key, _, value = words[1].partition("=")
         parsed[key] = value
-    assert parsed["FCT_TEST_SPACES"] == "two words"
-    assert parsed["FCT_TEST_QUOTES"] == "he said \"hi\" and 'bye'"
+    assert parsed["MINDS_TEST_SPACES"] == "two words"
+    assert parsed["MINDS_TEST_QUOTES"] == "he said \"hi\" and 'bye'"
 
 
 def test_write_agent_env_snapshot_skips_non_identifier_keys(
@@ -759,14 +759,14 @@ def test_write_agent_env_snapshot_skips_non_identifier_keys(
 ) -> None:
     # POSIX allows env keys that are not valid shell identifiers (e.g. with a
     # dash); an `export` line for one would break sourcing, so it is skipped.
-    monkeypatch.setenv("FCT-BAD-KEY", "value")
+    monkeypatch.setenv("MINDS-BAD-KEY", "value")
     monkeypatch.setenv("FCT_GOOD_KEY", "value")
     snapshot = tmp_path / "agent-env"
 
     _write_agent_env_snapshot(snapshot)
 
     content = snapshot.read_text()
-    assert "FCT-BAD-KEY" not in content
+    assert "MINDS-BAD-KEY" not in content
     assert "export FCT_GOOD_KEY=value" in content
 
 

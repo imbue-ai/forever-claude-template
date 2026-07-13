@@ -44,7 +44,7 @@ the agent's session and re-sends `/<skill>` so the skill runs fresh, with no mem
 of the previous run.
 A new scheduled agent (e.g. a morning news digest) needs only a skill plus a
 cron entry -- no new agent template. The daily **Caretaker** is the
-built-in instance, baked into `/etc/cron.d/fct-caretaker` at image build (delete
+built-in instance, baked into `/etc/cron.d/minds-caretaker` at image build (delete
 that file to switch it off): once a night it quietly checks the apps and services in your
 workspace for problems -- a page that stopped loading, a service that crashed,
 errors piling up -- and either fixes them or explains what it found, always in

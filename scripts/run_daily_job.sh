@@ -28,7 +28,7 @@ shift 2
 # Stamps live on the container rootfs (not under runtime/, so they are never
 # backed up -- a recreated container starts fresh and the bootstrap re-seeds).
 # The env override exists for tests.
-STAMP_DIR="${FCT_DAILY_STAMP_DIR:-/var/lib/fct/daily-stamps}"
+STAMP_DIR="${MINDS_DAILY_STAMP_DIR:-/var/lib/minds/daily-stamps}"
 STAMP="$STAMP_DIR/$JOB_ID"
 mkdir -p "$STAMP_DIR"
 

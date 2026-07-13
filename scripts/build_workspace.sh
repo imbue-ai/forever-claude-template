@@ -67,7 +67,7 @@ ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/ticket
 # local, with first-minute catch-up after a missed day at any hour). Guarded on
 # file existence because this script reruns on every Lima create. Deleting the
 # file is how the Caretaker is switched off.
-if [ ! -f /etc/cron.d/fct-caretaker ]; then
-    printf '%s\n' '* * * * *   root   /mngr/code/scripts/with_agent_env.sh /mngr/code/scripts/run_daily_job.sh caretaker 3 bash /mngr/code/scripts/run_task_agent.sh caretaker --template caretaker >> /var/log/supervisor/caretaker-job.log 2>&1' > /etc/cron.d/fct-caretaker
-    chmod 0644 /etc/cron.d/fct-caretaker
+if [ ! -f /etc/cron.d/minds-caretaker ]; then
+    printf '%s\n' '* * * * *   root   /mngr/code/scripts/with_agent_env.sh /mngr/code/scripts/run_daily_job.sh caretaker 3 bash /mngr/code/scripts/run_task_agent.sh caretaker --template caretaker >> /var/log/supervisor/caretaker-job.log 2>&1' > /etc/cron.d/minds-caretaker
+    chmod 0644 /etc/cron.d/minds-caretaker
 fi

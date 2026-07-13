@@ -87,7 +87,7 @@ every minute through the wrapper and the checker:
 ```
 
 - `job-id` -- unique name; the checker records the last covered date under
-  `/var/lib/fct/daily-stamps/<job-id>`.
+  `/var/lib/minds/daily-stamps/<job-id>`.
 - `due-hour` -- the local hour (0-23) the job is due.
 
 The every-minute tick is what makes catch-up possible: the checker exits
@@ -108,7 +108,7 @@ whole duration makes overlapping ticks skip. The semantics:
 A job with no stamp yet runs at the first tick at or after its due hour -- so
 a job added in the afternoon with a morning due hour fires within a minute. To
 make it wait for tomorrow instead, seed the stamp with today's date first:
-`mkdir -p /var/lib/fct/daily-stamps && date +%F > /var/lib/fct/daily-stamps/<job-id>`
+`mkdir -p /var/lib/minds/daily-stamps && date +%F > /var/lib/minds/daily-stamps/<job-id>`
 (exactly what the bootstrap does for the Caretaker). Cron rescans
 `/etc/cron.d/` within a minute, so a new drop-in takes effect with nothing to
 reload.
@@ -155,7 +155,7 @@ agent template; otherwise the generic `task_agent` template is used.
 ## How the Caretaker is wired (the built-in example)
 
 The nightly Caretaker is exactly the task-agent pattern above, with a tailored
-agent template. Its entry is the single line in `/etc/cron.d/fct-caretaker`
+agent template. Its entry is the single line in `/etc/cron.d/minds-caretaker`
 (job id `caretaker`, due hour 3):
 
 ```
@@ -166,7 +166,7 @@ agent template. Its entry is the single line in `/etc/cron.d/fct-caretaker`
   due hour 3), then `bash scripts/run_task_agent.sh caretaker --template
   caretaker` (wake the singleton Caretaker agent for one run), with output
   appended to `/var/log/supervisor/caretaker-job.log`.
-- **How it got there:** written to `/etc/cron.d/fct-caretaker` at image build
+- **How it got there:** written to `/etc/cron.d/minds-caretaker` at image build
   by `scripts/build_workspace.sh`, guarded on the file's existence so re-runs
   of that script never recreate it. Deleting the file is how the Caretaker is
   switched off -- and it stays off.
@@ -174,7 +174,7 @@ agent template. Its entry is the single line in `/etc/cron.d/fct-caretaker`
   that moment; after a fully missed day, within the first minute the container
   is up again, at any hour. Never at workspace creation.
 - **The first run:** at first boot the bootstrap seeds the Caretaker's stamp
-  (`/var/lib/fct/daily-stamps/caretaker`) with today's date, so the Caretaker
+  (`/var/lib/minds/daily-stamps/caretaker`) with today's date, so the Caretaker
   never spawns on creation day; its first run is the next day's 3 AM. The
   seeding happens exactly once, tracked by a `caretaker.seeded` marker beside
   the stamp -- so deleting the stamp to force a same-day run keeps working
@@ -190,7 +190,7 @@ agent template. Its entry is the single line in `/etc/cron.d/fct-caretaker`
   truth about what is scheduled.
 - **Remove:** delete the `/etc/cron.d/<job-name>` file.
 - **Pause without losing the definition:** comment the line out with `#`.
-- **Check a daily job's state:** read `/var/lib/fct/daily-stamps/<job-id>` --
+- **Check a daily job's state:** read `/var/lib/minds/daily-stamps/<job-id>` --
   the last date the job covered. Deleting the stamp makes today eligible
   again (the job runs at the next tick at or after its due hour).
 
@@ -201,16 +201,16 @@ The complete map of the scheduling machinery, for edits and debugging:
 - `/etc/cron.d/` -- one drop-in file per job, both kinds: daily jobs are
   every-minute lines through `run_daily_job.sh`, precise jobs are ordinary
   schedule lines (cron rescans the directory within a minute).
-- `/etc/cron.d/fct-caretaker` -- the Caretaker's drop-in.
+- `/etc/cron.d/minds-caretaker` -- the Caretaker's drop-in.
 - `/mngr/code/scripts/run_daily_job.sh` -- the daily-job due-checker (all of
   the daily-scheduling logic, about 50 lines).
-- `/var/lib/fct/daily-stamps/<job-id>` -- each daily job's last covered date
+- `/var/lib/minds/daily-stamps/<job-id>` -- each daily job's last covered date
   (how the checker knows whether today has run and whether a day was missed).
 - `supervisord.conf` -- `[program:cron]` is the cron daemon (check it with
   `supervisorctl status cron`).
 - `/var/log/supervisor/<job>.log` -- each job's own output (per the redirect
   on its entry); `/var/log/supervisor/cron-*.log` -- the cron daemon's logs.
-- `/run/fct-agent-env` -- the per-boot agent-environment snapshot that
+- `/run/minds-agent-env` -- the per-boot agent-environment snapshot that
   `scripts/with_agent_env.sh` sources.
 - `/etc/localtime` + `/etc/timezone` -- the container clock, set from the
   user's timezone at each boot by the bootstrap (see the timezone section

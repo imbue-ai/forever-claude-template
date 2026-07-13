@@ -49,7 +49,7 @@ CARETAKER_DIR = RUNTIME_DIR / "caretaker"
 # (supervisord and every service inherit it from this shell), so it dumps a
 # snapshot here each boot for scripts/with_agent_env.sh to source. /run is a
 # tmpfs, so the snapshot never outlives the boot that wrote it.
-AGENT_ENV_SNAPSHOT_PATH = Path("/run/fct-agent-env")
+AGENT_ENV_SNAPSHOT_PATH = Path("/run/minds-agent-env")
 # Keys must be valid shell identifiers to be re-exported (cron jobs source the
 # snapshot through bash); anything else (e.g. bash exports function baggage) is
 # skipped.
@@ -71,7 +71,7 @@ _TIMEZONE_FETCH_TIMEOUT_SECONDS = 5.0
 # Caretaker within the first minute. Seeding today's date on first boot
 # (stamp absent) is what guarantees the Caretaker never runs on creation day
 # and first fires at the NEXT day's 3 AM due hour.
-_DAILY_STAMP_DIR = Path("/var/lib/fct/daily-stamps")
+_DAILY_STAMP_DIR = Path("/var/lib/minds/daily-stamps")
 _CARETAKER_STAMP_PATH = _DAILY_STAMP_DIR / "caretaker"
 # When the user's timezone cannot be fetched at first boot, pick a fixed-offset
 # zone that places the workspace's "local" clock at this hour at setup time.
@@ -775,7 +775,7 @@ def _apply_container_timezone(
         logger.warning("Timezone {!r} has no zoneinfo file at {}", tz_name, zone_file)
         return False
     try:
-        tmp_link = localtime_path.with_name(localtime_path.name + ".fct-tmp")
+        tmp_link = localtime_path.with_name(localtime_path.name + ".minds-tmp")
         tmp_link.unlink(missing_ok=True)
         tmp_link.symlink_to(zone_file)
         os.replace(tmp_link, localtime_path)
@@ -1093,7 +1093,7 @@ def main() -> None:
     # Create runtime/caretaker/ (the Caretaker's state dir) after the runtime
     # worktree is in place, so it rides the backup branch. The Caretaker itself
     # runs as a daily job via scripts/run_daily_job.sh (see the
-    # /etc/cron.d/fct-caretaker line written by scripts/build_workspace.sh).
+    # /etc/cron.d/minds-caretaker line written by scripts/build_workspace.sh).
     _ensure_caretaker_dir()
 
     # Make sure supervisord's log directory exists, then hand off: replace this
