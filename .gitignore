@@ -7,7 +7,7 @@
 # the build context root under dockerignore syntax; the `**/` prefix
 # makes both formats agree.
 
-# Forever Claude runtime state.
+# Default Workspace Template runtime state.
 # memory/ now lives at runtime/memory/ (configured via .claude/settings.json's
 # autoMemoryDirectory) so the runtime-backup service backs it up alongside
 # the rest of runtime/.

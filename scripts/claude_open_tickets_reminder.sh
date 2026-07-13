@@ -40,7 +40,7 @@ open_lines=$("$tk_script" steps 2>/dev/null | sed '/^[[:space:]]*$/d' || true)
 
 cat <<EOF
 
-[Open task reminder from forever-claude-template]
+[Open task reminder from default-workspace-template]
 
 You have step records that are not yet closed:
 

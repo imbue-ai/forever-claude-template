@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared workspace build for forever-claude-template hosts.
+# Shared workspace build for default-workspace-template hosts.
 #
 # Builds the workspace from full source: builds the frontend, installs the mngr /
 # system-interface tools and their plugins, registers the editable workspace +

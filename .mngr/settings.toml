@@ -262,8 +262,8 @@ pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Seed /mngr/code from /docker_build_code (baked into the image) onto the
 # per-host volume. Runs synchronously after the host is online but
 # before any agent work_dir setup, so the workspace is in place by the
-# time the user's git refs land on top. See scripts/fct_seed.sh.
-post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+# time the user's git refs land on top. See scripts/default_workspace_template_seed.sh.
+post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-seed"]
 
 # gVisor (runsc) runtime overlay for the docker provider. Always stacked on top
 # of `docker` (`--template docker --template docker_runsc`): it reuses the entire
@@ -305,7 +305,7 @@ pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # post work_dir sync) and reuse the exact scripts the Dockerfile RUNs. There is
 # no docker build (so no `--file=Dockerfile` build arg) and no /docker_build_code
 # relocation (the repo lands straight on the VM's btrfs /mngr disk), so the
-# docker template's build_arg + post_host_create_command (fct-seed) are
+# docker template's build_arg + post_host_create_command (default-workspace-template-seed) are
 # intentionally absent here. extra_provision_command__extend stacks after the
 # main template's entry.
 extra_provision_command__extend = [
@@ -384,7 +384,7 @@ start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--resta
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
-post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-seed"]
 # Install the outer-VM boot unit so the agent recovers after a VPS reboot even
 # without the desktop app; same as the pool_host template..
 post_host_create_outer_command__extend = [
@@ -424,7 +424,7 @@ systemctl enable minds-autostart.service
 """,
 ]
 
-# Provider-agnostic FCT pool-host build recipe (the imbue-cloud pool bake stacks
+# Provider-agnostic DEFAULT_WORKSPACE_TEMPLATE pool-host build recipe (the imbue-cloud pool bake stacks
 # this on top of `main` for BOTH OVH VPSes and lima slices -- they build the same
 # container image). No `provider` is declared: the create address selects it
 # (`@host.ovh` for OVH, `@host.imbue_cloud_slice` for a slice), mirroring the
@@ -451,11 +451,11 @@ start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--resta
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
-post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-seed"]
 # Install a systemd unit on the OUTER pool/slice VM that, on every VM boot,
 # starts the agent container and relaunches the system-services agent inside it
 # -- so the workspace recovers from a VM reboot even when the minds desktop app
-# is not running. Runs once on the VM (post_host_create_command / fct-seed has
+# is not running. Runs once on the VM (post_host_create_command / default-workspace-template-seed has
 # already seeded /mngr/code in the container, so the installer can be copied out
 # of it). The unit persists across leases and container rebuilds (it finds the
 # container by mngr label, not by name).
@@ -525,7 +525,7 @@ start_arg__extend = ["--security-opt=no-new-privileges", "--workdir=/", "--resta
 # Same forwarding as the docker template; see comment there.
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN"]
 # Same first-boot seed as the docker template; see comment there.
-post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-seed"]
 # Install the outer-VM boot unit so the agent recovers after an EC2 reboot even
 # without the desktop app; same as the pool_host template..
 post_host_create_outer_command__extend = [
@@ -579,7 +579,7 @@ idle_mode = "disabled"
 # The agent workspace lives on the persistent volume at /mngr/code/. The fast
 # (adopt) path ignores this -- it reuses the pre-baked agent's recorded
 # work_dir -- but the slow (rebuild) path rebuilds the container from scratch
-# and needs the standard target_path so the FCT workspace lands in the right
+# and needs the standard target_path so the DEFAULT_WORKSPACE_TEMPLATE workspace lands in the right
 # place, exactly like the vultr/ovh templates.
 target_path = "/mngr/code/"
 # Docker build args forwarded verbatim to the delegated vps_docker build that
@@ -602,9 +602,9 @@ start_arg__extend = ["--restart=unless-stopped"]
 pass_host_env__extend = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "MNGR_PREFIX", "GH_TOKEN"]
 # Seed /mngr/code from the baked image on first boot (idempotent warm-boot
 # fast path). Runs after create_host for both paths; on the fast path the
-# code is already present so fct-seed is a no-op. Same as the vultr/ovh
+# code is already present so default-workspace-template-seed is a no-op. Same as the vultr/ovh
 # templates.
-post_host_create_command__extend = ["/usr/local/bin/fct-seed"]
+post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-seed"]
 
 ## and these templates are for sub-agents created within the sandbox
 
@@ -623,7 +623,20 @@ type = "claude"
 [create_templates.worker]
 type = "worker"
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]
-env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
+# The stop hook stays enabled (REVIEWER_STOP_HOOK_ENABLE=1) for a single
+# purpose: its uncommitted-changes gate, which keeps a worker from ending a
+# turn with uncommitted work (that work is silently lost when the branch is
+# merged back). The review gates are turned OFF -- REVIEWER_AUTOFIX_ENABLE=0
+# and REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0 -- because the worker skills already
+# prompt for /autofix and the architecture gate at the single right moment (the
+# hardening pass), and having the hook re-demand them on every commit fought
+# that. Clearing the flags only stops the hook from gating on them; the worker
+# still runs both commands by hand (the autofix / verify-architecture skills
+# don't read these flags -- only the stop hook's gate checker does).
+# REVIEWER_CI_ENABLE=0: repos created from this template are isolated units --
+# the stop hook must never auto-create PRs or push to origin (the repo-level
+# .reviewer/settings.json likewise disables ci + stop_hook.fetch_and_merge).
+env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
 agent_args = [
     "--dangerously-skip-permissions",
     "--append-system-prompt",
@@ -642,7 +655,9 @@ agent_args = [
 [create_templates.subskill-worker]
 type = "worker"
 extra_window = ["reviewer_settings='scripts/create_reviewer_settings.sh $REVIEWER_AUTOFIX_ENABLE $REVIEWER_CI_ENABLE $REVIEWER_VERIFY_CONVERSATION_ENABLE $REVIEWER_AUTOFIX_MINOR $REVIEWER_VERIFY_ARCHITECTURE_ENABLE $REVIEWER_STOP_HOOK_ENABLE'"]
-env = ["REVIEWER_AUTOFIX_ENABLE=1", "REVIEWER_CI_ENABLE=1", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=1", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
+# Same rationale as the worker template: stop hook on for commit enforcement
+# only, autofix + architecture gates off (handled by skill prompting), CI off.
+env = ["REVIEWER_AUTOFIX_ENABLE=0", "REVIEWER_CI_ENABLE=0", "REVIEWER_VERIFY_CONVERSATION_ENABLE=0", "REVIEWER_AUTOFIX_MINOR=0", "REVIEWER_VERIFY_ARCHITECTURE_ENABLE=0", "REVIEWER_STOP_HOOK_ENABLE=1", "MNGR_AGENT_ROLE=worker"]
 extra_provision_command = [
     "bash .agents/shared/scripts/install_worker_skills.sh .agents/skills",
 ]

@@ -88,7 +88,7 @@ The upstream URL and base branch are in `parent.toml`.
 
    ```bash
    gh pr create \
-       --repo imbue-ai/forever-claude-template \
+       --repo imbue-ai/default-workspace-template \
        --base main \
        --head submit/<short-name> \
        --title "<short imperative title>" \

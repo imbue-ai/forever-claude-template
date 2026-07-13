@@ -31,6 +31,7 @@ BACKUP_EVENT_SOURCE: Final[EventSource] = EventSource("backup")
 class BackupEventType(UpperCaseStrEnum):
     """All event types the host_backup service may emit."""
 
+    CAPABILITIES_DETECTED = auto()
     BACKUP_STARTED = auto()
     SNAPSHOT_CREATED = auto()
     SNAPSHOT_FAILED = auto()
@@ -49,6 +50,18 @@ class BackupEventType(UpperCaseStrEnum):
 
 class BackupEvent(EventEnvelope):
     """Base envelope for every host_backup event; subclasses add payload fields."""
+
+
+class CapabilitiesDetectedEvent(BackupEvent):
+    """The service probed its environment at startup and chose a snapshot method."""
+
+    method: str = Field(description="btrfs_local | outer_trigger | direct")
+    snapshot_read_path: str = Field(
+        description="In-container path restic reads from (stringified; 'None' for unset)"
+    )
+    trigger_dir: str = Field(
+        description="Outer-helper trigger dir (stringified; 'None' when not outer_trigger)"
+    )
 
 
 class BackupStartedEvent(BackupEvent):
@@ -152,7 +165,11 @@ class PruneSkippedEvent(BackupEvent):
 
 
 class ConfigReloadedEvent(BackupEvent):
-    """backup.toml was re-read for this tick."""
+    """Records the config-file mtimes in effect for this tick.
+
+    Emitted at the start of every tick; backup.toml itself is re-parsed only
+    when its mtime moves (see `_load_config_if_changed` in runner.py).
+    """
 
     tick_id: str
     backup_toml_mtime: float
