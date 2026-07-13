@@ -265,7 +265,11 @@ def _link(target: Path, source: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     # Absolute target: the store and checkout paths are relative to the app's cwd,
     # and a relative symlink would resolve against the link's own directory.
-    target.symlink_to(source.resolve())
+    try:
+        target.symlink_to(source.resolve())
+    except FileExistsError:
+        # A concurrent auto-enable won the race; the link is already there.
+        pass
 
 
 def _materialize(tree: RepoTree, entry: Path) -> bool:
@@ -400,6 +404,29 @@ def prepare_status(tree: RepoTree) -> dict:
 
 def is_ready(tree: RepoTree) -> bool:
     return prepare_status(tree).get("state") == "ready"
+
+
+def auto_enable(tree: RepoTree) -> dict:
+    """Silently enable rich types for ``tree`` iff it needs no install agent.
+
+    When the tree has no prep yet and the shared store holds an exact
+    dependency-fingerprint match, that reuse is free (symlinks, no agent), so we
+    materialize it and report ``ready`` without the user asking. When an install
+    would be required (no match, or only a partial one to seed from), this is a
+    no-op and rich types stay opt-in behind the explicit Enable action.
+    """
+    current = prepare_status(tree)
+    if current.get("state") != "absent":
+        return current
+    entry = reusable_entry(tree)
+    if entry is None:
+        return current
+    try:
+        if _materialize(tree, entry):
+            return prepare_status(tree)
+    except OSError:
+        pass  # a later call retries; keep the app responsive
+    return current
 
 
 def ready_roots(tree: RepoTree) -> list[str]:

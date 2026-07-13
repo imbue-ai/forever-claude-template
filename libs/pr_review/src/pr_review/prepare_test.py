@@ -220,6 +220,40 @@ def test_clear_prepared_unlinks_reused_symlinks(tmp_path: Path, monkeypatch: pyt
     assert prepare._entry_is_ready(prepare._store_entry(consumer.repo, fp))
 
 
+def test_auto_enable_materializes_exact_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    deps = {"package.json": '{"deps":1}'}
+    producer = _tree_at(tmp_path, "sha_old", deps)
+    _seed_prepared(producer, ["."])
+    prepare._publish(producer, prepare.dep_fingerprint(producer.root), ["."])
+
+    consumer = _tree_at(tmp_path, "sha_new", deps)  # same deps, never enabled
+    status = prepare.auto_enable(consumer)
+    assert status["state"] == "ready"
+    assert prepare.is_ready(consumer) is True
+    assert (consumer.root / prepare.PREP_DIRNAME).is_symlink()
+
+
+def test_auto_enable_noop_without_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    producer = _tree_at(tmp_path, "sha_old", {"package.json": '{"deps":1}'})
+    _seed_prepared(producer, ["."])
+    prepare._publish(producer, prepare.dep_fingerprint(producer.root), ["."])
+
+    # Different deps: an install would be needed, so auto-enable does nothing.
+    consumer = _tree_at(tmp_path, "sha_new", {"package.json": '{"deps":2}'})
+    status = prepare.auto_enable(consumer)
+    assert status == {"state": "absent"}
+    assert not (consumer.root / prepare.PREP_DIRNAME).exists()
+
+
+def test_auto_enable_leaves_installing_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tree = _tree_at(tmp_path, "sha", {"package.json": '{"deps":1}'})
+    prepare._write_status(tree, {"state": "installing"})
+    assert prepare.auto_enable(tree)["state"] == "installing"
+
+
 def test_seed_for_install_copies_prior_and_returns_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     # A prior prep for the repo, under some other dependency fingerprint.

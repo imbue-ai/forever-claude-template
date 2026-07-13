@@ -81,8 +81,11 @@ def api_pr(owner: str, repo: str, number: int) -> Response:
     try:
         status = github.enrich_status(full, number)
         files = github.list_changed_files(full, number)
-        # Warm the source-tree cache for the head commit so file reads are fast.
-        github.ensure_repo_tree(status["head_repo"], status["head_sha"])
+        # Warm the source-tree cache for the head commit so file reads are fast,
+        # and silently turn on rich types if a matching prep can be reused with no
+        # install agent (a no-op otherwise).
+        tree = github.ensure_repo_tree(status["head_repo"], status["head_sha"])
+        prepare.auto_enable(tree)
         return jsonify({"pr": status, "files": files})
     except github.GitHubError as exc:
         return _err(str(exc))
@@ -322,8 +325,10 @@ def api_jshover(owner: str, repo: str, sha: str) -> Response:
     try:
         tree = github.ensure_repo_tree(full, sha)
         # Rich types (tsserver) for prepared repos, tree-sitter otherwise or as a
-        # fallback when the language service has nothing / errors.
-        result = tsintel.hover(tree, path, line, col) if prepare.is_ready(tree) else None
+        # fallback when the language service has nothing / errors. auto_enable turns
+        # rich types on for free if a reusable prep matches (no agent needed).
+        ready = prepare.auto_enable(tree).get("state") == "ready"
+        result = tsintel.hover(tree, path, line, col) if ready else None
         result = result or jsintel.hover(tree, path, line, col)
         return jsonify(result or {"contents": ""})
     except github.GitHubError as exc:
@@ -344,7 +349,8 @@ def api_jsdef(owner: str, repo: str, sha: str) -> Response:
         return _err("path is required", status=400)
     try:
         tree = github.ensure_repo_tree(full, sha)
-        result = tsintel.definition(tree, path, line, col) if prepare.is_ready(tree) else None
+        ready = prepare.auto_enable(tree).get("state") == "ready"
+        result = tsintel.definition(tree, path, line, col) if ready else None
         result = result or jsintel.definition(tree, path, line, col)
         return jsonify(result or {"found": False})
     except github.GitHubError as exc:
@@ -373,7 +379,9 @@ def api_prepare_status(owner: str, repo: str, sha: str) -> Response:
     full = f"{owner}/{repo}"
     try:
         tree = github.ensure_repo_tree(full, sha)
-        status = prepare.prepare_status(tree)
+        # Reuse a matching prep with no agent if one exists, so the pill shows
+        # "rich" without the user clicking Enable.
+        status = prepare.auto_enable(tree)
         status["log_tail"] = prepare.log_tail(tree)
         return jsonify(status)
     except github.GitHubError as exc:
