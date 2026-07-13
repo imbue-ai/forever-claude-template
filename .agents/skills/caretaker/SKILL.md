@@ -96,7 +96,7 @@ So I know how you'd like me to help from here on:
 
 1. **Would you like me to keep checking like this each night?** Or I can stay out of the way -- you can switch me off entirely any time.
 
-2. **When I find something, what should I do** -- fix small things on my own (restart something that's stuck, correct a setting), or just tell you and let you decide? I can take on bigger fixes too, if you'd like.
+2. **When I find something, what should I do** -- fix small things on my own (restart something that's stuck, correct a setting, safely record finished work in your project's history), or just tell you and let you decide? I can take on bigger fixes too, if you'd like.
 
 You're always in control: you can change when I run, give me other regular jobs, or turn me off. Just tell me.
 
@@ -118,7 +118,7 @@ through to **The run**.
     all it needs.
 
     - Check my apps for problems each night: not set yet
-    - Fix small things on its own, without asking (restart a stuck service, correct a config value): not set yet
+    - Fix small things on its own, without asking (restart a stuck service, correct a config value, commit finished-but-uncommitted work): not set yet
     - Also take on bigger fixes, not just small ones: not set yet
 
 ## Recording the user's choices
@@ -131,7 +131,7 @@ there is no script). The three lines are:
 - "Check my apps for problems each night" -- whether you may scan their apps each
   night (`yes` / `no`).
 - "Fix small things on its own, without asking" -- whether you may apply fixes
-  without asking first (`yes` / `no`).
+  (including committing finished work) without asking first (`yes` / `no`).
 - "Also take on bigger fixes, not just small ones" -- whether you may take on
   larger fixes (e.g. code changes), or only small/low-risk ones (`yes` / `no`).
 
@@ -171,11 +171,13 @@ record their answer and confirm; the daily job wakes you again on the next caden
      - use the **`check-app-errors`** skill to scan the services efficiently
        (`supervisorctl status` + a few targeted greps of `/var/log/supervisor/`);
      - check for uncommitted work with `git status` in the workspace repo.
-       Work that is finished but never committed is at risk and belongs in
-       history (committing also triggers the automatic backup push). Judge
-       what "should be committed": completed-looking changes qualify;
-       something that looks actively mid-edit (half-written code, debug
-       scaffolding) does not -- note those for the summary instead.
+       Work that is finished but never committed belongs in history --
+       committing makes it visible and durable there, and triggers the
+       automatic push to origin. Judge what "should be committed":
+       completed-looking changes qualify; something that looks actively
+       mid-edit (half-written code, debug scaffolding), or so freshly
+       modified that another agent may still be working on it, does not --
+       note those for the summary instead.
 4. **Review and fix.** Read the single most recent **prior** `runtime/caretaker/*.md`
    log for continuity. Plan fixes scoped to the "also take on bigger fixes" line in
    `runtime/caretaker/permissions.md`:
@@ -189,8 +191,11 @@ record their answer and confirm; the daily job wakes you again on the next caden
    **Committing uncommitted work counts as a small, low-risk action**: when the
    scan found finished-but-uncommitted work and "fix small things on its own"
    is `yes`, commit it with a clear, descriptive message (group unrelated
-   changes into separate commits; never amend or rebase). If that permission
-   is not `yes`, mention the uncommitted work in your closing summary instead.
+   changes into separate commits; never amend or rebase). Only commit when the
+   repo is on a named branch -- on a detached HEAD the automatic push is
+   silently skipped, so mention the situation in your summary instead of
+   committing. If that permission is not `yes`, mention the uncommitted work
+   in your closing summary instead.
 5. **Closing message to the user.** A short, friendly, non-technical summary of
    what you found and what you propose or did -- e.g. "Your notes page was briefly
    failing to load each morning; I restarted it and it's been fine since." If you

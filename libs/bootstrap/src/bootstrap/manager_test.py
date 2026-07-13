@@ -760,14 +760,14 @@ def test_write_agent_env_snapshot_skips_non_identifier_keys(
     # POSIX allows env keys that are not valid shell identifiers (e.g. with a
     # dash); an `export` line for one would break sourcing, so it is skipped.
     monkeypatch.setenv("MINDS-BAD-KEY", "value")
-    monkeypatch.setenv("FCT_GOOD_KEY", "value")
+    monkeypatch.setenv("MINDS_GOOD_KEY", "value")
     snapshot = tmp_path / "agent-env"
 
     _write_agent_env_snapshot(snapshot)
 
     content = snapshot.read_text()
     assert "MINDS-BAD-KEY" not in content
-    assert "export FCT_GOOD_KEY=value" in content
+    assert "export MINDS_GOOD_KEY=value" in content
 
 
 def test_write_agent_env_snapshot_overwrites_and_retightens_mode(
