@@ -15,7 +15,7 @@ import pytest
 from flask.testing import FlaskClient
 from pr_review import ask, github, prepare
 from pr_review.runner import app
-from pr_review.testing import seed_prepared_state, seed_repo_cache
+from pr_review.testing import requires_ripgrep, seed_prepared_state, seed_repo_cache
 
 _SHA = "abc123"
 _REPO = "octocat/hello"
@@ -176,6 +176,7 @@ def test_repo_file_path_escape_maps_to_error(
     assert "error" in resp.get_json()
 
 
+@requires_ripgrep
 def test_repo_usages_finds_symbol(
     client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -9,12 +9,22 @@ with no GitHub call and no live write ever happening.
 
 import io
 import json
+import shutil
 import tarfile
 from pathlib import Path
 from typing import NamedTuple
 
+import pytest
+
 from pr_review import github, prepare
 from pr_review.github import RepoTree
+
+# find-usages shells out to ripgrep; tests that exercise it must be skipped where
+# `rg` is not installed (e.g. a CI runner without it) rather than erroring.
+requires_ripgrep = pytest.mark.skipif(
+    shutil.which("rg") is None,
+    reason="ripgrep (rg) is not installed; pr-review find-usages requires it",
+)
 
 
 class FakeCurl(NamedTuple):

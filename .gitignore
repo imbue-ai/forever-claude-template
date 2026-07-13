@@ -343,5 +343,8 @@ scripts/notify_user.local.sh
 apps/system_interface/frontend/permission-demo.html
 apps/system_interface/frontend/src/permission-demo.ts
 
-# Core dumps (e.g. from a crashed process during a session).
+# Core dumps (e.g. from a crashed process during a session). Match only the
+# core-dump *file*, not directories named "core" (e.g. vendored packages'
+# `.../core/` source dirs, which must stay tracked).
 **/core
+!**/core/

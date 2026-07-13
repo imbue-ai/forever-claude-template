@@ -19,6 +19,7 @@ from pr_review.testing import (
     make_evil_tarball_bytes,
     make_tarball_bytes,
     parse_write_call,
+    requires_ripgrep,
     seed_repo_cache,
     write_tree,
 )
@@ -39,7 +40,9 @@ def test_gh_json_raises_on_non_json() -> None:
 
 def test_gh_request_returns_body_on_success() -> None:
     curl = json_route({"comments": {"id": 7}}, status=201)
-    result = github.gh_request("POST", "repos/o/r/issues/1/comments", {"body": "hi"}, curl)
+    result = github.gh_request(
+        "POST", "repos/o/r/issues/1/comments", {"body": "hi"}, curl
+    )
     assert result == {"id": 7}
 
 
@@ -100,7 +103,9 @@ def test_ci_verdict_combined_failure_counts_when_statuses_exist() -> None:
 
 
 def test_ci_verdict_none_when_nothing_reported() -> None:
-    assert github._ci_verdict({"check_runs": []}, {"total_count": 0})["verdict"] == "none"
+    assert (
+        github._ci_verdict({"check_runs": []}, {"total_count": 0})["verdict"] == "none"
+    )
 
 
 def test_ci_verdict_neutral_conclusion_counts_as_neutral_not_failing() -> None:
@@ -131,11 +136,17 @@ def test_review_decision_latest_state_per_user() -> None:
 
 
 def test_review_decision_approved() -> None:
-    assert github._review_decision([{"state": "APPROVED", "user": {"login": "a"}}]) == "approved"
+    assert (
+        github._review_decision([{"state": "APPROVED", "user": {"login": "a"}}])
+        == "approved"
+    )
 
 
 def test_review_decision_commented_only() -> None:
-    assert github._review_decision([{"state": "COMMENTED", "user": {"login": "a"}}]) == "commented"
+    assert (
+        github._review_decision([{"state": "COMMENTED", "user": {"login": "a"}}])
+        == "commented"
+    )
 
 
 def test_review_decision_none_when_empty() -> None:
@@ -181,9 +192,32 @@ def test_summarize_search_item_not_mine_and_ready() -> None:
 
 
 def test_list_prs_returns_both_buckets() -> None:
-    authored = {"items": [{"repository_url": f"{github.API}/repos/o/a", "number": 1, "title": "mine", "user": {"login": "me"}}]}
-    requested = {"items": [{"repository_url": f"{github.API}/repos/o/b", "number": 2, "title": "theirs", "user": {"login": "you"}}]}
-    curl = make_curl({"author:me": json.dumps(authored).encode(), "review-requested:me": json.dumps(requested).encode()})
+    authored = {
+        "items": [
+            {
+                "repository_url": f"{github.API}/repos/o/a",
+                "number": 1,
+                "title": "mine",
+                "user": {"login": "me"},
+            }
+        ]
+    }
+    requested = {
+        "items": [
+            {
+                "repository_url": f"{github.API}/repos/o/b",
+                "number": 2,
+                "title": "theirs",
+                "user": {"login": "you"},
+            }
+        ]
+    }
+    curl = make_curl(
+        {
+            "author:me": json.dumps(authored).encode(),
+            "review-requested:me": json.dumps(requested).encode(),
+        }
+    )
     out = github.list_prs("me", curl)
     assert out["viewer"] == "me"
     assert [p["number"] for p in out["authored"]] == [1]
@@ -200,7 +234,11 @@ def _pr_payload() -> dict:
         "user": {"login": "octocat"},
         "draft": False,
         "base": {"ref": "main", "sha": "basesha"},
-        "head": {"ref": "feature", "sha": "headsha", "repo": {"full_name": "octocat/hello"}},
+        "head": {
+            "ref": "feature",
+            "sha": "headsha",
+            "repo": {"full_name": "octocat/hello"},
+        },
         "created_at": "2024-01-01T00:00:00Z",
         "updated_at": "2024-01-02T00:00:00Z",
         "mergeable_state": "dirty",
@@ -217,9 +255,13 @@ def _pr_payload() -> dict:
 def test_enrich_status_assembles_all_signals() -> None:
     curl = make_curl(
         {
-            "/pulls/7/reviews": json.dumps([{"state": "APPROVED", "user": {"login": "rev"}}]).encode(),
+            "/pulls/7/reviews": json.dumps(
+                [{"state": "APPROVED", "user": {"login": "rev"}}]
+            ).encode(),
             "/pulls/7": json.dumps(_pr_payload()).encode(),
-            "/check-runs": json.dumps({"check_runs": [{"status": "completed", "conclusion": "success"}]}).encode(),
+            "/check-runs": json.dumps(
+                {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+            ).encode(),
             "/status": json.dumps({"state": "success", "total_count": 0}).encode(),
         }
     )
@@ -229,7 +271,12 @@ def test_enrich_status_assembles_all_signals() -> None:
     assert out["has_conflicts"] is True
     assert out["head_sha"] == "headsha"
     assert out["head_repo"] == "octocat/hello"
-    assert out["diffstat"] == {"additions": 10, "deletions": 2, "changed_files": 3, "commits": 1}
+    assert out["diffstat"] == {
+        "additions": 10,
+        "deletions": 2,
+        "changed_files": 3,
+        "commits": 1,
+    }
     assert out["comment_counts"] == {"general": 4, "line_level": 5, "reviews": 1}
 
 
@@ -253,9 +300,20 @@ def test_enrich_status_head_repo_falls_back_to_repo_when_fork_repo_missing() -> 
 
 def test_list_changed_files_maps_entries_and_detects_binary_and_rename() -> None:
     page = [
-        {"filename": "a.py", "status": "modified", "additions": 1, "deletions": 1, "patch": "@@"},
+        {
+            "filename": "a.py",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 1,
+            "patch": "@@",
+        },
         {"filename": "img.png", "status": "modified"},  # no patch -> binary
-        {"filename": "new.py", "previous_filename": "old.py", "status": "renamed", "patch": "@@"},
+        {
+            "filename": "new.py",
+            "previous_filename": "old.py",
+            "status": "renamed",
+            "patch": "@@",
+        },
     ]
     curl = make_curl({"page=1": json.dumps(page).encode(), "page=2": b"[]"})
     files = github.list_changed_files("o/r", 1, curl)
@@ -266,7 +324,9 @@ def test_list_changed_files_maps_entries_and_detects_binary_and_rename() -> None
 
 
 def test_list_changed_files_stops_on_short_page() -> None:
-    curl = make_curl({"page=1": json.dumps([{"filename": "a", "status": "added"}]).encode()})
+    curl = make_curl(
+        {"page=1": json.dumps([{"filename": "a", "status": "added"}]).encode()}
+    )
     files = github.list_changed_files("o/r", 1, curl)
     assert len(files) == 1
     # Only page 1 should have been requested (short page ends pagination).
@@ -277,20 +337,47 @@ def test_list_changed_files_stops_on_short_page() -> None:
 
 
 def test_get_conversation_maps_and_filters_pending_reviews() -> None:
-    issue_comments = [{"id": 1, "user": {"login": "a"}, "created_at": "t", "body": "hi", "html_url": "u1"}]
+    issue_comments = [
+        {
+            "id": 1,
+            "user": {"login": "a"},
+            "created_at": "t",
+            "body": "hi",
+            "html_url": "u1",
+        }
+    ]
     reviews = [
-        {"id": 2, "user": {"login": "b"}, "state": "APPROVED", "submitted_at": "t", "body": "lgtm", "html_url": "u2"},
+        {
+            "id": 2,
+            "user": {"login": "b"},
+            "state": "APPROVED",
+            "submitted_at": "t",
+            "body": "lgtm",
+            "html_url": "u2",
+        },
         {"id": 3, "user": {"login": "c"}, "state": "PENDING", "body": "wip"},
     ]
     review_comments = [
         {
-            "id": 4, "user": {"login": "d"}, "path": "f.py", "original_line": 12,
-            "body": "nit", "created_at": "t", "html_url": "u4",
-            "diff_hunk": "@@ -1,2 +1,2 @@\n-old\n+new", "in_reply_to_id": None,
+            "id": 4,
+            "user": {"login": "d"},
+            "path": "f.py",
+            "original_line": 12,
+            "body": "nit",
+            "created_at": "t",
+            "html_url": "u4",
+            "diff_hunk": "@@ -1,2 +1,2 @@\n-old\n+new",
+            "in_reply_to_id": None,
         },
         {
-            "id": 5, "user": {"login": "e"}, "path": "f.py", "line": 12, "body": "reply",
-            "created_at": "t2", "html_url": "u5", "in_reply_to_id": 4,
+            "id": 5,
+            "user": {"login": "e"},
+            "path": "f.py",
+            "line": 12,
+            "body": "reply",
+            "created_at": "t2",
+            "html_url": "u5",
+            "in_reply_to_id": 4,
         },
     ]
     curl = make_curl(
@@ -306,7 +393,9 @@ def test_get_conversation_maps_and_filters_pending_reviews() -> None:
     assert out["review_comments"][0]["line"] == 12  # falls back to original_line
     assert out["review_comments"][0]["side"] == "RIGHT"
     assert out["review_comments"][0]["diff_hunk"] == "@@ -1,2 +1,2 @@\n-old\n+new"
-    assert out["review_comments"][1]["in_reply_to_id"] == 4  # reply linked to its thread root
+    assert (
+        out["review_comments"][1]["in_reply_to_id"] == 4
+    )  # reply linked to its thread root
 
 
 # --- write-payload construction (no real writes) ---
@@ -323,7 +412,9 @@ def test_add_issue_comment_builds_post_payload() -> None:
 
 def test_update_pr_filters_to_allowed_fields() -> None:
     curl = json_route({"pulls": {"number": 5}})
-    github.update_pr("o/r", 5, {"title": "New", "body": "Desc", "state": "closed"}, curl)
+    github.update_pr(
+        "o/r", 5, {"title": "New", "body": "Desc", "state": "closed"}, curl
+    )
     parsed = parse_write_call(curl.calls[0])
     assert parsed["method"] == "PATCH"
     assert parsed["payload"] == {"title": "New", "body": "Desc"}
@@ -341,7 +432,12 @@ def test_create_review_includes_body_and_event() -> None:
     parsed = parse_write_call(curl.calls[0])
     assert parsed["method"] == "POST"
     assert parsed["url"].endswith("repos/o/r/pulls/5/reviews")
-    assert parsed["payload"] == {"commit_id": "sha123", "comments": comments, "body": "Overall good", "event": "APPROVE"}
+    assert parsed["payload"] == {
+        "commit_id": "sha123",
+        "comments": comments,
+        "body": "Overall good",
+        "event": "APPROVE",
+    }
 
 
 def test_create_review_omits_event_when_pending() -> None:
@@ -366,7 +462,9 @@ def test_set_pr_state_rejects_invalid_state() -> None:
 
 
 def test_merge_pr_builds_put_with_method() -> None:
-    curl = json_route({"merge": {"merged": True, "message": "Pull Request successfully merged"}})
+    curl = json_route(
+        {"merge": {"merged": True, "message": "Pull Request successfully merged"}}
+    )
     github.merge_pr("o/r", 5, "squash", curl)
     parsed = parse_write_call(curl.calls[0])
     assert parsed["method"] == "PUT"
@@ -419,8 +517,12 @@ def test_get_file_at_ref_falls_back_to_blob_for_large_file() -> None:
     blob_content = base64.b64encode(b"big file body\n").decode()
     curl = make_curl(
         {
-            "/contents/big.py": json.dumps({"sha": "blobsha", "encoding": "none"}).encode(),
-            "/git/blobs/blobsha": json.dumps({"encoding": "base64", "content": blob_content}).encode(),
+            "/contents/big.py": json.dumps(
+                {"sha": "blobsha", "encoding": "none"}
+            ).encode(),
+            "/git/blobs/blobsha": json.dumps(
+                {"encoding": "base64", "content": blob_content}
+            ).encode(),
         }
     )
     assert github.get_file_at_ref("o/r", "big.py", "main", curl) == "big file body\n"
@@ -429,7 +531,9 @@ def test_get_file_at_ref_falls_back_to_blob_for_large_file() -> None:
 # --- repo-tree cache + extraction ---
 
 
-def test_ensure_repo_tree_uses_cache_without_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_repo_tree_uses_cache_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     seed_repo_cache("octocat/hello", "a" * 40, {"main.py": "x = 1\n"})
 
@@ -440,9 +544,13 @@ def test_ensure_repo_tree_uses_cache_without_network(tmp_path: Path, monkeypatch
     assert (tree.root / "main.py").read_text() == "x = 1\n"
 
 
-def test_ensure_repo_tree_fetches_and_extracts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_repo_tree_fetches_and_extracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
-    tarball = make_tarball_bytes("hello-abcdef0", {"src/app.py": "print(1)\n", "README.md": "hi\n"})
+    tarball = make_tarball_bytes(
+        "hello-abcdef0", {"src/app.py": "print(1)\n", "README.md": "hi\n"}
+    )
     curl = make_curl({"/tarball/": tarball})
     tree = github.ensure_repo_tree("octocat/hello", "abcdef0", curl)
     assert (tree.root / "src" / "app.py").read_text() == "print(1)\n"
@@ -450,7 +558,9 @@ def test_ensure_repo_tree_fetches_and_extracts(tmp_path: Path, monkeypatch: pyte
     assert (github.REPO_CACHE / "octocat__hello" / "abcdef0" / ".extracted").exists()
 
 
-def test_ensure_repo_tree_rejects_path_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ensure_repo_tree_rejects_path_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     curl = make_curl({"/tarball/": make_evil_tarball_bytes()})
     with pytest.raises(github.GitHubError, match="unsafe path"):
@@ -490,6 +600,7 @@ def test_list_tree_files_sorted_and_excludes_git(tmp_path: Path) -> None:
 # --- find_usages (real ripgrep) ---
 
 
+@requires_ripgrep
 def test_find_usages_finds_occurrences_definitions_first(tmp_path: Path) -> None:
     tree = write_tree(
         tmp_path,
@@ -506,6 +617,7 @@ def test_find_usages_finds_occurrences_definitions_first(tmp_path: Path) -> None
     assert out["results"][0]["is_def"] is True
 
 
+@requires_ripgrep
 def test_find_usages_no_matches_is_empty_not_error(tmp_path: Path) -> None:
     tree = write_tree(tmp_path, {"a.py": "x = 1\n"})
     out = github.find_usages(tree, "nonexistent")
@@ -519,6 +631,7 @@ def test_find_usages_rejects_invalid_symbol(tmp_path: Path) -> None:
         github.find_usages(tree, "not a symbol")
 
 
+@requires_ripgrep
 def test_find_usages_truncates_at_limit(tmp_path: Path) -> None:
     body = "\n".join(f"thing_{i} = thing  # thing" for i in range(50))
     tree = write_tree(tmp_path, {"a.py": "thing = 1\n" + body + "\n"})
