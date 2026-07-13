@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble a clean, shareable "inspiration" snapshot on top of the FCT base the
+# Assemble a clean, shareable "inspiration" snapshot on top of the DEFAULT_WORKSPACE_TEMPLATE base the
 # mind was created from, then commit it. Run by the launch-task WORKER the
 # publish-inspiration skill dispatches, from the worker's own git worktree
 # (cwd = worktree repo root); the live mind's /code is never touched. This is
@@ -122,11 +122,11 @@ cd "$REPO"
 MANIFEST="inspiration-${SLUG}.md"
 THUMBNAIL="inspiration-${SLUG}.svg"
 
-# --- 0. validate that BASE_REF is a real, bootable FCT template tree ---------
+# --- 0. validate that BASE_REF is a real, bootable default workspace template tree ---------
 
 # Guard against a wrong --base-ref: minds assembled via subtree merges can have
 # several parallel root commits, and a naive fallback can land on a near-empty
-# one instead of the real FCT seed. Any bootable template tree must contain
+# one instead of the real DEFAULT_WORKSPACE_TEMPLATE seed. Any bootable template tree must contain
 # pyproject.toml and supervisord.conf, so require both in BASE_REF's tree. This
 # runs BEFORE the destructive read-tree in step 2 so a bad ref aborts cleanly
 # without touching the worktree.
@@ -142,7 +142,7 @@ for required in pyproject.toml supervisord.conf; do
 done
 if [ -n "$base_missing" ]; then
     echo "build_inspiration.sh: BASE REF INVALID: the tree of '${BASE_REF}' is missing:${base_missing}" >&2
-    echo "build_inspiration.sh: '${BASE_REF}' does not look like a bootable forever-claude-template base (a wrong root commit from a subtree merge?) -- pass the real FCT seed commit as --base-ref" >&2
+    echo "build_inspiration.sh: '${BASE_REF}' does not look like a bootable default-workspace-template base (a wrong root commit from a subtree merge?) -- pass the real DEFAULT_WORKSPACE_TEMPLATE seed commit as --base-ref" >&2
     exit 5
 fi
 
@@ -195,7 +195,7 @@ for existing in inspiration-*.md inspiration-*.svg; do
 done
 shopt -u nullglob
 
-# --- 2. clean base = the FCT version the mind was based on --------------------
+# --- 2. clean base = the DEFAULT_WORKSPACE_TEMPLATE version the mind was based on --------------------
 
 # read-tree -u --reset makes the index+worktree match BASE_REF, dropping
 # tracked-but-not-in-base files. clean -fdxq then drops untracked AND gitignored
@@ -228,7 +228,7 @@ scan_failed=0
 
 # Files to scan: ONLY the content overlaid out of the live mind (the selected
 # --include / --data-include paths, plus any carried-forward inspiration-*.md /
-# .svg). The clean base is the trusted, public FCT template -- it cannot contain
+# .svg). The clean base is the trusted, public default workspace template -- it cannot contain
 # the user's secrets, and its own test fixtures legitimately hold placeholder
 # token strings (e.g. "sk-ant-test"), so scanning it only produces false
 # positives that block every publish. The real risk is a secret riding in from
@@ -467,7 +467,7 @@ seen the original mind. -->
 ## How it works
 
 The snapshot includes these paths (each is a repo-root-relative path copied
-from the original mind onto a clean forever-claude-template base):
+from the original mind onto a clean default-workspace-template base):
 
 ${included_paths_block}
 <!-- FILL-IN (publishing agent): BEFORE reporting done, replace this comment
@@ -678,7 +678,7 @@ fi
 git add -A
 SNAPSHOT_COMMIT="$(git commit-tree "$(git write-tree)" -p "$BASE_REF" -m "inspiration: ${SLUG}
 
-Assembled on clean FCT base ${BASE_REF} (provenance link only; no upstream fetch).")"
+Assembled on clean DEFAULT_WORKSPACE_TEMPLATE base ${BASE_REF} (provenance link only; no upstream fetch).")"
 git reset --soft "$SNAPSHOT_COMMIT"
 
 # --- 11. summary for the worker's done report --------------------------------

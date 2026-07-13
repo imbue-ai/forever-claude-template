@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared system-toolchain setup for forever-claude-template hosts.
+# Shared system-toolchain setup for default-workspace-template hosts.
 #
 # Installs the repo-independent toolchain: system packages, language runtimes,
 # and pinned CLIs. This is the single source of truth for that setup -- the
@@ -87,7 +87,7 @@ fi
 if ! grep -q '/root/.local/bin' /root/.bashrc 2>/dev/null; then
     echo 'PATH="/root/.local/bin:$PATH"' >> /root/.bashrc
 fi
-printf '%s\n' 'PATH="/root/.local/bin:$PATH"' > /etc/profile.d/fct_path.sh
+printf '%s\n' 'PATH="/root/.local/bin:$PATH"' > /etc/profile.d/default_workspace_template_path.sh
 
 # Source /mngr/env (when present) for interactive bash sessions so terminals can
 # run mngr commands without manual setup.

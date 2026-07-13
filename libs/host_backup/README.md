@@ -118,7 +118,7 @@ tag matching the app version, committing it with the subject
 classify built-in vs. user code match on it), running `uv sync`, and
 restarting the `host-backup` supervisord program. Tags are fetched from a
 minds-owned `official` git remote that always points at the canonical
-template repository (`https://github.com/imbue-ai/forever-claude-template.git`);
+template repository (`https://github.com/imbue-ai/default-workspace-template.git`);
 minds creates or repoints that remote idempotently, and the `upstream` remote
 name stays reserved for the update-self machinery. Drift *detection* compares
 against a fixed minimum required tag (bumped by minds only when a newer

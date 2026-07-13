@@ -40,7 +40,7 @@ and then creates the repo and pushes -- directly from the worker's worktree.
 
 > **AN INSPIRATION MUST BE BOOTABLE -- NEVER PUBLISH A PARTIAL SNAPSHOT.** A
 > valid inspiration is always the FULL tree `build_inspiration.sh` assembles on
-> `mngr/<slug>`: the clean FCT base (`pyproject.toml`, `supervisord.conf`,
+> `mngr/<slug>`: the clean DEFAULT_WORKSPACE_TEMPLATE base (`pyproject.toml`, `supervisord.conf`,
 > `.mngr/`, `.agents/skills/` including the generated inspiration `/welcome`, `parent.toml`,
 > etc.) plus the selected app/feature paths -- never just the app code plus a
 > README. That full tree is what makes `/use-inspiration`'s template path work:
@@ -671,7 +671,7 @@ push that commit -- the branch itself is never pushed:
 ( cd "$WT" \
     && SNAPSHOT_COMMIT="$(git commit-tree 'HEAD^{tree}' -p <BASE_REF> -m "inspiration: <slug>
 
-Assembled on clean FCT base <BASE_REF> (provenance link only; no upstream fetch).")" \
+Assembled on clean DEFAULT_WORKSPACE_TEMPLATE base <BASE_REF> (provenance link only; no upstream fetch).")" \
     && git \
     -c "http.extraHeader=X-Latchkey-Gateway-Password: $LATCHKEY_GATEWAY_PASSWORD" \
     -c "http.extraHeader=X-Latchkey-Gateway-Permissions-Override: $LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE" \
@@ -771,7 +771,7 @@ the VM). Interface (cwd = worktree repo root):
 
 ```
 .agents/skills/publish-inspiration/scripts/build_inspiration.sh \
-  --base-ref <BASE_REF> \          # FCT commit the mind was based on (provenance + clean base)
+  --base-ref <BASE_REF> \          # DEFAULT_WORKSPACE_TEMPLATE commit the mind was based on (provenance + clean base)
   --slug <slug> \
   --title <title> \
   --include <path> [--include <path> ...] \   # repo-root-relative app/feature paths to overlay

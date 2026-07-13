@@ -1,6 +1,6 @@
 # bootstrap
 
-First-boot setup for a forever-claude host, followed by launching
+First-boot setup for a default-workspace-template host, followed by launching
 [supervisord](http://supervisord.org/), which supervises every background
 service.
 

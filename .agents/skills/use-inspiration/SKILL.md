@@ -9,7 +9,7 @@ Version: v1 (inspirations flow). This versions the publish/adopt flow and the
 `inspiration-<slug>.md` manifest format.
 
 An inspiration is a publishable, reusable snapshot of the apps and features a mind
-has built. It lives in its own GitHub repo as a real forever-claude-template tree
+has built. It lives in its own GitHub repo as a real default-workspace-template tree
 plus one or more `inspiration-<slug>.md` manifests at the repo root (each with a
 sibling `inspiration-<slug>.svg` thumbnail). Adapting an inspiration means bringing
 that snapshot into *this* mind and then working through its "holes" — the parts
@@ -81,7 +81,7 @@ tree disagree. Surface it to the user in plain, non-technical language (step 4)
 and resolve it interactively.
 
 This merge path does not touch `parent.toml` — provenance is read-only reference
-(the inspiration records only a link to the forever-claude-template base it was
+(the inspiration records only a link to the default-workspace-template base it was
 built from; there is no upstream fetch or pull here).
 
 ## 2. Read the relevant manifest
