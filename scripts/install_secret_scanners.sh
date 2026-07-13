@@ -9,14 +9,11 @@
 #                                 runs it with --no-validate
 #
 # This file is the single source of truth for the version pins and per-arch
-# sha256s. It runs in two places:
-#
-#   1. PRIMARY: a Dockerfile RUN layer at image-build time, so every
-#      docker-built container has all three binaries from second zero.
-#   2. BACKSTOP: the deferred-install service (scripts/deferred_install.sh)
-#      re-invokes it per tool on providers whose hosts are not built from the
-#      Dockerfile (e.g. Lima). On docker containers that call is an instant
-#      no-op thanks to the skip-when-pinned check below.
+# sha256s. A Dockerfile RUN layer invokes it at image-build time, so every
+# container built from the workspace image has all three binaries from second
+# zero. If a binary is ever missing (an environment not built from that image,
+# or a failed bake), run this script by hand to install all three -- the
+# skip-when-pinned check below makes an already-satisfied run an instant no-op.
 #
 # Idempotent and cheap when already satisfied: a tool whose binary exists in
 # the install dir AND reports the pinned version is skipped without any

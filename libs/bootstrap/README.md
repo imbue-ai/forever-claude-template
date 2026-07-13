@@ -54,26 +54,19 @@ To add, change, or remove a service, edit `supervisord.conf` and run
 
 The `deferred-install` program in `supervisord.conf` runs
 `scripts/deferred_install.sh`, which installs packages that are too heavy to
-bake into the Docker image but aren't required by any boot-time service --
-plus a backstop for binaries that ARE baked into the image, for providers
-whose hosts are not built from the Dockerfile. Currently it covers:
+bake into the Docker image but aren't required by any boot-time service.
+Currently it covers:
 
 - Playwright's Chromium browser + its apt system libraries
   (`uv run playwright install --with-deps chromium`).
-- The three secret-scanner binaries the publish-inspiration skill's scan gate
-  hard-requires: `betterleaks`, `trufflehog`, and `kingfisher`. These are
-  normally baked into the docker image at build time (the Dockerfile RUNs
-  `scripts/install_secret_scanners.sh` -- the single source of truth for the
-  version pins and per-arch sha256 checksums, which are hard-coded in that
-  script and never fetched at install time). The deferred-install wrappers
-  re-invoke the same script per tool as a backstop for non-Dockerfile
-  providers (e.g. Lima): on docker containers each call is an instant no-op
-  (the binary already exists at its pinned version) that just writes the
-  marker; elsewhere it downloads the pinned release into
-  `/usr/local/bin/<tool>` after verifying its checksum. There is no fallback
-  scanner: the publish-inspiration scan aborts if any of the three is
-  missing, so a failed install here blocks publishes rather than weakening
-  the scan.
+
+(The publish-inspiration scan gate's three secret-scanner binaries --
+`betterleaks`, `trufflehog`, `kingfisher` -- are NOT deferred: they are baked
+into the workspace image at build time via a Dockerfile RUN of
+`scripts/install_secret_scanners.sh`, the single source of truth for the
+version pins and per-arch sha256 checksums. If a binary is ever missing, that
+script is runnable by hand to install all three; the scan gate aborts rather
+than running without any of them.)
 
 It is a one-shot supervisord program (`autorestart=false`, `startsecs=0`,
 `exitcodes=0`): supervisord starts it once on boot and leaves it stopped after a

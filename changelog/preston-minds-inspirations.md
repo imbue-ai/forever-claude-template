@@ -1,3 +1,11 @@
+- Simplified the secret-scanner delivery to just two things: the scanners are
+  baked into the workspace image at build time (Dockerfile RUN of the pinned
+  scripts/install_secret_scanners.sh), and if one is ever missing the scan
+  gate's error names the one command to reinstall all three. Removed the
+  deferred-install backstop for the scanners (and its wrapper unit tests) --
+  the shared installer keeps its own tests, and the deferred-install service
+  is back to only its heavy non-boot packages (Chromium/Playwright).
+
 - The secret gate now also blocks account-identifying cloud IDs, not just
   exploitable credentials: betterleaks gains rules for AWS access key IDs
   (all documented prefixes -- AKIA/ASIA/AROA/AIDA/...) and GCP service-account

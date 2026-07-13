@@ -20,8 +20,9 @@
 # There is NO fallback scanner and NO tolerance for a missing or broken tool:
 # a missing binary or a scanner that errors at runtime fails the scan (a
 # broken scanner must never silently pass). The three binaries are baked into
-# the docker image and backstop-installed by the deferred-install service
-# (scripts/install_secret_scanners.sh holds the pins).
+# the workspace image at build time; if one is missing, running
+# scripts/install_secret_scanners.sh (the single source of truth for the
+# version pins) installs all three.
 #
 # Output: one line per finding on stderr naming the scanner, rule/detector,
 # and path -- secret VALUES are never printed (betterleaks and kingfisher
@@ -85,7 +86,7 @@ for target in "${TARGETS[@]}"; do
 done
 for tool in betterleaks trufflehog kingfisher; do
     if ! command -v "$tool" > /dev/null 2>&1; then
-        echo "scan_secrets.sh: SCANNER MISSING: '$tool' is not installed -- it is baked into the docker image and backstop-installed by the deferred-install service (scripts/install_secret_scanners.sh); refusing to scan without it" >&2
+        echo "scan_secrets.sh: SCANNER MISSING: '$tool' is not installed. The secret scanners are baked into the workspace image; if one is missing, install all three by running: bash scripts/install_secret_scanners.sh (from the repo root). Refusing to scan without it." >&2
         precondition_failed=1
     fi
 done

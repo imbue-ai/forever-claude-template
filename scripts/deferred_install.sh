@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Idempotent installer for packages that are too heavy to bake into the
 # Docker image but not required to start the chat agent or any boot-time
-# service -- plus a backstop for the secret-scanner binaries on providers
-# whose hosts are NOT built from the Dockerfile (e.g. Lima). Run once per
-# container lifetime by the one-shot `deferred-install` supervisord program,
-# gated by per-package marker files under
+# service. Run once per container lifetime by the one-shot `deferred-install`
+# supervisord program, gated by per-package marker files under
 # /var/lib/minds/deferred-install/done.<package>.
 #
 # Designed to behave the same way across container restarts (no-op when
@@ -23,12 +21,6 @@ set -euo pipefail
 # never sets them, so production always uses the container-local defaults.
 readonly MARKER_DIR="${DEFERRED_INSTALL_MARKER_DIR:-/var/lib/minds/deferred-install}"
 readonly REPO_ROOT=/mngr/code
-
-# This script's own directory: the shared secret-scanner installer is a
-# sibling. Resolved from BASH_SOURCE (not REPO_ROOT) so unit tests can source
-# this file from a checkout anywhere on disk.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly SCRIPT_DIR
 
 _log() {
     printf '[deferred-install] %s\n' "$*"
@@ -101,41 +93,9 @@ _install_playwright() {
     fi
 }
 
-_install_secret_scanner() {
-    # Backstop install for one of the publish-inspiration secret scanners
-    # (betterleaks / trufflehog / kingfisher). The shared pinned installer
-    # (sibling install_secret_scanners.sh -- the single source of truth for
-    # versions and sha256s, also RUN by the Dockerfile at image-build time)
-    # does the actual download+verify+install; this wrapper only adds the
-    # deferred-install marker semantics. On docker-built containers the
-    # binaries are already baked in at the pinned versions, so the shared
-    # script skips instantly and this just writes the marker.
-    local tool="$1" marker
-    marker="$(_marker_for "$tool")"
-    if [ -f "$marker" ]; then
-        _log "$tool: marker present at $marker, skipping"
-        return 0
-    fi
-    if bash "$SCRIPT_DIR/install_secret_scanners.sh" "$tool"; then
-        touch "$marker"
-        _log "$tool: install complete, marker written to $marker"
-    else
-        _log "$tool: install FAILED; marker not written so the next boot retries"
-        return 1
-    fi
-}
-
 main() {
     mkdir -p "$MARKER_DIR"
-    local rc=0 tool
-    # Secret scanners first: small single-binary downloads (and instant no-ops
-    # on docker images, which bake them in at build time), so they become
-    # available quickly instead of queueing behind playwright's multi-minute
-    # apt run. Installs stay independent: each runs regardless of the others'
-    # results.
-    for tool in betterleaks trufflehog kingfisher; do
-        _install_secret_scanner "$tool" || rc=$?
-    done
+    local rc=0
     _install_playwright || rc=$?
     if [ "$rc" -eq 0 ]; then
         _log "all deferred installs complete"

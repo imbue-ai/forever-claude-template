@@ -451,9 +451,8 @@ stderr. What each exit means, and what you do:
   kingfisher) was missing or errored -- the stderr says which. Nothing was
   committed; for a finding, surface the flagged path (value redacted) and
   stop. For a missing/broken scanner, the environment is broken (the binaries
-  are baked into the docker image and backstopped by the deferred-install
-  service) -- check `supervisorctl status deferred-install` and its log
-  before relaunching; never publish around the gate.
+  are baked into the workspace image; if one is missing, the stderr names the
+  command to reinstall all three) -- never publish around the gate.
 - **No-diff guard (exit 3).** The resolved include set contributes nothing
   beyond `BASE_REF` (the assembled tree equals the base tree). Tell the user
   plainly and do NOT create a repo -- there are no empty inspiration repos.
