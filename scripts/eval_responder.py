@@ -45,9 +45,9 @@ def main() -> None:
 
     from eval_aws_sink import AwsSink
 
+    # Creds come from config.json (see eval_aws_sink); we drive restic ourselves. backup_provider is
+    # configure_later, so host-backup is already idle -- nothing to stop.
     sink = AwsSink(config)
-    sink.stop_host_backup()
-    sink.upload_restic_password()  # so restore can decrypt the repo after the box/sandbox are gone
 
     deadline = time.time() + OVERALL_TIMEOUT_SECONDS
     agent_id = watcher.resolve_chat_agent_id(deadline)

@@ -1,10 +1,11 @@
 """S3 sink for the eval worker.
 
-- restic snapshots of /mngr (tagged post_message_<k>), using the create-menu-configured
-  runtime/secrets/restic.env (repo + AWS creds + password). We invoke restic ourselves at the
-  turns we choose -- the host-backup service is stopped so nothing runs on a hidden cadence.
-- plain S3 objects (state.json, transcript, artifacts) via boto3, reusing the SAME AWS creds from
-  restic.env, into the case's S3 prefix (passed in config.json).
+Self-contained: all credentials come from the slotted scripts/config.json (aws_access_key_id /
+aws_secret_access_key / restic_repository / restic_password), NOT from minds' backup provisioning
+(which does not reliably land a restic.env inside a Modal sandbox). We drive restic ourselves:
+
+- restic snapshots of /mngr, tagged post_message_<k>, at the turns we choose.
+- plain S3 objects (state.json, transcript) via boto3, same creds, into the case's S3 prefix.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
 
 HOST_DIR = os.environ.get("MNGR_HOST_DIR", "/mngr")
 
@@ -24,70 +24,48 @@ _RESTIC_EXCLUDES = (
 )
 
 
-def _load_restic_env() -> dict:
-    """Read runtime/secrets/restic.env (reuse FCT's loader when importable)."""
-    try:
-        from host_backup.config import load_restic_env  # type: ignore
-
-        return dict(load_restic_env())
-    except Exception:
-        env: dict[str, str] = {}
-        path = Path("runtime/secrets/restic.env")
-        if path.is_file():
-            for raw in path.read_text().splitlines():
-                line = raw.strip()
-                if line.startswith("export "):
-                    line = line[len("export "):].lstrip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    env[key.strip()] = value.strip().strip("'\"")
-        return env
-
-
 class AwsSink:
     def __init__(self, config: dict):
         self._config = config
-        self._restic_env = _load_restic_env()
         self._bucket = config["s3_bucket"]
         self._prefix = str(config["s3_prefix"]).rstrip("/")
+        self._region = config.get("aws_region", "us-east-1")
+        self._key = config.get("aws_access_key_id", "")
+        self._secret = config.get("aws_secret_access_key", "")
+        self._repo = config.get("restic_repository", "")
+        self._restic_password = config.get("restic_password", "")
         import boto3
 
         self._s3 = boto3.client(
-            "s3",
-            aws_access_key_id=self._restic_env.get("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=self._restic_env.get("AWS_SECRET_ACCESS_KEY"),
-            region_name=self._restic_env.get("AWS_DEFAULT_REGION", "us-east-1"),
+            "s3", aws_access_key_id=self._key, aws_secret_access_key=self._secret, region_name=self._region,
         )
 
-    def stop_host_backup(self) -> None:
-        """Take over snapshot cadence for THIS sandbox only (config unchanged; non-eval unaffected)."""
-        subprocess.run(["supervisorctl", "stop", "host-backup"], capture_output=True, text=True)
-
-    def _restic_configured(self) -> bool:
-        return bool(self._restic_env.get("RESTIC_REPOSITORY") and self._restic_env.get("RESTIC_PASSWORD"))
+    def _restic_env(self) -> dict:
+        return {
+            **os.environ,
+            "RESTIC_REPOSITORY": self._repo, "RESTIC_PASSWORD": self._restic_password,
+            "AWS_ACCESS_KEY_ID": self._key, "AWS_SECRET_ACCESS_KEY": self._secret,
+            "AWS_DEFAULT_REGION": self._region,
+        }
 
     def restic_snapshot(self, tag: str) -> None:
-        if not self._restic_configured():
-            print("[eval] restic.env not configured -- skipping snapshot", tag, flush=True)
+        if not (self._repo and self._restic_password):
+            print("[eval] no restic repo/password in config -- skipping snapshot", tag, flush=True)
             return
-        env = {**os.environ, **self._restic_env}
+        env = self._restic_env()
         if subprocess.run(["restic", "cat", "config"], env=env, capture_output=True, text=True).returncode != 0:
-            subprocess.run(["restic", "init"], env=env, capture_output=True, text=True)
+            init = subprocess.run(["restic", "init"], env=env, capture_output=True, text=True)
+            if init.returncode != 0:
+                print("[eval] restic init failed: {}".format((init.stderr or "").strip()[:300]), flush=True)
         result = subprocess.run(
             ["restic", "backup", HOST_DIR, "--tag", tag, *_RESTIC_EXCLUDES],
             env=env, capture_output=True, text=True,
         )
-        print("[eval] restic snapshot {} rc={}".format(tag, result.returncode), flush=True)
+        print("[eval] restic snapshot {} rc={} {}".format(
+            tag, result.returncode, (result.stderr or "").strip()[:200] if result.returncode else ""), flush=True)
 
     def _put(self, key: str, data: bytes, content_type: str) -> None:
         self._s3.put_object(Bucket=self._bucket, Key="{}/{}".format(self._prefix, key), Body=data, ContentType=content_type)
-
-    def upload_restic_password(self) -> None:
-        """Persist minds' per-workspace restic password to S3 so restore can decrypt the repo even
-        after the box + sandbox are gone. (Same private, bucket-scoped store as the repo itself.)"""
-        password = self._restic_env.get("RESTIC_PASSWORD", "")
-        if password:
-            self._put("restic_password", password.encode("utf-8"), "text/plain")
 
     def write_state(self, waits_done: int, num_turns: int, test_state: str) -> None:
         payload = {
