@@ -2,7 +2,7 @@
 S3 per turn (restic), and uploads the transcript at the end -- so a launched run completes on its
 own and everything is retrievable from S3 without the launching machine staying on.
 
-Eval mode is gated on scripts/config.json; absent -> immediate no-op (normal workspaces).
+Eval mode is gated on scripts/test_case_metadata.json; absent -> immediate no-op (normal workspaces).
 
 Turn logic (N = config.num_turns; e.g. N=4):
   wait 1                 -> send config.first_prompt
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import eval_wait_watcher as watcher
 
-CONFIG_PATH = Path("scripts/config.json")
+CONFIG_PATH = Path("scripts/test_case_metadata.json")
 DONE_MARKER = Path("runtime/eval_done")
 OVERALL_TIMEOUT_SECONDS = 3 * 3600.0  # matches the 3h sandbox cap
 _TURN_MESSAGE = "OKAY"
@@ -37,7 +37,7 @@ def _load_config() -> dict | None:
 def main() -> None:
     config = _load_config()
     if config is None:
-        print("[eval] no scripts/config.json -- not eval mode, exiting", flush=True)
+        print("[eval] no scripts/test_case_metadata.json -- not eval mode, exiting", flush=True)
         return
     if DONE_MARKER.exists():
         print("[eval] already finished (marker present) -- exiting", flush=True)
@@ -45,7 +45,7 @@ def main() -> None:
 
     from eval_aws_sink import AwsSink
 
-    # Creds come from config.json (see eval_aws_sink); we drive restic ourselves. backup_provider is
+    # Creds come from test_case_metadata.json (see eval_aws_sink); we drive restic ourselves. backup_provider is
     # configure_later, so host-backup is already idle -- nothing to stop.
     sink = AwsSink(config)
 

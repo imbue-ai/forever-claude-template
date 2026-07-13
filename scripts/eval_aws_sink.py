@@ -1,6 +1,6 @@
 """S3 sink for the eval worker.
 
-Self-contained: all credentials come from the slotted scripts/config.json (aws_access_key_id /
+Self-contained: all credentials come from the slotted scripts/test_case_metadata.json (aws_access_key_id /
 aws_secret_access_key / restic_repository / restic_password), NOT from minds' backup provisioning
 (which does not reliably land a restic.env inside a Modal sandbox). We drive restic ourselves:
 
