@@ -77,3 +77,47 @@ filter.containsAny(lower(finding["secret"]), [
   "xxxxxxxx",
 ])
 '''
+
+# --- account-identifying cloud IDs (not just exploitable secrets) ------------
+# For a PUBLISHED snapshot we hold a stricter bar than "is this an exploitable
+# credential?": account-identifying provider IDs should not ship either, even
+# when they cannot authenticate on their own (an AWS access key ID needs its
+# paired secret to be usable, but still names an account and aids targeted
+# attacks). These rules cover STRUCTURED, unambiguous provider identifiers with
+# a fixed shape -- deliberately NOT generic IDs (UUIDs, emails, numeric account
+# numbers, commit SHAs), which appear constantly in legitimate code and mock
+# data; catching those would flag nearly every publish. Fuzzier "personal
+# stuff" is handled by the human review layers (the scope gate and the
+# published-version modifications), not this deterministic gate.
+
+[[rules]]
+id = "minds-aws-access-key-id"
+description = "AWS access key ID (AKIA/ASIA/AROA/AIDA/... + 16 base32) -- account-identifying even without its secret"
+# All documented AWS key-id prefixes (long-term AKIA, temporary ASIA, role
+# AROA, user AIDA, plus the rarer ANPA/ANVA/ABIA/ACCA/AGPA/AIPA/AISA/APKA),
+# each followed by exactly 16 uppercase-alnum chars.
+# Non-capturing group (?:...) is load-bearing: betterleaks sets the finding's
+# "secret" to the captured group when one exists, so a capturing (...) here
+# would make the `example` filter below see only the 4-char prefix and never
+# match "AKIAIOSFODNN7EXAMPLE". With (?:...) the secret is the full match.
+regex = '''\b(?:AKIA|ASIA|AROA|AIDA|ANPA|ANVA|ABIA|ACCA|AGPA|AIPA|AISA|APKA)[A-Z0-9]{16}\b'''
+keywords = ["AKIA", "ASIA", "AROA", "AIDA", "ANPA", "ANVA", "ABIA", "ACCA", "AGPA", "AIPA", "AISA", "APKA"]
+# AWS's canonical docs key (AKIAIOSFODNN7EXAMPLE) and any EXAMPLE-tagged one.
+filter = '''
+filter.containsAny(lower(finding["secret"]), [
+  "example",
+])
+'''
+
+[[rules]]
+id = "minds-gcp-service-account-email"
+description = "GCP service-account email (<name>@<project>.iam.gserviceaccount.com) -- names a project/account"
+regex = '''[a-z][a-z0-9-]{4,}@[a-z][a-z0-9-]{4,}\.iam\.gserviceaccount\.com'''
+keywords = ["gserviceaccount.com"]
+filter = '''
+filter.containsAny(lower(finding["secret"]), [
+  "example",
+  "your-project",
+  "my-project",
+])
+'''

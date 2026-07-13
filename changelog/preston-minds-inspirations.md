@@ -1,3 +1,15 @@
+- The secret gate now also blocks account-identifying cloud IDs, not just
+  exploitable credentials: betterleaks gains rules for AWS access key IDs
+  (all documented prefixes -- AKIA/ASIA/AROA/AIDA/...) and GCP service-account
+  emails. These are deliberately limited to STRUCTURED, unambiguous provider
+  identifiers; generic IDs (UUIDs, plain emails, commit SHAs, numeric account
+  numbers) are intentionally NOT matched, since they appear constantly in
+  legitimate code and mock data -- fuzzier 'do not publish this' judgement is
+  left to the scope gate and the published-version-modifications step. The
+  canonical AWS docs key (AKIAIOSFODNN7EXAMPLE) and placeholder emails are
+  exempted; the AWS rule uses a non-capturing group so betterleaks' finding
+  secret is the full key (a capturing group would break the example filter).
+
 - Added **inspirations**: a publishable, reusable, bootable snapshot of the
   apps and features a mind has built. A mind can publish an inspiration as its
   own clean GitHub repo, and another mind can adapt one into itself. A single
