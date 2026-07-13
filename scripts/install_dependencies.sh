@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared dependency install for forever-claude-template hosts.
+# Shared dependency install for default-workspace-template hosts.
 #
 # Installs third-party Python + Node dependencies from the lockfiles only (no
 # workspace/local packages). Needs the dependency manifests present but not the

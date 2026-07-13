@@ -17,22 +17,27 @@ an encrypted restic repo on cheaper object storage.
   host_backup: minds runs `restic init` + `restic key add` from outside the
   workspace and injects the resulting `restic.env`. host_backup just backs up
   to the existing repository -- it does not probe-then-init.
-- Each tick reads two config files written by `libs/bootstrap` (and, for
-  `restic.env`, overwritten by minds):
-  - `runtime/backup.toml`: non-secret settings -- backup interval, snapshot
-    method, retention, exclude patterns.
+- Each tick reads two optional on-disk inputs:
+  - `runtime/backup.toml`: purely *user* settings -- backup interval,
+    retention, exclude patterns. Optional: when absent the service runs on
+    built-in defaults. Loading is tolerant: unknown keys (including the
+    stale `[snapshot]` section pre-refactor bootstraps keep writing) and
+    malformed values are logged and skipped -- they never crash the service
+    or block the remaining valid settings.
   - `runtime/secrets/restic.env`: the repository address + all secrets --
     `RESTIC_REPOSITORY` (the only source of the repo URL), `RESTIC_PASSWORD`
     (this workspace's repository password), and any backend credentials
     restic reads from the environment (e.g. `AWS_ACCESS_KEY_ID` /
-    `AWS_SECRET_ACCESS_KEY` for an S3/R2 backend). `restic.env` is gitignored
-    (rides nothing). `backup.toml` is *not* gitignored so it survives
-    container loss via runtime-backup.
+    `AWS_SECRET_ACCESS_KEY` for an S3/R2 backend). Written only by the minds
+    app (injected whole); a missing file means backups are not configured.
+    `restic.env` is gitignored (rides nothing). `backup.toml` is *not*
+    gitignored so it survives container loss via runtime-backup.
 - A tick only runs once both `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` are
   set in `restic.env`. Backend credentials are not gated by host_backup --
   restic reports its own error if the chosen backend needs one that is
   missing.
-- Snapshot method (set by bootstrap from the detected environment):
+- Snapshot method ("backup capabilities", detected in memory by the service
+  itself at startup -- never configured; see `host_backup/capabilities.py`):
   - `btrfs_local`: take a `sudo btrfs subvolume snapshot -r` directly into
     `<btrfs-mount>/snapshots/current/` (lima).
   - `outer_trigger`: write a `request.json` into `/mngr-snapshot/` (a
@@ -43,8 +48,8 @@ an encrypted restic repo on cheaper object storage.
     sandbox's file gofer a reused path serves a stale, deleted subvolume, so
     only the first post-boot backup would capture data; unique names avoid
     that. After the backup, the oldest snapshots beyond `max_local_snapshots`
-    (default 5, an `[snapshot]` knob) are deleted by name via a `cleanup`
-    request that carries the snapshot name as `target`.
+    (default 5) are deleted by name via a `cleanup` request that carries the
+    snapshot name as `target`.
   - `direct`: no snapshot; restic reads `/mngr/` directly (plain docker;
     intended for testing).
 - Restic is run with `--exclude` for each entry in `backup.toml`'s
@@ -81,6 +86,7 @@ mtime, then tails `events/backup/events.jsonl` for the next
 ## Events
 
 Structured events at `$MNGR_AGENT_STATE_DIR/events/backup/events.jsonl`:
+- `capabilities_detected` (once at service startup)
 - `backup_started`, `snapshot_created`, `snapshot_deleted` (one per deleted
   snapshot -- `outer_trigger` may emit several per tick during keep-N pruning)
 - `restic_backup_succeeded`, `restic_backup_failed`
@@ -102,6 +108,34 @@ injects the file. To configure backups by hand instead, populate
 credentials (e.g. R2 access keys), and a `RESTIC_PASSWORD`, and initialize
 the repository yourself (`restic init`) before the first tick -- host_backup
 does not create the repository.
+
+## Stable contract (minds backup-service updates)
+
+The minds desktop app can inject a newer version of this service into a
+running workspace by checking out `libs/host_backup/**` at the `minds-v<X>`
+tag matching the app version, committing it with the subject
+`backup-update: minds-v<X>` (a convention like `update-self:` -- tools that
+classify built-in vs. user code match on it), running `uv sync`, and
+restarting the `host-backup` supervisord program. Tags are fetched from a
+minds-owned `official` git remote that always points at the canonical
+template repository (`https://github.com/imbue-ai/default-workspace-template.git`);
+minds creates or repoints that remote idempotently, and the `upstream` remote
+name stays reserved for the update-self machinery. Drift *detection* compares
+against a fixed minimum required tag (bumped by minds only when a newer
+service is actually required), so a workspace at or above the minimum is
+never flagged even when the app is newer. For that mechanism to stay sound,
+the following are stable contracts that must NOT be changed by edits to this
+library alone:
+
+- the `[program:host-backup]` block in `supervisord.conf`,
+- this package's registration in the root `pyproject.toml` uv workspace,
+- the `uv run host-backup` / `uv run host-backup-now` entry points.
+
+Dependency changes are absorbed by regenerating `uv.lock` on the workspace
+with a plain `uv sync`. `host_backup/config.py` additionally keeps no-op
+backwards-compatibility shims for the names pre-refactor bootstraps import
+at boot; they are removable only once all pre-refactor hosts have rotated
+out.
 
 ## Restore
 

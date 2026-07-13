@@ -11,7 +11,8 @@ Each mechanism implements the same `SnapshotTakerInterface` contract:
   the rest; for `btrfs_local` it deletes the single `current` snapshot; for
   `direct` it is a no-op.
 
-The three concrete implementations are selected from `SnapshotSettings.method`.
+The three concrete implementations are selected from `BackupCapabilities.method`
+(detected in memory at service startup; see `host_backup.capabilities`).
 """
 
 import json
@@ -28,7 +29,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from loguru import logger
 from pydantic import Field
 
-from host_backup.config import SnapshotMethod, SnapshotSettings
+from host_backup.capabilities import BackupCapabilities, SnapshotMethod
 
 
 class SnapshotError(RuntimeError):
@@ -70,8 +71,8 @@ class SnapshotResult(FrozenModel):
 class SnapshotTakerInterface(MutableModel, ABC):
     """Strategy interface for the three snapshot mechanisms."""
 
-    settings: SnapshotSettings = Field(
-        frozen=True, description="Resolved snapshot config"
+    capabilities: BackupCapabilities = Field(
+        frozen=True, description="Detected snapshot capabilities"
     )
 
     @abstractmethod
@@ -83,15 +84,17 @@ class SnapshotTakerInterface(MutableModel, ABC):
         """Reclaim snapshots after restic has read them; return deleted paths."""
 
 
-def make_snapshot_taker(settings: SnapshotSettings) -> SnapshotTakerInterface:
-    """Build the right SnapshotTakerInterface implementation for `settings.method`."""
-    match settings.method:
+def make_snapshot_taker(capabilities: BackupCapabilities) -> SnapshotTakerInterface:
+    """Build the right SnapshotTakerInterface implementation for `capabilities.method`."""
+    match capabilities.method:
         case SnapshotMethod.BTRFS_LOCAL:
-            _require_paths(settings, ("host_subvolume_path", "snapshot_current_path"))
-            return BtrfsLocalSnapshotTaker(settings=settings)
+            _require_paths(
+                capabilities, ("host_subvolume_path", "snapshot_current_path")
+            )
+            return BtrfsLocalSnapshotTaker(capabilities=capabilities)
         case SnapshotMethod.OUTER_TRIGGER:
             _require_paths(
-                settings,
+                capabilities,
                 (
                     "host_subvolume_path",
                     "snapshot_current_path",
@@ -99,17 +102,19 @@ def make_snapshot_taker(settings: SnapshotSettings) -> SnapshotTakerInterface:
                     "trigger_dir",
                 ),
             )
-            return OuterTriggerSnapshotTaker(settings=settings)
+            return OuterTriggerSnapshotTaker(capabilities=capabilities)
         case SnapshotMethod.DIRECT:
-            return DirectSnapshotTaker(settings=settings)
+            return DirectSnapshotTaker(capabilities=capabilities)
 
 
-def _require_paths(settings: SnapshotSettings, field_names: tuple[str, ...]) -> None:
-    """Raise SnapshotError if any of `field_names` is None on `settings`."""
-    missing = [name for name in field_names if getattr(settings, name) is None]
+def _require_paths(
+    capabilities: BackupCapabilities, field_names: tuple[str, ...]
+) -> None:
+    """Raise SnapshotError if any of `field_names` is None on `capabilities`."""
+    missing = [name for name in field_names if getattr(capabilities, name) is None]
     if missing:
         raise SnapshotError(
-            f"snapshot.method={settings.method.value} requires fields {missing} in backup.toml"
+            f"snapshot method {capabilities.method.value} requires capability fields {missing}"
         )
 
 
@@ -128,8 +133,8 @@ class BtrfsLocalSnapshotTaker(SnapshotTakerInterface):
         # Delete any leftover snapshot first; tolerant of "doesn't exist".
         self.delete_snapshot()
         start = time.monotonic()
-        source = self.settings.host_subvolume_path
-        target = self.settings.snapshot_current_path
+        source = self.capabilities.host_subvolume_path
+        target = self.capabilities.snapshot_current_path
         assert (
             source is not None and target is not None
         )  # checked by make_snapshot_taker
@@ -147,7 +152,7 @@ class BtrfsLocalSnapshotTaker(SnapshotTakerInterface):
                 f"stderr={result.stderr.strip()!r}"
             )
         duration = time.monotonic() - start
-        read_path = self.settings.snapshot_read_path or target
+        read_path = self.capabilities.snapshot_read_path or target
         return SnapshotResult(
             method=SnapshotMethod.BTRFS_LOCAL,
             snapshot_path=str(target),
@@ -160,13 +165,13 @@ class BtrfsLocalSnapshotTaker(SnapshotTakerInterface):
     def cleanup_after_backup(self) -> tuple[str, ...]:
         # lima keeps a single `current` snapshot; delete it after each backup
         # exactly as before.
-        target = self.settings.snapshot_current_path
+        target = self.capabilities.snapshot_current_path
         existed = target is not None and target.exists()
         self.delete_snapshot()
         return (str(target),) if existed else ()
 
     def delete_snapshot(self) -> None:
-        target = self.settings.snapshot_current_path
+        target = self.capabilities.snapshot_current_path
         if target is None:
             return
         if not target.exists():
@@ -214,8 +219,8 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
         # after the first read empty. The request id (a timestamp) doubles as
         # the snapshot's directory name, and cleanup_after_backup garbage-
         # collects old snapshots by name.
-        assert self.settings.snapshot_read_path is not None
-        assert self.settings.snapshot_current_path is not None
+        assert self.capabilities.snapshot_read_path is not None
+        assert self.capabilities.snapshot_current_path is not None
         start = time.monotonic()
         snapshot_name = _iso_now()
         result = self._do_request("snapshot", request_id=snapshot_name)
@@ -226,12 +231,12 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
                 f"stderr={result.stderr.strip()!r}"
             )
         outer_snapshot_path = result.snapshot_path or str(
-            self.settings.snapshot_current_path.parent / snapshot_name
+            self.capabilities.snapshot_current_path.parent / snapshot_name
         )
         return SnapshotResult(
             method=SnapshotMethod.OUTER_TRIGGER,
             snapshot_path=outer_snapshot_path,
-            read_path=self.settings.snapshot_read_path.parent / snapshot_name,
+            read_path=self.capabilities.snapshot_read_path.parent / snapshot_name,
             duration_seconds=duration,
             helper_exit_code=result.exit_code,
             helper_stdout=result.stdout,
@@ -244,12 +249,12 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
         # `current` basename in the config is vestigial under the per-name
         # scheme). We enumerate over the read mount -- listing the parent dir is
         # reliable; only same-path inode swaps were affected by the gofer bug.
-        assert self.settings.snapshot_read_path is not None
-        assert self.settings.snapshot_current_path is not None
-        read_dir = self.settings.snapshot_read_path.parent
-        outer_dir = self.settings.snapshot_current_path.parent
+        assert self.capabilities.snapshot_read_path is not None
+        assert self.capabilities.snapshot_current_path is not None
+        read_dir = self.capabilities.snapshot_read_path.parent
+        outer_dir = self.capabilities.snapshot_current_path.parent
         names = _list_snapshot_names(read_dir)
-        surplus_count = max(0, len(names) - self.settings.max_local_snapshots)
+        surplus_count = max(0, len(names) - self.capabilities.max_local_snapshots)
         deleted: list[str] = []
         for name in names[:surplus_count]:
             result = self._do_request("cleanup", request_id=uuid4().hex, target=name)
@@ -267,7 +272,7 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
         self, operation: str, request_id: str, target: str | None = None
     ) -> _HelperResult:
         """Send a request.json to the outer helper and wait for its matching result.json."""
-        trigger_dir = self.settings.trigger_dir
+        trigger_dir = self.capabilities.trigger_dir
         assert trigger_dir is not None
         trigger_dir.mkdir(parents=True, exist_ok=True)
         request_payload: dict[str, str] = {
@@ -297,7 +302,7 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
         # miss a same-mtime rewrite (coarse-resolution filesystems) and accept a
         # stale result from a prior request whose id happened to be re-read; the
         # id match is the authoritative, race-free freshness signal.
-        deadline = time.monotonic() + self.settings.outer_helper_timeout_seconds
+        deadline = time.monotonic() + self.capabilities.outer_helper_timeout_seconds
         while True:
             parsed = _parse_helper_result(result_path)
             if parsed is not None and parsed.request_id == request_id:
@@ -305,7 +310,7 @@ class OuterTriggerSnapshotTaker(SnapshotTakerInterface):
             # Absent, unparseable, or a result for a different request: keep polling.
             if time.monotonic() >= deadline:
                 raise SnapshotError(
-                    f"Timed out after {self.settings.outer_helper_timeout_seconds}s "
+                    f"Timed out after {self.capabilities.outer_helper_timeout_seconds}s "
                     f"waiting for outer helper result for request_id={request_id}"
                 )
             time.sleep(_HELPER_POLL_INTERVAL_SECONDS)
@@ -372,7 +377,7 @@ class DirectSnapshotTaker(SnapshotTakerInterface):
     """No-op snapshot; restic reads the host_dir live (used in plain docker dev/test)."""
 
     def take_snapshot(self) -> SnapshotResult:
-        read_path = self.settings.snapshot_read_path or Path("/mngr")
+        read_path = self.capabilities.snapshot_read_path or Path("/mngr")
         return SnapshotResult(
             method=SnapshotMethod.DIRECT,
             snapshot_path=str(read_path),

@@ -1,6 +1,6 @@
 """Verify that ``.mngr/settings.toml`` create-templates compose as expected.
 
-The minds/FCT setup runs ``mngr create --template main --template <mode>``
+The minds/DEFAULT_WORKSPACE_TEMPLATE setup runs ``mngr create --template main --template <mode>``
 and relies on the fact that tuple-typed options (e.g. ``extra_provision_command``)
 concatenate when multiple templates stack, while scalar-typed options (e.g.
 ``provider``) get overridden by the latter template.
@@ -94,7 +94,7 @@ def test_main_template_writes_default_tmux_conf() -> None:
 
 def test_main_extra_provision_command_stacks_with_lima() -> None:
     """`main` + `lima`: lima runs the agent directly in the VM as root, so it runs
-    the shared FCT setup scripts via its own `extra_provision_command`. Those must
+    the shared DEFAULT_WORKSPACE_TEMPLATE setup scripts via its own `extra_provision_command`. Those must
     stack *after* main's (the timeline is main's tmux config, then the setup
     scripts), and main's command must be preserved.
     """

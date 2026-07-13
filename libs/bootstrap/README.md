@@ -1,6 +1,6 @@
 # bootstrap
 
-First-boot setup for a forever-claude host, followed by launching
+First-boot setup for a default-workspace-template host, followed by launching
 [supervisord](http://supervisord.org/), which supervises every background
 service.
 
@@ -29,9 +29,7 @@ service.
 4. **Initial chat agent** - on first boot only (gated by
    `runtime/initial_chat_created`), commits the rsynced workspace onto a clean
    `main` branch and creates the welcome chat agent (`--message /welcome`).
-5. **host-backup config** - detects the snapshot mechanism for the provider and
-   seeds `runtime/backup.toml` + `runtime/secrets/restic.env`.
-6. **Launch supervisord** - `exec supervisord -n -c supervisord.conf`. Running
+5. **Launch supervisord** - `exec supervisord -n -c supervisord.conf`. Running
    via `exec` keeps the bootstrap tmux window alive as supervisord and lets the
    supervised services inherit this shell's already-sourced agent environment.
 

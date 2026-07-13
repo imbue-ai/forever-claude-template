@@ -1,4 +1,4 @@
-# forever-claude-template
+# default-workspace-template
 
 A self-contained template for running a persistent Claude agent that delegates work to sub-agents and can manage its own background services.
 
@@ -7,7 +7,7 @@ A self-contained template for running a persistent Claude agent that delegates w
 ```bash
 mngr create my-workspace main -t local \
     --host-env MINDS_WORKSPACE_NAME=my-workspace \
-    --project ~/project/forever-claude-template
+    --project ~/project/default-workspace-template
 ```
 
 ## Structure

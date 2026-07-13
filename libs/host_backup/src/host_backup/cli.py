@@ -71,8 +71,9 @@ def _safe_file_size(path: Path) -> int:
 def _bump_config_mtime() -> None:
     """Update backup.toml's mtime so the runner's poll loop kicks off a new tick."""
     if not BACKUP_TOML_PATH.exists():
-        # No config yet; touching anyway so bootstrap can pick it up later
-        # is harmless. Create an empty file rather than skipping.
+        # No config yet; create an empty file rather than skipping so the
+        # runner still sees an mtime change. Tolerant loading reads an empty
+        # backup.toml as an all-defaults config.
         BACKUP_TOML_PATH.parent.mkdir(parents=True, exist_ok=True)
         BACKUP_TOML_PATH.touch()
         return

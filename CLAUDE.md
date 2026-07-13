@@ -116,10 +116,10 @@ Only after doing all of the above should you begin writing code.
 - For faster iteration, add "-m 'not tmux and not modal and not docker and not docker_sdk and not acceptance and not release'" to skip slow infrastructure tests (~30s instead of ~95s). These still run in CI. Note that you *MUST* also pass "--no-cov --cov-fail-under=0" when doing this, otherwise it will complain about a lack of coverage.
 - When running pytest with a Bash tool timeout, always set `PYTEST_MAX_DURATION_SECONDS` to match the timeout (in seconds). For example, if using a 2-minute timeout: `PYTEST_MAX_DURATION_SECONDS=120 uv run pytest ...`. This ensures the pytest global lock file records a deadline, allowing other pytest processes to break a stale lock if this one gets killed by the timeout.
 - Running pytest will produce files in .test_output/ (relative to the directory you ran from) for things like slow tests and coverage reports.
-- Note that "uv run pytest" defaults to running all "unit" and "integration" tests, but the "acceptance" tests also run in CI. Do *not* run *all* the acceptance tests locally to validate changes--just allow CI to run them automatically after you finish responding (it's faster than running them locally).
+- Note that "uv run pytest" defaults to running all "unit" and "integration" tests, but the "acceptance" tests also run in CI when a PR exists. Do *not* run *all* the acceptance tests locally to validate changes--let CI run them once a PR is opened (it's faster than running them locally).
 - If you need to run a specific acceptance or release test to write or fix it, iterate on that specific test locally by calling "just test <full_path>::<test_name>" from the root of the git checkout. Do this rather than re-running all tests in CI.
-- Tasks are not allowed to finish without all tests passing in CI.
-- A PR will be made automatically for you when you finish your reply--do NOT create one yourself.
+- Tasks are not allowed to finish without all tests passing (in CI, if a PR exists).
+- Do NOT create a PR yourself--if a PR is needed, the user will create it.
 - To help verify that you ran the tests, report the exact command you used to run the tests, as well as the total number of tests that passed and failed (and the number that failed had better be 0).
 - If tests fail because of a lack of coverage, you should add tests for the new code that you wrote.
 - When adding tests, consider whether it should be a unit test (in a _test.py file) or an integration/acceptance/release test (in a test_*.py file, and marked with @pytest.mark.acceptance or @pytest.mark.release, no marks needed for integration).  See the style_guide.md for exact details on the types of tests. In general, most slow tests of all functionality should be release tests, and only important / core functionality should be acceptance tests.
@@ -204,6 +204,8 @@ You can (and should) modify your own configuration to improve yourself:
 - **scripts/**: Add utility scripts that help you accomplish your purpose.
 
 Commit your changes to git after making modifications.
+
+Inspirations are a publishable, reusable, bootable snapshot of the apps and features a mind has built (one repo can accumulate several); another mind can adapt one into itself.
 
 # Updates
 

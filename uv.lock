@@ -28,7 +28,7 @@ members = [
     "bootstrap",
     "browser",
     "cloudflare-tunnel",
-    "forever-claude-template",
+    "default-workspace-template",
     "host-backup",
     "mngr-cli-contract",
     "runtime-backup",
@@ -341,17 +341,41 @@ name = "bootstrap"
 version = "0.1.0"
 source = { editable = "libs/bootstrap" }
 dependencies = [
-    { name = "host-backup" },
     { name = "loguru" },
-    { name = "tomlkit" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "host-backup", editable = "libs/host_backup" },
     { name = "loguru", specifier = ">=0.7.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
-    { name = "tomlkit", specifier = ">=0.12" },
+]
+
+[[package]]
+name = "boto3"
+version = "1.43.46"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f2/e7/976bf3dfe0aa5d7f31bec2f2cf57c79641620c910a39bc843a237aa9592d/boto3-1.43.46.tar.gz", hash = "sha256:66c0d943b049a46a492ec4ec2ebe73c930b1842c7137bee83aad6d93e95d4d96", size = 112654, upload-time = "2026-07-10T19:32:12.498Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/1d/c52e66ff32ba7911664e6c4c2ac62e1c6d2d1e7550c7ac185d3f4b70a8a4/boto3-1.43.46-py3-none-any.whl", hash = "sha256:69453e2c1bcb9fd9806527ab99950cacfc2826cb0dce9a3a0414d19270c06c3c", size = 140031, upload-time = "2026-07-10T19:32:11.129Z" },
+]
+
+[[package]]
+name = "botocore"
+version = "1.43.46"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jmespath" },
+    { name = "python-dateutil" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7d/f1/1917891851ac5ac09bb9f4862b8fc9252a009d7c24e8688bb67e4383d9e7/botocore-1.43.46.tar.gz", hash = "sha256:59f2e1ac3cdc66d191cae91c0804bc41847ce817dc8147cf43eaada8f76a5533", size = 15694635, upload-time = "2026-07-10T19:32:00.437Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/f2/4bd8f2f419088feb3ce55f0ca91040ff902f402edfd197450b20a2e1d533/botocore-1.43.46-py3-none-any.whl", hash = "sha256:cb673891e623ae6e6a1bf24d94ef169504f3eb02584adb5d5bee2f6aae819b60", size = 15380350, upload-time = "2026-07-10T19:31:57.616Z" },
 ]
 
 [[package]]
@@ -910,6 +934,71 @@ wheels = [
 ]
 
 [[package]]
+name = "default-workspace-template"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "app-watcher" },
+    { name = "bootstrap" },
+    { name = "browser" },
+    { name = "cloudflare-tunnel" },
+    { name = "host-backup" },
+    { name = "imbue-common" },
+    { name = "litellm" },
+    { name = "playwright" },
+    { name = "runtime-backup" },
+    { name = "tk-command-parsing" },
+    { name = "tomlkit" },
+    { name = "web-server" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-claude" },
+    { name = "import-linter" },
+    { name = "inline-snapshot" },
+    { name = "mngr-cli-contract" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-timeout" },
+    { name = "pyyaml" },
+    { name = "ruff" },
+    { name = "tomlkit" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "app-watcher", editable = "libs/app_watcher" },
+    { name = "bootstrap", editable = "libs/bootstrap" },
+    { name = "browser", editable = "libs/browser" },
+    { name = "cloudflare-tunnel", editable = "libs/cloudflare_tunnel" },
+    { name = "host-backup", editable = "libs/host_backup" },
+    { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
+    { name = "litellm", specifier = ">=1.88.1" },
+    { name = "playwright", specifier = "==1.58.0" },
+    { name = "runtime-backup", editable = "libs/runtime_backup" },
+    { name = "tk-command-parsing", editable = "libs/tk_command_parsing" },
+    { name = "tomlkit", specifier = ">=0.12" },
+    { name = "web-server", editable = "libs/web_server" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
+    { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
+    { name = "import-linter", specifier = ">=2.0" },
+    { name = "inline-snapshot", specifier = ">=0.31" },
+    { name = "mngr-cli-contract", editable = "libs/mngr_cli_contract" },
+    { name = "pyright", specifier = ">=1.1" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-timeout", specifier = ">=2.0" },
+    { name = "pyyaml", specifier = ">=6" },
+    { name = "ruff", specifier = ">=0.4" },
+    { name = "tomlkit", specifier = ">=0.12" },
+]
+
+[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1037,71 +1126,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8d/8f/c6ab717dc90f4e46d1430335cd4ab13e3629410bb760c0ead6de476760fb/flask-sock-0.7.0.tar.gz", hash = "sha256:e023b578284195a443b8d8bdb4469e6a6acf694b89aeb51315b1a34fcf427b7d", size = 4334, upload-time = "2023-10-02T22:32:42.973Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d8/98/107728ce3f430b5481eb426ccc5e1f7c8ab0bd01eaf231c62a8d528ff721/flask_sock-0.7.0-py3-none-any.whl", hash = "sha256:caac4d679392aaf010d02fabcf73d52019f5bdaf1c9c131ec5a428cb3491204a", size = 3982, upload-time = "2023-10-02T22:32:41.778Z" },
-]
-
-[[package]]
-name = "forever-claude-template"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "app-watcher" },
-    { name = "bootstrap" },
-    { name = "browser" },
-    { name = "cloudflare-tunnel" },
-    { name = "host-backup" },
-    { name = "imbue-common" },
-    { name = "litellm" },
-    { name = "playwright" },
-    { name = "runtime-backup" },
-    { name = "tk-command-parsing" },
-    { name = "tomlkit" },
-    { name = "web-server" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "imbue-mngr" },
-    { name = "imbue-mngr-claude" },
-    { name = "import-linter" },
-    { name = "inline-snapshot" },
-    { name = "mngr-cli-contract" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-timeout" },
-    { name = "pyyaml" },
-    { name = "ruff" },
-    { name = "tomlkit" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "app-watcher", editable = "libs/app_watcher" },
-    { name = "bootstrap", editable = "libs/bootstrap" },
-    { name = "browser", editable = "libs/browser" },
-    { name = "cloudflare-tunnel", editable = "libs/cloudflare_tunnel" },
-    { name = "host-backup", editable = "libs/host_backup" },
-    { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
-    { name = "litellm", specifier = ">=1.88.1" },
-    { name = "playwright", specifier = "==1.58.0" },
-    { name = "runtime-backup", editable = "libs/runtime_backup" },
-    { name = "tk-command-parsing", editable = "libs/tk_command_parsing" },
-    { name = "tomlkit", specifier = ">=0.12" },
-    { name = "web-server", editable = "libs/web_server" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
-    { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
-    { name = "import-linter", specifier = ">=2.0" },
-    { name = "inline-snapshot", specifier = ">=0.31" },
-    { name = "mngr-cli-contract", editable = "libs/mngr_cli_contract" },
-    { name = "pyright", specifier = ">=1.1" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-timeout", specifier = ">=2.0" },
-    { name = "pyyaml", specifier = ">=6" },
-    { name = "ruff", specifier = ">=0.4" },
-    { name = "tomlkit", specifier = ">=0.12" },
 ]
 
 [[package]]
@@ -1573,7 +1597,6 @@ dependencies = [
     { name = "click" },
     { name = "imbue-common" },
     { name = "loguru" },
-    { name = "tomlkit" },
 ]
 
 [package.metadata]
@@ -1581,7 +1604,6 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
     { name = "loguru", specifier = ">=0.7.0" },
-    { name = "tomlkit", specifier = ">=0.12" },
 ]
 
 [[package]]
@@ -1667,23 +1689,29 @@ name = "imbue-common"
 version = "0.1.20"
 source = { editable = "vendor/mngr/libs/imbue_common" }
 dependencies = [
+    { name = "boto3" },
     { name = "click" },
     { name = "cowsay-python" },
     { name = "httpx" },
     { name = "loguru" },
     { name = "pydantic" },
+    { name = "sentry-sdk" },
     { name = "tenacity" },
+    { name = "traceback-with-variables" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", specifier = ">=1.34" },
     { name = "click", specifier = ">=8.0" },
     { name = "cowsay-python", specifier = ">=1.0.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "sentry-sdk", specifier = ">=2.59.0" },
     { name = "tenacity", specifier = ">=8.0" },
+    { name = "traceback-with-variables", specifier = ">=2.0" },
 ]
 provides-extras = ["dev"]
 
@@ -6359,6 +6387,18 @@ dependencies = [
 requires-dist = [{ name = "loguru", specifier = ">=0.7.0" }]
 
 [[package]]
+name = "s3transfer"
+version = "0.19.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/65/da/4bef7ce7bb989b222aa4785a413896dbec53306dfc59c6ce7d16a7ffbd6a/s3transfer-0.19.1.tar.gz", hash = "sha256:d3d6371dc3f1e5c5427b2b457bcf13bcf87bec334c95aed18642eae61f6926f3", size = 165354, upload-time = "2026-07-10T19:32:04.849Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/23/e84c64ad0e8bc59cd1b2ef98def848deff0ef3456c542afe74d51e9e8c85/s3transfer-0.19.1-py3-none-any.whl", hash = "sha256:d5fd7005ee39307455ad5f310b5ea67f4b1960d7fed5b3671ee50c249de675de", size = 90072, upload-time = "2026-07-10T19:32:03.673Z" },
+]
+
+[[package]]
 name = "screeninfo"
 version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
@@ -6369,6 +6409,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ec/bb/e69e5e628d43f118e0af4fc063c20058faa8635c95a1296764acc8167e27/screeninfo-0.8.1.tar.gz", hash = "sha256:9983076bcc7e34402a1a9e4d7dabf3729411fd2abb3f3b4be7eba73519cd2ed1", size = 10666, upload-time = "2022-09-09T11:35:23.419Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6e/bf/c5205d480307bef660e56544b9e3d7ff687da776abb30c9cb3f330887570/screeninfo-0.8.1-py3-none-any.whl", hash = "sha256:e97d6b173856edcfa3bd282f81deb528188aff14b11ec3e195584e7641be733c", size = 12907, upload-time = "2022-09-09T11:35:21.351Z" },
+]
+
+[[package]]
+name = "sentry-sdk"
+version = "2.64.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/31/b7341f156a5f6f36f0b4845d6f1c28a2ae4799171dba7007f3a1e9b234b4/sentry_sdk-2.64.0.tar.gz", hash = "sha256:68be2c29e14ae310f8a39e1a79916b6d85c6cb41dcce789d14ff05fe293e4c55", size = 921020, upload-time = "2026-06-30T08:13:47.682Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/36/a8/3fb9a4319efa3b26f5be0e90e6d8918df43fa7c7e977d26390f589501d82/sentry_sdk-2.64.0-py3-none-any.whl", hash = "sha256:715ea91ca860a819e8d8a50a7bde3a80d0df3b4ed7b6660a20fb9a2d084188f1", size = 498901, upload-time = "2026-06-30T08:13:45.566Z" },
 ]
 
 [[package]]
@@ -6697,6 +6750,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/85/05/0d5260f1f1ca784f4a4a0def9cbe6affe587f5b4025328d446c3d67765f4/tqdm-4.68.2.tar.gz", hash = "sha256:89c230e8dbc67c7615c142487111222f878c77427ea09549960f62389e258add", size = 171923, upload-time = "2026-06-09T13:26:42.539Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/75/1a0392bcc21c44dcdf87b3cf2d137e7829be2c083a1e38d44efca3d57a16/tqdm-4.68.2-py3-none-any.whl", hash = "sha256:d4240441fb5353290b87d6a85968c9decc131a99b8c7faa28269d829de669ede", size = 78578, upload-time = "2026-06-09T13:26:40.731Z" },
+]
+
+[[package]]
+name = "traceback-with-variables"
+version = "2.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/34/b1/25ee53be3125145cef9385f159a44547b4a01e1b2d2828055ca69b7e18aa/traceback_with_variables-2.2.1.tar.gz", hash = "sha256:ea7c695f9b401762f68f75df0439d661112b8dbd58bcd6910e402cff925ad7e0", size = 26145, upload-time = "2025-10-24T13:39:35.141Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/06/fda9970d55fbbb7cd5cc856da2a9c693107e20f84386596da1f25b90a8cf/traceback_with_variables-2.2.1-py3-none-any.whl", hash = "sha256:ab6d75c72d26d61217962d11db44c98c62dccd2fedb2d4fb0ae4f9faf9db23c2", size = 22388, upload-time = "2025-10-24T13:29:32.712Z" },
 ]
 
 [[package]]

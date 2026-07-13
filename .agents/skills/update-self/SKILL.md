@@ -8,7 +8,7 @@ description: Pull updates from the upstream template repo. Use when upstream has
 This repo was created from a template repo. The two share git history and stay connected via a git remote. The template URL and branch are defined in `parent.toml`:
 
 ```toml
-url = "https://github.com/imbue-ai/forever-claude-template.git"
+url = "https://github.com/imbue-ai/default-workspace-template.git"
 branch = "main"
 ```
 

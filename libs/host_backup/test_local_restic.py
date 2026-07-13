@@ -6,7 +6,7 @@ local `restic` repository in a tmp dir, with no network access.
 
 Skipped automatically when the `restic` binary is not on PATH so this
 test still runs cleanly in environments that haven't installed it yet
-(restic ships in the FCT Dockerfile + lima provision; CI runners may
+(restic ships in the DEFAULT_WORKSPACE_TEMPLATE Dockerfile + lima provision; CI runners may
 not have it).
 """
 
