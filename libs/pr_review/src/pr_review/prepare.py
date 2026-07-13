@@ -74,6 +74,7 @@ def normalize_model(model: str | None) -> str:
     """The requested model if it is one we allow, else the default."""
     return model if model in _ALLOWED_MODELS else DEFAULT_MODEL
 
+
 _AGENT_PROMPT = """\
 You are preparing a checked-out copy of a Git repository so that a TypeScript \
 language server (tsserver) can resolve types for its JavaScript/TypeScript \
@@ -211,7 +212,12 @@ def reusable_entry(tree: RepoTree) -> Path | None:
     """The shared-store entry a pristine ``tree`` can reuse, or ``None``.
 
     Fingerprints the tree and returns the matching ready entry if one exists.
+    Short-circuits before the fingerprint walk when nothing has ever been
+    published for the repo -- ``auto_enable`` runs on every hover / poll, so the
+    common "repo was never prepared" case must not pay a full-tree walk each time.
     """
+    if not (PREP_STORE / _safe_slug(tree.repo)).is_dir():
+        return None
     fingerprint = dep_fingerprint(tree.root)
     if fingerprint is None:
         return None
@@ -247,7 +253,10 @@ def _publish(tree: RepoTree, fingerprint: str, roots: list[str]) -> None:
                 shutil.copytree(nm, modules / str(idx), symlinks=True)
                 captured.append({"root": root, "modules": str(idx)})
         _store_manifest_path(staging).write_text(
-            json.dumps({"fingerprint": fingerprint, "roots": roots, "modules": captured}, indent=2)
+            json.dumps(
+                {"fingerprint": fingerprint, "roots": roots, "modules": captured},
+                indent=2,
+            )
         )
         shutil.rmtree(entry, ignore_errors=True)
         os.replace(staging, entry)
@@ -451,8 +460,35 @@ def _write_status(tree: RepoTree, status: dict) -> None:
     _status_path(tree).write_text(json.dumps(status, indent=2))
 
 
+def _detach_store_links(tree: RepoTree) -> None:
+    """Unlink any of ``tree``'s paths that symlink into the shared store.
+
+    A reused / auto-enabled checkout points its ``.pr-review-prep`` sidecar and
+    each root's ``node_modules`` at the shared store via symlinks. Before a real
+    install runs against this checkout, those links must go so the install writes
+    to local paths -- otherwise ``npm install`` (and the status writes) would
+    mutate the shared store that other checkouts of the same dependency set are
+    symlinked to. Real directories (a prior from-scratch install) are left alone
+    so the package manager can update them incrementally.
+    """
+    prep = _prep_dir(tree)
+    if prep.is_symlink():
+        prep.unlink(missing_ok=True)
+    for dirpath, dirnames, _files in os.walk(tree.root):
+        if PREP_DIRNAME in dirnames:
+            dirnames.remove(PREP_DIRNAME)  # its node_modules belongs to the prep
+        if "node_modules" in dirnames:
+            nm = Path(dirpath) / "node_modules"
+            if nm.is_symlink():
+                nm.unlink(missing_ok=True)
+            dirnames.remove("node_modules")  # don't descend into a store-backed link
+
+
 def start_prepare(
-    tree: RepoTree, launcher: Launcher | None = None, force: bool = False, model: str | None = None
+    tree: RepoTree,
+    launcher: Launcher | None = None,
+    force: bool = False,
+    model: str | None = None,
 ) -> dict:
     """Kick off preparation for ``tree`` (idempotent).
 
@@ -471,6 +507,11 @@ def start_prepare(
         entry = reusable_entry(tree)
         if entry is not None and _materialize(tree, entry):
             return prepare_status(tree)
+    # A real install follows (force, or no reusable match). If this checkout was
+    # previously reused/auto-enabled, its sidecar and node_modules are symlinks
+    # into the shared store; detach them first so the install writes to local
+    # paths and never mutates the store other checkouts are symlinked to.
+    _detach_store_links(tree)
     status = {"state": "installing", "model": chosen, "error": None}
     _write_status(tree, status)
     launcher(tree)
@@ -530,7 +571,13 @@ def _run_prepare(tree: RepoTree, model: str = DEFAULT_MODEL) -> None:
             "cost_usd": run.cost_usd,
             "error": None if ok else detail,
         }
-    except (PrepareError, AgentError, OSError, subprocess.SubprocessError, ValueError) as exc:
+    except (
+        PrepareError,
+        AgentError,
+        OSError,
+        subprocess.SubprocessError,
+        ValueError,
+    ) as exc:
         # Any expected failure in this background thread becomes a failed status
         # the UI can show, rather than a silently dead thread.
         status = {"state": "failed", "model": model, "error": str(exc)[:1000]}
@@ -540,7 +587,9 @@ def _run_prepare(tree: RepoTree, model: str = DEFAULT_MODEL) -> None:
         _publish(tree, fingerprint, [r for r in status["roots"] if isinstance(r, str)])
 
 
-def _seed_for_install(tree: RepoTree, fingerprint: str | None, model: str) -> str | None:
+def _seed_for_install(
+    tree: RepoTree, fingerprint: str | None, model: str
+) -> str | None:
     """Seed a from-scratch install with the repo's nearest previous prep, if any.
 
     Copies the most recent ready prep for this repo (with a *different*
@@ -558,7 +607,9 @@ def _seed_for_install(tree: RepoTree, fingerprint: str | None, model: str) -> st
     return _seed_hint(findings)
 
 
-def _run_agent(tree: RepoTree, model: str = DEFAULT_MODEL, seed_hint: str | None = None) -> AgentRun:
+def _run_agent(
+    tree: RepoTree, model: str = DEFAULT_MODEL, seed_hint: str | None = None
+) -> AgentRun:
     """Run the headless prepare agent in the tree, streaming its activity to the
     log line-by-line so the UI can show live progress while it installs."""
     return run_streaming_agent(

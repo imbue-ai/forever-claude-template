@@ -13,7 +13,7 @@ import tarfile
 from pathlib import Path
 from typing import NamedTuple
 
-from pr_review import github
+from pr_review import github, prepare
 from pr_review.github import RepoTree
 
 
@@ -40,7 +40,9 @@ class FakeCurl(NamedTuple):
     def __call__(self, args: list[str]) -> bytes:
         self.calls.append(list(args))
         url = args[-1]
-        matches = [(needle, response) for needle, response in self.routes if needle in url]
+        matches = [
+            (needle, response) for needle, response in self.routes if needle in url
+        ]
         if not matches:
             raise AssertionError(f"FakeCurl: no route matched URL {url!r}")
         # Longest matching needle wins, so routing does not depend on the order
@@ -58,7 +60,9 @@ def make_curl(routes: dict[str, bytes], status: int = 200) -> FakeCurl:
 
 def json_route(routes: dict[str, object], status: int = 200) -> FakeCurl:
     """Like :func:`make_curl` but each route value is JSON-encoded for you."""
-    return make_curl({k: json.dumps(v).encode() for k, v in routes.items()}, status=status)
+    return make_curl(
+        {k: json.dumps(v).encode() for k, v in routes.items()}, status=status
+    )
 
 
 def parse_write_call(call: list[str]) -> dict:
@@ -118,3 +122,40 @@ def seed_repo_cache(repo: str, sha: str, files: dict[str, str]) -> Path:
         target.write_text(content)
     (dest / ".extracted").write_text(sha)
     return root
+
+
+def seed_prepared_state(
+    tree: RepoTree,
+    roots: list[str],
+    package_manager: str = "pnpm",
+    notes: str = "used pnpm; engine-strict fallback",
+) -> None:
+    """Fake a completed rich-types install on ``tree`` without running the agent.
+
+    Writes a ready ``.pr-review-prep`` sidecar (status + agent result + a
+    typescript@5 stand-in) plus a ``node_modules`` under each project root, so the
+    tree looks exactly like one the prepare agent finished -- enough for
+    ``prepare._publish`` to capture and for reuse/auto-enable to materialize.
+    """
+    prepare._write_status(
+        tree,
+        {
+            "state": "ready",
+            "package_manager": package_manager,
+            "roots": roots,
+            "typescript_dir": prepare.PREP_DIRNAME,
+        },
+    )
+    prepare._agent_result_path(tree).write_text(
+        json.dumps({"package_manager": package_manager, "roots": roots, "notes": notes})
+    )
+    ts = tree.root / prepare.PREP_DIRNAME / "node_modules" / "typescript"
+    ts.mkdir(parents=True)
+    (ts / "package.json").write_text('{"name":"typescript","version":"5.4.0"}')
+    (tree.root / prepare.PREP_DIRNAME / "package.json").write_text(
+        '{"dependencies":{"typescript":"5"}}'
+    )
+    for root in roots:
+        pkg = tree.root / root / "node_modules" / "left-pad"
+        pkg.mkdir(parents=True)
+        (pkg / "index.js").write_text("module.exports = 1;\n")

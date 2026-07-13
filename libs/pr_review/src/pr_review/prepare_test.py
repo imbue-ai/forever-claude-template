@@ -4,13 +4,13 @@ These never launch a real agent or run a real install: the launcher is injected,
 and state is asserted through the on-disk sidecar written under ``tmp_path``.
 """
 
-import json
 from pathlib import Path
 
 import pytest
 
 from pr_review import prepare
 from pr_review.github import RepoTree
+from pr_review.testing import seed_prepared_state
 
 
 def _tree(tmp_path: Path) -> RepoTree:
@@ -30,23 +30,11 @@ def _tree_at(tmp_path: Path, sha: str, deps: dict[str, str]) -> RepoTree:
     return RepoTree(repo="octocat/hello", sha=sha, root=root)
 
 
-def _seed_prepared(tree: RepoTree, roots: list[str], notes: str = "used pnpm; engine-strict fallback") -> None:
+def _seed_prepared(
+    tree: RepoTree, roots: list[str], notes: str = "used pnpm; engine-strict fallback"
+) -> None:
     """Fake a completed install on ``tree``: ready sidecar + a typescript@5 + node_modules."""
-    prepare._write_status(
-        tree,
-        {"state": "ready", "package_manager": "pnpm", "roots": roots, "typescript_dir": prepare.PREP_DIRNAME},
-    )
-    prepare._agent_result_path(tree).write_text(
-        json.dumps({"package_manager": "pnpm", "roots": roots, "notes": notes})
-    )
-    ts = tree.root / prepare.PREP_DIRNAME / "node_modules" / "typescript"
-    ts.mkdir(parents=True)
-    (ts / "package.json").write_text('{"name":"typescript","version":"5.4.0"}')
-    (tree.root / prepare.PREP_DIRNAME / "package.json").write_text('{"dependencies":{"typescript":"5"}}')
-    for root in roots:
-        pkg = tree.root / root / "node_modules" / "left-pad"
-        pkg.mkdir(parents=True)
-        (pkg / "index.js").write_text("module.exports = 1;\n")
+    seed_prepared_state(tree, roots, notes=notes)
 
 
 def test_status_absent_by_default(tmp_path: Path) -> None:
@@ -98,7 +86,9 @@ def test_start_prepare_does_not_relaunch_when_ready(tmp_path: Path) -> None:
     tree = _tree(tmp_path)
 
     def ready_launcher(t: RepoTree) -> None:
-        prepare._write_status(t, {"state": "ready", "roots": ["."], "typescript_dir": "."})
+        prepare._write_status(
+            t, {"state": "ready", "roots": ["."], "typescript_dir": "."}
+        )
 
     prepare.start_prepare(tree, launcher=ready_launcher)
     assert prepare.is_ready(tree) is True
@@ -134,7 +124,9 @@ def test_clear_prepared_removes_state_and_node_modules(tmp_path: Path) -> None:
 
 def test_dep_fingerprint_reflects_deps_not_source(tmp_path: Path) -> None:
     tree = _tree_at(
-        tmp_path, "sha1", {"package.json": '{"deps":1}', "package-lock.json": '{"lock":1}'}
+        tmp_path,
+        "sha1",
+        {"package.json": '{"deps":1}', "package-lock.json": '{"lock":1}'},
     )
     fp = prepare.dep_fingerprint(tree.root)
     assert fp is not None
@@ -165,7 +157,9 @@ def test_dep_fingerprint_matches_across_checkouts(tmp_path: Path) -> None:
     assert prepare.dep_fingerprint(a.root) == prepare.dep_fingerprint(b.root)
 
 
-def test_start_prepare_reuses_published_prep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_prepare_reuses_published_prep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)  # store paths are relative to cwd
     deps = {"package.json": '{"deps":1}', "package-lock.json": '{"lock":1}'}
     producer = _tree_at(tmp_path, "sha_producer", deps)
@@ -187,7 +181,9 @@ def test_start_prepare_reuses_published_prep(tmp_path: Path, monkeypatch: pytest
     assert (linked_nm / "left-pad" / "index.js").exists()
 
 
-def test_start_prepare_no_reuse_for_different_deps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_start_prepare_no_reuse_for_different_deps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     producer = _tree_at(tmp_path, "sha_p", {"package.json": '{"deps":1}'})
     _seed_prepared(producer, ["."])
@@ -200,7 +196,9 @@ def test_start_prepare_no_reuse_for_different_deps(tmp_path: Path, monkeypatch: 
     assert status["state"] == "installing"
 
 
-def test_clear_prepared_unlinks_reused_symlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clear_prepared_unlinks_reused_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     deps = {"package.json": '{"deps":1}'}
     producer = _tree_at(tmp_path, "sha_p", deps)
@@ -220,7 +218,39 @@ def test_clear_prepared_unlinks_reused_symlinks(tmp_path: Path, monkeypatch: pyt
     assert prepare._entry_is_ready(prepare._store_entry(consumer.repo, fp))
 
 
-def test_auto_enable_materializes_exact_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_force_reprepare_detaches_store_links_and_leaves_store_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    deps = {"package.json": '{"deps":1}'}
+    producer = _tree_at(tmp_path, "sha_p", deps)
+    _seed_prepared(producer, ["."])
+    fp = prepare.dep_fingerprint(producer.root)
+    prepare._publish(producer, fp, ["."])
+
+    # A consumer reuses the published prep: its sidecar + node_modules are now
+    # symlinks pointing into the shared store.
+    consumer = _tree_at(tmp_path, "sha_c", deps)
+    prepare.start_prepare(consumer, launcher=lambda _t: None)
+    assert (consumer.root / prepare.PREP_DIRNAME).is_symlink()
+    assert (consumer.root / "node_modules").is_symlink()
+
+    # A forced re-prepare must NOT write the "installing" status (nor later run the
+    # installer) through those symlinks into the shared store. The store entry it
+    # was symlinked to stays ready, and the checkout's own paths are detached.
+    launched: list[RepoTree] = []
+    status = prepare.start_prepare(consumer, launcher=launched.append, force=True)
+    assert status["state"] == "installing"
+    assert launched == [consumer]
+    assert not (consumer.root / prepare.PREP_DIRNAME).is_symlink()  # local real dir now
+    assert not (consumer.root / "node_modules").is_symlink()
+    # The shared store entry is untouched -- other checkouts keep reusing it.
+    assert prepare._entry_is_ready(prepare._store_entry(consumer.repo, fp))
+
+
+def test_auto_enable_materializes_exact_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     deps = {"package.json": '{"deps":1}'}
     producer = _tree_at(tmp_path, "sha_old", deps)
@@ -234,7 +264,9 @@ def test_auto_enable_materializes_exact_match(tmp_path: Path, monkeypatch: pytes
     assert (consumer.root / prepare.PREP_DIRNAME).is_symlink()
 
 
-def test_auto_enable_noop_without_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_enable_noop_without_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     producer = _tree_at(tmp_path, "sha_old", {"package.json": '{"deps":1}'})
     _seed_prepared(producer, ["."])
@@ -247,14 +279,60 @@ def test_auto_enable_noop_without_match(tmp_path: Path, monkeypatch: pytest.Monk
     assert not (consumer.root / prepare.PREP_DIRNAME).exists()
 
 
-def test_auto_enable_leaves_installing_untouched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auto_enable_leaves_installing_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     tree = _tree_at(tmp_path, "sha", {"package.json": '{"deps":1}'})
     prepare._write_status(tree, {"state": "installing"})
     assert prepare.auto_enable(tree)["state"] == "installing"
 
 
-def test_seed_for_install_copies_prior_and_returns_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reusable_entry_short_circuits_when_repo_never_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    tree = _tree_at(tmp_path, "sha", {"package.json": '{"deps":1}'})
+    # No prep has ever been published for this repo, so its store dir is absent
+    # and the lookup returns without fingerprinting the tree.
+    assert not (prepare.PREP_STORE / prepare._safe_slug(tree.repo)).exists()
+    assert prepare.reusable_entry(tree) is None
+    assert prepare.auto_enable(tree) == {"state": "absent"}
+
+
+def test_link_creates_replaces_dir_and_replaces_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "store" / "node_modules"
+    source.mkdir(parents=True)
+    (source / "marker.txt").write_text("from store\n")
+    target = tmp_path / "checkout" / "node_modules"
+
+    # Fresh create: the target does not exist yet.
+    prepare._link(target, source)
+    assert target.is_symlink()
+    assert (target / "marker.txt").read_text() == "from store\n"
+
+    # Replace a real directory sitting where the link should go (a prior install).
+    target.unlink()
+    target.mkdir()
+    (target / "stale.txt").write_text("old install\n")
+    prepare._link(target, source)
+    assert target.is_symlink()
+    assert not (target / "stale.txt").exists()
+    assert (target / "marker.txt").read_text() == "from store\n"
+
+    # Replace an existing symlink that points somewhere else (a stale reuse).
+    other = tmp_path / "other" / "node_modules"
+    other.mkdir(parents=True)
+    target.unlink()
+    target.symlink_to(other.resolve())
+    prepare._link(target, source)
+    assert target.is_symlink()
+    assert target.resolve() == source.resolve()
+
+
+def test_seed_for_install_copies_prior_and_returns_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     # A prior prep for the repo, under some other dependency fingerprint.
     producer = _tree_at(tmp_path, "sha_old", {"package.json": '{"deps":1}'})
@@ -262,12 +340,18 @@ def test_seed_for_install_copies_prior_and_returns_hint(tmp_path: Path, monkeypa
     prepare._publish(producer, prepare.dep_fingerprint(producer.root), ["apps/minds"])
 
     # A new checkout with *different* deps: no exact reuse, so we seed the install.
-    consumer = _tree_at(tmp_path, "sha_new", {"package.json": '{"deps":2}', "apps/minds/x": ""})
+    consumer = _tree_at(
+        tmp_path, "sha_new", {"package.json": '{"deps":2}', "apps/minds/x": ""}
+    )
     fp = prepare.dep_fingerprint(consumer.root)
     hint = prepare._seed_for_install(consumer, fp, model="claude-haiku-4-5")
 
     assert hint is not None
-    assert "pnpm" in hint and "apps/minds" in hint and "engine-strict fallback to npm" in hint
+    assert (
+        "pnpm" in hint
+        and "apps/minds" in hint
+        and "engine-strict fallback to npm" in hint
+    )
     # Seeded artifacts are real writable copies (the agent mutates them), not symlinks.
     prep = consumer.root / prepare.PREP_DIRNAME
     assert prep.is_dir() and not prep.is_symlink()
@@ -279,14 +363,18 @@ def test_seed_for_install_copies_prior_and_returns_hint(tmp_path: Path, monkeypa
     assert prepare.prepare_status(consumer)["state"] == "installing"
 
 
-def test_seed_for_install_returns_none_without_prior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_seed_for_install_returns_none_without_prior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     consumer = _tree_at(tmp_path, "sha_new", {"package.json": '{"deps":1}'})
     fp = prepare.dep_fingerprint(consumer.root)
     assert prepare._seed_for_install(consumer, fp, model="claude-haiku-4-5") is None
 
 
-def test_seed_for_install_skips_exact_fingerprint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_seed_for_install_skips_exact_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     deps = {"package.json": '{"deps":1}'}
     producer = _tree_at(tmp_path, "sha_old", deps)

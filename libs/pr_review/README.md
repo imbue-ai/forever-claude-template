@@ -28,10 +28,20 @@ A code-aware web interface for reviewing your GitHub pull requests, served at
    hover / go-to-definition come from that language service (member + inferred
    types, library `.d.ts`), falling back to tree-sitter on any error. State lives
    under `.pr-review-prep/` in the tree; "clear" removes it and the installed
-   `node_modules`. This installs dependencies (running their scripts) and spends
-   Claude usage, so it is strictly manual. Note: `npm install typescript` now
-   resolves to TypeScript 7.x, whose npm package lacks the classic language
-   service API -- the agent pins `typescript@5` for this reason.
+   `node_modules` for that checkout (the shared store is left intact). A finished
+   prep is shared across PRs and pushes: it is keyed by a fingerprint of the
+   repo's dependency files (`package.json` + lockfiles) rather than the commit
+   SHA and published to a store under `runtime/pr-review/prep/`, so any later
+   checkout whose dependencies match reuses it by symlink instead of
+   reinstalling. When the dependencies match an existing prep exactly, rich types
+   **auto-enable** silently (no agent) -- the pill flips to "rich" on its own.
+   Only a genuine install (new or changed dependencies) launches the agent, which
+   runs the packages' install scripts and spends Claude usage; that remains
+   strictly manual behind the Enable action, and it is seeded from the repo's
+   nearest prior prep so it updates incrementally rather than from scratch. Note:
+   `npm install typescript` now resolves to TypeScript 7.x, whose npm package
+   lacks the classic language service API -- the agent pins `typescript@5` for
+   this reason.
 4. **Write-back.** Post general comments, submit line-comment reviews
    (comment / approve / request-changes), edit the PR title/description, and
    close / reopen or merge a PR (merge / squash / rebase) -- from the detail
@@ -61,7 +71,9 @@ which would otherwise wrongly override a clean check-runs result.
   (JavaScript / TypeScript): declaration signatures + doc comments, and
   definitions resolved locally and across relative imports in the cached tree.
 - `src/pr_review/prepare.py` -- the opt-in "rich types" state machine: launches
-  the headless install/setup agent and tracks state under `.pr-review-prep/`.
+  the headless install/setup agent, tracks state under `.pr-review-prep/`, and
+  shares finished preps across checkouts via a dependency-fingerprint-keyed store
+  under `runtime/pr-review/prep/` (reuse by symlink, auto-enable, seeded installs).
 - `src/pr_review/tsintel.py` -- rich hover / go-to-definition via a persistent
   TypeScript language service, used for prepared repos (falls back to jsintel).
 - `src/pr_review/assets/tsintel_server.mjs` -- the Node language-service helper
