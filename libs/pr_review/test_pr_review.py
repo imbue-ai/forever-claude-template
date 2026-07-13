@@ -15,7 +15,7 @@ import pytest
 from flask.testing import FlaskClient
 from pr_review import ask, github, prepare
 from pr_review.runner import app
-from pr_review.testing import seed_repo_cache
+from pr_review.testing import seed_prepared_state, seed_repo_cache
 
 _SHA = "abc123"
 _REPO = "octocat/hello"
@@ -272,6 +272,50 @@ def test_prepare_clear_resets_state(client: FlaskClient, tmp_path: Path, monkeyp
         assert status.get_json()["state"] == "absent"
     finally:
         app.config.pop("PREPARE_LAUNCHER", None)
+
+
+def test_prepare_status_auto_enables_from_shared_store(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A TS repo whose dependency manifest gives it a reusable fingerprint.
+    monkeypatch.chdir(tmp_path)
+    seed_repo_cache(
+        _REPO,
+        _SHA,
+        {
+            "util.ts": "export const x = 1;\n",
+            "package.json": '{"name":"app","dependencies":{"left-pad":"1"}}',
+            "package-lock.json": '{"lockfileVersion":3}',
+        },
+    )
+    tree = github.ensure_repo_tree(_REPO, _SHA)
+    # Publish a completed install for this dependency set to the shared store, then
+    # clear the local checkout so its own state is "absent" again (store survives).
+    seed_prepared_state(tree, ["."])
+    prepare._publish(tree, prepare.dep_fingerprint(tree.root), ["."])
+    prepare.clear_prepared(tree)
+    assert prepare.prepare_status(tree)["state"] == "absent"
+
+    # Polling status auto-enables from the store with no agent: the pill flips to
+    # "rich" on its own and the sidecar is a symlink into the shared store.
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/prepare/status")
+    assert resp.status_code == 200
+    assert resp.get_json()["state"] == "ready"
+    assert (tree.root / prepare.PREP_DIRNAME).is_symlink()
+
+
+def test_prepare_status_stays_absent_without_store_match(
+    client: FlaskClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A repo with dependencies but nothing published for it: auto-enable is a
+    # no-op, so rich types stay opt-in behind the explicit Enable action.
+    monkeypatch.chdir(tmp_path)
+    seed_repo_cache(_REPO, _SHA, {"util.ts": "export const x = 1;\n", "package.json": '{"name":"app"}'})
+    resp = client.get(f"/api/repo/{_REPO}/{_SHA}/prepare/status")
+    assert resp.status_code == 200
+    assert resp.get_json()["state"] == "absent"
+    tree = github.ensure_repo_tree(_REPO, _SHA)
+    assert not (tree.root / prepare.PREP_DIRNAME).exists()
 
 
 # --- ask-an-agent (per-line questions) ---

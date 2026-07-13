@@ -4,13 +4,13 @@ These never launch a real agent or run a real install: the launcher is injected,
 and state is asserted through the on-disk sidecar written under ``tmp_path``.
 """
 
-import json
 from pathlib import Path
 
 import pytest
 
 from pr_review import prepare
 from pr_review.github import RepoTree
+from pr_review.testing import seed_prepared_state
 
 
 def _tree(tmp_path: Path) -> RepoTree:
@@ -32,21 +32,7 @@ def _tree_at(tmp_path: Path, sha: str, deps: dict[str, str]) -> RepoTree:
 
 def _seed_prepared(tree: RepoTree, roots: list[str], notes: str = "used pnpm; engine-strict fallback") -> None:
     """Fake a completed install on ``tree``: ready sidecar + a typescript@5 + node_modules."""
-    prepare._write_status(
-        tree,
-        {"state": "ready", "package_manager": "pnpm", "roots": roots, "typescript_dir": prepare.PREP_DIRNAME},
-    )
-    prepare._agent_result_path(tree).write_text(
-        json.dumps({"package_manager": "pnpm", "roots": roots, "notes": notes})
-    )
-    ts = tree.root / prepare.PREP_DIRNAME / "node_modules" / "typescript"
-    ts.mkdir(parents=True)
-    (ts / "package.json").write_text('{"name":"typescript","version":"5.4.0"}')
-    (tree.root / prepare.PREP_DIRNAME / "package.json").write_text('{"dependencies":{"typescript":"5"}}')
-    for root in roots:
-        pkg = tree.root / root / "node_modules" / "left-pad"
-        pkg.mkdir(parents=True)
-        (pkg / "index.js").write_text("module.exports = 1;\n")
+    seed_prepared_state(tree, roots, notes=notes)
 
 
 def test_status_absent_by_default(tmp_path: Path) -> None:
@@ -252,6 +238,36 @@ def test_auto_enable_leaves_installing_untouched(tmp_path: Path, monkeypatch: py
     tree = _tree_at(tmp_path, "sha", {"package.json": '{"deps":1}'})
     prepare._write_status(tree, {"state": "installing"})
     assert prepare.auto_enable(tree)["state"] == "installing"
+
+
+def test_link_creates_replaces_dir_and_replaces_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "store" / "node_modules"
+    source.mkdir(parents=True)
+    (source / "marker.txt").write_text("from store\n")
+    target = tmp_path / "checkout" / "node_modules"
+
+    # Fresh create: the target does not exist yet.
+    prepare._link(target, source)
+    assert target.is_symlink()
+    assert (target / "marker.txt").read_text() == "from store\n"
+
+    # Replace a real directory sitting where the link should go (a prior install).
+    target.unlink()
+    target.mkdir()
+    (target / "stale.txt").write_text("old install\n")
+    prepare._link(target, source)
+    assert target.is_symlink()
+    assert not (target / "stale.txt").exists()
+    assert (target / "marker.txt").read_text() == "from store\n"
+
+    # Replace an existing symlink that points somewhere else (a stale reuse).
+    other = tmp_path / "other" / "node_modules"
+    other.mkdir(parents=True)
+    target.unlink()
+    target.symlink_to(other.resolve())
+    prepare._link(target, source)
+    assert target.is_symlink()
+    assert target.resolve() == source.resolve()
 
 
 def test_seed_for_install_copies_prior_and_returns_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
