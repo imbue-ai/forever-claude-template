@@ -6,7 +6,7 @@
   --color-bg-sidebar: #f3f2ef;
   --color-bg-hover: #edecea;
   --color-bg-active: #e8e6e1;
-  --color-bg-user-bubble: #eae8e4;
+  --color-bg-user-bubble: #ededed;
   --color-bg-composer: #ffffff;
   --color-bg-chat: #ffffff;
   --color-bg-code: #f0f0f0;
@@ -2083,6 +2083,9 @@ body {
   --pv-active: var(--color-accent);
   --pv-done: #5a564a;
   --pv-pending: #c2bfb6;
+  /* The "glint" that sweeps across active-step narration. Kept independent of
+     the text scale so the shimmer stays visible against the muted caption. */
+  --pv-shimmer: #bcbcbc;
   font-size: 14.5px;
   line-height: 1.5;
   color: var(--pv-fg);
@@ -2170,7 +2173,7 @@ body {
   position: absolute;
   left: 7.5px;
   top: 8px;
-  bottom: 8px;
+  bottom: 0;
   width: 1px;
   background: var(--pv-line);
 }
@@ -2211,8 +2214,7 @@ body {
 
 .pv-tl-summary {
   margin-top: 3px;
-  padding-left: 10px;
-  border-left: 2px solid var(--pv-line);
+  padding-left: 2px;
   font-size: 13px;
   color: var(--pv-fg-muted);
   line-height: 1.5;
@@ -2220,13 +2222,12 @@ body {
 
 .pv-tl-narration {
   margin-top: 3px;
-  padding-left: 10px;
-  border-left: 2px solid var(--pv-active);
+  padding-left: 2px;
   font-size: 13px;
   font-style: italic;
   color: var(--pv-fg-muted);
   line-height: 1.5;
-  background: linear-gradient(90deg, var(--pv-fg-muted) 0%, var(--pv-fg-faint) 40%, var(--pv-fg-muted) 80%);
+  background: linear-gradient(90deg, var(--pv-fg-muted) 0%, var(--pv-shimmer) 40%, var(--pv-fg-muted) 80%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -2248,8 +2249,7 @@ body {
    styling below is shared with .pv-tl-narration via the grouped selectors. */
 .pv-tl-narration--static {
   margin-top: 3px;
-  padding-left: 10px;
-  border-left: 2px solid var(--pv-line);
+  padding-left: 2px;
   font-size: 13px;
   font-style: italic;
   color: var(--pv-fg-muted);
