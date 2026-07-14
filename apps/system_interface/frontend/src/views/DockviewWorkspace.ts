@@ -2771,14 +2771,14 @@ export const DockviewWorkspace: m.Component = {
       },
       [
         // Phone-sized screens replace the dockview tab strip (hidden via
-        // responsive.css) with a mobile tab bar: active-tab title + count
-        // opening a bottom-sheet switcher, and a "+" opening the same menu
-        // as the desktop dropdown, as a bottom sheet.
+        // responsive.css) with a mobile tab bar: a hamburger button opening
+        // one bottom-sheet menu holding the open tabs plus the same "open
+        // new" items as the desktop dropdown, next to the active tab title.
         isMobileViewport()
           ? m(MobileTabBar, {
               tabs: getMobileTabs(),
               buildAddItems: () => buildDropdownItems(),
-              onAddSheetOpen: () => {
+              onMenuOpen: () => {
                 // Same open-refresh the desktop dropdown does: re-fetch the
                 // browser/terminal fleets and re-render when they land.
                 refreshBrowserFleet(() => m.redraw());

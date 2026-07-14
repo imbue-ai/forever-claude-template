@@ -48,65 +48,14 @@
   .mobile-tab-bar {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 8px;
     height: 48px;
-    padding: 0 6px;
+    padding: 0 12px 0 6px;
     background: var(--color-bg-sidebar);
     border-bottom: 1px solid var(--color-border);
   }
 
-  .mobile-tab-bar-switcher {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1;
-    min-width: 0;
-    height: 40px;
-    padding: 0 10px;
-    background: none;
-    border: none;
-    border-radius: 8px;
-    color: var(--color-text-primary);
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .mobile-tab-bar-switcher:active {
-    background: var(--color-bg-hover);
-  }
-
-  .mobile-tab-bar-title {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 15px;
-    font-weight: 600;
-  }
-
-  .mobile-tab-bar-count {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    min-width: 20px;
-    height: 20px;
-    padding: 0 6px;
-    border-radius: 10px;
-    background: var(--color-bg-active);
-    color: var(--color-text-secondary);
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .mobile-tab-bar-chevron {
-    display: inline-flex;
-    flex-shrink: 0;
-    color: var(--color-text-secondary);
-  }
-
-  .mobile-tab-bar-add {
+  .mobile-tab-bar-menu-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -117,17 +66,26 @@
     background: none;
     border: none;
     border-radius: 8px;
-    color: var(--color-text-secondary);
-    font-size: 26px;
-    font-weight: 300;
+    color: var(--color-text-primary);
     cursor: pointer;
   }
 
-  .mobile-tab-bar-add:active {
+  .mobile-tab-bar-menu-button:active {
     background: var(--color-bg-hover);
   }
 
-  /* ── Bottom sheets (tab switcher and "open new" menu) ── */
+  .mobile-tab-bar-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  /* ── Bottom-sheet menu (open tabs + "open new" actions) ── */
   .mobile-sheet-backdrop {
     position: fixed;
     inset: 0;
@@ -171,9 +129,9 @@
     background: var(--color-border);
   }
 
+  /* Section label inside the sheet ("Tabs", "Open new"). */
   .mobile-sheet-title {
-    flex-shrink: 0;
-    padding: 0 12px 8px;
+    padding: 8px 12px;
     font-size: 13px;
     font-weight: 600;
     letter-spacing: 0.04em;

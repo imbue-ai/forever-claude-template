@@ -2,12 +2,12 @@
  * Mobile replacement for the dockview tab strip.
  *
  * On small screens (see isMobileViewport) the dockview header is hidden and
- * this bar renders above the workspace instead: the active tab's title with a
- * tab-count badge on the left, and a "+" button on the right. Tapping the
- * title opens a bottom sheet listing every open tab (tap to switch, with
- * close/destroy actions); tapping "+" opens a bottom sheet with the same
- * items as the desktop "+" dropdown. Bottom sheets are the mobile idiom for
- * these menus: full-width, thumb-reachable, and scrollable when long.
+ * this bar renders above the workspace instead: a hamburger button at the top
+ * left and the active tab's title beside it. The hamburger opens a single
+ * bottom-sheet menu with everything tab-related: the open tabs (tap to
+ * switch, with close/destroy actions) followed by the same "open new" items
+ * as the desktop "+" dropdown. A bottom sheet is the mobile idiom for this
+ * menu: full-width, thumb-reachable, and scrollable when long.
  *
  * The component is pure presentation -- panel state, actions, and menu items
  * are supplied by DockviewWorkspace, which stays the single owner of dockview
@@ -36,12 +36,12 @@ export interface MobileAddMenuItem {
 
 export interface MobileTabBarAttrs {
   tabs: MobileTabInfo[];
-  // Built lazily on each redraw while the add sheet is open, so fleet
-  // refreshes (browsers, terminals) show up as soon as they land.
+  // Built lazily on each redraw while the menu is open, so fleet refreshes
+  // (browsers, terminals) show up as soon as they land.
   buildAddItems: () => MobileAddMenuItem[];
-  // Fired when the add sheet opens; the owner kicks off its async fleet
-  // refreshes here (mirroring the desktop dropdown's open handler).
-  onAddSheetOpen: () => void;
+  // Fired when the menu opens; the owner kicks off its async fleet refreshes
+  // here (mirroring the desktop dropdown's open handler).
+  onMenuOpen: () => void;
   onSelectTab: (panelId: string) => void;
   onCloseTab: (panelId: string) => void;
   onDestroyTab: (panelId: string) => void;
@@ -64,10 +64,10 @@ export function isMobileViewport(): boolean {
   return mobileQuery.matches;
 }
 
-const CHEVRON_DOWN_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" ' +
+const HAMBURGER_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" ' +
   'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-  '<polyline points="6 9 12 15 18 9"/></svg>';
+  '<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>';
 
 const CLOSE_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" ' +
@@ -79,81 +79,67 @@ const TRASH_SVG =
   'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
   '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
 
-type SheetKind = "tabs" | "add";
-
 export function MobileTabBar(): m.Component<MobileTabBarAttrs> {
-  let openSheet: SheetKind | null = null;
+  let menuOpen = false;
 
-  function closeSheet(): void {
-    openSheet = null;
+  function closeMenu(): void {
+    menuOpen = false;
   }
 
-  function renderSheet(title: string, rows: m.Children): m.Children {
-    return [
-      m("div", { class: "mobile-sheet-backdrop", onclick: closeSheet }),
-      m("div", { class: "mobile-sheet" }, [
-        m("div", { class: "mobile-sheet-grabber" }),
-        m("div", { class: "mobile-sheet-title" }, title),
-        m("div", { class: "mobile-sheet-rows" }, rows),
-      ]),
-    ];
-  }
-
-  function renderTabsSheet(attrs: MobileTabBarAttrs): m.Children {
-    const rows =
-      attrs.tabs.length === 0
-        ? [m("div", { class: "mobile-sheet-empty" }, "No tabs open")]
-        : attrs.tabs.map((tab) =>
-            m(
-              "div",
-              {
-                key: tab.panelId,
-                class: tab.isActive ? "mobile-sheet-row mobile-sheet-row--active" : "mobile-sheet-row",
-                onclick: () => {
-                  closeSheet();
-                  attrs.onSelectTab(tab.panelId);
-                },
-              },
-              [
-                m("span", { class: "mobile-sheet-row-label" }, tab.title),
-                tab.destroyKind !== null
-                  ? m(
-                      "button",
-                      {
-                        type: "button",
-                        class: "mobile-sheet-row-action mobile-sheet-row-action--destructive",
-                        title: tab.destroyKind === "agent" ? "Destroy agent" : "Destroy terminal",
-                        "aria-label": tab.destroyKind === "agent" ? "Destroy agent" : "Destroy terminal",
-                        onclick: (event: MouseEvent) => {
-                          event.stopPropagation();
-                          closeSheet();
-                          attrs.onDestroyTab(tab.panelId);
-                        },
-                      },
-                      m.trust(TRASH_SVG),
-                    )
-                  : null,
-                m(
-                  "button",
-                  {
-                    type: "button",
-                    class: "mobile-sheet-row-action",
-                    title: "Close tab",
-                    "aria-label": "Close tab",
-                    onclick: (event: MouseEvent) => {
-                      event.stopPropagation();
-                      attrs.onCloseTab(tab.panelId);
-                    },
+  function renderTabRows(attrs: MobileTabBarAttrs): m.Children[] {
+    if (attrs.tabs.length === 0) {
+      return [m("div", { class: "mobile-sheet-empty" }, "No tabs open")];
+    }
+    return attrs.tabs.map((tab) =>
+      m(
+        "div",
+        {
+          key: tab.panelId,
+          class: tab.isActive ? "mobile-sheet-row mobile-sheet-row--active" : "mobile-sheet-row",
+          onclick: () => {
+            closeMenu();
+            attrs.onSelectTab(tab.panelId);
+          },
+        },
+        [
+          m("span", { class: "mobile-sheet-row-label" }, tab.title),
+          tab.destroyKind !== null
+            ? m(
+                "button",
+                {
+                  type: "button",
+                  class: "mobile-sheet-row-action mobile-sheet-row-action--destructive",
+                  title: tab.destroyKind === "agent" ? "Destroy agent" : "Destroy terminal",
+                  "aria-label": tab.destroyKind === "agent" ? "Destroy agent" : "Destroy terminal",
+                  onclick: (event: MouseEvent) => {
+                    event.stopPropagation();
+                    closeMenu();
+                    attrs.onDestroyTab(tab.panelId);
                   },
-                  m.trust(CLOSE_SVG),
-                ),
-              ],
-            ),
-          );
-    return renderSheet("Tabs", rows);
+                },
+                m.trust(TRASH_SVG),
+              )
+            : null,
+          m(
+            "button",
+            {
+              type: "button",
+              class: "mobile-sheet-row-action",
+              title: "Close tab",
+              "aria-label": "Close tab",
+              onclick: (event: MouseEvent) => {
+                event.stopPropagation();
+                attrs.onCloseTab(tab.panelId);
+              },
+            },
+            m.trust(CLOSE_SVG),
+          ),
+        ],
+      ),
+    );
   }
 
-  function renderAddSheet(attrs: MobileTabBarAttrs): m.Children {
+  function renderAddRows(attrs: MobileTabBarAttrs): m.Children[] {
     const items = attrs.buildAddItems();
     const rows: m.Children[] = [];
     for (const item of items) {
@@ -167,7 +153,7 @@ export function MobileTabBar(): m.Component<MobileTabBarAttrs> {
                 if (item.disabledReason) alert(item.disabledReason);
                 return;
               }
-              closeSheet();
+              closeMenu();
               item.action();
             },
           },
@@ -178,7 +164,26 @@ export function MobileTabBar(): m.Component<MobileTabBarAttrs> {
         rows.push(m("div", { class: "mobile-sheet-divider" }));
       }
     }
-    return renderSheet("Open new", rows);
+    return rows;
+  }
+
+  function renderMenuSheet(attrs: MobileTabBarAttrs): m.Children {
+    return [
+      m("div", { class: "mobile-sheet-backdrop", onclick: closeMenu }),
+      m("div", { class: "mobile-sheet" }, [
+        m("div", { class: "mobile-sheet-grabber" }),
+        m("div", { class: "mobile-sheet-rows" }, [
+          m("div", { class: "mobile-sheet-title" }, "Tabs"),
+          // The tab rows stay a nested array: mithril normalizes it into its
+          // own fragment, which keeps the keyed rows (by panel id) uniformly
+          // keyed among themselves without keying these section siblings.
+          renderTabRows(attrs),
+          m("div", { class: "mobile-sheet-divider" }),
+          m("div", { class: "mobile-sheet-title" }, "Open new"),
+          ...renderAddRows(attrs),
+        ]),
+      ]),
+    ];
   }
 
   return {
@@ -191,38 +196,21 @@ export function MobileTabBar(): m.Component<MobileTabBarAttrs> {
             "button",
             {
               type: "button",
-              class: "mobile-tab-bar-switcher",
+              class: "mobile-tab-bar-menu-button",
+              title: "Menu",
+              "aria-label": "Menu",
               onclick: () => {
-                openSheet = openSheet === "tabs" ? null : "tabs";
-              },
-            },
-            [
-              m("span", { class: "mobile-tab-bar-title" }, active?.title ?? "No tabs open"),
-              attrs.tabs.length > 0 ? m("span", { class: "mobile-tab-bar-count" }, String(attrs.tabs.length)) : null,
-              m("span", { class: "mobile-tab-bar-chevron" }, m.trust(CHEVRON_DOWN_SVG)),
-            ],
-          ),
-          m(
-            "button",
-            {
-              type: "button",
-              class: "mobile-tab-bar-add",
-              title: "Add tab",
-              "aria-label": "Add tab",
-              onclick: () => {
-                if (openSheet === "add") {
-                  openSheet = null;
-                  return;
+                menuOpen = !menuOpen;
+                if (menuOpen) {
+                  attrs.onMenuOpen();
                 }
-                openSheet = "add";
-                attrs.onAddSheetOpen();
               },
             },
-            "+",
+            m.trust(HAMBURGER_SVG),
           ),
+          m("span", { class: "mobile-tab-bar-title" }, active?.title ?? "No tabs open"),
         ]),
-        openSheet === "tabs" ? renderTabsSheet(attrs) : null,
-        openSheet === "add" ? renderAddSheet(attrs) : null,
+        menuOpen ? renderMenuSheet(attrs) : null,
       ]);
     },
   };

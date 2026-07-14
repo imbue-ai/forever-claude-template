@@ -336,40 +336,48 @@ def test_mobile_viewport_layout(e2e_server: tuple[str, list[AgentInfo], Path], p
     font_size = textarea.evaluate("el => getComputedStyle(el).fontSize")
     assert float(font_size.removesuffix("px")) >= 16
 
-    # The desktop tab strip is hidden; the mobile bar shows the active tab.
+    # The desktop tab strip is hidden; the mobile bar shows the hamburger
+    # menu button and the active tab's title.
     expect(page.locator(".mobile-tab-bar")).to_be_visible()
     expect(page.locator(".dv-tabs-and-actions-container")).to_be_hidden()
+    expect(page.locator(".mobile-tab-bar-menu-button")).to_be_visible()
     expect(page.locator(".mobile-tab-bar-title")).to_have_text("test-agent")
 
-    # The tab switcher opens as a bottom sheet listing the open tab as active.
-    page.locator(".mobile-tab-bar-switcher").click()
-    active_row = page.locator(".mobile-sheet-row--active")
-    expect(active_row).to_be_visible()
-    expect(active_row).to_contain_text("test-agent")
-    page.locator(".mobile-sheet-backdrop").click()
-    expect(page.locator(".mobile-sheet")).to_have_count(0)
 
-
-# Opening the mobile "+" sheet refreshes the terminal fleet, which lists real
-# tmux sessions server-side, so this test must be marked ``tmux`` (the
+# Opening the mobile menu refreshes the terminal fleet, which lists real tmux
+# sessions server-side, so this test must be marked ``tmux`` (the
 # resource_guards plugin blocks unmarked tmux invocations). The fetch is
 # asynchronous, so the test explicitly awaits the /api/terminals response --
 # otherwise the tmux call could land after the test body and trip the guard's
 # "marked but never invoked" side.
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_mobile_add_sheet_lists_new_tab_actions(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
-    """The mobile "+" button opens a bottom sheet with the same actions as the
-    desktop add-tab dropdown."""
+def test_mobile_menu_lists_tabs_and_new_tab_actions(
+    e2e_server: tuple[str, list[AgentInfo], Path], page: Page
+) -> None:
+    """The hamburger button opens one bottom sheet holding the open tabs plus
+    the same actions as the desktop add-tab dropdown."""
     base_url, _, _ = e2e_server
     page.set_viewport_size({"width": 390, "height": 844})
     page.goto(base_url)
     expect(page.locator(".mobile-tab-bar")).to_be_visible(timeout=5000)
 
     with page.expect_response("**/api/terminals"):
-        page.locator(".mobile-tab-bar-add").click()
+        page.locator(".mobile-tab-bar-menu-button").click()
+
+    # The open tab is listed as the active row, alongside the "open new"
+    # actions, all in the single combined sheet.
+    active_row = page.locator(".mobile-sheet-row--active")
+    expect(active_row).to_be_visible()
+    expect(active_row).to_contain_text("test-agent")
     expect(page.locator(".mobile-sheet-row", has_text="New chat")).to_be_visible()
     expect(page.locator(".mobile-sheet-row", has_text="New terminal")).to_be_visible()
+
+    # Backdrop tap dismisses the sheet. Click near the top: the backdrop
+    # spans the whole viewport and the sheet covers its center, so a default
+    # (center) click would land on the sheet instead.
+    page.locator(".mobile-sheet-backdrop").click(position={"x": 10, "y": 10})
+    expect(page.locator(".mobile-sheet")).to_have_count(0)
 
 
 def test_desktop_viewport_keeps_default_chrome(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
