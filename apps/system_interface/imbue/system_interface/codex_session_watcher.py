@@ -26,11 +26,13 @@ point of view, so the ``session_id`` parameter these methods accept is inert (th
 are no subagent sessions to filter) and :meth:`get_subagent_metadata` always returns
 ``None``.
 
-Watching is poll-based (``POLL_INTERVAL_SECONDS``), matching the cadence the claude
-watcher's watchdog falls back to and the cadence ``mngr event --follow`` itself uses.
-A watchdog observer is intentionally omitted for this first cut: the transcript
-directory does not exist until the agent's first turn, which complicates scheduling
-an observer, and a 1s poll is well within the latency budget for a chat transcript.
+Watching is a watchdog observer on the transcript dir with the poll loop
+(``POLL_INTERVAL_SECONDS``) as a safety net -- the same pattern as the claude
+watcher. The observer is started lazily (``_maybe_start_observer``) because the
+transcript dir does not exist until the agent's first turn; until then the poll
+covers the gap. The watchdog matters for latency: without it, a new message waits
+out the poll interval before reaching the UI, which is long enough for the optimistic
+"sending" bubble to visibly flip to "queued" before it reconciles.
 """
 
 from __future__ import annotations
@@ -42,9 +44,11 @@ from typing import Any
 from typing import Callable
 
 from loguru import logger as _loguru_logger
+from watchdog.observers import Observer
 
 from imbue.system_interface.codex_session_parser import parse_codex_rollout_line
 from imbue.system_interface.watcher_common import POLL_INTERVAL_SECONDS
+from imbue.system_interface.watcher_common import WakeOnChangeHandler
 
 logger = _loguru_logger
 
@@ -95,6 +99,10 @@ class CodexSessionWatcher:
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # Watchdog observer on the transcript dir, so an append wakes the loop
+        # immediately instead of waiting out the poll interval. Started lazily once
+        # the dir exists (see _maybe_start_observer).
+        self._observer: Observer | None = None
 
     def start(self) -> None:
         """Start tailing the transcript in a background thread."""
@@ -105,20 +113,48 @@ class CodexSessionWatcher:
         """Stop tailing."""
         self._stop_event.set()
         self._wake_event.set()
+        if self._observer is not None:
+            self._observer.stop()
+            self._observer.join(timeout=5.0)
         if self._thread is not None:
             self._thread.join(timeout=5.0)
 
     # --- background loop ---------------------------------------------------
 
+    def _maybe_start_observer(self) -> None:
+        """Watch the transcript dir so an append wakes the loop immediately.
+
+        No-op if already watching or the dir does not exist yet -- the transcript
+        dir is created by mngr_codex's stream_transcript.sh on the agent's first
+        turn, so until then the poll interval covers the gap and this is retried
+        each loop. Watching the transcript dir (not the whole state dir) keeps us
+        off the noisy per-agent sqlite/log writes elsewhere. The 1s poll remains a
+        safety net if watchdog misses an event.
+        """
+        if self._observer is not None:
+            return
+        watch_dir = self._transcript_path.parent
+        if not watch_dir.is_dir():
+            return
+        try:
+            observer = Observer()
+            observer.schedule(WakeOnChangeHandler(self._wake_event), str(watch_dir), recursive=False)
+            observer.start()
+            self._observer = observer
+        except OSError as e:
+            logger.debug("codex watcher: failed to start watchdog on {}: {}", watch_dir, e)
+
     def _run(self) -> None:
         # Emit whatever already exists on first read (agent may have run before the
-        # UI connected), then poll for appended lines.
+        # UI connected), then poll (woken early by watchdog) for appended lines.
+        self._maybe_start_observer()
         self._emit(self._consume_new_lines())
         while not self._stop_event.is_set():
             self._wake_event.wait(timeout=POLL_INTERVAL_SECONDS)
             self._wake_event.clear()
             if self._stop_event.is_set():
                 break
+            self._maybe_start_observer()  # retry until the transcript dir exists
             self._emit(self._consume_new_lines())
 
     def _emit(self, events: list[dict[str, Any]]) -> None:

@@ -27,11 +27,12 @@ Lossy by design for this first cut -- all deferred to later slices: ``usage``
 ``logs_2.sqlite``, never the transcript), subagent linkage, tk step-progress.
 ``stop_reason`` is left null.
 
-Event ids are synthesized from the rollout's physical line index. Each rollout line
-is at most one UI event, so ``codex-<line>-<kind>`` is unique and stable for the
-in-order, never-reparse-a-single-line reads :class:`CodexSessionWatcher` performs
-(the trait that lets a line ordinal be a safe id here, unlike a single-line-reparse
-watcher).
+Event ids prefer codex's own stable identity (the assistant message ``id``, or a
+tool call's ``call_id``) so the watcher dedups codex 0.144.3's re-serialised
+duplicates (the same message written to the rollout more than once by the
+"paginated" / world_state persistence). Where codex gives no id (an ``event_msg``
+``user_message``), we fall back to the physical line index -- safe because those are
+not re-serialised, and the watcher reads in order and never reparses a single line.
 """
 
 from __future__ import annotations
@@ -154,9 +155,16 @@ def parse_codex_rollout_line(
     # --- response_item: assistant messages + tool calls/results ---
     if payload_type == "message":
         if payload.get("role") == "assistant":
+            # codex 0.144.3 re-serialises history (the "paginated" / world_state
+            # persistence): the same assistant message is written to the rollout
+            # more than once, every copy sharing codex's stable message ``id``. Key
+            # the event id on that id so the watcher dedups the copies (falling back
+            # to the line index for a message without one).
+            msg_id = payload.get("id")
+            event_id = f"codex-{msg_id}" if isinstance(msg_id, str) and msg_id else f"codex-{line_index}-assistant"
             return _assistant_event(
                 timestamp,
-                f"codex-{line_index}-assistant",
+                event_id,
                 text=_join_content_text(payload.get("content"), "output_text"),
                 tool_calls=[],
             )
@@ -168,9 +176,11 @@ def parse_codex_rollout_line(
         tool_name = str(payload.get("name", ""))
         if call_id and tool_name:
             tool_name_by_call_id[call_id] = tool_name
+        # Same dedup rationale: a re-serialised tool call keeps its ``call_id``.
+        event_id = f"codex-call-{call_id}" if call_id else f"codex-{line_index}-assistant"
         return _assistant_event(
             timestamp,
-            f"codex-{line_index}-assistant",
+            event_id,
             text="",
             tool_calls=[
                 {
@@ -183,7 +193,7 @@ def parse_codex_rollout_line(
 
     if payload_type in ("function_call_output", "custom_tool_call_output"):
         call_id = str(payload.get("call_id", ""))
-        event_id = f"codex-{line_index}-tool_result"
+        event_id = f"codex-result-{call_id}" if call_id else f"codex-{line_index}-tool_result"
         return {
             "timestamp": timestamp,
             "type": "tool_result",
