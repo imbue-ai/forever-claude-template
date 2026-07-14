@@ -956,6 +956,7 @@ dependencies = [
 dev = [
     { name = "imbue-mngr" },
     { name = "imbue-mngr-claude" },
+    { name = "imbue-mngr-codex" },
     { name = "import-linter" },
     { name = "inline-snapshot" },
     { name = "mngr-cli-contract" },
@@ -987,6 +988,7 @@ requires-dist = [
 dev = [
     { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
     { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
+    { name = "imbue-mngr-codex", editable = "vendor/mngr/libs/mngr_codex" },
     { name = "import-linter", specifier = ">=2.0" },
     { name = "inline-snapshot", specifier = ">=0.31" },
     { name = "mngr-cli-contract", editable = "libs/mngr_cli_contract" },
@@ -1797,6 +1799,17 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "imbue-mngr-modal", editable = "vendor/mngr/libs/mngr_modal" }]
+
+[[package]]
+name = "imbue-mngr-codex"
+version = "0.1.4"
+source = { editable = "vendor/mngr/libs/mngr_codex" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" }]
 
 [[package]]
 name = "import-linter"
@@ -6567,6 +6580,7 @@ dependencies = [
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-claude" },
+    { name = "imbue-mngr-codex" },
     { name = "pexpect" },
     { name = "pluggy" },
     { name = "pydantic-settings" },
@@ -6600,6 +6614,7 @@ requires-dist = [
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
     { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
     { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
+    { name = "imbue-mngr-codex", editable = "vendor/mngr/libs/mngr_codex" },
     { name = "pexpect", specifier = ">=4.9" },
     { name = "pluggy", specifier = ">=1.5" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },

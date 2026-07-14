@@ -110,6 +110,22 @@ command = "sleep infinity && claude"
 [agent_types.worker]
 parent_type = "claude"
 
+# the "codex" agent type -- OpenAI Codex CLI as a peer harness to claude. It is
+# its own base type (registered by the vendored imbue-mngr-codex plugin via
+# `mngr plugin add` in scripts/build_workspace.sh), so no parent_type. Auto-approve
+# + auto-dismiss so the sandboxed container agent runs unattended, matching
+# agent_types.claude's posture (auto_allow_permissions sets codex
+# approval_policy="never"; sandbox_mode still applies). The codex binary is baked
+# into the image (scripts/setup_system.sh, CODEX_VERSION), so check_installation
+# is off -- do not reinstall/verify at provision. model is intentionally left
+# unset: a ChatGPT-account login rejects some *-codex slugs, so leaving codex's
+# default in force is safest; pin (e.g. "gpt-5.5") only if the first message 400s.
+[agent_types.codex]
+auto_dismiss_dialogs = true
+auto_allow_permissions = true
+sandbox_mode = "workspace-write"
+check_installation = false
+
 # --- Provider configurations ---
 
 # all disabled for now, since we don't want the agents to be able to launch mngr agents anywhere except within their own containers
@@ -611,6 +627,13 @@ post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-s
 # Chat template: minimal agent for additional chat sessions in the same work directory
 [create_templates.chat]
 type = "claude"
+
+# Codex chat template: a codex agent in the same work directory (parallels
+# create_templates.chat, which is claude). Spawn from the CLI with
+# `mngr create <name> chat_codex`; the system-interface "New Codex Agent" UI
+# will target this template once wired.
+[create_templates.chat_codex]
+type = "codex"
 
 # Worktree template: agent in a new git worktree, no services by default --
 # creates its own as needed. Uses the plain `claude` type (not `main`), so

@@ -41,6 +41,10 @@ dev = [
     # (which has --with-editable mngr_claude on the system_interface tool
     # install) avoids a cwd-dependent divergence.
     "imbue-mngr-claude",
+    # imbue-mngr-codex: same rationale as imbue-mngr-claude above -- registers the
+    # codex plugin in /mngr/code/.venv so `uv run mngr` parses agent_types.codex
+    # config fields instead of rejecting them as "Unknown fields".
+    "imbue-mngr-codex",
     # Shared validator that checks mngr CLI argvs against the live mngr command
     # tree; used by the per-feature contract tests (bootstrap's manager_test,
     # launch-task's create_worker_test).
@@ -70,6 +74,7 @@ browser = { workspace = true }
 imbue-common = { path = "vendor/mngr/libs/imbue_common", editable = true }
 imbue-mngr = { path = "vendor/mngr/libs/mngr", editable = true }
 imbue-mngr-claude = { path = "vendor/mngr/libs/mngr_claude", editable = true }
+imbue-mngr-codex = { path = "vendor/mngr/libs/mngr_codex", editable = true }
 resource-guards = { path = "vendor/mngr/libs/resource_guards", editable = true }
 concurrency-group = { path = "vendor/mngr/libs/concurrency_group", editable = true }
 
