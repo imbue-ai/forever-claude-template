@@ -86,8 +86,20 @@ Ask the user, in plain language. Never enumerate files at them:
   repo-root-relative include paths, e.g. `apps/slack-inbox`, `libs/slack_inbox`,
   plus their service wiring -- you reason about the backing paths, the user does
   not);
-- whether any data should be included. **Default: NO user data.** Include data
-  paths only if the user explicitly asks for them;
+- what data should be included -- and this is NOT an all-or-nothing default.
+  Judge each candidate data path by whether it is **personal**: information
+  about the user or specific real people (names, emails, accounts, messages,
+  contacts, private notes -- anything identifying, or that they'd reasonably
+  consider theirs). **Personal data is kept private by default -- excluded from
+  the snapshot.** **Non-personal data -- generic seed/sample/reference data,
+  fixtures, config defaults, and public or synthetic datasets with no tie to a
+  real person -- is included by default**, since shipping it is what makes the
+  inspiration bootable and genuinely useful to an adopter. For anything
+  **remotely close to the boundary** -- arguably personal, a mix of personal
+  and non-personal, or simply data you are not sure how to classify -- do NOT
+  silently pick a side: ask the user what they want and let their answer
+  decide. When in doubt, treat it as near-the-boundary and ask rather than
+  guessing;
 - whether anything should be **changed, removed, or generalized in the
   published version only** -- hardcoded personal preferences, account or
   channel names, anything they'd rather not ship. Their live files stay
@@ -104,9 +116,12 @@ include paths yourself.
 include set as final, and before dispatching the worker (§3). This is a hard
 gate.** Send ONE message that lays out, in plain language:
 
-- what WILL be included (apps/features, not file lists);
-- what will NOT be included that they might expect (their data, other apps
-  this mind has, secrets/config) -- so surprises surface now;
+- what WILL be included (apps/features, plus any non-personal data that ships
+  with them -- not file lists);
+- what will NOT be included that they might expect (their personal data, other
+  apps this mind has, secrets/config) -- so surprises surface now;
+- any data near the personal/non-personal boundary you flagged in the data
+  question above, restated so they can settle it before assembly begins;
 - the published-version modifications you will apply (or "none");
 - the proposed title and repo name, marked as adjustable later;
 - the default private visibility.
@@ -782,7 +797,7 @@ the VM). Interface (cwd = worktree repo root):
   --slug <slug> \
   --title <title> \
   --include <path> [--include <path> ...] \   # repo-root-relative app/feature paths to overlay
-  [--data-include <path> ...] \    # only when the user opted in; default none
+  [--data-include <path> ...] \    # non-personal data (included by default); personal data excluded; boundary cases asked -- see §1
   [--description <text>]
 ```
 

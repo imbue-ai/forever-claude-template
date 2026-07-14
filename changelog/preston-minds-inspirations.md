@@ -43,7 +43,9 @@
   system_interface changes remain in the final design).
 
 - New **`/publish-inspiration`** skill. The lead asks in chat what to include
-  (no user data by default), then dispatches ONE `launch-task` worker cycle.
+  (personal data excluded by default, non-personal data included, boundary
+  cases surfaced to the user -- see the data-policy bullet below), then
+  dispatches ONE `launch-task` worker cycle.
   On its isolated worktree the worker runs `build_inspiration.sh` -- reset to
   the clean FCT base the mind was created from (first-parent-root fallback
   plus a bootable-base pre-check covering `pyproject.toml` and
@@ -280,3 +282,17 @@
   `scripts/install_secret_scanners.sh` -- the single source of truth for the
   version pins and hard-coded per-arch sha256 checksums -- so docker-built
   images and Lima VMs both get the scanners.
+
+- The data-inclusion default is no longer all-or-nothing. Instead of assuming
+  ALL user data is private (the old "Default: NO user data"), the setup Q&A
+  now classifies candidate data by whether it is **personal** -- information
+  about the user or specific real people (names, emails, accounts, messages,
+  contacts, private notes). Personal data stays private and is excluded by
+  default; **non-personal** data (generic seed/sample/reference data,
+  fixtures, config defaults, public or synthetic datasets) is **included** by
+  default, since shipping it is what makes an inspiration bootable and useful.
+  Anything **remotely close to the boundary** -- arguably personal, mixed, or
+  simply unclear -- is not decided silently: the agent asks the user and lets
+  their answer settle it, defaulting to "ask" when in doubt. The scope gate
+  restates any boundary data it flagged so the user settles it before
+  assembly.
