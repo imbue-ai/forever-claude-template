@@ -97,12 +97,12 @@ Ask the user, in plain language. Never enumerate files at them:
   not);
 - what should and should not be SHARED -- **ask, never silently assume**.
   The default is still NO user data, but apply it as a question, not a
-  policy: enumerate the candidate shareable content you actually found in
-  the selected paths (their data files, but also instructions/prompts,
-  config, sample or seed data, docs) and ask which of these, if any, they
-  want to ship. Some users WANT their instructions or curated examples
-  shared -- do not strip those without asking; equally, do not ship data
-  without an explicit yes;
+  policy: name the kinds of shareable content you actually found in the
+  selected paths, in plain language rather than file lists ("your saved
+  contacts", "the instructions you wrote for the digest", sample data,
+  docs), and ask which of these, if any, they want to ship. Some users
+  WANT their instructions or curated examples shared -- do not strip those
+  without asking; equally, do not ship data without an explicit yes;
 - whether anything should be **changed, removed, or generalized in the
   published version only** -- hardcoded personal preferences, account or
   channel names, anything they'd rather not ship. Their live files stay
