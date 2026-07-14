@@ -14,6 +14,5 @@
   scanners -- it stays limited to heavy non-boot packages (Chromium/Playwright).
 
 - `install_secret_scanners_test.py` covers the shared installer (arch mapping,
-  checksum accept/reject, skip-at-pin, per-tool isolation), and
-  `deferred_install_test.py` covers `deferred_install.sh`'s marker/skip path,
-  both using shared bash-test helpers in `bootstrap/testing.py`.
+  checksum accept/reject, skip-at-pin, per-tool isolation), with shared
+  bash-test helpers in `bootstrap/testing.py`.
