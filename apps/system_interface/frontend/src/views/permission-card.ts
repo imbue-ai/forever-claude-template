@@ -130,11 +130,15 @@ function renderLockIcon(): m.Vnode {
 }
 
 /** The card heading: "Permission request: File access" for a file-sharing
- *  request; "Permission request: <service>" for a predefined request once the
- *  gateway catalog has resolved the scope to a friendly service name; otherwise
- *  plain "Permission request" (the scope still shows on the "Requesting" line). */
+ *  request; "Permission request: Workspace management" for a workspace request
+ *  (acting on the user's other Minds workspaces -- rendered heading-only, with
+ *  no "Requesting" detail line for now); "Permission request: <service>" for a
+ *  predefined request once the gateway catalog has resolved the scope to a
+ *  friendly service name; otherwise plain "Permission request" (the scope still
+ *  shows on the "Requesting" line). */
 function permissionHeading(details: PermissionRequestDetails | null, scopeInfo: ScopeInfo | null): string {
   if (details?.requestType === "file-sharing") return "Permission request: File access";
+  if (details?.requestType === "workspace") return "Permission request: Workspace management";
   if (details?.scope && scopeInfo) return `Permission request: ${scopeInfo.display_name}`;
   return "Permission request";
 }
@@ -233,16 +237,19 @@ function renderPermissionVerdict(resolution: PermissionResolution): m.Vnode {
  * here; tests call it directly with an injected `scopeInfo`.
  *
  * `resolution` reflects the user's decision once it lands: the action button is
- * replaced by a Granted/Denied verdict. Before the result lands (still pending)
- * `details` is null: the card shows a waiting state with no button. The button
- * appears once the result carries a request_id and the request is still
- * awaiting a decision.
+ * replaced by a Granted/Denied verdict. While no decision has landed and
+ * `details` is null, `hasResult` picks between the two buttonless states: the
+ * result hasn't arrived yet (still waiting), or it arrived but no request id
+ * could be read from it (so the card says so honestly instead of waiting
+ * forever). The button appears once the result carries a request_id and the
+ * request is still awaiting a decision.
  */
 export function renderPermissionCard(
   details: PermissionRequestDetails | null,
   scopeInfo: ScopeInfo | null,
   resolution: PermissionResolution | null,
   rawText: string,
+  hasResult: boolean,
 ): m.Vnode {
   const requesting = permissionRequestingValue(details, scopeInfo);
 
@@ -252,7 +259,13 @@ export function renderPermissionCard(
       m("span", { class: "permission-request-title" }, permissionHeading(details, scopeInfo)),
     ]),
     resolution === null && details === null
-      ? m("div", { class: "permission-request-status" }, "Waiting for the request to register…")
+      ? m(
+          "div",
+          { class: "permission-request-status" },
+          hasResult
+            ? "Couldn't read this request from the tool output. If it's still pending, you can respond to it directly in the Minds app."
+            : "Waiting for the request to register…",
+        )
       : null,
     requesting
       ? m("div", { class: "permission-request-detail" }, [
@@ -315,7 +328,7 @@ export function PermissionCard(): m.Component<{
       const rawInput = toolCall.input_preview || "";
       const rawOutput = toolResult?.output || "";
       const rawText = rawOutput ? `${rawInput}\n\n${rawOutput}` : rawInput;
-      return renderPermissionCard(details, scopeInfo, resolution, rawText);
+      return renderPermissionCard(details, scopeInfo, resolution, rawText, toolResult !== null);
     },
   };
 }
