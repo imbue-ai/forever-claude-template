@@ -34,6 +34,9 @@ class SendMessageRequest(FrozenModel):
     """Request body for sending a message to an agent."""
 
     message: str = Field(description="The message text to send")
+    client_id: str = Field(default="", description="Per-browser client id of the sender ('' for legacy callers)")
+    active_layout: str = Field(default="", description="The sender's active layout slug at send time")
+    device_kind: str = Field(default="", description="'mobile' or 'desktop', derived from the sender's user agent")
 
 
 class SendMessageResponse(FrozenModel):

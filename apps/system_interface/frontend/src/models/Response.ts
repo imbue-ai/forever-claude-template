@@ -5,6 +5,7 @@
 
 import m from "mithril";
 import { apiUrl } from "../base-path";
+import { getActiveLayoutSlug, getClientId, getDeviceKind } from "./ClientIdentity";
 import { reconcilePendingMessages } from "./PendingMessages";
 
 export interface SubagentMetadata {
@@ -567,11 +568,19 @@ export async function sendMessage(agentId: string, message: string): Promise<voi
     return;
   }
 
+  // The client identity rides along so the server can record which browser
+  // (and which named layout) the message came from -- that is how agents
+  // attribute a request to a client via `layout.py context`.
   await m.request({
     method: "POST",
     url: apiUrl("/api/agents/:agentId/message"),
     params: { agentId },
-    body: { message: message.trim() },
+    body: {
+      message: message.trim(),
+      client_id: getClientId(),
+      active_layout: getActiveLayoutSlug(),
+      device_kind: getDeviceKind(),
+    },
   });
 }
 

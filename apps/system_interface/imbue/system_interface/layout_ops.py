@@ -47,6 +47,9 @@ _TERMINAL_SERVICE_URL_PATH = "/service/terminal/"
 _BROWSER_SESSION_QUERY_KEY = "session"
 
 # Set of op names the endpoint dispatches on. Anything else is a 400.
+# ``context`` is a pure query over the client-activity event log; ``load``
+# broadcasts a layout-switch request to clients (handled outside the
+# ``layout_op`` message family, so it is not in ``_BROADCASTING_OPS``).
 _KNOWN_OPS: frozenset[str] = frozenset(
     {
         "list",
@@ -62,6 +65,8 @@ _KNOWN_OPS: frozenset[str] = frozenset(
         "replace-url",
         "refresh",
         "reload_system_interface",
+        "context",
+        "load",
     }
 )
 

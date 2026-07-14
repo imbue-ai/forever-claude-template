@@ -23,7 +23,9 @@ from imbue.concurrency_group.subprocess_utils import run_local_command_modern_ve
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.system_interface import claude_auth_endpoints
+from imbue.system_interface import client_activity
 from imbue.system_interface import latchkey_endpoints
+from imbue.system_interface import workspace_layouts
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
@@ -362,6 +364,21 @@ def _send_message_endpoint(agent_id: str) -> Response:
         error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}' (0 successful agents)")
         return _json_response(error.model_dump(), status_code=500)
 
+    # Record which client (and layout) the message came from, so agents can
+    # attribute requests to a client via ``layout.py context``. Legacy callers
+    # without client metadata (curl, older frontends) are simply not recorded.
+    events_path = _client_activity_events_path()
+    if events_path is not None and send_message_request.client_id:
+        client_activity.append_message_event(
+            events_path,
+            client_id=send_message_request.client_id,
+            device_kind=send_message_request.device_kind,
+            layout_slug=send_message_request.active_layout,
+            agent_id=agent_info.id,
+            agent_name=agent_info.name,
+            message_text=send_message_request.message,
+        )
+
     return _json_response(SendMessageResponse(status="ok").model_dump())
 
 
@@ -497,10 +514,8 @@ def _stream_subagent_events(agent_id: str, subagent_session_id: str) -> Response
     )
 
 
-_LAYOUT_FILENAME = "layout.json"
-
 # Stores the user's "never show again" choice for the terminal lifecycle banner,
-# alongside layout.json in the primary agent's workspace_layout dir.
+# alongside the named layouts in the primary agent's workspace_layout dir.
 _TERMINAL_BANNER_FILENAME = "terminal_banner.json"
 
 # Serializes terminal-name allocation and tracks names handed out but not yet
@@ -523,43 +538,144 @@ def _primary_agent_layout_dir() -> Path | None:
     return get_host_dir() / "agents" / agent_id / "workspace_layout"
 
 
-def _get_layout() -> Response:
-    """Get the saved workspace layout for this workspace's primary agent."""
+def _client_activity_events_path() -> Path | None:
+    """Where the workspace-level client-activity event log lives, or None."""
     layout_dir = _primary_agent_layout_dir()
     if layout_dir is None:
-        return _json_response(None, status_code=404)
+        return None
+    return client_activity.get_events_path(layout_dir)
 
-    layout_file = layout_dir / _LAYOUT_FILENAME
-    if not layout_file.exists():
-        return _json_response(None, status_code=404)
 
+def _parse_json_object_body() -> dict[str, Any] | Response:
+    """Parse the request body as a JSON object, or return a 400 error response."""
     try:
-        layout_data = json.loads(layout_file.read_text())
-        return _json_response(layout_data)
-    except (json.JSONDecodeError, OSError):
-        return _json_response(None, status_code=404)
+        body = json.loads(request.get_data())
+    except (json.JSONDecodeError, ValueError) as e:
+        _loguru_logger.opt(exception=e).warning("Request to {} carried invalid JSON", request.path)
+        error = ErrorResponse(detail="Invalid JSON in request body")
+        return _json_response(error.model_dump(), status_code=400)
+    if not isinstance(body, dict):
+        error = ErrorResponse(detail="Request body must be a JSON object")
+        return _json_response(error.model_dump(), status_code=400)
+    return body
 
 
-def _save_layout() -> Response:
-    """Save the workspace layout for this workspace's primary agent."""
+def _default_layout_infos() -> list[dict[str, Any]]:
+    """The two default layout names, for dev/test setups with no layout dir."""
+    return [
+        workspace_layouts.LayoutInfo(slug=slug, display_name=slug, has_content=False).model_dump()
+        for slug in (workspace_layouts.DESKTOP_LAYOUT_SLUG, workspace_layouts.MOBILE_LAYOUT_SLUG)
+    ]
+
+
+def _list_layouts_endpoint() -> Response:
+    """List every named layout plus the last-active slug."""
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is None:
+        # No primary agent configured (dev/test): expose the default names so
+        # the frontend can still pick an active layout; nothing persists.
+        return _json_response(
+            {"layouts": _default_layout_infos(), "last_active_slug": workspace_layouts.DESKTOP_LAYOUT_SLUG}
+        )
+    infos = workspace_layouts.list_layouts(layout_dir)
+    return _json_response(
+        {
+            "layouts": [info.model_dump() for info in infos],
+            "last_active_slug": workspace_layouts.get_last_active_slug(layout_dir),
+        }
+    )
+
+
+def _get_named_layout_endpoint(slug: str) -> Response:
+    """Get one named layout's saved content (null when the layout is still empty)."""
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is None:
+        return _json_response({"slug": slug, "display_name": slug, "layout": None})
+    try:
+        content = workspace_layouts.read_layout_content(layout_dir, slug)
+        display_name = workspace_layouts.get_layout_display_name(layout_dir, slug)
+    except workspace_layouts.LayoutNotFoundError:
+        error = ErrorResponse(detail=f"Layout '{slug}' not found")
+        return _json_response(error.model_dump(), status_code=404)
+    return _json_response({"slug": slug, "display_name": display_name, "layout": content})
+
+
+def _save_layout_as_endpoint() -> Response:
+    """Save the posted layout under a display name (creating or overwriting).
+
+    The server owns slugification: an exact display-name match overwrites
+    that layout, while a slug collision with a *different* display name is
+    rejected so two visually-distinct names never share a file.
+    """
     layout_dir = _primary_agent_layout_dir()
     if layout_dir is None:
         error = ErrorResponse(detail="No primary agent configured for this workspace")
         return _json_response(error.model_dump(), status_code=500)
-
-    body = request.get_data()
-    try:
-        # Validate it's valid JSON
-        json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        error = ErrorResponse(detail="Invalid JSON in request body")
+    body = _parse_json_object_body()
+    if isinstance(body, Response):
+        return body
+    display_name = body.get("display_name")
+    layout_content = body.get("layout")
+    client_id = str(body.get("client_id") or "")
+    if not isinstance(display_name, str) or not display_name.strip():
+        error = ErrorResponse(detail="'display_name' must be a non-empty string")
         return _json_response(error.model_dump(), status_code=400)
+    if not isinstance(layout_content, dict):
+        error = ErrorResponse(detail="'layout' must be a JSON object")
+        return _json_response(error.model_dump(), status_code=400)
+    try:
+        slug = workspace_layouts.register_layout(layout_dir, display_name.strip())
+    except workspace_layouts.LayoutNameError as e:
+        return _json_response(ErrorResponse(detail=str(e)).model_dump(), status_code=400)
+    except workspace_layouts.LayoutConflictError as e:
+        return _json_response(ErrorResponse(detail=str(e)).model_dump(), status_code=409)
+    workspace_layouts.write_layout_content(layout_dir, slug, layout_content)
+    resolved_display_name = workspace_layouts.get_layout_display_name(layout_dir, slug)
+    get_state().broadcaster.broadcast_layout_saved(slug, resolved_display_name, client_id)
+    return _json_response({"slug": slug, "display_name": resolved_display_name})
 
-    layout_dir.mkdir(parents=True, exist_ok=True)
-    layout_file = layout_dir / _LAYOUT_FILENAME
-    layout_file.write_bytes(body)
 
+def _autosave_named_layout_endpoint(slug: str) -> Response:
+    """Persist the posted content to an existing named layout (the autosave path)."""
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is None:
+        error = ErrorResponse(detail="No primary agent configured for this workspace")
+        return _json_response(error.model_dump(), status_code=500)
+    body = _parse_json_object_body()
+    if isinstance(body, Response):
+        return body
+    layout_content = body.get("layout")
+    client_id = str(body.get("client_id") or "")
+    if not isinstance(layout_content, dict):
+        error = ErrorResponse(detail="'layout' must be a JSON object")
+        return _json_response(error.model_dump(), status_code=400)
+    try:
+        workspace_layouts.write_layout_content(layout_dir, slug, layout_content)
+        display_name = workspace_layouts.get_layout_display_name(layout_dir, slug)
+    except workspace_layouts.LayoutNotFoundError:
+        # The layout was deleted while this client's autosave was in flight;
+        # the client hears about the deletion over the WebSocket.
+        error = ErrorResponse(detail=f"Layout '{slug}' not found")
+        return _json_response(error.model_dump(), status_code=404)
+    get_state().broadcaster.broadcast_layout_saved(slug, display_name, client_id)
     return _json_response({"status": "ok"})
+
+
+def _delete_named_layout_endpoint(slug: str) -> Response:
+    """Delete a named layout; the last remaining layout cannot be deleted."""
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is None:
+        error = ErrorResponse(detail="No primary agent configured for this workspace")
+        return _json_response(error.model_dump(), status_code=500)
+    try:
+        fallback_slug = workspace_layouts.delete_layout(layout_dir, slug)
+    except workspace_layouts.LayoutNotFoundError:
+        error = ErrorResponse(detail=f"Layout '{slug}' not found")
+        return _json_response(error.model_dump(), status_code=404)
+    except workspace_layouts.LastLayoutDeletionError as e:
+        return _json_response(ErrorResponse(detail=str(e)).model_dump(), status_code=409)
+    get_state().broadcaster.broadcast_layout_deleted(slug, fallback_slug)
+    return _json_response({"status": "ok", "fallback_layout_slug": fallback_slug})
 
 
 def _tmux_prefix() -> str:
@@ -848,6 +964,54 @@ def _ws_endpoint(websocket: Any) -> None:
     )
 
 
+def _handle_client_state_message(
+    raw_message: str,
+    client_queue: "queue.Queue[str | None]",
+    ws_broadcaster: WebSocketBroadcaster,
+    is_first_report: bool,
+) -> bool:
+    """Process one incoming WebSocket message; returns True for a ``client_state``.
+
+    ``client_state`` is the only message type clients send: it registers the
+    browser's client id, active layout, and device kind (on connect and on
+    every layout switch). Registration feeds the broadcaster's client
+    registry (used to target layout-mutating ops), the last-active-layout
+    record, and the client-activity event log (a ``layout_switch`` event when
+    the report names a different previous layout, else a ``client_connected``
+    event for the connection's first report).
+    """
+    try:
+        parsed = json.loads(raw_message)
+    except json.JSONDecodeError as e:
+        _loguru_logger.opt(exception=e).warning("Ignored unparsable WebSocket message from client")
+        return False
+    if not isinstance(parsed, dict) or parsed.get("type") != "client_state":
+        _loguru_logger.warning("Ignored unexpected WebSocket message type from client: {!r}", parsed)
+        return False
+    client_id = str(parsed.get("client_id") or "")
+    active_layout = str(parsed.get("active_layout") or "")
+    device_kind = str(parsed.get("device_kind") or "")
+    previous_layout = str(parsed.get("previous_layout") or "")
+    if not client_id or not active_layout:
+        return False
+    ws_broadcaster.set_client_info(client_queue, client_id, active_layout, device_kind)
+    layout_dir = _primary_agent_layout_dir()
+    if layout_dir is not None:
+        workspace_layouts.set_last_active_slug(layout_dir, active_layout)
+        events_path = client_activity.get_events_path(layout_dir)
+        if previous_layout and previous_layout != active_layout:
+            client_activity.append_layout_switch_event(
+                events_path, client_id, device_kind, previous_layout, active_layout
+            )
+        elif is_first_report:
+            client_activity.append_client_connected_event(events_path, client_id, device_kind, active_layout)
+        else:
+            # A re-report on an already-registered connection with an
+            # unchanged layout; the registry update above is all it needs.
+            pass
+    return True
+
+
 def _run_ws_broadcast_loop(
     websocket: Any,
     agent_manager: AgentManager,
@@ -861,6 +1025,12 @@ def _run_ws_broadcast_loop(
     half-dead peer, surfacing as ``ConnectionClosed`` from ``send``; the
     broadcaster can also evict a hopelessly-behind client by pushing the
     shutdown sentinel (``None``) into the queue.
+
+    Incoming ``client_state`` registrations are drained non-blockingly on
+    each loop iteration (simple_websocket buffers frames on its own reader
+    thread, so ``receive(timeout=0)`` never blocks); worst-case processing
+    latency is one queue-poll interval (~1 s), well under any agent-driven
+    op that depends on the registration.
     """
     client_queue = ws_broadcaster.register()
     try:
@@ -884,8 +1054,16 @@ def _run_ws_broadcast_loop(
         for proto in agent_manager.get_proto_agents():
             websocket.send(json.dumps({"type": "proto_agent_created", **proto}))
 
+        is_client_registered = False
         shutdown = False
         while not shutdown:
+            incoming = websocket.receive(timeout=0)
+            while incoming is not None:
+                if _handle_client_state_message(
+                    str(incoming), client_queue, ws_broadcaster, is_first_report=not is_client_registered
+                ):
+                    is_client_registered = True
+                incoming = websocket.receive(timeout=0)
             try:
                 message = client_queue.get(timeout=1.0)
             except queue.Empty:
@@ -1021,6 +1199,37 @@ def _start_agent(agent_id: str) -> Response:
     return _json_response(StartAgentResponse(status="ok").model_dump())
 
 
+def _resolve_requested_layout_slug(
+    args_raw: dict[str, Any],
+    layout_dir: Path | None,
+) -> tuple[str | None, Response | None]:
+    """Resolve a layout op's ``args.layout`` (or the last-active default) to a slug.
+
+    Returns ``(slug, None)`` on success and ``(None, error_response)`` when an
+    explicitly-named layout is unusable or unknown. With no layout dir
+    configured (dev/test), an explicit name is slugified without registry
+    validation and the default is None.
+    """
+    requested = args_raw.get("layout")
+    if isinstance(requested, str) and requested:
+        if layout_dir is None:
+            try:
+                return workspace_layouts.slugify_layout_name(requested), None
+            except workspace_layouts.LayoutNameError as e:
+                return None, _json_response(ErrorResponse(detail=str(e)).model_dump(), status_code=400)
+        try:
+            return workspace_layouts.resolve_layout_slug(layout_dir, requested), None
+        except workspace_layouts.LayoutNameError as e:
+            return None, _json_response(ErrorResponse(detail=str(e)).model_dump(), status_code=400)
+        except workspace_layouts.LayoutNotFoundError:
+            known = ", ".join(info.display_name for info in workspace_layouts.list_layouts(layout_dir))
+            error = ErrorResponse(detail=f"Layout {requested!r} not found (known layouts: {known})")
+            return None, _json_response(error.model_dump(), status_code=404)
+    if layout_dir is None:
+        return None, None
+    return workspace_layouts.get_last_active_slug(layout_dir), None
+
+
 def _layout_broadcast_endpoint() -> Response:
     """Unified loopback endpoint for the agent-facing ``scripts/layout.py`` helper.
 
@@ -1074,26 +1283,77 @@ def _layout_broadcast_endpoint() -> Response:
 
     agent_manager: AgentManager = get_state().agent_manager
     agent_name_by_id = {a["id"]: a["name"] for a in agent_manager.get_agents_serialized()}
+    layout_dir = _primary_agent_layout_dir()
 
-    if op == "list":
-        layout_dir = _primary_agent_layout_dir()
-        layout_path = (layout_dir / _LAYOUT_FILENAME) if layout_dir is not None else None
-        entries = layout_list(
-            agent_manager.list_service_names(),
-            agent_manager.get_agents_serialized(),
-            layout_path,
-            agent_name_by_id,
+    if op in {"list", "inspect"}:
+        slug, error_response = _resolve_requested_layout_slug(args_raw, layout_dir)
+        if error_response is not None:
+            return error_response
+        layout_path = (
+            workspace_layouts.layout_content_path(layout_dir, slug)
+            if layout_dir is not None and slug is not None
+            else None
         )
-        # Log the caller for telemetry; v1 has no enforcement.
-        logger.info("layout op={} agent_id={} entries={}", op, agent_id, len(entries))
-        return _json_response({"ok": True, "entries": entries})
-
-    if op == "inspect":
-        layout_dir = _primary_agent_layout_dir()
-        layout_path = (layout_dir / _LAYOUT_FILENAME) if layout_dir is not None else None
+        if op == "list":
+            entries = layout_list(
+                agent_manager.list_service_names(),
+                agent_manager.get_agents_serialized(),
+                layout_path,
+                agent_name_by_id,
+            )
+            # Log the caller for telemetry; v1 has no enforcement.
+            logger.info("layout op={} agent_id={} layout={} entries={}", op, agent_id, slug, len(entries))
+            return _json_response({"ok": True, "layout_slug": slug, "entries": entries})
         summary = layout_inspect(layout_path, agent_name_by_id)
-        logger.info("layout op={} agent_id={} panels={}", op, agent_id, len(summary.get("panels", [])))
-        return _json_response({"ok": True, "layout": summary})
+        logger.info("layout op={} agent_id={} layout={} panels={}", op, agent_id, slug, len(summary.get("panels", [])))
+        return _json_response({"ok": True, "layout_slug": slug, "layout": summary})
+
+    if op == "context":
+        # Per-client activity summary: who is connected, on which layout,
+        # and what they recently asked for. The live registry overrides the
+        # event-log-derived current layout for connected clients (fresher,
+        # and correct even if an event write was skipped).
+        events_path = _client_activity_events_path()
+        events = client_activity.read_client_activity_events(events_path) if events_path is not None else []
+        connected_infos = get_state().broadcaster.get_connected_client_infos()
+        live_layout_by_client_id = {info["client_id"]: info["active_layout_slug"] for info in connected_infos}
+        clients = client_activity.summarize_client_activity(events, set(live_layout_by_client_id))
+        for client_summary in clients:
+            live_layout = live_layout_by_client_id.get(client_summary["client_id"])
+            if live_layout:
+                client_summary["current_layout"] = live_layout
+        logger.info("layout op={} agent_id={} clients={}", op, agent_id, len(clients))
+        return _json_response({"ok": True, "clients": clients})
+
+    if op == "load":
+        requested = args_raw.get("layout")
+        if not isinstance(requested, str) or not requested:
+            error = ErrorResponse(detail="'load' requires a layout name in args.layout")
+            return _json_response(error.model_dump(), status_code=400)
+        if layout_dir is None:
+            error = ErrorResponse(detail="No primary agent configured for this workspace")
+            return _json_response(error.model_dump(), status_code=500)
+        slug, error_response = _resolve_requested_layout_slug(args_raw, layout_dir)
+        if error_response is not None:
+            return error_response
+        if slug is None:
+            # Unreachable: an explicit layout name (validated above) always
+            # resolves to a slug or an error response.
+            error = ErrorResponse(detail="Failed to resolve the requested layout")
+            return _json_response(error.model_dump(), status_code=500)
+        display_name = workspace_layouts.get_layout_display_name(layout_dir, slug)
+        # Target the explicitly-named client, else the client that most
+        # recently messaged the requesting agent, else every client.
+        explicit_client = args_raw.get("client")
+        if isinstance(explicit_client, str) and explicit_client:
+            target_client_id: str | None = explicit_client
+        else:
+            events_path = _client_activity_events_path()
+            events = client_activity.read_client_activity_events(events_path) if events_path is not None else []
+            target_client_id = client_activity.find_client_id_for_agent(events, agent_id)
+        get_state().broadcaster.broadcast_load_layout(slug, display_name, target_client_id)
+        logger.info("layout op={} agent_id={} layout={} target_client={}", op, agent_id, slug, target_client_id)
+        return _json_response({"ok": True, "layout": slug, "target_client_id": target_client_id})
 
     if not is_broadcasting_op(op):
         # Defensive: every non-list/inspect op should broadcast. Catch
@@ -1117,6 +1377,28 @@ def _layout_broadcast_endpoint() -> Response:
     layout_mutex: LayoutMutex = get_state().layout_mutex
     broadcaster: WebSocketBroadcaster = get_state().broadcaster
     if is_mutating_op(op):
+        # Mutating ops are layout-targeted: they require an explicit target
+        # layout and are delivered only to connected clients that have it
+        # active (those clients apply the mutation and autosave it into the
+        # named layout's file). With no such client the op cannot take
+        # effect anywhere, so fail loudly rather than broadcasting into the
+        # void.
+        requested_layout = args_raw.get("layout")
+        if not isinstance(requested_layout, str) or not requested_layout:
+            error = ErrorResponse(detail=f"Layout op {op!r} requires a target layout (pass --layout)")
+            return _json_response(error.model_dump(), status_code=400)
+        target_layout_slug, layout_error_response = _resolve_requested_layout_slug(args_raw, layout_dir)
+        if layout_error_response is not None:
+            return layout_error_response
+        if target_layout_slug is None or not broadcaster.has_client_on_layout(target_layout_slug):
+            error = ErrorResponse(
+                detail=(
+                    f"No connected client has layout '{requested_layout}' active. Ask the user to switch "
+                    f"to it, or run `layout.py load {requested_layout!r}` first."
+                )
+            )
+            return _json_response(error.model_dump(), status_code=412)
+        broadcast_args = {key: value for key, value in args_raw.items() if key != "layout"}
         holder = layout_mutex.try_acquire(agent_id, op, args_raw)
         if holder is not None:
             error_body = {
@@ -1129,7 +1411,9 @@ def _layout_broadcast_endpoint() -> Response:
             }
             return _json_response(error_body, status_code=409)
         try:
-            broadcaster.broadcast_layout_op(op, args_raw, requester_agent_id=agent_id)
+            broadcaster.broadcast_layout_op(
+                op, broadcast_args, requester_agent_id=agent_id, target_layout_slug=target_layout_slug
+            )
         finally:
             layout_mutex.release(agent_id, op)
     else:
@@ -1200,8 +1484,18 @@ def create_application(state: SystemInterfaceState) -> Flask:
         endpoint="_delete_attachment",
     )
     application.add_url_rule("/api/agents/<agent_id>/interrupt", view_func=_interrupt_agent_endpoint, methods=["POST"])
-    application.add_url_rule("/api/layout", view_func=_get_layout, methods=["GET"])
-    application.add_url_rule("/api/layout", view_func=_save_layout, methods=["POST"], endpoint="_save_layout")
+    application.add_url_rule("/api/layouts", view_func=_list_layouts_endpoint, methods=["GET"])
+    application.add_url_rule(
+        "/api/layouts", view_func=_save_layout_as_endpoint, methods=["POST"], endpoint="_save_layout_as"
+    )
+    application.add_url_rule("/api/layouts/<slug>", view_func=_get_named_layout_endpoint, methods=["GET"])
+    application.add_url_rule(
+        "/api/layouts/<slug>",
+        view_func=_autosave_named_layout_endpoint,
+        methods=["POST"],
+        endpoint="_autosave_named_layout",
+    )
+    application.add_url_rule("/api/layouts/<slug>/delete", view_func=_delete_named_layout_endpoint, methods=["POST"])
     application.add_url_rule("/api/agents/<agent_id>/screen", view_func=_get_screen_capture, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/destroy", view_func=_destroy_agent, methods=["POST"])
     application.add_url_rule("/api/agents/<agent_id>/start", view_func=_start_agent, methods=["POST"])
