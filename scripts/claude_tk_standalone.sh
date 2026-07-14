@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
-# PreToolUse hook: HARD-BLOCK a `tk`/`ticket` step command whose output the chat
-# progress view cannot read.
+# PreToolUse hook: HARD-BLOCK a `tk`/`ticket` start or close that is not run as
+# the ONLY command in the tool call.
 #
 # Why: the chat progress view reconstructs each step's structure and grouping
 # from two things in the transcript -- the tk command's visible OUTPUT (the
-# `Updated <id> -> <status>` line for a transition, the `Created <id>: <title>`
-# line for a create) and the command's POSITION. If a start/close is chained
-# with other commands (a leading `cd`, `&&`, `;`, `|`, `&`, a newline) or its
-# output is redirected (`>`, `>>`, `2>`, `&>`, `</dev/null`, ...), the transition
-# gets suppressed or mis-positioned, so the step never groups the work done under
-# it. That is exactly what produced the "Confirm the refresh button works for
-# you" bug, where the agent ran `cd /mngr/code; tk start <id> >/dev/null 2>&1;
-# sed ...`: the start output was swallowed, the step was never seen as open, and
-# its work + close fell out of the timeline as loose blocks. Forbidding the
-# chained/redirected form makes that class of bug structurally impossible at the
-# source.
+# `Updated <id> -> <status>` line) and the command's POSITION. If a start/close
+# is chained with other commands (a leading `cd`, `&&`, `;`, `|`, `&`, a
+# newline) or its output is redirected (`>`, `>>`, `2>`, `&>`, `</dev/null`,
+# ...), the transition gets suppressed or mis-positioned, so the step never
+# groups the work done under it. That is exactly what produced the
+# "Confirm the refresh button works for you" bug, where the agent ran
+# `cd /mngr/code; tk start <id> >/dev/null 2>&1; sed ...`: the start output was
+# swallowed, the step was never seen as open, and its work + close fell out of
+# the timeline as loose blocks. Forbidding the chained/redirected form makes
+# that class of bug structurally impossible at the source.
 #
 # tk uses the TICKETS_DIR env var (absolute) and works from any directory, so a
 # `cd` to the repo root is never needed.
 #
-# Scope: `start` and `close` must be standalone. `create` may be batched (several
-# in one tool call), but is blocked when its output is redirected (which hides
-# the `Created` line) or when a single `create` carries more than one `--step`
-# (tk makes only one step and silently keeps just the last title).
+# Scope: ONLY `start` and `close`. `create` is exempt -- agents legitimately
+# batch several `tk create --step ...` up front when declaring the plan, and a
+# create carries no positional transition the view must group around.
 #
 # Blocks via exit 2 with a stderr message the agent sees (mirrors
 # claude_prevent_commit_rewrite.sh). Skipped for subagents (they manage their
