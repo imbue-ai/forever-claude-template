@@ -37,8 +37,11 @@ enabled, three pieces work together (see `libs/github_sync/README.md`):
    such program exists -- expected before enable).
 
 2. **Request GitHub permissions** through latchkey (see the latchkey skill
-   for the permission-request mechanics). Both scopes are needed, in one
-   combined ask to the user:
+   for the permission-request mechanics). GitHub exposes two latchkey scopes
+   and a permission request carries exactly one scope, so this is two
+   requests -- **fire both back-to-back, before any other GitHub call**, so
+   the user approves them in a single sitting. Never dribble out further
+   requests later in the flow.
 
    ```bash
    latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
@@ -46,15 +49,47 @@ enabled, three pieces work together (see `libs/github_sync/README.md`):
      -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "type": "predefined", "payload": {"scope": "github-git", "permissions": ["github-git-read", "github-git-write"]}, "rationale": "GitHub sync: push this workspace'"'"'s branches and runtime state to your private sync repo."}'
    latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
      -H 'Content-Type: application/json' \
-     -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "type": "predefined", "payload": {"scope": "github-rest-api", "permissions": ["github-read-repos", "github-write-all"]}, "rationale": "GitHub sync: create the private sync repo (needs github-write-all) and verify it stays private (github-read-repos)."}'
+     -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "type": "predefined", "payload": {"scope": "github-rest-api", "permissions": ["github-read-user", "github-read-repos", "github-write-all"]}, "rationale": "GitHub sync: create the private sync repo (needs github-write-all), confirm which GitHub account it lands under (github-read-user), and verify it stays private (github-read-repos)."}'
    ```
 
-   Wait for the approval system message before continuing.
+   This exact permission set is what the flow needs -- do not trim it, or the
+   user gets asked again mid-flow:
+
+   - `github-write-all` -- repo creation (`POST /user/repos`). The narrower
+     `github-write-repos` covers only existing-repo (`/repos/{owner}/{repo}`)
+     paths and is **not** enough to create a repo. It also covers the
+     optional repo deletion on disable.
+   - `github-read-repos` -- the recurring private-visibility check
+     (`GET /repos/{owner}/{repo}`), which the service repeats forever.
+   - `github-read-user` -- `GET /user`, to name the account the repo will be
+     created under (step 3) and as the one legitimate "did the grants land?"
+     probe (below).
+   - `github-git-read` / `github-git-write` -- clone/fetch and push.
+
+   Then **wait for both approval system messages** ("Your permission request
+   for GitHub (git) / (REST API) was granted..."). Those messages are the
+   authoritative signal; they are what tells you to proceed.
+
+   **Do not treat a rejected API call as evidence that a grant is missing.**
+   `{"error": "Error: Request not permitted by the user."}` means *that
+   endpoint* is not covered by the granted permissions -- it does not mean
+   the approval failed to arrive. Probing an endpoint outside the set above
+   (e.g. `GET /user/repos`, which needs broader read access) will be rejected
+   even when everything is granted correctly. If you want to sanity-check
+   after the grant messages arrive, the only probe to use is:
+
+   ```bash
+   latchkey curl -s https://api.github.com/user
+   ```
+
+   Never re-ask the user for a permission you have already been told was
+   granted; re-read this list and check *which endpoint* you called instead.
 
 3. **Pick the repo.** Default: create a brand-new private repo named after
-   the workspace (`$MINDS_WORKSPACE_NAME`). Confirm the name and owner with
-   the user first; owner defaults to their GitHub account, but they can name
-   an org. One exception: if `git remote get-url origin` already points at a
+   the workspace (`$MINDS_WORKSPACE_NAME`), owned by the authenticated GitHub
+   account (read its `login` from `latchkey curl -s https://api.github.com/user`).
+   Confirm the name and owner with the user first; they can name an org
+   instead. One exception: if `git remote get-url origin` already points at a
    user-owned repo (not `imbue-ai/default-workspace-template` or another
    shared template), ask whether to reuse it or create a fresh one --
    recommend a fresh dedicated repo unless they have a specific reason.
@@ -71,12 +106,8 @@ enabled, three pieces work together (see `libs/github_sync/README.md`):
    (For an org: `POST https://api.github.com/orgs/<org>/repos`.) On a 422
    name-taken error, append `-2`, `-3`, ... and retry. The response JSON must
    contain `"private": true` -- if it does not, delete/abandon the repo and
-   stop; do not proceed with a public repo.
-
-   Repo creation (`POST /user/repos`) needs `github-write-all`, not
-   `github-write-repos`: the scoped `github-write-repos` permission only covers
-   existing-repo (`/repos/{owner}/{repo}`) paths, which is why step 2 requests
-   `github-write-all`.
+   stop; do not proceed with a public repo. The response's `full_name` is the
+   authoritative `<owner>/<repo>` to use from here on.
 
 5. **Point origin at it and record the config**:
 
@@ -181,9 +212,10 @@ repo (recommend keeping it -- it costs nothing and preserves history).
 3. Delete `github_sync.toml`.
 4. Leave the local `runtime/` worktree and its history intact (harmless, and
    re-enabling picks it right back up).
-5. If the user chose to delete the remote repo, try
-   `latchkey curl -s -X DELETE https://api.github.com/repos/<owner>/<repo>`;
-   deleting repos needs an extra GitHub permission, so if it fails, point
-   them at the repo's GitHub settings page to delete it themselves.
+5. If the user chose to delete the remote repo:
+   `latchkey curl -s -X DELETE https://api.github.com/repos/<owner>/<repo>`
+   (covered by the `github-write-all` granted at enable). If the grant has
+   since been revoked, do not re-request it just for this -- point them at
+   the repo's GitHub settings page to delete it themselves.
 6. Commit the removal. Note that this commit is NOT auto-pushed (the hook is
    inert again).
