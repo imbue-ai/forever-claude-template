@@ -18,7 +18,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.primitives import WaitingReason
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
@@ -341,42 +340,18 @@ def get_descendant_process_names(root_pid: str, ps_output: str) -> list[str]:
 
 
 @pure
-def _find_process_pid_by_name(
-    root_pid: str,
-    expected_process_name: str,
-    children_by_ppid: dict[str, list[str]],
-    comm_by_pid: dict[str, str],
-) -> str | None:
-    """PID of root_pid or its first matching descendant whose comm equals expected_process_name (BFS).
-
-    The root is included so an agent whose expected process is the pane's own top
-    process (started directly, not under a shell) is still found, in addition to the
-    common case where it runs as a descendant of the pane's shell.
-    """
-    queue = [root_pid]
-    while queue:
-        pid = queue.pop(0)
-        if comm_by_pid.get(pid) == expected_process_name:
-            return pid
-        queue.extend(children_by_ppid.get(pid, []))
-    return None
-
-
-@pure
-def determine_lifecycle_probe_result(
+def determine_lifecycle_state(
     tmux_info: str | None,
     is_active: bool,
     expected_process_name: str,
     ps_output: str,
     is_agent_type_known: bool = True,
-) -> LifecycleProbeResult:
-    """Determine agent lifecycle state and main process PID from tmux info and ps output.
+) -> AgentLifecycleState:
+    """Determine agent lifecycle state from tmux info and ps output.
 
     This is a pure function that replicates the logic from
-    BaseAgent.get_lifecycle_state() using pre-collected data instead of making
-    SSH calls. The PID is that of the running ``expected_process_name`` process
-    when the agent is RUNNING or WAITING (else None), drawn from the same
-    already-parsed ps tree -- no extra probe.
+    BaseAgent.get_lifecycle_state() using pre-collected data instead of
+    making SSH calls.
 
     When is_agent_type_known is False, the expected_process_name cannot be
     trusted (because we don't know what binary the agent type runs). In that
@@ -384,16 +359,16 @@ def determine_lifecycle_probe_result(
     RUNNING_UNKNOWN_AGENT_TYPE instead.
     """
     if not tmux_info:
-        return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
+        return AgentLifecycleState.STOPPED
 
     parts = tmux_info.split("|")
     if len(parts) != 3:
-        return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
+        return AgentLifecycleState.STOPPED
 
     pane_dead, current_command, pane_pid = parts
 
     if pane_dead == "1":
-        return LifecycleProbeResult(state=AgentLifecycleState.DONE)
+        return AgentLifecycleState.DONE
 
     # Parse the ps output once for all subsequent checks. We use ps as the
     # authoritative source for process names because tmux's pane_current_command
@@ -401,22 +376,16 @@ def determine_lifecycle_probe_result(
     # Claude Code sets it to its version string like "2.1.73"), which tmux
     # picks up while ps -o comm= still reports the original executable name.
     children_by_ppid, comm_by_pid = _parse_ps_output(ps_output)
-    main_pid_str = _find_process_pid_by_name(pane_pid, expected_process_name, children_by_ppid, comm_by_pid)
-    main_pid = int(main_pid_str) if main_pid_str is not None else None
-    running_result = LifecycleProbeResult(
-        state=AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING,
-        main_pid=main_pid,
-    )
 
     # Check tmux's report first (fast path for well-behaved processes)
     if current_command == expected_process_name:
-        return running_result
+        return AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING
 
     # Check descendant processes via ps (authoritative for modified titles)
     descendant_names = _collect_descendant_names(pane_pid, children_by_ppid, comm_by_pid)
 
     if expected_process_name in descendant_names:
-        return running_result
+        return AgentLifecycleState.RUNNING if is_active else AgentLifecycleState.WAITING
 
     # When the agent type is unknown, we cannot distinguish between
     # "replaced by a different program" and "running the correct program
@@ -428,7 +397,7 @@ def determine_lifecycle_probe_result(
     # Check for non-shell descendant processes
     non_shell_processes = [p for p in descendant_names if p not in SHELL_COMMANDS]
     if non_shell_processes:
-        return LifecycleProbeResult(state=replaced_state)
+        return replaced_state
 
     # Agent is not running. Determine DONE vs REPLACED by checking whether
     # the pane process is a shell (agent exited normally) or something else
@@ -436,9 +405,9 @@ def determine_lifecycle_probe_result(
     # since tmux may report a stale modified title.
     pane_comm = comm_by_pid.get(pane_pid)
     if current_command in SHELL_COMMANDS or (pane_comm is not None and pane_comm in SHELL_COMMANDS):
-        return LifecycleProbeResult(state=AgentLifecycleState.DONE)
+        return AgentLifecycleState.DONE
 
-    return LifecycleProbeResult(state=replaced_state)
+    return replaced_state
 
 
 @pure

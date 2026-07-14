@@ -26,7 +26,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
-from imbue.mngr.hosts.common import determine_lifecycle_probe_result
+from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
@@ -41,7 +41,6 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import LifecycleProbeResult
 from imbue.mngr.utils.env_utils import parse_env_file
 
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -214,19 +213,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         """Get the lifecycle state of this agent using tmux format variables.
 
         Collects tmux state and ps output via SSH, then delegates to the shared
-        determine_lifecycle_probe_result pure function for the actual state logic.
-        """
-        return self.probe_lifecycle().state
-
-    def probe_lifecycle(self) -> LifecycleProbeResult:
-        """Get the lifecycle state and the agent's main process PID in one probe.
-
-        Collects tmux state and ps output via SSH (a single probe, shared with
-        get_lifecycle_state), then delegates to the shared pure function. The PID
-        is that of the running agent process (e.g. ``claude``) when the agent is
-        RUNNING/WAITING, else None. It is a PID in the agent host's namespace, so
-        callers watching the process for spontaneous death must only do so when
-        that host is the local machine.
+        determine_lifecycle_state pure function for the actual state logic.
         """
         try:
             # Get pane state and pid in one command.
@@ -261,20 +248,18 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             expected_process_name = self.get_expected_process_name()
             is_type_known = check_agent_type_known(str(self.agent_type), self.mngr_ctx.config)
 
-            probe = determine_lifecycle_probe_result(
+            state = determine_lifecycle_state(
                 tmux_info=tmux_info if tmux_info else None,
                 is_active=is_active,
                 expected_process_name=expected_process_name,
                 ps_output=ps_output,
                 is_agent_type_known=is_type_known,
             )
-            logger.trace(
-                "Determined agent {} lifecycle state: {} (main_pid={})", self.name, probe.state, probe.main_pid
-            )
-            return probe
+            logger.trace("Determined agent {} lifecycle state: {}", self.name, state)
+            return state
         except HostConnectionError:
             logger.trace("Determined agent {} lifecycle state: STOPPED (host connection error)", self.name)
-            return LifecycleProbeResult(state=AgentLifecycleState.STOPPED)
+            return AgentLifecycleState.STOPPED
 
     def _build_lifecycle_probe_command(self) -> str:
         """Build the command that probes the agent's primary window for lifecycle state."""

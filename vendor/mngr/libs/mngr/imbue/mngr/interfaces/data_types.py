@@ -553,7 +553,6 @@ class HostDetails(FrozenModel):
     id: HostId = Field(description="Host ID")
     name: str = Field(description="Host name")
     provider_name: ProviderInstanceName = Field(description="Provider that owns the host")
-    is_local: bool = Field(description="Whether the host is the local machine (rather than a remote host)")
 
     # Extended fields (all optional)
     state: HostState | None = Field(default=None, description="Current host state (RUNNING, STOPPED, etc.)")
@@ -611,14 +610,6 @@ class AgentDetails(FrozenModel):
 
     state: AgentLifecycleState = Field(
         description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)"
-    )
-    main_pid: int | None = Field(
-        default=None,
-        description=(
-            "PID of the agent's main process (e.g. claude) in its host's PID namespace, "
-            "populated when the agent is running; None for stopped agents. Only watchable "
-            "in-process (e.g. via psutil) when the host is local (host.is_local)."
-        ),
     )
     url: str | None = Field(default=None, description="Agent URL (reported)")
     start_time: datetime | None = Field(default=None, description="Last start time (reported)")
