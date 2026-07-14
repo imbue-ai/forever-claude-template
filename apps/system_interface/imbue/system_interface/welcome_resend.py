@@ -42,7 +42,7 @@ from loguru import logger as _loguru_logger
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import AgentId
 from imbue.system_interface.agent_discovery import AgentInfo
-from imbue.system_interface.session_watcher import AgentSessionWatcher
+from imbue.system_interface.claude_session_watcher import ClaudeSessionWatcher
 
 logger = _loguru_logger
 
@@ -157,13 +157,13 @@ def _default_read_assistant_transcript(agent: AgentInfo) -> str | None:
     """Return the concatenated text of every assistant turn in the agent's transcript.
 
     Reads the agent's session files the same way the `/events` endpoint does
-    (via `AgentSessionWatcher`) and joins the `assistant_message` text. Only
+    (via `ClaudeSessionWatcher`) and joins the `assistant_message` text. Only
     assistant turns are included: the `/welcome` skill expansion is a *user*
     message that also contains the welcome text verbatim, so including user
     turns would always look like a delivered welcome. Returns None when the
     transcript cannot be read so the caller treats the welcome as not-yet-delivered.
     """
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id=agent.id,
         agent_state_dir=agent.agent_state_dir,
         claude_config_dir=agent.claude_config_dir,

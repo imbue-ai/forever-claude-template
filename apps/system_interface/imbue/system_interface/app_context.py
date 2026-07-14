@@ -15,7 +15,7 @@ from imbue.system_interface.codex_session_watcher import CodexSessionWatcher
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.layout_ops import LayoutMutex
-from imbue.system_interface.session_watcher import AgentSessionWatcher
+from imbue.system_interface.claude_session_watcher import ClaudeSessionWatcher
 from imbue.system_interface.welcome_resend import WelcomeResender
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
@@ -23,7 +23,7 @@ from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 # with the same public read/callback API: the claude JSONL watcher or the codex
 # common-transcript watcher. The registry and the server treat them
 # interchangeably through this union.
-AnySessionWatcher = AgentSessionWatcher | CodexSessionWatcher
+AnySessionWatcher = ClaudeSessionWatcher | CodexSessionWatcher
 
 
 def _is_codex_agent(agent_info: AgentInfo) -> bool:
@@ -137,7 +137,7 @@ class SystemInterfaceState(MutableModel):
                     on_events=on_events,
                 )
             else:
-                watcher = AgentSessionWatcher(
+                watcher = ClaudeSessionWatcher(
                     agent_id=agent_info.id,
                     agent_state_dir=agent_info.agent_state_dir,
                     claude_config_dir=agent_info.claude_config_dir,

@@ -75,7 +75,7 @@ from typing import Callable
 from loguru import logger as _loguru_logger
 from watchdog.observers import Observer
 
-from imbue.system_interface.session_parser import parse_session_lines
+from imbue.system_interface.claude_session_parser import parse_claude_session_lines
 from imbue.system_interface.watcher_common import POLL_INTERVAL_SECONDS
 from imbue.system_interface.watcher_common import WakeOnChangeHandler
 
@@ -218,7 +218,7 @@ class SessionFileState:
         self.emitted_count: int = 0
 
 
-class AgentSessionWatcher:
+class ClaudeSessionWatcher:
     """Watches all session files for a single mngr agent and emits parsed events."""
 
     def __init__(
@@ -650,7 +650,7 @@ class AgentSessionWatcher:
         except UnicodeDecodeError as e:
             logger.warning("UTF-8 decode error re-reading {}@{}: {}", state.file_path, locator.byte_offset, e)
             return []
-        return parse_session_lines(
+        return parse_claude_session_lines(
             decoded.splitlines(),
             existing_event_ids=None,
             tool_name_by_call_id=self._tool_name_by_call_id,
@@ -726,7 +726,7 @@ class AgentSessionWatcher:
                 except UnicodeDecodeError as e:
                     logger.warning("UTF-8 decode error in session file {}: {}", state.file_path, e)
                     continue
-                line_events = parse_session_lines(
+                line_events = parse_claude_session_lines(
                     decoded_line.splitlines(),
                     existing_event_ids=self._existing_event_ids,
                     tool_name_by_call_id=self._tool_name_by_call_id,

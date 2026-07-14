@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from imbue.system_interface.session_watcher import AgentSessionWatcher
+from imbue.system_interface.claude_session_watcher import ClaudeSessionWatcher
 
 
 def _user_event(index: int, content: str | None = None) -> dict[str, Any]:
@@ -36,8 +36,8 @@ def _setup_empty_agent(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 def _make_watcher(
     agent_state_dir: Path, claude_config_dir: Path, collected: list[dict[str, Any]]
-) -> AgentSessionWatcher:
-    return AgentSessionWatcher(
+) -> ClaudeSessionWatcher:
+    return ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -92,7 +92,7 @@ def test_get_all_events_returns_parsed_events(tmp_path: Path) -> None:
     agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, events)
     collected: list[tuple[str, list[dict[str, Any]]]] = []
 
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -118,7 +118,7 @@ def test_get_all_events_with_tail(tmp_path: Path) -> None:
 
     agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, events)
 
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -144,7 +144,7 @@ def test_get_backfill_events(tmp_path: Path) -> None:
 
     agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, events)
 
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -171,7 +171,7 @@ def test_watcher_detects_new_events(tmp_path: Path) -> None:
     agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, events)
     collected: list[tuple[str, list[dict[str, Any]]]] = []
 
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -223,7 +223,7 @@ def test_watcher_handles_missing_history_file(tmp_path: Path) -> None:
     agent_state_dir.mkdir()
     claude_config_dir = tmp_path / "claude_config"
 
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -392,7 +392,7 @@ def test_poll_still_emits_events_parsed_by_a_concurrent_get_all_events(tmp_path:
 def test_get_all_events_caches_parsed_events(tmp_path: Path) -> None:
     """Unchanged files are not re-parsed across calls (issue D)."""
     agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, [_user_event(i) for i in range(5)])
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -411,7 +411,7 @@ def test_get_all_events_caches_parsed_events(tmp_path: Path) -> None:
 def test_get_all_events_parses_only_new_tail(tmp_path: Path) -> None:
     """Appending to a file only parses the new tail, reusing cached events (issue D)."""
     agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [_user_event(i) for i in range(3)])
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -441,7 +441,7 @@ def test_concurrent_reads_and_discovery_do_not_raise(tmp_path: Path) -> None:
     agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, [_user_event(0)])
     projects_dir = claude_config_dir / "projects"
     history_file = agent_state_dir / "claude_session_id_history"
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -610,7 +610,7 @@ def test_running_subagent_gets_rich_card_from_disk_linkage(tmp_path: Path) -> No
         description="explore foo",
     )
 
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -667,7 +667,7 @@ def test_multiple_agent_tool_uses_link_to_their_subagents(tmp_path: Path) -> Non
         description="first sub",
     )
 
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -714,7 +714,7 @@ def test_falls_back_to_tool_result_linkage_when_subagent_file_absent(tmp_path: P
     ]
 
     agent_state_dir, claude_config_dir, _ = _setup_agent(tmp_path, parent_events)
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -773,7 +773,7 @@ def test_late_subagent_discovery_rebroadcasts_enriched_parent(tmp_path: Path) ->
     parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
 
     collected: list[tuple[str, list[dict[str, Any]]]] = []
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -836,7 +836,7 @@ def test_inorder_subagent_discovery_does_not_rebroadcast(tmp_path: Path) -> None
     parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
 
     collected: list[tuple[str, list[dict[str, Any]]]] = []
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -901,7 +901,7 @@ def test_tool_result_in_later_poll_relinks_cached_parent(tmp_path: Path) -> None
     parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
 
     collected: list[tuple[str, list[dict[str, Any]]]] = []
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -966,7 +966,7 @@ def test_parent_already_on_disk_at_start_upgrades_card_when_subagent_links(tmp_p
     parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
 
     collected: list[tuple[str, list[dict[str, Any]]]] = []
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -1028,7 +1028,7 @@ def test_tool_result_before_meta_discovery_does_not_strand_card(tmp_path: Path) 
     parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
 
     collected: list[tuple[str, list[dict[str, Any]]]] = []
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -1093,7 +1093,7 @@ def test_subagent_discovered_after_history_file_disappears(tmp_path: Path) -> No
     parent_session_file = claude_config_dir / "projects" / "hash123" / f"{session_id}.jsonl"
 
     collected: list[tuple[str, list[dict[str, Any]]]] = []
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -1129,7 +1129,7 @@ def test_subagent_discovered_after_history_file_disappears(tmp_path: Path) -> No
 def test_is_main_session_event_excludes_subagent_sessions(tmp_path: Path) -> None:
     """The predicate that keeps subagent-session events out of the main stream."""
     agent_state_dir, claude_config_dir, session_id = _setup_agent(tmp_path, [])
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -1152,7 +1152,7 @@ def test_watcher_handles_missing_session_file(tmp_path: Path) -> None:
     # Write history with a session ID whose file doesn't exist
     (agent_state_dir / "claude_session_id_history").write_text("nonexistent-session\n")
 
-    watcher = AgentSessionWatcher(
+    watcher = ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -1235,8 +1235,8 @@ def _build_two_file_agent(tmp_path: Path, file1_lines: int, file2_lines: int) ->
     return agent_state_dir, claude_config_dir
 
 
-def _make_oracle_watcher(agent_state_dir: Path, claude_config_dir: Path, capacity: int) -> AgentSessionWatcher:
-    return AgentSessionWatcher(
+def _make_oracle_watcher(agent_state_dir: Path, claude_config_dir: Path, capacity: int) -> ClaudeSessionWatcher:
+    return ClaudeSessionWatcher(
         agent_id="test-agent",
         agent_state_dir=agent_state_dir,
         claude_config_dir=claude_config_dir,
@@ -1352,7 +1352,7 @@ def test_backfill_of_evicted_history_is_correct(tmp_path: Path) -> None:
             assert event["text"] == oracle_event["text"]
 
 
-class _CountingWatcher(AgentSessionWatcher):
+class _CountingWatcher(ClaudeSessionWatcher):
     """Counts line re-reads so a test can assert backfill disk work is bounded."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

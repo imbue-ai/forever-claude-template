@@ -1148,7 +1148,7 @@ class AgentManager:
         """Recompute transcript-derived activity signals from the full event list.
 
         Called by ``server._get_or_create_watcher`` whenever the
-        :class:`AgentSessionWatcher` learns of new events. Cheap to call: short
+        :class:`ClaudeSessionWatcher` learns of new events. Cheap to call: short
         circuits when both the unmatched-tool-use boolean and the last event
         type are unchanged.
 

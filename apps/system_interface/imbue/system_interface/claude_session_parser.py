@@ -246,7 +246,7 @@ def _is_resume_no_response_reply(message: dict[str, Any]) -> bool:
     return _extract_text_content(message.get("content")).strip() == _NO_RESPONSE_REQUESTED_TEXT
 
 
-def parse_session_lines(
+def parse_claude_session_lines(
     lines: list[str],
     existing_event_ids: set[str] | None = None,
     tool_name_by_call_id: dict[str, str] | None = None,

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from imbue.system_interface.session_parser import parse_session_lines
+from imbue.system_interface.claude_session_parser import parse_claude_session_lines
 
 
 def _make_user_line(uuid: str, timestamp: str, content: str) -> str:
@@ -71,7 +71,7 @@ def _make_tool_result_line(uuid: str, timestamp: str, tool_use_id: str, output: 
 
 def test_parse_user_message() -> None:
     lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", "Hello")]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["type"] == "user_message"
     assert events[0]["content"] == "Hello"
@@ -80,7 +80,7 @@ def test_parse_user_message() -> None:
 
 def test_parse_assistant_message() -> None:
     lines = [_make_assistant_line("uuid-2", "2026-01-01T00:00:01Z", "Hi there!")]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["type"] == "assistant_message"
     assert events[0]["text"] == "Hi there!"
@@ -97,7 +97,7 @@ def test_parse_assistant_with_tool_calls() -> None:
             tool_calls=[{"id": "toolu_1", "name": "Read", "input": {"file": "test.txt"}}],
         ),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert len(events[0]["tool_calls"]) == 1
     assert events[0]["tool_calls"][0]["tool_name"] == "Read"
@@ -107,7 +107,7 @@ def test_parse_assistant_with_tool_calls() -> None:
 def test_parse_tool_result() -> None:
     tool_name_by_call_id: dict[str, str] = {"toolu_1": "Read"}
     lines = [_make_tool_result_line("uuid-3", "2026-01-01T00:00:02Z", "toolu_1", "file contents")]
-    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    events = parse_claude_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
     assert len(events) == 1
     assert events[0]["type"] == "tool_result"
     assert events[0]["tool_name"] == "Read"
@@ -147,7 +147,7 @@ def test_parse_queued_command_attachment_emits_user_message() -> None:
     agent received and answered the message.
     """
     lines = [_make_queued_command_line("uuid-q", "2026-01-01T00:00:00Z", "actually do gmail instead")]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["type"] == "user_message"
     assert events[0]["content"] == "actually do gmail instead"
@@ -162,7 +162,7 @@ def test_queued_command_reconciles_alongside_normal_turns() -> None:
         _make_queued_command_line("uuid-3", "2026-01-01T00:00:02Z", "actually do gmail instead"),
         _make_assistant_line("uuid-4", "2026-01-01T00:00:03Z", "Switching to Gmail."),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert [e["type"] for e in events] == [
         "user_message",
         "assistant_message",
@@ -182,7 +182,7 @@ def test_queued_task_notification_attachment_not_emitted() -> None:
             command_mode="task-notification",
         )
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert events == []
 
 
@@ -198,14 +198,14 @@ def test_non_queued_command_attachment_ignored() -> None:
             }
         )
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert events == []
 
 
 def test_blank_queued_command_not_emitted() -> None:
     """A whitespace-only queued prompt is dropped, like a blank user message."""
     lines = [_make_queued_command_line("uuid-b", "2026-01-01T00:00:00Z", "   ")]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert events == []
 
 
@@ -235,7 +235,7 @@ def test_slash_command_expansion_normalized_to_typed_text() -> None:
     so reconciliation (whitespace-normalized content match) succeeds.
     """
     lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", _CUSTOM_COMMAND_EXPANSION)]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["type"] == "user_message"
     assert events[0]["content"] == "/rebase-merge origin/main"
@@ -246,7 +246,7 @@ def test_slash_command_expansion_with_empty_args_drops_trailing_space() -> None:
     just '/compact' -- the rebuilt text carries no dangling whitespace around the
     (absent) args."""
     lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", _BUILTIN_COMMAND_EXPANSION)]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["content"] == "/compact"
 
@@ -256,7 +256,7 @@ def test_queued_slash_command_expansion_normalized() -> None:
     on the queued_command path, so it too reconciles against its optimistic
     bubble."""
     lines = [_make_queued_command_line("uuid-q", "2026-01-01T00:00:00Z", _CUSTOM_COMMAND_EXPANSION)]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["content"] == "/rebase-merge origin/main"
 
@@ -266,7 +266,7 @@ def test_non_command_text_with_angle_brackets_untouched() -> None:
     <command-name> tag passes through unchanged."""
     text = "does <Foo> compile when T <: Bar?"
     lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", text)]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["content"] == text
 
@@ -278,7 +278,7 @@ def test_parse_conversation_sequence() -> None:
         _make_user_line("uuid-3", "2026-01-01T00:00:02Z", "How are you?"),
         _make_assistant_line("uuid-4", "2026-01-01T00:00:03Z", "Good!"),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 4
     assert events[0]["type"] == "user_message"
     assert events[1]["type"] == "assistant_message"
@@ -289,7 +289,7 @@ def test_parse_conversation_sequence() -> None:
 def test_deduplication() -> None:
     lines = [_make_user_line("uuid-1", "2026-01-01T00:00:00Z", "Hello")]
     existing_ids = {"uuid-1-user"}
-    events = parse_session_lines(lines, existing_event_ids=existing_ids)
+    events = parse_claude_session_lines(lines, existing_event_ids=existing_ids)
     assert len(events) == 0
 
 
@@ -299,21 +299,21 @@ def test_skips_non_conversation_events() -> None:
         json.dumps({"type": "file-history-snapshot", "uuid": "uuid-f", "timestamp": "2026-01-01T00:00:00Z"}),
         _make_user_line("uuid-1", "2026-01-01T00:00:01Z", "Hello"),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["type"] == "user_message"
 
 
 def test_skips_blank_and_invalid_lines() -> None:
     lines = ["", "  ", "not json", _make_user_line("uuid-1", "2026-01-01T00:00:00Z", "Hello")]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
 
 
 def test_tool_result_only_user_message_not_emitted_as_user_message() -> None:
     """A user message containing only tool results should not produce a user_message event."""
     lines = [_make_tool_result_line("uuid-3", "2026-01-01T00:00:02Z", "toolu_1", "result")]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 1
     assert events[0]["type"] == "tool_result"
 
@@ -346,7 +346,7 @@ def test_interrupt_sentinel_user_message_not_emitted() -> None:
             },
         }
     )
-    events = parse_session_lines([string_form, array_form])
+    events = parse_claude_session_lines([string_form, array_form])
     assert events == []
 
 
@@ -355,7 +355,7 @@ def test_events_sorted_by_timestamp() -> None:
         _make_assistant_line("uuid-2", "2026-01-01T00:00:02Z", "Second"),
         _make_user_line("uuid-1", "2026-01-01T00:00:01Z", "First"),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert len(events) == 2
     assert events[0]["type"] == "user_message"
     assert events[1]["type"] == "assistant_message"
@@ -371,7 +371,7 @@ def test_tool_input_preview_truncation() -> None:
             tool_calls=[{"id": "toolu_1", "name": "Read", "input": long_input}],
         ),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     preview = events[0]["tool_calls"][0]["input_preview"]
     assert len(preview) <= 203  # 200 + "..."
 
@@ -380,7 +380,7 @@ def test_tool_output_truncation() -> None:
     long_output = "x" * 3000
     tool_name_by_call_id: dict[str, str] = {"toolu_1": "Bash"}
     lines = [_make_tool_result_line("uuid-1", "2026-01-01T00:00:00Z", "toolu_1", long_output)]
-    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    events = parse_claude_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
     assert events[0]["output"].endswith("...")
     assert len(events[0]["output"]) <= 2003
 
@@ -400,7 +400,7 @@ def test_agent_tool_use_exposes_description_and_subagent_type() -> None:
             ],
         ),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     tc = events[0]["tool_calls"][0]
     assert tc["description"] == "explore foo"
     assert tc["subagent_type"] == "Explore"
@@ -415,7 +415,7 @@ def test_non_agent_tool_use_has_no_description_or_subagent_type() -> None:
             tool_calls=[{"id": "toolu_read", "name": "Read", "input": {"file_path": "/x", "description": "nope"}}],
         ),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     tc = events[0]["tool_calls"][0]
     assert "description" not in tc
     assert "subagent_type" not in tc
@@ -445,7 +445,7 @@ def test_agent_tool_result_uses_structured_agent_id() -> None:
             structured_agent_id="abc123",
         ),
     ]
-    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    events = parse_claude_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
     assert len(events) == 1
     assert events[0]["type"] == "tool_result"
     assert events[0]["subagent_id"] == "abc123"
@@ -462,7 +462,7 @@ def test_agent_tool_result_falls_back_to_text_trailer() -> None:
             structured_agent_id=None,
         ),
     ]
-    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    events = parse_claude_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
     assert len(events) == 1
     assert events[0]["subagent_id"] == "legacy999"
 
@@ -478,7 +478,7 @@ def test_agent_tool_result_without_any_agent_id_omits_field() -> None:
             structured_agent_id=None,
         ),
     ]
-    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    events = parse_claude_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
     assert len(events) == 1
     assert "subagent_id" not in events[0]
 
@@ -494,7 +494,7 @@ def test_agent_tool_result_prefers_structured_over_trailer() -> None:
             structured_agent_id="structuredWins",
         ),
     ]
-    events = parse_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
+    events = parse_claude_session_lines(lines, tool_name_by_call_id=tool_name_by_call_id)
     assert events[0]["subagent_id"] == "structuredWins"
 
 
@@ -543,7 +543,7 @@ def test_agent_tool_result_prefers_structured_over_trailer() -> None:
 )
 def test_assistant_message_auth_error_flag(text: str, expected: bool) -> None:
     lines = [_make_assistant_line("uuid-1", "2026-01-01T00:00:00Z", text)]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert events[0]["is_auth_error"] is expected
 
 
@@ -562,7 +562,7 @@ def test_user_message_with_array_content() -> None:
             },
         }
     )
-    events = parse_session_lines([line])
+    events = parse_claude_session_lines([line])
     assert len(events) == 1
     assert events[0]["content"] == "Part one\nPart two"
 
@@ -584,7 +584,7 @@ def test_resume_continuation_user_message_not_emitted() -> None:
             },
         }
     )
-    assert parse_session_lines([line]) == []
+    assert parse_claude_session_lines([line]) == []
 
 
 def test_synthetic_model_assistant_message_not_emitted() -> None:
@@ -606,7 +606,7 @@ def test_synthetic_model_assistant_message_not_emitted() -> None:
             },
         }
     )
-    assert parse_session_lines([line]) == []
+    assert parse_claude_session_lines([line]) == []
 
 
 def test_resume_marker_filter_is_gated_and_does_not_over_hide() -> None:
@@ -616,7 +616,7 @@ def test_resume_marker_filter_is_gated_and_does_not_over_hide() -> None:
     """
     typed = _make_user_line("uuid-1", "2026-01-01T00:00:00Z", "Continue from where you left off.")
     real_reply = _make_assistant_line("uuid-2", "2026-01-01T00:00:01Z", "No response requested.")
-    events = parse_session_lines([typed, real_reply])
+    events = parse_claude_session_lines([typed, real_reply])
     assert [e["type"] for e in events] == ["user_message", "assistant_message"]
     assert events[0]["content"] == "Continue from where you left off."
     assert events[1]["text"] == "No response requested."
@@ -643,7 +643,7 @@ def test_synthetic_api_error_message_is_still_shown() -> None:
             },
         }
     )
-    events = parse_session_lines([line])
+    events = parse_claude_session_lines([line])
     assert [e["type"] for e in events] == ["assistant_message"]
     assert events[0]["text"] == error_text
 
@@ -654,7 +654,7 @@ def test_tool_output_preserves_tk_transition_past_truncation() -> None:
     step transition when a tk command is batched after verbose output."""
     output = ("x" * 5000) + "\nUpdated s1 -> closed\n"
     lines = [_make_tool_result_line("uuid-trunc", "2026-01-01T00:00:02Z", "toolu_1", output)]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     assert events[0]["type"] == "tool_result"
     assert "Updated s1 -> closed" in events[0]["output"]
     # Still truncated overall (not the full verbose output).
@@ -672,7 +672,7 @@ def test_tool_output_preserves_tk_step_decoration_past_truncation() -> None:
         + "tk-step cod-step-abcd summary: Wired the theme into the toggle.\n"
     )
     lines = [_make_tool_result_line("uuid-dec", "2026-01-01T00:00:02Z", "toolu_1", output)]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     preserved = events[0]["output"]
     assert "Updated cod-step-abcd -> closed" in preserved
     assert "tk-step cod-step-abcd title: Register the new theme" in preserved
@@ -703,7 +703,7 @@ def test_tk_lifecycle_input_preview_is_not_truncated() -> None:
             ],
         ),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     calls = {tc["tool_call_id"]: tc["input_preview"] for tc in events[0]["tool_calls"]}
     # tk lifecycle inputs kept in full (no truncation marker, full length).
     assert len(calls["toolu_create"]) > 203
@@ -731,7 +731,7 @@ def test_tk_mentioned_in_quoted_arg_is_still_truncated() -> None:
             tool_calls=[{"id": "toolu_mention", "name": "Bash", "input": {"command": mentions_tk}}],
         ),
     ]
-    events = parse_session_lines(lines)
+    events = parse_claude_session_lines(lines)
     preview = events[0]["tool_calls"][0]["input_preview"]
     assert preview.endswith("...")
     assert len(preview) <= 203
