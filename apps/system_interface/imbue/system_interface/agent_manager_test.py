@@ -94,7 +94,6 @@ def _agent_details(
             id=host_id if host_id is not None else HostId(),
             name="test-host",
             provider_name=provider_name,
-            is_local=True,
             state=HostState.RUNNING,
         ),
     )
