@@ -60,13 +60,14 @@ Currently it covers:
 - Playwright's Chromium browser + its apt system libraries
   (`uv run playwright install --with-deps chromium`).
 
-(The publish-inspiration scan gate's three secret-scanner binaries --
-`betterleaks`, `trufflehog`, `kingfisher` -- are NOT deferred: they are baked
-into the workspace image at build time via a Dockerfile RUN of
-`scripts/install_secret_scanners.sh`, the single source of truth for the
-version pins and per-arch sha256 checksums. If a binary is ever missing, that
-script is runnable by hand to install all three; the scan gate aborts rather
-than running without any of them.)
+(The publish-inspiration scan gate's two secret-scanner binaries --
+`betterleaks`, `kingfisher` -- are NOT deferred: they are baked into the
+workspace image at build time by the common `scripts/setup_system.sh` (which
+the Dockerfile RUNs and the Lima provider runs directly in the VM), which
+invokes `scripts/install_secret_scanners.sh`, the single source of truth for
+the version pins and per-arch sha256 checksums. If a binary is ever missing,
+that script is runnable by hand to install both; the scan gate aborts rather
+than running without either of them.)
 
 It is a one-shot supervisord program (`autorestart=false`, `startsecs=0`,
 `exitcodes=0`): supervisord starts it once on boot and leaves it stopped after a

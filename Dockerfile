@@ -12,29 +12,27 @@ ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # ============================================================================
 # System toolchain (repo-independent). Shared verbatim with the Lima provider,
-# which runs this exact script in the VM. Copied with its sibling
-# _provision_guard.sh (which setup_system.sh sources via `dirname "$0"`) and
-# nothing else, so this expensive, stable layer caches against the scripts +
-# pinned versions, not application source.
+# which runs this exact script in the VM. setup_system.sh installs the system
+# toolchain AND invokes install_secret_scanners.sh to bake the publish-
+# inspiration scan gate's secret-scanner binaries (betterleaks + kingfisher),
+# so both docker-built images and Lima VMs get the scanners from the same
+# common script. Copied with its sibling _provision_guard.sh (which
+# setup_system.sh sources via `dirname "$0"`) and install_secret_scanners.sh
+# (which it invokes the same way) and nothing else, so this expensive, stable
+# layer caches against these scripts + pinned versions, not application source.
+# install_secret_scanners.sh is the single source of truth for the version
+# pins and per-arch sha256s; it stays installed at
+# /usr/local/bin/default-workspace-template-install-secret-scanners so it is runnable by hand
+# if a scanner ever goes missing (the scan gate's error names that command).
+# Caching tradeoff: folding the scanner install into this layer means a pin
+# bump in install_secret_scanners.sh now rebuilds the whole system-toolchain
+# layer (apt/node/uv + scanners) rather than a scanner-only layer -- accepted
+# so a single common script covers docker AND Lima.
 # ============================================================================
 COPY scripts/setup_system.sh /usr/local/bin/default-workspace-template-setup-system
 COPY scripts/_provision_guard.sh /usr/local/bin/_provision_guard.sh
-RUN chmod +x /usr/local/bin/default-workspace-template-setup-system && default-workspace-template-setup-system
-
-# ============================================================================
-# Secret-scanner binaries (repo-independent, pinned). Baked at image-build
-# time so the publish-inspiration skill's scan gate (scan_secrets.sh) can
-# hard-require betterleaks + trufflehog + kingfisher from the first second of
-# every docker-built container. The script is the single source of truth for
-# the version pins and per-arch sha256s and skips any scanner already present
-# at its pinned version. If a binary is ever missing (an environment not built
-# from this Dockerfile, or a failed bake), the script is runnable by hand to
-# install all three -- the scan gate's error names that command.
-# Kept above the `COPY . /mngr/code/` layer so it caches against the script
-# content (the pins live inside it), not application source.
-# ============================================================================
 COPY scripts/install_secret_scanners.sh /usr/local/bin/default-workspace-template-install-secret-scanners
-RUN chmod +x /usr/local/bin/default-workspace-template-install-secret-scanners && default-workspace-template-install-secret-scanners
+RUN chmod +x /usr/local/bin/default-workspace-template-setup-system /usr/local/bin/default-workspace-template-install-secret-scanners && default-workspace-template-setup-system
 
 # Safety-net symlinks: /code -> /mngr/code and /worktree -> /mngr/worktree.
 # All default-workspace-template-owned paths are written as /mngr/code/... and /mngr/worktree/...

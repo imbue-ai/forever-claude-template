@@ -4,35 +4,32 @@
 # staged overlay, and the assembly worker re-runs it over any
 # published-version-modified files.
 #
-# The scan runs THREE independent scanners over the same targets, ALL of which
-# must pass -- a finding from ANY of them fails the scan:
+# The scan runs TWO independent scanners over the same targets, BOTH of which
+# must pass -- a finding from EITHER of them fails the scan:
 #
 #   - betterleaks: `betterleaks dir` with the sibling betterleaks.toml config
 #     (default ruleset + credential-filename path rules + a broad Anthropic
 #     key rule). Live validation of findings is off by default and never
 #     enabled here.
-#   - trufflehog: `trufflehog filesystem` ALWAYS with --no-verification --
-#     verification would send candidate secrets to third-party APIs, which
-#     must never happen with scanned content.
-#   - kingfisher: `kingfisher scan` ALWAYS with --no-validate, for the same
-#     reason.
+#   - kingfisher: `kingfisher scan` ALWAYS with --no-validate -- live
+#     validation would send candidate secrets to third-party APIs, which must
+#     never happen with scanned content.
 #
 # There is NO fallback scanner and NO tolerance for a missing or broken tool:
 # a missing binary or a scanner that errors at runtime fails the scan (a
-# broken scanner must never silently pass). The three binaries are baked into
+# broken scanner must never silently pass). The two binaries are baked into
 # the workspace image at build time; if one is missing, running
 # scripts/install_secret_scanners.sh (the single source of truth for the
-# version pins) installs all three.
+# version pins) installs both.
 #
 # Output: one line per finding on stderr naming the scanner, rule/detector,
-# and path -- secret VALUES are never printed (betterleaks and kingfisher
-# redact their reports; trufflehog's raw report is parsed for detector+path
-# only and deleted). Finding paths under a scanned directory target are
+# and path -- secret VALUES are never printed (betterleaks and kingfisher both
+# redact their reports). Finding paths under a scanned directory target are
 # printed relative to that directory: the stage dir holds files at their
 # repo-relative locations, so findings print repo-relative.
 #
 # Usage: scan_secrets.sh [--config <betterleaks-toml>] <path> [<path> ...]
-# Exit codes: 0 = all three scanners ran and found nothing;
+# Exit codes: 0 = both scanners ran and found nothing;
 #             1 = findings, or a scanner missing/errored, or a target missing;
 #             2 = usage error.
 
@@ -84,9 +81,9 @@ for target in "${TARGETS[@]}"; do
         precondition_failed=1
     fi
 done
-for tool in betterleaks trufflehog kingfisher; do
+for tool in betterleaks kingfisher; do
     if ! command -v "$tool" > /dev/null 2>&1; then
-        echo "scan_secrets.sh: SCANNER MISSING: '$tool' is not installed. The secret scanners are baked into the workspace image; if one is missing, install all three by running: bash scripts/install_secret_scanners.sh (from the repo root). Refusing to scan without it." >&2
+        echo "scan_secrets.sh: SCANNER MISSING: '$tool' is not installed. The secret scanners are baked into the workspace image; if one is missing, install both by running: bash scripts/install_secret_scanners.sh (from the repo root). Refusing to scan without it." >&2
         precondition_failed=1
     fi
 done
@@ -102,10 +99,9 @@ scan_failed=0
 
 # Print findings from a scanner's report file (stderr, one line per finding,
 # no secret values). $1 names the report format: betterleaks (JSON array with
-# RuleID/File), trufflehog (JSON lines with DetectorName + filesystem
-# metadata; the Raw* secret fields are never read), or kingfisher (JSON lines
-# with rule.name + finding.path). Remaining args: report path, then the scan
-# targets (finding paths under a directory target print relative to it).
+# RuleID/File) or kingfisher (JSON lines with rule.name + finding.path).
+# Remaining args: report path, then the scan targets (finding paths under a
+# directory target print relative to it).
 _print_findings() {
     if ! python3 - "$@" << 'PYEOF'
 import json
@@ -143,14 +139,6 @@ with open(report_path) as fh:
     if fmt == "betterleaks":
         for finding in json.load(fh) or []:
             emit(finding.get("RuleID", "unknown-rule"), finding.get("File", ""), finding.get("StartLine"))
-    elif fmt == "trufflehog":
-        for raw_line in fh:
-            raw_line = raw_line.strip()
-            if not raw_line:
-                continue
-            finding = json.loads(raw_line)
-            meta = finding.get("SourceMetadata", {}).get("Data", {}).get("Filesystem", {})
-            emit(finding.get("DetectorName", "unknown-detector"), meta.get("file", ""), meta.get("line"))
     elif fmt == "kingfisher":
         for raw_line in fh:
             raw_line = raw_line.strip()
@@ -204,34 +192,7 @@ run_betterleaks() {
     rm -f "$report" "$errlog"
 }
 
-# --- scanner 2: trufflehog ----------------------------------------------------
-
-# Exit codes: 0 = clean; 183 = findings (--fail); anything else = error
-# (--fail-on-scan-errors covers per-file scan errors). --no-verification is
-# REQUIRED (see the header); --no-update disables its update check. The JSON
-# report on stdout contains raw secret values, so it is parsed for
-# detector+path only and deleted -- never printed or kept.
-run_trufflehog() {
-    local report errlog rc=0
-    report="$(mktemp)"
-    errlog="$(mktemp)"
-    trufflehog filesystem "${TARGETS[@]}" \
-        --no-verification \
-        --no-update \
-        --fail \
-        --fail-on-scan-errors \
-        --json \
-        > "$report" 2> "$errlog" || rc=$?
-    if [ "$rc" -eq 183 ]; then
-        scan_failed=1
-        _print_findings trufflehog "$report" "${TARGETS[@]}"
-    elif [ "$rc" -ne 0 ]; then
-        _scanner_error trufflehog "$rc" "$errlog"
-    fi
-    rm -f "$report" "$errlog"
-}
-
-# --- scanner 3: kingfisher ----------------------------------------------------
+# --- scanner 2: kingfisher ----------------------------------------------------
 
 # Exit codes: 0 = clean; 200 = findings; 205 = validated findings (cannot
 # happen with --no-validate, but treated as findings for safety); anything
@@ -257,14 +218,13 @@ run_kingfisher() {
     rm -f "$report" "$errlog"
 }
 
-# Run all three even after one fails, so a single run reports every scanner's
-# findings; the combined verdict is the OR of all of them.
+# Run both even after one fails, so a single run reports every scanner's
+# findings; the combined verdict is the OR of both of them.
 run_betterleaks
-run_trufflehog
 run_kingfisher
 
 if [ "$scan_failed" -ne 0 ]; then
     exit 1
 fi
-echo "scan_secrets.sh: clean -- all three scanners (betterleaks, trufflehog, kingfisher) found nothing" >&2
+echo "scan_secrets.sh: clean -- both scanners (betterleaks, kingfisher) found nothing" >&2
 exit 0

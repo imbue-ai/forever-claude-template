@@ -1,7 +1,7 @@
 # Betterleaks config for scan_secrets.sh (the publish-inspiration secret
-# scan). Betterleaks is one of the three scanners the scan runs; this config
-# applies only to it (trufflehog and kingfisher have no filename-based rules
-# and run with their own flags).
+# scan). Betterleaks is one of the two scanners the scan runs; this config
+# applies only to it (kingfisher has no filename-based rules and runs with its
+# own flags).
 #
 # Scope: the scan runs `betterleaks dir` over the STAGING directory, which
 # holds exactly the files overlaid out of the live mind (the selected
@@ -20,9 +20,9 @@
 # The .env template exemption: .env.example / .env.sample / .env.template are
 # deliberately non-secret placeholder templates and are allowed to ship, so
 # skip those files before any rule runs (this also skips betterleaks' content
-# rules for them; the other two scanners in scan_secrets.sh still content-scan
-# every file, so a real credential pasted into a template file is still
-# caught).
+# rules for them; the other scanner in scan_secrets.sh (kingfisher) still
+# content-scans every file, so a real credential pasted into a template file
+# is still caught).
 prefilter = '''
 filter.matchesAny(get(attributes, "path", ""), [
   `(^|/)\.env\.(example|sample|template)$`,

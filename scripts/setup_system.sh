@@ -118,6 +118,23 @@ chmod 600 /root/.ssh/known_hosts
 npm install -g "latchkey@${LATCHKEY_VERSION}"
 uv tool install "modal==${MODAL_VERSION}"
 
+# Secret-scanner binaries (betterleaks + kingfisher) for the publish-inspiration
+# scan gate. install_secret_scanners.sh is the single source of truth for the
+# version pins + per-arch sha256s; invoking it here means BOTH docker-built
+# images (this script runs in a Dockerfile RUN) and Lima-provisioned VMs (this
+# script runs directly in the VM) bake in the scanners from one common place.
+# The installer is reachable two ways depending on how we were invoked: in a
+# Dockerfile build it sits beside this script's install path as
+# default-workspace-template-install-secret-scanners; run straight from the repo (Lima/Modal)
+# it is its sibling install_secret_scanners.sh. It is idempotent (skips any tool
+# already at its pinned version without network access).
+setup_dir="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$setup_dir/install_secret_scanners.sh" ]; then
+    bash "$setup_dir/install_secret_scanners.sh"
+else
+    bash "$setup_dir/default-workspace-template-install-secret-scanners"
+fi
+
 # Playwright + Chromium is deliberately NOT installed here; the deferred-install
 # service installs it idempotently on first boot.
 

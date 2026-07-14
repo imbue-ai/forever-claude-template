@@ -278,10 +278,9 @@ worktree to a clean template base and deletes gitignored state -- including
    "None requested.">
 
    After applying them, re-run the secret scan over every file you modified,
-   with the same shared script the assembly's scan gate uses. It runs all
-   three scanners (betterleaks, trufflehog, kingfisher) and exits non-zero on
-   any finding, any scanner error, or any missing scanner -- there is no
-   fallback scanner:
+   with the same shared script the assembly's scan gate uses. It runs both
+   scanners (betterleaks, kingfisher) and exits non-zero on any finding, any
+   scanner error, or any missing scanner -- there is no fallback scanner:
 
    ```bash
    bash .agents/skills/publish-inspiration/scripts/scan_secrets.sh <each modified file>
@@ -447,12 +446,12 @@ The worker maps any non-zero exit to a `stuck` report quoting the script's
 stderr. What each exit means, and what you do:
 
 - **Secret scan (exit 1).** A credential/token rode in on an overlaid path,
-  OR one of the three required scanners (betterleaks / trufflehog /
-  kingfisher) was missing or errored -- the stderr says which. Nothing was
-  committed; for a finding, surface the flagged path (value redacted) and
-  stop. For a missing/broken scanner, the environment is broken (the binaries
-  are baked into the workspace image; if one is missing, the stderr names the
-  command to reinstall all three) -- never publish around the gate.
+  OR one of the two required scanners (betterleaks / kingfisher) was missing
+  or errored -- the stderr says which. Nothing was committed; for a finding,
+  surface the flagged path (value redacted) and stop. For a missing/broken
+  scanner, the environment is broken (the binaries are baked into the
+  workspace image; if one is missing, the stderr names the command to
+  reinstall both) -- never publish around the gate.
 - **No-diff guard (exit 3).** The resolved include set contributes nothing
   beyond `BASE_REF` (the assembled tree equals the base tree). Tell the user
   plainly and do NOT create a repo -- there are no empty inspiration repos.
@@ -798,13 +797,12 @@ What it does, in order (see the script for the exact commands):
    repo root.
 6. Runs a deterministic secret scan that HARD-FAILS (non-zero, abort before any
    commit/push). The scan is the sibling `scan_secrets.sh` over the staged
-   overlay: THREE scanners -- betterleaks (configured by the sibling
+   overlay: TWO scanners -- betterleaks (configured by the sibling
    `betterleaks.toml`: its default ruleset plus the credential-filename
-   blocklist and a broader Anthropic key rule), trufflehog (always
-   `--no-verification`), and kingfisher (always `--no-validate`) -- where a
-   finding from ANY of them, any scanner error, or any missing scanner binary
-   fails the scan. There is no fallback scanner. This is the authoritative
-   blocker, not LLM prose.
+   blocklist and a broader Anthropic key rule) and kingfisher (always
+   `--no-validate`) -- where a finding from EITHER of them, any scanner error,
+   or any missing scanner binary fails the scan. There is no fallback scanner.
+   This is the authoritative blocker, not LLM prose.
 7. Generates the manifest `inspiration-<slug>.md` at the repo root (with the
    FILL-IN blocks the worker must replace).
 8. Generates a placeholder thumbnail `inspiration-<slug>.svg` carrying a

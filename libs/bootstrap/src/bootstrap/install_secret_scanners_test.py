@@ -25,7 +25,7 @@ from bootstrap.testing import run_sourced
 
 _SCRIPT = REPO_ROOT / "scripts" / "install_secret_scanners.sh"
 
-_ALL_TOOLS = ("betterleaks", "trufflehog", "kingfisher")
+_ALL_TOOLS = ("betterleaks", "kingfisher")
 
 
 # --- _scanner_asset_for_arch / _scanner_release_url ---
@@ -39,7 +39,7 @@ def test_scanner_asset_for_arch_maps_x86_64_and_aarch64_per_tool() -> None:
     result = run_sourced(_SCRIPT, snippet, extra_env={})
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
-    assert len(lines) == 9
+    assert len(lines) == 3 * len(_ALL_TOOLS)
     for tool_index, tool in enumerate(_ALL_TOOLS):
         x64_asset, x64_sha = lines[tool_index * 3].split()
         arm64_asset, arm64_sha = lines[tool_index * 3 + 1].split()
@@ -75,7 +75,6 @@ def test_scanner_release_urls_point_at_pinned_releases() -> None:
     urls = result.stdout.splitlines()
     assert urls == [
         "https://github.com/betterleaks/betterleaks/releases/download/v1.6.1/betterleaks_1.6.1_linux_x64.tar.gz",
-        "https://github.com/trufflesecurity/trufflehog/releases/download/v3.95.9/trufflehog_3.95.9_linux_amd64.tar.gz",
         "https://github.com/mongodb/kingfisher/releases/download/v1.106.0/kingfisher-linux-x64.tgz",
     ]
 
@@ -130,13 +129,13 @@ def test_install_scanner_skips_without_network_when_pinned_version_installed(
     tmp_path: Path,
 ) -> None:
     install_dir = tmp_path / "install"
-    install_fake_pinned_scanner(install_dir, _SCRIPT, "trufflehog")
+    install_fake_pinned_scanner(install_dir, _SCRIPT, "kingfisher")
     stub_bin = tmp_path / "stub-bin"
     curl_log = make_stub_bin(stub_bin, served_tarball=None, arch="x86_64")
 
     result = run_sourced(
         _SCRIPT,
-        "_install_scanner trufflehog",
+        "_install_scanner kingfisher",
         extra_env={"SECRET_SCANNER_INSTALL_DIR": str(install_dir)},
         stub_bin=stub_bin,
     )
@@ -153,17 +152,17 @@ def test_install_scanner_downloads_when_installed_version_is_not_the_pin(
     # fake tarball, proving the download was attempted).
     install_dir = tmp_path / "install"
     install_dir.mkdir()
-    stale = install_dir / "trufflehog"
-    stale.write_text('#!/bin/sh\necho "trufflehog 0.0.1"\n')
+    stale = install_dir / "kingfisher"
+    stale.write_text('#!/bin/sh\necho "kingfisher 0.0.1"\n')
     stale.chmod(stale.stat().st_mode | stat.S_IXUSR)
-    tarball = tmp_path / "trufflehog.tar.gz"
-    make_scanner_tarball(tarball, "trufflehog")
+    tarball = tmp_path / "kingfisher.tar.gz"
+    make_scanner_tarball(tarball, "kingfisher")
     stub_bin = tmp_path / "stub-bin"
     curl_log = make_stub_bin(stub_bin, served_tarball=tarball, arch="x86_64")
 
     result = run_sourced(
         _SCRIPT,
-        "_install_scanner trufflehog",
+        "_install_scanner kingfisher",
         extra_env={"SECRET_SCANNER_INSTALL_DIR": str(install_dir)},
         stub_bin=stub_bin,
     )
@@ -171,7 +170,7 @@ def test_install_scanner_downloads_when_installed_version_is_not_the_pin(
     assert "sha256 MISMATCH" in result.stdout
     assert curl_log.exists()  # the download itself did happen
     # The stale binary is left in place (all-or-nothing install).
-    assert stale.read_text().endswith('echo "trufflehog 0.0.1"\n')
+    assert stale.read_text().endswith('echo "kingfisher 0.0.1"\n')
 
 
 def test_install_scanner_fails_on_unsupported_arch(tmp_path: Path) -> None:
@@ -214,15 +213,13 @@ def test_install_scanner_downloads_pinned_release_url(tmp_path: Path) -> None:
 # --- main ---
 
 
-def test_main_installs_all_three_by_default_and_isolates_failures(
+def test_main_installs_both_by_default_and_isolates_failures(
     tmp_path: Path,
 ) -> None:
-    # trufflehog and kingfisher are already installed at their pins;
-    # betterleaks is absent and its download serves a tarball that cannot
-    # match the pinned sha256. main must still process ALL tools (isolation)
-    # and exit non-zero because one failed.
+    # kingfisher is already installed at its pin; betterleaks is absent and its
+    # download serves a tarball that cannot match the pinned sha256. main must
+    # still process ALL tools (isolation) and exit non-zero because one failed.
     install_dir = tmp_path / "install"
-    install_fake_pinned_scanner(install_dir, _SCRIPT, "trufflehog")
     install_fake_pinned_scanner(install_dir, _SCRIPT, "kingfisher")
     tarball = tmp_path / "betterleaks.tar.gz"
     make_scanner_tarball(tarball, "betterleaks")
@@ -239,7 +236,7 @@ def test_main_installs_all_three_by_default_and_isolates_failures(
     assert "betterleaks: sha256 MISMATCH" in result.stdout.replace(
         "[install-secret-scanners] ", ""
     )
-    assert result.stdout.count("already installed at pinned version") == 2
+    assert result.stdout.count("already installed at pinned version") == 1
     assert "one or more secret-scanner installs failed" in result.stdout
 
 
@@ -257,7 +254,7 @@ def test_main_succeeds_when_every_tool_is_at_its_pin(tmp_path: Path) -> None:
         stub_bin=stub_bin,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    assert result.stdout.count("already installed at pinned version") == 3
+    assert result.stdout.count("already installed at pinned version") == len(_ALL_TOOLS)
     assert not curl_log.exists()
 
 

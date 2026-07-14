@@ -22,11 +22,11 @@
 #     `cp -a "$STAGE/apps" "$REPO/apps"` (nests into apps/apps).
 #   - Secret scan is a hard-failing (exit-non-zero, abort-before-commit) gate
 #     -- the authoritative blocker. It runs the sibling scan_secrets.sh, which
-#     requires ALL THREE scanners (betterleaks with the sibling
-#     betterleaks.toml config, trufflehog with --no-verification, kingfisher
-#     with --no-validate) and fails on any finding, any scanner error, or any
-#     missing scanner binary. There is NO fallback scanner: the binaries are
-#     baked into the workspace image, so a missing one is a broken environment.
+#     requires BOTH scanners (betterleaks with the sibling betterleaks.toml
+#     config, kingfisher with --no-validate) and fails on any finding, any
+#     scanner error, or any missing scanner binary. There is NO fallback
+#     scanner: the binaries are baked into the workspace image, so a missing
+#     one is a broken environment.
 #   - Boot smoke-check via the supervisor python lib (realize/process_config),
 #     NEVER `supervisord -t` (in supervisord, -t means --strip_ansi and LAUNCHES
 #     the daemon).
@@ -220,12 +220,11 @@ rsync -a "$STAGE/" "$REPO/"
 # --- 5. secret scan (authoritative, hard-failing blocker) --------------------
 
 # The scan is the snapshotted scan_secrets.sh (with its sibling
-# betterleaks.toml) over the STAGING dir. It runs THREE scanners --
-# betterleaks, trufflehog (--no-verification), kingfisher (--no-validate) --
-# and exits non-zero on a finding from ANY of them, on any scanner error, or
-# on any missing scanner binary (no fallback: the binaries are baked into the
-# workspace image, so a missing one is a broken environment, never a reason to
-# scan less). A hit
+# betterleaks.toml) over the STAGING dir. It runs TWO scanners --
+# betterleaks, kingfisher (--no-validate) -- and exits non-zero on a finding
+# from EITHER of them, on any scanner error, or on any missing scanner binary
+# (no fallback: the binaries are baked into the workspace image, so a missing
+# one is a broken environment, never a reason to scan less). A hit
 # prints the offending path (value redacted, never printed) and this script
 # exits 1, so the worker reports `stuck` and NOTHING is committed or pushed.
 # This is the enforced gate on top of the .gitignore denylist -- not LLM

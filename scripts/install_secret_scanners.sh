@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Pinned installer for the three secret-scanner binaries the
+# Pinned installer for the two secret-scanner binaries the
 # publish-inspiration skill's scan gate (scan_secrets.sh) hard-requires:
 #
 #   - betterleaks (MIT)        -- gitleaks' successor, by the gitleaks author
-#   - trufflehog  (AGPL-3.0)   -- Truffle Security's scanner; the scan gate
-#                                 always runs it with --no-verification
 #   - kingfisher  (Apache-2.0) -- MongoDB's scanner; the scan gate always
 #                                 runs it with --no-validate
 #
 # This file is the single source of truth for the version pins and per-arch
-# sha256s. A Dockerfile RUN layer invokes it at image-build time, so every
-# container built from the workspace image has all three binaries from second
-# zero. If a binary is ever missing (an environment not built from that image,
-# or a failed bake), run this script by hand to install all three -- the
-# skip-when-pinned check below makes an already-satisfied run an instant no-op.
+# sha256s. It is invoked by the common scripts/setup_system.sh (which the
+# Dockerfile RUNs at image-build time and the Lima provider runs directly in
+# the VM), so every workspace -- docker-built or Lima-provisioned -- has both
+# binaries from second zero. If a binary is ever missing (an environment not
+# built that way, or a failed bake), run this script by hand to install both
+# -- the skip-when-pinned check below makes an already-satisfied run an
+# instant no-op.
 #
 # Idempotent and cheap when already satisfied: a tool whose binary exists in
 # the install dir AND reports the pinned version is skipped without any
@@ -22,7 +22,7 @@
 # failed. Each sha256 is hard-coded (never fetched at install time) from the
 # release's published checksums; a mismatch refuses to install.
 #
-# Usage: install_secret_scanners.sh [tool ...]   (default: all three)
+# Usage: install_secret_scanners.sh [tool ...]   (default: both)
 set -euo pipefail
 
 # Env-overridable for unit tests only; production always installs to the
@@ -31,7 +31,6 @@ readonly SECRET_SCANNER_INSTALL_DIR="${SECRET_SCANNER_INSTALL_DIR:-/usr/local/bi
 
 # Release pins. The sha256s come from each release's published checksums:
 #   betterleaks: https://github.com/betterleaks/betterleaks/releases/download/v1.6.1/checksums.txt
-#   trufflehog:  https://github.com/trufflesecurity/trufflehog/releases/download/v3.95.9/trufflehog_3.95.9_checksums.txt
 #   kingfisher:  https://github.com/mongodb/kingfisher/releases/download/v1.106.0/multiple.intoto.jsonl
 #                (kingfisher publishes no plain checksums.txt; the sha256s are
 #                the subject digests in that sigstore/in-toto attestation)
@@ -39,9 +38,6 @@ readonly SECRET_SCANNER_INSTALL_DIR="${SECRET_SCANNER_INSTALL_DIR:-/usr/local/bi
 readonly BETTERLEAKS_VERSION="1.6.1"
 readonly BETTERLEAKS_SHA256_LINUX_X64="fbefc700a0bd4522cc952dd2a8f259cdb80526d7e60114aca19bb2d6fdc80f81"
 readonly BETTERLEAKS_SHA256_LINUX_ARM64="bab9688ba968264ace67b608fc7a7d8f5e61218cde70029d32cbc894e3808fdf"
-readonly TRUFFLEHOG_VERSION="3.95.9"
-readonly TRUFFLEHOG_SHA256_LINUX_X64="f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e"
-readonly TRUFFLEHOG_SHA256_LINUX_ARM64="9d9c2ec4ea36a089a9c5aaafe1969d176013ddf9f44d68e8cd75291aed8c83ed"
 readonly KINGFISHER_VERSION="1.106.0"
 readonly KINGFISHER_SHA256_LINUX_X64="5320b7a3a2f7a8c9b90990ee90099d70903d84c302e61b54dae87b7000c8c153"
 readonly KINGFISHER_SHA256_LINUX_ARM64="1c888a174b4fa8eaebbddf4b46829f4d00079f44d8b07ed4f13d048fa6068540"
@@ -63,7 +59,6 @@ _sha256_of() {
 _scanner_pinned_version() {
     case "$1" in
         betterleaks) printf '%s\n' "$BETTERLEAKS_VERSION" ;;
-        trufflehog) printf '%s\n' "$TRUFFLEHOG_VERSION" ;;
         kingfisher) printf '%s\n' "$KINGFISHER_VERSION" ;;
         *) return 1 ;;
     esac
@@ -87,12 +82,6 @@ _scanner_asset_for_arch() {
         betterleaks:arm64)
             printf '%s %s\n' "betterleaks_${BETTERLEAKS_VERSION}_linux_arm64.tar.gz" "$BETTERLEAKS_SHA256_LINUX_ARM64"
             ;;
-        trufflehog:x64)
-            printf '%s %s\n' "trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" "$TRUFFLEHOG_SHA256_LINUX_X64"
-            ;;
-        trufflehog:arm64)
-            printf '%s %s\n' "trufflehog_${TRUFFLEHOG_VERSION}_linux_arm64.tar.gz" "$TRUFFLEHOG_SHA256_LINUX_ARM64"
-            ;;
         kingfisher:x64)
             printf '%s %s\n' "kingfisher-linux-x64.tgz" "$KINGFISHER_SHA256_LINUX_X64"
             ;;
@@ -112,9 +101,6 @@ _scanner_release_url() {
         betterleaks)
             printf 'https://github.com/betterleaks/betterleaks/releases/download/v%s/%s\n' "$BETTERLEAKS_VERSION" "$asset"
             ;;
-        trufflehog)
-            printf 'https://github.com/trufflesecurity/trufflehog/releases/download/v%s/%s\n' "$TRUFFLEHOG_VERSION" "$asset"
-            ;;
         kingfisher)
             printf 'https://github.com/mongodb/kingfisher/releases/download/v%s/%s\n' "$KINGFISHER_VERSION" "$asset"
             ;;
@@ -126,8 +112,8 @@ _scanner_release_url() {
 
 _scanner_at_pinned_version() {
     # True when the tool's binary already exists in the install dir and its
-    # --version output mentions the pinned version (all three print it:
-    # "betterleaks version 1.6.1" / "trufflehog 3.95.9" / "kingfisher 1.106.0").
+    # --version output mentions the pinned version (both print it:
+    # "betterleaks version 1.6.1" / "kingfisher 1.106.0").
     local tool="$1" bin version_output
     bin="$SECRET_SCANNER_INSTALL_DIR/$tool"
     [ -x "$bin" ] || return 1
@@ -138,7 +124,7 @@ _scanner_at_pinned_version() {
 _fetch_verify_install() {
     # Download tool $1's release tarball from $2, verify it against the pinned
     # sha256 in $3, and install the extracted binary (named after the tool at
-    # the archive root in all three projects' tarballs) to the path in $4.
+    # the archive root in both projects' tarballs) to the path in $4.
     # All-or-nothing: any failure (download, checksum mismatch, extract,
     # install) leaves nothing installed and returns non-zero.
     local tool="$1" url="$2" expected_sha="$3" dest="$4"
@@ -194,13 +180,13 @@ _install_scanner() {
 main() {
     local tools=("$@") tool rc=0
     if [ "${#tools[@]}" -eq 0 ]; then
-        tools=(betterleaks trufflehog kingfisher)
+        tools=(betterleaks kingfisher)
     fi
     for tool in "${tools[@]}"; do
         case "$tool" in
-            betterleaks | trufflehog | kingfisher) ;;
+            betterleaks | kingfisher) ;;
             *)
-                _log "unknown scanner '${tool}' (expected betterleaks, trufflehog, or kingfisher)"
+                _log "unknown scanner '${tool}' (expected betterleaks or kingfisher)"
                 return 2
                 ;;
         esac

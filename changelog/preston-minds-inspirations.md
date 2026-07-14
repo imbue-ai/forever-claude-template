@@ -1,10 +1,14 @@
 - Simplified the secret-scanner delivery to just two things: the scanners are
-  baked into the workspace image at build time (Dockerfile RUN of the pinned
+  baked into every workspace at build/provision time by the common
+  scripts/setup_system.sh (which invokes the pinned
   scripts/install_secret_scanners.sh), and if one is ever missing the scan
-  gate's error names the one command to reinstall all three. Removed the
-  deferred-install backstop for the scanners (and its wrapper unit tests) --
-  the shared installer keeps its own tests, and the deferred-install service
-  is back to only its heavy non-boot packages (Chromium/Playwright).
+  gate's error names the one command to reinstall both. Because setup_system.sh
+  is the shared script the Dockerfile RUNs AND the Lima provider runs directly
+  in the VM, both docker-built images and Lima VMs get the scanners (previously
+  only docker did). Removed the deferred-install backstop for the scanners (and
+  its wrapper unit tests) -- the shared installer keeps its own tests, and the
+  deferred-install service is back to only its heavy non-boot packages
+  (Chromium/Playwright).
 
 - The secret gate now also blocks account-identifying cloud IDs, not just
   exploitable credentials: betterleaks gains rules for AWS access key IDs
@@ -232,12 +236,12 @@
   carried). The first-parent root remains only as a last resort for repos
   with no marker at all.
 
-- The publish flow's secret scan is now a triple-scanner gate with no
+- The publish flow's secret scan is now a two-scanner gate with no
   fallback. The scan (extracted into the shared
   `.agents/skills/publish-inspiration/scripts/scan_secrets.sh`, used both by
   `build_inspiration.sh`'s section-5 gate over the staged overlay and by the
-  worker's published-version-modification re-scan) runs THREE independent
-  scanners over the same targets, and a finding from ANY of them aborts
+  worker's published-version-modification re-scan) runs TWO independent
+  scanners over the same targets, and a finding from EITHER of them aborts
   before commit:
 
   - **betterleaks** v1.6.1 (MIT; the gitleaks author's successor project,
@@ -251,21 +255,18 @@
     gitleaks' `[[rules.allowlists]]`, so the false-positive exemptions are
     expressed as Expr `prefilter`/`filter` expressions instead.
 
-  - **trufflehog** v3.95.9 (AGPL-3.0), always with `--no-verification`: its
-    verification feature would send candidate secrets to third-party APIs,
-    which must never happen with scanned content. Its raw JSON report (which
-    contains secret values) is parsed for detector+path only and deleted.
-
   - **kingfisher** v1.106.0 (Apache-2.0), always with `--no-validate` (its
-    live-validation feature is disabled for the same reason) and `--redact`.
+    live-validation feature would send candidate secrets to third-party APIs,
+    which must never happen with scanned content) and `--redact`.
 
   Findings print scanner + rule + repo-relative path with values redacted.
   There is NO fallback scanner and no tolerance for a missing tool: the
   historical filename+grep fallback is deleted, and a missing binary or a
   scanner that errors at runtime fails the scan (exit 1 naming the tool) --
-  a broken scanner must never silently pass. All three binaries are baked
-  into the docker image at build time (a Dockerfile layer runs the new
-  `scripts/install_secret_scanners.sh`, the single source of truth for the
-  version pins and hard-coded per-arch sha256 checksums), with the
-  deferred-install service re-running the same script as a backstop on
-  providers not built from the Dockerfile (e.g. Lima).
+  a broken scanner must never silently pass. Both binaries are baked into
+  every workspace at build/provision time by the common
+  `scripts/setup_system.sh` (the Dockerfile RUNs it, and the Lima provider
+  runs it directly in the VM), which invokes
+  `scripts/install_secret_scanners.sh` -- the single source of truth for the
+  version pins and hard-coded per-arch sha256 checksums -- so docker-built
+  images and Lima VMs both get the scanners.
