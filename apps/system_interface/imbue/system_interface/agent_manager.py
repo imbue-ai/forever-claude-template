@@ -130,6 +130,32 @@ def _build_chat_create_command(
     return cmd
 
 
+def _build_codex_create_command(
+    mngr_binary: str,
+    name: str,
+    agent_id: str,
+    primary_labels: dict[str, str],
+) -> list[str]:
+    """Build the ``mngr create`` argv for a codex chat agent. Identical to the chat
+    command except for the harness template (``chat_codex`` -> agent_types.codex).
+    Pure (see above)."""
+    cmd = [
+        mngr_binary,
+        "create",
+        name,
+        "--id",
+        agent_id,
+        "--transfer",
+        "none",
+        "--template",
+        "chat_codex",
+        "--no-connect",
+    ]
+    if "project" in primary_labels:
+        cmd.extend(["--label", f"project={primary_labels['project']}"])
+    return cmd
+
+
 def _build_observe_command_argv(mngr_binary: str) -> list[str]:
     """Build the ``mngr observe`` discovery-only argv. Pure (see above).
 
@@ -596,6 +622,49 @@ class AgentManager:
             agent_id=agent_id,
             name=name,
             creation_type="chat",
+            parent_agent_id=None,
+        )
+
+        labels: dict[str, str] = {}
+        if "project" in primary_labels:
+            labels["project"] = primary_labels["project"]
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
+
+        return agent_id
+
+    def create_codex_agent(self, name: str) -> str:
+        """Create a new codex chat agent in the primary agent's work dir. Returns the
+        pre-generated agent ID. Mirrors :meth:`create_chat_agent` exactly, differing
+        only in the harness template (``chat_codex``) and the ``creation_type`` tag."""
+        agent_id = str(AgentId())
+
+        with self._lock:
+            work_dir = self._resolve_agent_work_dir(self._own_agent_id)
+            primary = self._agents.get(self._own_agent_id)
+            primary_labels = dict(primary.labels) if primary else {}
+
+        if work_dir is None:
+            msg = f"Cannot determine work directory for primary agent {self._own_agent_id}"
+            raise AgentCreationError(msg)
+
+        cmd = _build_codex_create_command(self._mngr_binary, name, agent_id, primary_labels)
+
+        log_queue: queue.Queue[str | None] = queue.Queue(maxsize=10000)
+
+        proto_info = {
+            "agent_id": agent_id,
+            "name": name,
+            "creation_type": "codex",
+            "parent_agent_id": None,
+        }
+        with self._lock:
+            self._proto_agents[agent_id] = proto_info
+            self._log_queues[agent_id] = log_queue
+
+        self._broadcaster.broadcast_proto_agent_created(
+            agent_id=agent_id,
+            name=name,
+            creation_type="codex",
             parent_agent_id=None,
         )
 
