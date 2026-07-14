@@ -34,7 +34,6 @@ members = [
     "runtime-backup",
     "system-interface",
     "tk-command-parsing",
-    "web-server",
 ]
 overrides = [{ name = "openai", specifier = ">=2.20.0" }]
 
@@ -949,7 +948,6 @@ dependencies = [
     { name = "runtime-backup" },
     { name = "tk-command-parsing" },
     { name = "tomlkit" },
-    { name = "web-server" },
 ]
 
 [package.dev-dependencies]
@@ -980,7 +978,6 @@ requires-dist = [
     { name = "runtime-backup", editable = "libs/runtime_backup" },
     { name = "tk-command-parsing", editable = "libs/tk_command_parsing" },
     { name = "tomlkit", specifier = ">=0.12" },
-    { name = "web-server", editable = "libs/web_server" },
 ]
 
 [package.metadata.requires-dev]
@@ -6937,21 +6934,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/2c/ee/afaf0f85a9a18fe47a67f1e4422ed6cf1fe642f0ae0a2f81166231303c52/wcwidth-0.7.0.tar.gz", hash = "sha256:90e3a7ea092341c44b99562e75d09e4d5160fe7a3974c6fb842a101a95e7eed0", size = 182132, upload-time = "2026-05-02T16:04:12.653Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/52/e465037f5375f43533d1a80b6923955201596a99142ed524d77b571a1418/wcwidth-0.7.0-py3-none-any.whl", hash = "sha256:5d69154c429a82910e241c738cd0e2976fac8a2dd47a1a805f4afed1c0f136f2", size = 110825, upload-time = "2026-05-02T16:04:11.033Z" },
-]
-
-[[package]]
-name = "web-server"
-version = "0.1.0"
-source = { editable = "libs/web_server" }
-dependencies = [
-    { name = "flask" },
-    { name = "werkzeug" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "flask", specifier = ">=3.0" },
-    { name = "werkzeug", specifier = ">=3.0" },
 ]
 
 [[package]]

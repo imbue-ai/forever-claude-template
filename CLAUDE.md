@@ -14,7 +14,7 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - If you need to *actively develop* against an external repo (e.g. `mngr`), check out a standalone clone of it under `.external_worktrees/<repo-name>/`. This directory is gitignored so the external clones don't pollute the monorepo. The branch in the external clone should mirror the branch you're on in this monorepo.
 - This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `runtime/tickets/` (the path is set via the `TICKETS_DIR` env var so tickets ride the `mindsbackup/$MNGR_AGENT_ID` runtime-backup branch).
 - All relative paths in this repo assume cwd = repo root (`/code`). Supervisord runs the services from there; any process started elsewhere (manual launch, subprocess from a different cwd) must either set cwd to the repo root or use absolute paths. State directories live under `runtime/<feature>/`.
-- When adding a new web app, do NOT edit `libs/web_server/` -- it's an example placeholder. Use the `build-web-service` skill, which sets up a new lib + service entry + `forward_port.py` registration on its own port.
+- When adding a new web app, use the `build-web-service` skill, which sets up a new lib + service entry + `forward_port.py` registration on its own port. Do NOT edit `apps/system_interface/` for this -- that's the top-level workspace UI, not a template for new views.
 
 # Task management (CRITICAL — read this before doing real work)
 

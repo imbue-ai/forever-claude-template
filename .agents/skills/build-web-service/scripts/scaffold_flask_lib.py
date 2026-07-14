@@ -35,8 +35,6 @@ from tomlkit.items import Array, Table
 # a snake-cased existing service name is also rejected.
 RESERVED_NAMES = frozenset(
     {
-        "web",
-        "web-server",
         "system-interface",
         "system_interface",
         "cloudflared",
@@ -50,7 +48,7 @@ RESERVED_NAMES = frozenset(
         "imbue-common",
     }
 )
-LOWEST_AUTO_PORT = 8081
+LOWEST_AUTO_PORT = 8080
 KEBAB_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 LOCALHOST_PORT_RE = re.compile(r"http://(?:localhost|127\.0\.0\.1):(\d+)")
 
