@@ -380,7 +380,10 @@ new mind. This is the \`use-inspiration\` skill's template path; in short:
 with one bullet per hole: every ADAPTATION gap the adapter must decide or
 rewire -- stubbed integrations, hardcoded accounts/channels/ids, data that was
 not included, anything that will not work out of the box. For each, say what
-is missing and what a working replacement looks like. Do NOT list activation
+is missing and what a working replacement looks like. Where missing data can
+come from the adopter's own connectors, the replacement IS that connector pull
+(initiated by the adopting agent via latchkey) -- never a manual data-entry
+step like typing records into a file. Do NOT list activation
 requirements here (permissions, tokens, accounts) -- those belong in
 "Prerequisites" above. If there are genuinely no holes, say so explicitly. -->
 

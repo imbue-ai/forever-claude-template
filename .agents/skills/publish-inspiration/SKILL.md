@@ -95,8 +95,14 @@ Ask the user, in plain language. Never enumerate files at them:
   repo-root-relative include paths, e.g. `apps/slack-inbox`, `libs/slack_inbox`,
   plus their service wiring -- you reason about the backing paths, the user does
   not);
-- whether any data should be included. **Default: NO user data.** Include data
-  paths only if the user explicitly asks for them;
+- what should and should not be SHARED -- **ask, never silently assume**.
+  The default is still NO user data, but apply it as a question, not a
+  policy: enumerate the candidate shareable content you actually found in
+  the selected paths (their data files, but also instructions/prompts,
+  config, sample or seed data, docs) and ask which of these, if any, they
+  want to ship. Some users WANT their instructions or curated examples
+  shared -- do not strip those without asking; equally, do not ship data
+  without an explicit yes;
 - whether anything should be **changed, removed, or generalized in the
   published version only** -- hardcoded personal preferences, account or
   channel names, anything they'd rather not ship. Their live files stay
@@ -109,6 +115,32 @@ Ask the user, in plain language. Never enumerate files at them:
 Derive `slug` and `repo_name` from the title. Resolve the concrete set of
 include paths yourself.
 
+**Design the adopter's onboarding, then confirm it.** Before the gate below,
+think through the first-run experience of someone ADOPTING this inspiration,
+and write it down as a short plain-language onboarding summary. Design for
+the smoothest path to an INSTANT app the adopter can see working with their
+own data and then modify:
+
+- Every piece of data the app needs must come from the adopter's own
+  connectors when one exists, initiated by the adopting agent via latchkey --
+  NEVER a manual data-entry chore. (A real publish told adopters to type all
+  their contacts into a `contacts.txt`; the right onboarding pulls contacts
+  from their email/Google account after a permission approval. Manual entry
+  is a design failure whenever a connector could supply the same data.)
+- Enumerate what the adopting agent will self-initiate (the
+  `requires_permission:` / `requires_secret:` lines), what then populates
+  automatically, and what genuinely remains for the adopter to decide --
+  those decisions are the Holes; data-entry chores are not acceptable Holes.
+- The summary reads like: "when someone adopts this, their agent asks to
+  connect X and Y; the app then fills with their own data automatically; the
+  only choices left are Z."
+
+This summary is confirmed at the gate below and then handed to the worker
+(§3), which writes the manifest's Prerequisites / How to adapt it / Holes to
+MATCH it. (The generated welcome routes adopters through the manifest, so
+the manifest matching is sufficient -- the welcome itself is a deterministic
+write the worker never edits.)
+
 **The scope gate: confirm BEFORE any assembly work -- before treating the
 include set as final, and before dispatching the worker (§3). This is a hard
 gate.** Send ONE message that lays out, in plain language:
@@ -116,6 +148,12 @@ gate.** Send ONE message that lays out, in plain language:
 - what WILL be included (apps/features, not file lists);
 - what will NOT be included that they might expect (their data, other apps
   this mind has, secrets/config) -- so surprises surface now;
+- the share-or-strip answers from the Q&A above, restated (which
+  instructions/config/sample data ship, which data stays private) -- as
+  their answers being played back, not as assumptions;
+- the **onboarding summary** you designed above -- how an adopter goes from
+  creating a mind off this repo to seeing the app working with their own
+  data, what their agent self-initiates, and what the remaining Holes are;
 - the published-version modifications you will apply (or "none");
 - the proposed title and repo name, marked as adjustable later;
 - the default private visibility.
@@ -319,6 +357,13 @@ worktree to a clean template base and deletes gitignored state -- including
    nothing to add, say so explicitly in prose; never leave a placeholder
    comment in place and never leave a section blank.
 
+   "Prerequisites," "How to adapt it," and "Holes" must together realize the
+   user-confirmed onboarding design from your task's Context: any data the
+   app needs comes from the adopter's own connectors (initiated by the
+   adopting agent via latchkey), never from a manual data-entry step where a
+   connector exists, and every Hole is a genuine decision for the adopter --
+   not a chore like "type your contacts into a file."
+
    The generated `README.md` at the repo root (the repo's GitHub landing
    page) carries ONE `<!-- FILL-IN (publishing agent): ... -->` block too --
    a short overview of this inspiration. Replace it with a GitHub-flavored
@@ -359,6 +404,12 @@ worktree to a clean template base and deletes gitignored state -- including
   -- that is correct and expected. Do not "restore" anything it removes.
 - Included paths and what each one is:
   <one line per include path: what it is and its role>
+- The USER-CONFIRMED onboarding design (write the manifest's Prerequisites /
+  How to adapt it / Holes to MATCH this; adopter data comes from their own
+  connectors via latchkey, initiated by the adopting agent -- never a manual
+  data-entry step where a connector exists):
+  <the lead's confirmed onboarding summary from §1: what the adopting agent
+  self-initiates, what fills automatically, what the genuine Holes are>
 - <extra context the lead has: what the app does for its user, known holes,
   tokens/accounts it depends on -- everything the worker needs to write a
   good manifest and a representative thumbnail>
@@ -370,6 +421,9 @@ worktree to a clean template base and deletes gitignored state -- including
 - Every FILL-IN block replaced with real prose (or an explicit "none") -- in
   BOTH `inspiration-<slug>.md` and `README.md`.
 - `README.md` describes this inspiration (not the default-workspace-template).
+- The manifest's Prerequisites / How to adapt it / Holes match the
+  user-confirmed onboarding design above (no manual data-entry steps where a
+  connector exists; Holes are decisions, not chores).
 - `inspiration-<slug>.svg` is a bespoke design for this app; the placeholder
   marker is gone and the safety grep is clean.
 - Follow-up edits committed on `mngr/<slug>`; `git status` clean.
@@ -563,6 +617,13 @@ mechanism. Present the proposal to the user ONCE, in plain language:
 - a short recap of the **published-version modifications** that were applied
   (or that there were none), so the user can verify their requested removals
   and changes actually happened;
+- the **onboarding as actually written**: a two-or-three-line recap of the
+  manifest's setup path and Holes as the worker wrote them (what an adopter's
+  agent self-initiates, what fills automatically, what decisions remain), so
+  the user confirms the REAL manifest -- not just the §1 design -- reads the
+  way they approved. If the worker's version drifted from the confirmed
+  design (e.g. it introduced a manual data-entry step), fix the manifest
+  BEFORE presenting this message, not after;
 - the **thumbnail** the sub-agent designed -- EMBED it in the chat message
   as a markdown image so the user actually sees what will represent their
   inspiration, using the file's absolute path:
