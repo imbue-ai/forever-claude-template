@@ -6,6 +6,8 @@ The new `github-sync` skill enables sync on request: it creates a dedicated PRIV
 
 Private-only is enforced: the skill refuses public repos at setup and the service re-verifies visibility every 15 minutes, halting all pushes (service and hook) when the repo is public or unverifiable.
 
+The skill's permission ask was validated against a live workspace and corrected: creating the repo needs `github-write-all` (the narrower `github-write-repos` covers only existing-repo paths, not `POST /user/repos`), and `github-read-user` is requested so the skill can name the owning account and verify the grants landed. Both requests now go out back-to-back before any GitHub call, so the user approves once and setup runs to completion.
+
 A workspace recreated from a previously-synced repo self-heals: after the user re-grants the GitHub permissions, the service re-wires git and restores `runtime/` (memory, tickets, transcripts) from the `runtime-sync` branch automatically. Disable is supported (full unwind of the service, hook, and git wiring; the user chooses whether to keep the remote repo).
 
 Existing workspaces that update-self onto this version simply stop git-syncing `runtime/` until they opt in via the skill; legacy `mindsbackup/*` branches are not migrated.
