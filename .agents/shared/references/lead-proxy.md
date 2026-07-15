@@ -109,11 +109,12 @@ On `type: status`:
   git fetch . <WORKER_BRANCH>:<WORKER_BRANCH>
   git merge --no-ff <WORKER_BRANCH>
   ```
-  If the merge conflicts and the calling skill defines a staleness rule (the
-  harden flows do -- see `.agents/shared/references/harden-contention.md`),
-  abort the merge and follow that rule instead of hand-resolving; otherwise
-  resolve manually. On successful merge, close any tracking ticket and
-  optionally destroy the worker.
+  On a clean merge, close any tracking ticket and optionally destroy the
+  worker. On a conflict, recovery depends on the calling skill: if it defines
+  a staleness rule (the harden flows do -- see
+  `.agents/shared/references/harden-contention.md`), abort the merge and
+  follow that rule rather than hand-resolving; otherwise resolve the conflict
+  manually.
 
 - `name: stuck`, or the 30m timeout tripped without a report arriving -- follow
   `.agents/skills/launch-task/references/worker-failure.md`: surface the report

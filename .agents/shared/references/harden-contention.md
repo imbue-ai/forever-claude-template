@@ -5,9 +5,7 @@ pass (`update-artifact` / `heal-artifact`). Left uncoordinated this produces
 two failure shapes: two agents' harden workers colliding (the worker name,
 branch, and runtime dir are all derived from the artifact name), and a
 hardened branch getting merged after the base it was verified against has
-moved. This reference is read at two points in the harden flows: **before
-dispatching** a worker (Step 1) and **before merging** its branch (Step 4,
-on `done`).
+moved.
 
 Two principles drive every rule below:
 

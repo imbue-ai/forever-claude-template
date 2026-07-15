@@ -6,26 +6,20 @@ description: "Use immediately whenever the user asks you to update, change, fix,
 # Changing an existing service
 
 A "service" here is a `[program:<name>]` under supervisord (see
-`supervisord.conf`). There are two kinds, and the flow differs only in
-whether there's a tab to refresh:
+`supervisord.conf`). Two kinds, differing only in whether there's a tab to
+refresh:
 
-- **User-facing web service** -- something the user opens as a tab and
-  sees render at `/service/<name>/` (scaffolded via `build-web-service`).
-  Changing it means the open tab is showing the *old* page until you
-  refresh it.
+- **User-facing web service** -- the user opens it as a tab rendering at
+  `/service/<name>/` (scaffolded via `build-web-service`).
 - **Background daemon** -- a supervisord program with no tab
-  (`runtime-backup`, `cloudflared`, forwarders, cron-like jobs). There's
-  nothing to refresh; the change takes effect when the process restarts.
+  (`runtime-backup`, `cloudflared`, forwarders, cron-like jobs).
 
-**This skill is the front door for editing a service's code.** You do not
-need to have loaded it to start typing an edit -- but the moment you are
-changing a service, this is the process to follow, because two things are
-easy to forget and both leave the user looking at stale state: (1) the
-change doesn't take effect until the process is reloaded, and (2) an open
-web tab keeps showing the old page until it's refreshed.
+Two things are easy to forget when editing either, and both leave the user
+looking at stale state: a code change doesn't take effect until the process
+is reloaded, and an open web tab keeps showing the old page until it's
+refreshed. The live change loop below handles both.
 
-If you are doing something other than editing an existing service, you are
-in the wrong skill:
+If you're doing something *other* than editing an existing service:
 
 - **Creating a new web view** -> `build-web-service`.
 - **Changing the workspace UI itself** (`apps/system_interface` -- the
@@ -44,26 +38,20 @@ the request is -- it changes what you do *before* touching code:
   to the live change loop below: edit, apply, refresh, verify.
 
 - **Larger-scope change** -- a redesign, a new page or view, a meaningful
-  shift in look-and-feel, or a new user-facing capability. This is not a
-  quick edit; it is a fresh pass through the **interactive-delivery shape**
-  -- the *same* flow `build-web-service` used to build the service in the
-  first place. **Read `.agents/shared/references/interactive-delivery.md`**,
-  then follow `build-web-service`'s mock-confirm loop: put a cheap,
-  throwaway version of the *proposed* change in front of the user (render it
-  against the service's real data/state where you can -- *reading* the live
-  store to preview is fine; never let a preview or verification *write* to it,
-  see "Protect the user's data while you verify" below), loop until they
-  **explicitly confirm** the shape, and only then build the real thing to a
-  usable state. Do not do the heavy build against an unconfirmed shape --
-  the same tripwire the create flow exists to prevent applies to edits.
+  shift in look-and-feel, or a new user-facing capability. Run the *same*
+  mock-confirm flow `build-web-service` used to create the service: **read
+  `.agents/shared/references/interactive-delivery.md`**, put a cheap,
+  throwaway version of the *proposed* change in front of the user, loop until
+  they **explicitly confirm** the shape, and only then build the real thing
+  to a usable state. Never build heavy against an unconfirmed shape.
 
-  When a hand-built mock won't convince -- a redesign, a data-touching change
-  -- you can instead boot the *actually changed* service as a labeled preview
-  tab beside the live one, via the shared `serve_isolated_instance.py` script
-  (see "Protect the user's data while you verify" for the exact invocation).
-  That is the same preview mechanism the system-interface flow uses; reach for
-  it when the user needs to click the real thing, and keep the lighter hand
-  mock for quick look-and-feel loops.
+  When a hand mock won't convince -- a redesign, or a data-touching change --
+  boot the *actually changed* service as a labeled preview tab beside the
+  live one via the shared `serve_isolated_instance.py` script (invocation
+  under "Protect the user's data while you verify"; it's the same preview
+  mechanism the system-interface flow uses). Keep the lighter hand mock for
+  quick look-and-feel loops. Either way, *reading* the live store to render a
+  preview is fine; never let a preview or verification *write* to it.
 
   A new view or capability bolted onto an existing service is its own
   delivery with its own feedback gate (interactive-delivery phase 8):
@@ -293,22 +281,15 @@ turn-end, formalize it through the background worker pipeline -- the main
 agent never runs the thorough test passes or the review gates itself.
 
 **Get the user's feedback before you start any hardening pass.** Delivering
-the change live is not the same as the user *wanting* it. Do not dispatch the
-hardening worker in the same turn you make the change: end the turn by
-surfacing the change and asking the user whether it's what they wanted, and
-only invoke the turn-end skill below once they've given a clear go-ahead
-(next turn). This holds for *every* change, contained or larger-scope -- a
-one-line copy tweak still gets shown and confirmed before it's hardened.
-
-Just like any incremental work, this can take **several rounds**: the user
-may respond with adjustments, then more adjustments. Treat each response as
-another live iteration -- make the change, show it, and ask again -- and do
-**not** launch the harden worker until you are sure the user is satisfied
-with the update. A single "looks fine" mid-thread isn't the same as being
-done; if the user is still tweaking, keep iterating live and hold the
-hardening pass. (For a larger-scope change this gate is the *working* result,
-not just the mock, exactly as `build-web-service`'s Step 5 gates on the
-working site.)
+the change live is not the same as the user *wanting* it, so never dispatch
+the hardening worker in the same turn you make the change. This holds for
+*every* change, contained or larger-scope -- even a one-line copy tweak gets
+shown and confirmed first. It can take **several rounds**: treat each
+response as another live iteration -- make the change, show it, ask again --
+and hold the harden pass until you are sure the user is satisfied. A single
+"looks fine" mid-thread while they're still tweaking isn't done. (For a
+larger-scope change this gate is the *working* result, not just the mock,
+exactly as `build-web-service`'s Step 5 gates on the working site.)
 
 - **A change you and the user discussed and applied live, or repeatable
   work you did by hand** -> invoke `update-artifact` with
