@@ -135,6 +135,27 @@ def test_chat_score_monotonic_in_each_signal() -> None:
     assert base <= never
 
 
+def test_browser_remap_lands_inside_the_band_and_preserves_chromes_order() -> None:
+    # Chrome's self-assigned gradation (browser/zygote 0, gpu/utility 200,
+    # renderers 300, up to 1000) must map to strictly increasing values that all
+    # sit inside the browser band's range -- i.e. above every agent subprocess.
+    remapped = [bands.shared_browser_oom_score_adj(v) for v in (0, 200, 300, 1000)]
+    assert remapped == sorted(remapped)
+    assert len(set(remapped)) == len(remapped), "Chrome's gradation must survive the remap"
+    for value in remapped:
+        assert bands.SHARED_BROWSER_FLOOR <= value <= bands.SHARED_BROWSER
+    assert bands.AGENT_SUBPROCESS < bands.SHARED_BROWSER_FLOOR < bands.SHARED_BROWSER
+
+
+def test_browser_remap_output_is_never_below_the_floor() -> None:
+    # The browser service's sweep only remaps values *below* the floor; the remap
+    # emitting values at/above the floor is what makes repeated sweeps idempotent
+    # (a remapped process is never remapped again). Out-of-range inputs clamp.
+    for value in (-1000, -1, 0, 1, 299, 300, 999, 1000, 2000):
+        remapped = bands.shared_browser_oom_score_adj(value)
+        assert bands.SHARED_BROWSER_FLOOR <= remapped <= bands.SHARED_BROWSER, value
+
+
 def test_chat_score_always_within_the_chat_band() -> None:
     for is_open in (True, False):
         for is_visible in (True, False):

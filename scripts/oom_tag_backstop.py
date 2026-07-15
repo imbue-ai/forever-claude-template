@@ -41,8 +41,7 @@ sys.path.insert(
 )
 
 from oom_priority import bands
-
-_PROC_DIR = Path("/proc")
+from oom_priority.proctree import list_descendant_pids
 
 
 def parse_token_fields(line: str) -> dict[str, str]:
@@ -54,38 +53,6 @@ def parse_token_fields(line: str) -> dict[str, str]:
         if sep:
             fields[key] = value
     return fields
-
-
-def list_descendant_pids(pid: int, proc_dir: Path = _PROC_DIR) -> list[int]:
-    """All current descendants of ``pid``, via ``/proc/<pid>/task/*/children``.
-
-    Best-effort: a process that exits mid-walk is skipped, and on a host without
-    ``/proc`` (e.g. macOS) the result is empty. The ``seen`` guard makes the walk
-    terminate even on an inconsistent snapshot of a changing process tree.
-    """
-    seen: set[int] = {pid}
-    frontier = [pid]
-    descendants: list[int] = []
-    while frontier:
-        current = frontier.pop()
-        task_dir = proc_dir / str(current) / "task"
-        try:
-            tasks = list(task_dir.iterdir())
-        except OSError:
-            continue
-        for task in tasks:
-            try:
-                children_text = (task / "children").read_text()
-            except OSError:
-                continue
-            for child_text in children_text.split():
-                if not child_text.isdigit() or int(child_text) in seen:
-                    continue
-                child = int(child_text)
-                seen.add(child)
-                descendants.append(child)
-                frontier.append(child)
-    return descendants
 
 
 def raise_pids_to_band(

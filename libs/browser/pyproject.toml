@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
     "flask>=3.0",
     "flask-sock>=0.7",
+    "oom-priority",
     "simple-websocket>=1.0",
     "werkzeug>=3.0",
     "browser-use[core]==0.13.1",

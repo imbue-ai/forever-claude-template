@@ -45,6 +45,7 @@ without inspecting the process tree:
 | an agent's main process | launch | chat -> expendable chat band (560); worker or unidentifiable -> worker agent | `scripts/claude_oom_launch.py` |
 | an agent's subprocesses | each Bash tool call | agent subprocess (most expendable) | `scripts/claude_oom_tag_subprocess.py` (PreToolUse) |
 | a shared browser | launch | `SHARED_BROWSER` (1000, the ceiling) | inline `oom_score_adj` write in the `browser` program |
+| Chromium's own processes | periodic sweep | `[SHARED_BROWSER_FLOOR, SHARED_BROWSER]` (910-1000) | the browser service's re-tagging sweep (`browser.oom_retag`) -- see "The Chromium exception" below |
 
 Each supervisord service tags itself the same way an agent's main process does:
 its `command` in `supervisord.conf` runs `scripts/oom_tag_service.py <key> <the
@@ -85,6 +86,32 @@ Because the band and pid survive `execve`, the tagged process *is* the claude
 process, so its band is set before any subprocess exists. A subprocess inherits its
 agent's band by default; the PreToolUse hook raises it the rest of the way so a
 runaway build/test/browser is always shed first.
+
+## The Chromium exception
+
+Everything above rests on inheritance: tag a process once and its whole subtree
+keeps the band. Chromium is the one process in the workspace that breaks this.
+Each Chromium process overwrites any inherited `oom_score_adj` once at its own
+startup with Chrome's internal gradation (browser/zygote 0, gpu/utility 200,
+renderers 300 -- `AdjustLinuxOOMScore` in chromium's `chrome_main_delegate.cc`,
+with no flag to disable it). So the browser daemon's ceiling tag survives only
+on processes that never self-write (the node/Playwright driver, crashpad), while
+the memory-heavy renderers end up at 300 -- *more* protected than workers (600)
+and agent subprocesses (900), inverting the design.
+
+The kernel cannot forbid the lowering: without `CAP_SYS_RESOURCE` any process
+may lower its own value back down to its inherited floor (`oom_score_adj_min`,
+0 everywhere in this container). But Chromium writes each value exactly once
+(its continuous re-adjustment is ChromeOS-only), so an external raise sticks.
+The browser service therefore runs a small periodic sweep (`browser.oom_retag`,
+every ~5s) over its descendants that remaps every value found below
+`SHARED_BROWSER_FLOOR` (910) into `[SHARED_BROWSER_FLOOR, SHARED_BROWSER]` via
+`bands.shared_browser_oom_score_adj`. The mapping is order-preserving, so
+Chrome's gradation survives in compressed form -- worth keeping, because it
+means earlyoom sheds one tab's renderer before the whole browser. The sweep
+only remaps values below the floor, so it is idempotent and never touches the
+inherited-ceiling processes; a freshly-spawned renderer sits at Chrome's 300
+for at most one sweep period before being raised.
 
 ## Dynamic chat band
 

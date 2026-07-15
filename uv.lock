@@ -387,6 +387,7 @@ dependencies = [
     { name = "browser-use", extra = ["core"] },
     { name = "flask" },
     { name = "flask-sock" },
+    { name = "oom-priority" },
     { name = "simple-websocket" },
     { name = "werkzeug" },
 ]
@@ -396,6 +397,7 @@ requires-dist = [
     { name = "browser-use", extras = ["core"], specifier = "==0.13.1" },
     { name = "flask", specifier = ">=3.0" },
     { name = "flask-sock", specifier = ">=0.7" },
+    { name = "oom-priority", editable = "libs/oom_priority" },
     { name = "simple-websocket", specifier = ">=1.0" },
     { name = "werkzeug", specifier = ">=3.0" },
 ]

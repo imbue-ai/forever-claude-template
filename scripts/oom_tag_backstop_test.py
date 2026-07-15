@@ -1,11 +1,11 @@
 """Tests for the OOM band backstop event listener.
 
-The policy pieces (payload parsing, the raise-only write, the descendant walk)
-are tested with injected collaborators / a fake ``/proc`` tree, so no real
-process tree or writable ``/proc`` is needed. The event-listener protocol loop
-is exercised end to end via a subprocess fed a scripted event stream; the
-scripted event names a PROTECTED program so the loop never touches the real
-``/proc`` on a Linux runner.
+The policy pieces (payload parsing, the raise-only write) are tested with
+injected collaborators, so no real process tree or writable ``/proc`` is needed
+(the descendant walk itself is tested with ``oom_priority.proctree``). The
+event-listener protocol loop is exercised end to end via a subprocess fed a
+scripted event stream; the scripted event names a PROTECTED program so the loop
+never touches the real ``/proc`` on a Linux runner.
 """
 
 from __future__ import annotations
@@ -115,25 +115,6 @@ def test_malformed_payload_is_ignored() -> None:
             list_descendants=lambda pid: [],
         )
     assert proc.writes == []
-
-
-def _write_fake_proc_children(proc_dir: Path, pid: int, children: list[int]) -> None:
-    task_dir = proc_dir / str(pid) / "task" / str(pid)
-    task_dir.mkdir(parents=True)
-    (task_dir / "children").write_text(" ".join(str(child) for child in children) + " ")
-
-
-def test_descendant_walk_is_recursive_and_survives_gaps(tmp_path: Path) -> None:
-    # 10 -> 11 -> 12, plus 10 -> 13 where 13 has no /proc entry (exited).
-    _write_fake_proc_children(tmp_path, 10, [11, 13])
-    _write_fake_proc_children(tmp_path, 11, [12])
-    _write_fake_proc_children(tmp_path, 12, [])
-    found = oom_tag_backstop.list_descendant_pids(10, proc_dir=tmp_path)
-    assert sorted(found) == [11, 12, 13]
-
-
-def test_descendant_walk_on_a_host_without_proc(tmp_path: Path) -> None:
-    assert oom_tag_backstop.list_descendant_pids(10, proc_dir=tmp_path / "none") == []
 
 
 def test_protocol_round_trip() -> None:

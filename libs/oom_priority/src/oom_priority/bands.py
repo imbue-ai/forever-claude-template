@@ -139,6 +139,35 @@ SERVICE_BANDS: Final[dict[str, int]] = {
 # can re-assert the value if that self-tag failed.
 SHARED_BROWSER: Final[int] = 1000
 
+# The floor of the browser band's *range*. Chromium deliberately overwrites any
+# inherited ``oom_score_adj`` once per process at startup with its own internal
+# gradation (browser/zygote 0, gpu/utility 200, renderers 300 -- see
+# ``AdjustLinuxOOMScore`` in chromium's chrome_main_delegate.cc), which without
+# correction would leave the memory-heavy renderers *more* protected than the
+# agents whose work they serve. The kernel offers no way to forbid that lowering
+# without ``CAP_SYS_RESOURCE``, so the browser service instead sweeps its process
+# tree and remaps every self-lowered value into ``[SHARED_BROWSER_FLOOR,
+# SHARED_BROWSER]`` via ``shared_browser_oom_score_adj``: the whole browser tree
+# stays above AGENT_SUBPROCESS, while Chromium's relative ordering (which is worth
+# keeping -- shedding one renderer kills one tab, not the whole browser) is
+# preserved in compressed form. Chromium only writes each value once, so a
+# remapped value sticks.
+SHARED_BROWSER_FLOOR: Final[int] = 910
+
+
+def shared_browser_oom_score_adj(self_assigned: int) -> int:
+    """Map a value Chromium assigned within its own 0..1000 gradation into the
+    browser band's range ``[SHARED_BROWSER_FLOOR, SHARED_BROWSER]``.
+
+    Order-preserving (a more-expendable Chromium process stays more expendable)
+    and clamped, so any input lands inside the band range -- in particular at or
+    above the floor, which is what makes the browser service's sweep idempotent
+    (it only remaps values *below* the floor).
+    """
+    clamped = max(0, min(1000, self_assigned))
+    span = SHARED_BROWSER - SHARED_BROWSER_FLOOR
+    return SHARED_BROWSER_FLOOR + round(clamped * span / 1000)
+
 # Expected band per supervisord program whose *program name* is not a
 # SERVICE_BANDS key, for the backstop listener (scripts/oom_tag_backstop.py).
 # The OOM machinery itself (earlyoom, the listener) must stay PROTECTED -- it is
