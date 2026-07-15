@@ -29,8 +29,25 @@ vi.mock("../models/PendingMessages", () => ({
 
 import { renderPendingMessages } from "./PendingMessageView";
 
-function pending(id: string, status: "sending" | "queued"): PendingMessage {
+function pending(id: string, status: PendingMessage["status"]): PendingMessage {
   return { id, content: "hello there", status, sent_while_idle: true, prior_user_event_ids: new Set() };
+}
+
+// Collect every text leaf in a rendered vnode subtree (mithril stores a string
+// child as a "#" text vnode whose `children` is the string).
+function collectText(node: unknown): string {
+  if (node === null || node === undefined) return "";
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(collectText).join("");
+  if (typeof node === "object") return collectText((node as { children?: unknown }).children ?? null);
+  return "";
+}
+
+/** The status-caption child (the "Sending…" / "Queued" / "Reconnecting…" row). */
+function statusChild(wrapper: m.Vnode): m.Vnode | undefined {
+  return ((wrapper.children as m.Vnode[]) ?? []).find((c) =>
+    vnodeClass(c).split(/\s+/).includes("pending-message-status"),
+  );
 }
 
 // Mithril normalizes a vnode's `class` attr into `attrs.className`.
@@ -84,6 +101,25 @@ describe("renderPendingMessages", () => {
     expect(directChildClasses(wrapper)).toContain("pending-message-status");
     // The interrupt-and-send action is offered on a queued message.
     expect(hasClassInTree(wrapper, "pending-message-interrupt")).toBe(true);
+    for (const child of (wrapper.children as m.Vnode[]) ?? []) {
+      expect(child.key).toBeDefined();
+    }
+  });
+
+  it("renders a reconnecting bubble dimmed, with a distinct 'Reconnecting…' caption and no action", () => {
+    mockPending = [pending("p1", "reconnecting")];
+    const nodes = renderPendingMessages("agent");
+
+    expect(nodes).toHaveLength(1);
+    const wrapper = nodes[0];
+    // Undelivered (neither accepted nor rejected), so it shares the dimmed style.
+    expect(vnodeClass(wrapper)).toContain("pending-message--sending");
+    expect(vnodeClass(wrapper)).not.toContain("--queued");
+    // Distinct caption -- not "Sending…" -- so the user sees it is held, not in flight.
+    expect(collectText(statusChild(wrapper))).toContain("Reconnecting");
+    expect(collectText(statusChild(wrapper))).not.toContain("Sending");
+    // No interrupt action: nothing is queued on the agent to interrupt.
+    expect(hasClassInTree(wrapper, "pending-message-interrupt")).toBe(false);
     for (const child of (wrapper.children as m.Vnode[]) ?? []) {
       expect(child.key).toBeDefined();
     }

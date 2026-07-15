@@ -2453,6 +2453,25 @@ body {
   text-overflow: ellipsis;
 }
 
+/* During a live-updates outage the indicator cannot know the agent's real
+   activity, so it shows an explicit, subdued "Reconnecting…" state: a muted
+   grey dot with a slower, gentler fade (no scale, lower peak opacity) that
+   reads as "waiting" rather than the accent-colored "actively working" pulse. */
+.agent-activity-indicator[data-state="RECONNECTING"] .agent-activity-indicator__dot {
+  background: var(--color-text-faint);
+  animation: agent-activity-reconnecting-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes agent-activity-reconnecting-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
 .claude-login-overlay {
   position: absolute;
   inset: 0;

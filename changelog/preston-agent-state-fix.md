@@ -1,0 +1,5 @@
+Fix the misleading chat behavior that appeared when a laptop slept (or the workspace container restarted) while the local minds app was open and the browser reconnected to a backend whose state had been reset.
+
+- Sending a message during a connectivity outage no longer pops the raw "Failed to send message: null" native alert. A send that fails because the backend is unreachable (a front-door proxy 502/503/504 or an offline network) is now recognized as a transient outage rather than a rejection: the message bubble is held in a "Reconnecting…" state instead of being dropped, and is re-sent automatically once the connection recovers. Only a genuine application-level rejection still rolls the message back with an error.
+
+- The activity indicator above the message input now shows "Reconnecting…" instead of a frozen "Thinking…" / "Running <tool>…" while the live-updates connection is down. When the connection drops, the last-known per-agent activity is treated as unknowable rather than current, so the indicator tells the truth about the outage instead of leaving a stale status pinned on screen. It returns to the real activity as soon as the connection is restored.

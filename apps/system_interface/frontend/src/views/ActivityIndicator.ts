@@ -32,10 +32,16 @@
  * A null ``activity_state`` means the server has no per-agent activity
  * tracking for this agent (proto-agents, non-Claude agent types, remote
  * agents whose state dir is not on this host) -- the indicator collapses.
+ *
+ * When the live-updates WebSocket is disconnected the indicator instead shows
+ * an explicit "Reconnecting…" state (``data-state="RECONNECTING"``): during an
+ * outage the last-known activity is stale and unknowable, so a truthful
+ * "we've lost the connection" beats a frozen "Thinking…".
  */
 
 import m from "mithril";
 import type { ToolCall, TranscriptEvent } from "../models/Response";
+import { isConnected } from "../models/AgentManager";
 import { getEffectiveActivityState } from "../models/PendingMessages";
 
 // Note: Agent / Task are intentionally NOT in this map. labelForToolCall
@@ -202,6 +208,12 @@ export function labelForActivityState(state: string | null | undefined, events: 
   return null;
 }
 
+// data-state value and label for the live-updates outage state. Kept distinct
+// from the server-derived activity enum (THINKING/TOOL_RUNNING/IDLE) so the CSS
+// can style "we've lost the connection" on its own (a subdued grey pulse).
+const RECONNECTING_STATE = "RECONNECTING";
+const RECONNECTING_LABEL = "Reconnecting…";
+
 interface ActivityIndicatorAttrs {
   agentId: string;
   events: TranscriptEvent[];
@@ -210,6 +222,19 @@ interface ActivityIndicatorAttrs {
 export function ActivityIndicator(): m.Component<ActivityIndicatorAttrs> {
   return {
     view(vnode) {
+      // A dropped live-updates socket means the agent's true activity is
+      // unknowable, so show an explicit "Reconnecting…" rather than the
+      // last-known (now stale) state. Checked before labelForActivityState so
+      // the indicator is truthful even in the unlikely case an agent's
+      // activity_state is still non-null during the outage -- AgentManager nulls
+      // them on disconnect, but we do not rely solely on that side effect.
+      if (!isConnected()) {
+        return m(
+          "div.agent-activity-indicator",
+          { "data-state": RECONNECTING_STATE, role: "status", "aria-live": "polite" },
+          [m("span.agent-activity-indicator__dot"), m("span.agent-activity-indicator__label", RECONNECTING_LABEL)],
+        );
+      }
       const state = getEffectiveActivityState(vnode.attrs.agentId);
       const label = labelForActivityState(state, vnode.attrs.events);
       if (label === null) return null;

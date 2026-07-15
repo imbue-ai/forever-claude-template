@@ -1,6 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type m from "mithril";
 import type { TranscriptEvent } from "../models/Response";
-import { isWorkingActivityState, labelForActivityState } from "./ActivityIndicator";
+
+// The ActivityIndicator component reads live connection state from AgentManager
+// and the effective activity state from PendingMessages. Stub both so the view
+// tests can drive each independently; the pure-function tests below never call
+// them. `mock`-prefixed vars are referenceable inside the hoisted factories.
+let mockConnected = true;
+let mockActivityState: string | null = null;
+vi.mock("../models/AgentManager", () => ({
+  isConnected: () => mockConnected,
+}));
+vi.mock("../models/PendingMessages", () => ({
+  getEffectiveActivityState: () => mockActivityState,
+}));
+
+import { ActivityIndicator, isWorkingActivityState, labelForActivityState } from "./ActivityIndicator";
 
 function userMsg(ts: string): TranscriptEvent {
   return { timestamp: ts, type: "user_message", event_id: `u-${ts}`, source: "test", role: "user", content: "hi" };
@@ -217,5 +232,70 @@ describe("isWorkingActivityState — stop-button visibility gate", () => {
 
   it("treats an unknown / future state value as not working", () => {
     expect(isWorkingActivityState("SOMETHING_NEW")).toBe(false);
+  });
+});
+
+// Collect every text leaf in a rendered vnode tree (mithril stores a string
+// child as a "#" text vnode whose `children` is the string).
+function collectText(node: unknown): string {
+  if (node === null || node === undefined) return "";
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(collectText).join("");
+  if (typeof node === "object") return collectText((node as { children?: unknown }).children ?? null);
+  return "";
+}
+
+function dataState(vnode: m.Vnode): string | undefined {
+  return (vnode.attrs as Record<string, unknown> | null)?.["data-state"] as string | undefined;
+}
+
+function renderActivityIndicator(events: TranscriptEvent[] = []): m.Vnode | null {
+  const component = ActivityIndicator();
+  const vnode = { attrs: { agentId: "a1", events } } as unknown as m.Vnode<{
+    agentId: string;
+    events: TranscriptEvent[];
+  }>;
+  return component.view(vnode) as m.Vnode | null;
+}
+
+describe("ActivityIndicator view — live-connection state", () => {
+  beforeEach(() => {
+    mockConnected = true;
+    mockActivityState = null;
+  });
+
+  it("shows 'Reconnecting…' with a RECONNECTING data-state while the socket is down, ignoring any activity_state", () => {
+    mockConnected = false;
+    // A stale non-null activity must NOT leak through during an outage.
+    mockActivityState = "THINKING";
+    const vnode = renderActivityIndicator();
+    expect(vnode).not.toBe(null);
+    expect(dataState(vnode as m.Vnode)).toBe("RECONNECTING");
+    expect(collectText(vnode)).toContain("Reconnecting");
+    expect(collectText(vnode)).not.toContain("Thinking");
+  });
+
+  it("shows 'Reconnecting…' while disconnected even when activity_state is null", () => {
+    mockConnected = false;
+    mockActivityState = null;
+    const vnode = renderActivityIndicator();
+    expect(vnode).not.toBe(null);
+    expect(dataState(vnode as m.Vnode)).toBe("RECONNECTING");
+    expect(collectText(vnode)).toContain("Reconnecting");
+  });
+
+  it("renders the real activity state normally when connected (no regression)", () => {
+    mockConnected = true;
+    mockActivityState = "THINKING";
+    const vnode = renderActivityIndicator();
+    expect(vnode).not.toBe(null);
+    expect(dataState(vnode as m.Vnode)).toBe("THINKING");
+    expect(collectText(vnode)).toContain("Thinking");
+  });
+
+  it("collapses (renders nothing) when connected and the agent is idle / untracked", () => {
+    mockConnected = true;
+    mockActivityState = null;
+    expect(renderActivityIndicator()).toBe(null);
   });
 });
