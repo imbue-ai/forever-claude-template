@@ -113,17 +113,25 @@ parent_type = "claude"
 # the "codex" agent type -- OpenAI Codex CLI as a peer harness to claude. It is
 # its own base type (registered by the vendored imbue-mngr-codex plugin via
 # `mngr plugin add` in scripts/build_workspace.sh), so no parent_type. Auto-approve
-# + auto-dismiss so the sandboxed container agent runs unattended, matching
+# + auto-dismiss so the container agent runs unattended, matching
 # agent_types.claude's posture (auto_allow_permissions sets codex
-# approval_policy="never"; sandbox_mode still applies). The codex binary is baked
-# into the image (scripts/setup_system.sh, CODEX_VERSION), so check_installation
-# is off -- do not reinstall/verify at provision. model is intentionally left
-# unset: a ChatGPT-account login rejects some *-codex slugs, so leaving codex's
-# default in force is safest; pin (e.g. "gpt-5.5") only if the first message 400s.
+# approval_policy="never"). The codex binary is baked into the image
+# (scripts/setup_system.sh, CODEX_VERSION), so check_installation is off -- do not
+# reinstall/verify at provision. model is intentionally left unset: a ChatGPT-account
+# login rejects some *-codex slugs, so leaving codex's default in force is safest;
+# pin (e.g. "gpt-5.5") only if the first message 400s.
+#
+# sandbox_mode = danger-full-access disables codex's own OS sandbox. On Linux codex
+# sandboxes exec via bubblewrap, but the bundled bwrap cannot set up its network
+# namespace inside the Modal/gVisor agent container (every exec fails with
+# `bwrap: loopback: Failed RTM_NEWADDR: No child process`). The container is already
+# the isolation boundary -- same reason agent_types.claude runs
+# --dangerously-skip-permissions -- so codex's nested sandbox is both redundant and
+# broken here. Turning it off lets exec actually run.
 [agent_types.codex]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
-sandbox_mode = "workspace-write"
+sandbox_mode = "danger-full-access"
 check_installation = false
 
 # --- Provider configurations ---
