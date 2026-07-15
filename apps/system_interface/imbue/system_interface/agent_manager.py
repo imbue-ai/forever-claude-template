@@ -9,6 +9,8 @@ from typing import Any
 from typing import Final
 
 from loguru import logger as _loguru_logger
+from oom_priority.bands import set_oom_score_adj
+from oom_priority.registry import lookup_pid_by_agent_id
 from pydantic import Field
 from watchdog.events import FileMovedEvent
 from watchdog.events import FileSystemEvent
@@ -24,22 +26,21 @@ from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
-from imbue.mngr.api.discovery_events import DiscoveryEvent
-from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.find import AgentMatch
+from imbue.mngr.api.observe import AgentRemovedEvent
+from imbue.mngr.api.observe import AgentStateEvent
+from imbue.mngr.api.observe import FullAgentStateEvent
+from imbue.mngr.api.observe import parse_observe_event_line
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
-from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
-from imbue.system_interface.activity_state import is_lifecycle_process_alive
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
@@ -47,11 +48,11 @@ from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import MngrMessenger
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
-from imbue.system_interface.agent_discovery import get_tmux_naming_config
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
+from imbue.system_interface.oom_prioritizer import ChatOomPrioritizer
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
@@ -124,6 +125,10 @@ def _build_chat_create_command(
         "none",
         "--template",
         "chat",
+        # Tags this as a user-created agent so the OOM launch wrapper puts it in the
+        # dynamic chat band (re-tagged from live UI engagement), not the worker band.
+        "--label",
+        "user_created=true",
         "--no-connect",
     ]
     # Inherit the project label from the primary agent. The chat agent belongs to
@@ -134,93 +139,20 @@ def _build_chat_create_command(
 
 
 def _build_observe_command_argv(mngr_binary: str) -> list[str]:
-    """Build the ``mngr observe`` discovery-only argv. Pure (see above).
+    """Build the ``mngr observe --stream-events`` argv. Pure (see above).
 
-    ``--discovery-only`` streams discovery events as JSONL to stdout (which we
-    consume directly) and tails the single shared discovery log under the
-    default host dir. We deliberately do NOT pass ``--events-dir``: that flag
-    only relocates the *full* observer's event files + lock and has no effect in
-    discovery-only mode -- mngr now rejects the combination outright.
+    ``--stream-events`` runs the full observer and additionally echoes each
+    agents-stream event (AGENT_STATE / AGENTS_FULL_STATE / AGENT_REMOVED) as
+    JSONL to stdout, which we consume directly. Unlike the old ``--discovery-only``
+    stream, these events carry real probed lifecycle state (including event-driven
+    detection of an agent process dying on its own), which is what drives each
+    agent's real ``state`` below.
     """
     return [
         mngr_binary,
         "observe",
-        "--discovery-only",
+        "--stream-events",
     ]
-
-
-# How often the liveness poll re-probes each locally-tracked agent's process. The
-# discovery stream is metadata-only and reports every agent as RUNNING, so this
-# poll is the source of truth for whether an agent's Claude process is alive
-# (which gates the "Thinking..."/"Running..." indicator). A local tmux+ps probe
-# is cheap, so this is short enough that a death (e.g. a container restart) clears
-# a stale indicator within a few seconds.
-_LIVENESS_POLL_INTERVAL_SECONDS: Final[float] = 5.0
-_LIVENESS_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
-
-# One `tmux list-panes -a` covers every session at once; each pane is emitted as
-# ``session|window|pane_dead|pane_current_command|pane_pid``. The last three
-# fields are exactly what BaseAgent._build_lifecycle_probe_command produces, so a
-# session's primary-window row feeds straight into determine_lifecycle_state.
-_TMUX_LIVENESS_PANE_FORMAT: Final[str] = "#{session_name}|#{window_name}|#{pane_dead}|#{pane_current_command}|#{pane_pid}"
-_PS_LIVENESS_ARGV: Final[tuple[str, ...]] = ("ps", "-e", "-o", "pid=,ppid=,comm=")
-
-
-def _build_tmux_liveness_argv() -> list[str]:
-    """Build the ``tmux list-panes -a`` argv used to probe every session at once. Pure."""
-    return ["tmux", "list-panes", "-a", "-F", _TMUX_LIVENESS_PANE_FORMAT]
-
-
-def _parse_primary_window_probe_by_session(panes_output: str, primary_window_name: str) -> dict[str, str]:
-    """Map each tmux session to its primary window's lifecycle probe string.
-
-    ``panes_output`` is the stdout of ``tmux list-panes -a`` in
-    :data:`_TMUX_LIVENESS_PANE_FORMAT`. For each session, the first pane in the
-    ``primary_window_name`` window yields a ``pane_dead|pane_current_command|pane_pid``
-    string in the shape ``BaseAgent._build_lifecycle_probe_command`` produces.
-    Sessions with no such pane are omitted, so a caller reads a missing session as
-    a dead (STOPPED) agent -- exactly what a container restart that killed every
-    session looks like.
-    """
-    probe_by_session: dict[str, str] = {}
-    for line in panes_output.splitlines():
-        parts = line.split("|")
-        if len(parts) != 5:
-            continue
-        session_name, window_name, pane_dead, current_command, pane_pid = parts
-        if window_name != primary_window_name:
-            continue
-        probe_by_session.setdefault(session_name, f"{pane_dead}|{current_command}|{pane_pid}")
-    return probe_by_session
-
-
-def _derive_process_liveness(
-    session_name_by_agent_id: dict[str, str],
-    probe_by_session: dict[str, str],
-    ps_output: str,
-) -> dict[str, bool]:
-    """Derive per-agent process liveness from a single tmux + ps probe.
-
-    Each agent's primary-window probe string (or ``None`` when its session is
-    gone) plus the shared ``ps`` output go to mngr's ``determine_lifecycle_state``.
-    ``expected_process_name`` is empty and ``is_agent_type_known`` is False because
-    system_interface does not load the agent-type plugins that know each agent's
-    binary: a live pane running any non-shell program reads as
-    RUNNING_UNKNOWN_AGENT_TYPE (alive), while a gone session (STOPPED) or a
-    dead/bare-shell pane (DONE) reads as not alive -- all the activity gate needs.
-    """
-    liveness_by_agent_id: dict[str, bool] = {}
-    for agent_id, session_name in session_name_by_agent_id.items():
-        probe = probe_by_session.get(session_name)
-        state = determine_lifecycle_state(
-            tmux_info=probe,
-            is_active=False,
-            expected_process_name="",
-            ps_output=ps_output,
-            is_agent_type_known=False,
-        )
-        liveness_by_agent_id[agent_id] = is_lifecycle_process_alive(state.value)
-    return liveness_by_agent_id
 
 
 # AgentMatch requires a host_name, but the send path never reads it -- it groups
@@ -230,18 +162,18 @@ def _derive_process_liveness(
 _UNUSED_HOST_NAME: Final[HostName] = HostName("unknown")
 
 
-def _build_agent_match(agent: DiscoveredAgent) -> AgentMatch:
-    """Assemble the messaging-location AgentMatch for a discovered agent.
+def _build_agent_match(agent: AgentDetails) -> AgentMatch:
+    """Assemble the messaging-location AgentMatch for an observed agent.
 
-    Addressed by agent_id + host_id + provider_name; host_name is a placeholder
-    (see `_UNUSED_HOST_NAME`).
+    Addressed by agent_id + host_id + provider_name (sourced from the agent's
+    nested host details); host_name is a placeholder (see `_UNUSED_HOST_NAME`).
     """
     return AgentMatch(
-        agent_id=agent.agent_id,
-        agent_name=agent.agent_name,
-        host_id=agent.host_id,
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host_id=agent.host.id,
         host_name=_UNUSED_HOST_NAME,
-        provider_name=agent.provider_name,
+        provider_name=agent.host.provider_name,
     )
 
 
@@ -360,12 +292,12 @@ class AgentManager:
     _broadcaster: WebSocketBroadcaster
     _messenger: MngrMessenger
     _lock: threading.Lock
-    # Folds the per-provider discovery stream into one consistent view. Each
-    # discovery event (per-provider snapshot or incremental agent/host event) is
-    # applied here, and ``_agents`` / ``_match_by_agent_id`` are rebuilt from the
-    # accumulated state so a slow/errored provider's snapshot can never wipe
-    # another provider's agents.
-    _aggregator: DiscoveryStateAggregator
+    # The live view of observed agents keyed by id, folded from the observe
+    # stream: an AGENTS_FULL_STATE snapshot rebuilds it wholesale, an AGENT_STATE
+    # upserts one agent, and an AGENT_REMOVED drops one. ``_agents`` /
+    # ``_match_by_agent_id`` are rebuilt from it after each event, and its
+    # before/after key diff drives the per-agent membership side-effects.
+    _agent_details_by_id: dict[str, AgentDetails]
     _agents: dict[str, AgentStateItem]
     # agent id -> its discovered location (host/provider), maintained from the
     # observe snapshot/discovered/destroy events so messaging can resolve an
@@ -390,26 +322,19 @@ class AgentManager:
     _last_event_type_by_agent: dict[str, str | None]
     _last_event_timestamp_by_agent: dict[str, str | None]
     _activity_state_by_agent: dict[str, ActivityState]
-    # Per-agent "is the Claude process alive", owned by the liveness poll
-    # (``_poll_agent_liveness``). The discovery stream reports every agent as
-    # RUNNING, so this cache -- not ``AgentStateItem.state`` -- is the source of
-    # truth for the ``is_agent_running`` gate in ``_recompute_activity_state``. A
-    # missing entry (agent not yet probed) falls back to the discovery state.
-    _process_alive_by_agent: dict[str, bool]
-    # Concurrency group hosting the liveness poll thread, and the event that stops
-    # it. A dedicated event (not ``_shutdown_event``) so the poll's cadence never
-    # contends with the observe subprocess's shutdown signal. Both are None/unset
-    # until ``_start_liveness_poll`` runs (only from ``start()``), so unit tests
-    # that build a manager without starting it never spawn the poll.
-    _liveness_cg: ConcurrencyGroup | None
-    _liveness_poll_stop: threading.Event
-    _tmux_session_prefix: str
-    _tmux_primary_window_name: str
     # Assist chats whose tab we have already auto-opened (or that existed at
     # startup, seeded by ``_initial_discover`` so we never auto-open them). Lets
     # both discovery paths -- the per-agent delta and the full snapshot -- open
     # each new assist chat exactly once without reopening it on later snapshots.
     _auto_opened_assist_ids: set[str]
+    # Re-tags chat agents' OOM ``oom_score_adj`` from live UI activity (open /
+    # visible / recently-messaged). Driven purely by the ``/api/activity`` endpoint
+    # (via ``record_activity``): a chat launches at the expendable band and is
+    # protected only as engagement is reported, so no periodic re-tag is needed.
+    # The messaged-revive path is race-free without one -- the send blocks until the
+    # revived process is ready (and its pid is registered before that), and the
+    # frontend posts activity only after the send returns.
+    _oom_prioritizer: ChatOomPrioritizer
 
     @classmethod
     def build(
@@ -423,14 +348,14 @@ class AgentManager:
         ``messenger`` is the agent-messaging collaborator; it defaults to the
         real mngr discover/send. Tests pass one whose ``discover``/``send`` are
         fakes to avoid touching mngr. ``mngr_binary`` is the path or name of the
-        mngr executable used for the discovery-only observe subprocess and for
+        mngr executable used for the stream-events observe subprocess and for
         agent-creation commands.
         """
         manager = cls.__new__(cls)
         manager._broadcaster = broadcaster
         manager._messenger = messenger
         manager._lock = threading.Lock()
-        manager._aggregator = DiscoveryStateAggregator()
+        manager._agent_details_by_id = {}
         manager._agents = {}
         manager._match_by_agent_id = {}
         manager._applications = []
@@ -451,39 +376,33 @@ class AgentManager:
         manager._last_event_type_by_agent = {}
         manager._last_event_timestamp_by_agent = {}
         manager._activity_state_by_agent = {}
-        manager._process_alive_by_agent = {}
-        manager._liveness_cg = None
-        manager._liveness_poll_stop = threading.Event()
-        manager._tmux_session_prefix = ""
-        manager._tmux_primary_window_name = ""
         manager._auto_opened_assist_ids = set()
+        # Built last: its ``list_chat_agent_ids`` callback reads ``_agents`` /
+        # ``_lock``, which are set above.
+        manager._oom_prioritizer = ChatOomPrioritizer(
+            list_chat_agent_ids=manager.get_chat_agent_ids,
+            resolve_pid=lookup_pid_by_agent_id,
+            set_adj=set_oom_score_adj,
+        )
         return manager
 
     def start(self) -> None:
         """Start the observe subprocess and perform initial agent discovery."""
         self._initial_discover()
         self._start_observe()
-        self._start_liveness_poll()
 
     def start_without_observe(self) -> None:
         """Start with initial discovery only, no observe subprocess. For testing."""
         self._initial_discover()
 
     def stop(self) -> None:
-        """Stop the observe subprocess, liveness poll, file watchers, and creation threads."""
+        """Stop the observe subprocess, file watchers, and creation threads."""
         self._shutdown_event.set()
-        # Wake the liveness poll loop so it exits before its group joins it.
-        self._liveness_poll_stop.set()
 
         if self._observe_cg is not None:
             self._observe_cg.shutdown()
             self._observe_cg.__exit__(None, None, None)
             self._observe_cg = None
-
-        if self._liveness_cg is not None:
-            self._liveness_cg.shutdown()
-            self._liveness_cg.__exit__(None, None, None)
-            self._liveness_cg = None
 
         self._creation_cg.__exit__(None, None, None)
 
@@ -498,7 +417,6 @@ class AgentManager:
             self._has_unmatched_tool_use_by_agent.clear()
             self._last_event_type_by_agent.clear()
             self._activity_state_by_agent.clear()
-            self._process_alive_by_agent.clear()
 
     @property
     def broadcaster(self) -> WebSocketBroadcaster:
@@ -517,6 +435,36 @@ class AgentManager:
         """Look up a single agent by ID."""
         with self._lock:
             return self._agents.get(agent_id)
+
+    def get_chat_agent_ids(self) -> list[str]:
+        """Ids of the agents the OOM prioritizer manages: chat agents only.
+
+        Excludes workers (``agent_created=true``) and the primary services agent
+        (``is_primary=true``); those keep their launch bands -- workers maximally
+        expendable, the primary pinned -- so no UI activity moves their score.
+        Remote agents are left in (they have no local pid, so the prioritizer's
+        pid lookup skips them harmlessly).
+        """
+        with self._lock:
+            return [
+                agent.id
+                for agent in self._agents.values()
+                if agent.labels.get("agent_created") != "true" and agent.labels.get("is_primary") != "true"
+            ]
+
+    def record_activity(
+        self,
+        *,
+        open_ids: list[str],
+        visible_ids: list[str],
+        messaged_id: str | None = None,
+    ) -> None:
+        """Feed a frontend activity report to the OOM prioritizer (re-tags chats)."""
+        self._oom_prioritizer.record_activity(
+            open_ids=open_ids,
+            visible_ids=visible_ids,
+            messaged_id=messaged_id,
+        )
 
     def get_agent_info_by_id(self, agent_id: str) -> AgentInfo | None:
         """Resolve an agent id to its web-UI :class:`AgentInfo` (with resolved dirs), or None."""
@@ -911,7 +859,7 @@ class AgentManager:
         return Path.home()
 
     def _build_observe_command(self) -> list[str]:
-        """Build the argv for the mngr observe discovery-only subprocess. Pure."""
+        """Build the argv for the mngr observe --stream-events subprocess. Pure."""
         return _build_observe_command_argv(self._mngr_binary)
 
     def _start_observe(self) -> None:
@@ -986,142 +934,6 @@ class AgentManager:
             stderr if stderr else "(empty)",
         )
 
-    def _start_liveness_poll(self) -> None:
-        """Start the periodic process-liveness poll for locally-tracked agents.
-
-        Loads the (static) tmux session-naming config once so the poll can address
-        each agent's session without a live mngr context, then spawns the loop on a
-        dedicated concurrency group. If the config cannot be loaded, the poll is
-        disabled and the activity gate falls back to the discovery lifecycle state.
-        """
-        try:
-            naming = get_tmux_naming_config()
-        except (OSError, ValueError, RuntimeError, MngrError) as e:
-            _loguru_logger.opt(exception=e).warning(
-                "Could not load tmux naming config; agent process-liveness polling disabled."
-            )
-            return
-
-        self._tmux_session_prefix = naming.session_prefix
-        self._tmux_primary_window_name = naming.primary_window_name
-
-        self._liveness_cg = ConcurrencyGroup(name="agent-manager-liveness")
-        self._liveness_cg.__enter__()
-        self._liveness_cg.start_new_thread(
-            target=self._liveness_poll_loop,
-            name="liveness-poll",
-            is_checked=False,
-        )
-
-    def _liveness_poll_loop(self) -> None:
-        """Probe local agents' process liveness on an interval until shutdown.
-
-        Probes immediately, then every ``_LIVENESS_POLL_INTERVAL_SECONDS``, exiting
-        promptly when ``stop()`` sets the poll's shutdown event.
-        """
-        self._run_liveness_poll_once()
-        while not self._liveness_poll_stop.wait(timeout=_LIVENESS_POLL_INTERVAL_SECONDS):
-            self._run_liveness_poll_once()
-
-    def _run_liveness_poll_once(self) -> None:
-        """Run one liveness-poll iteration, logging (not raising) any failure."""
-        try:
-            self._poll_agent_liveness()
-        except (OSError, ValueError, RuntimeError, ProcessError, ConcurrencyGroupError, MngrError) as e:
-            _loguru_logger.opt(exception=e).warning("Agent process-liveness poll iteration failed (continuing)")
-
-    def _poll_agent_liveness(self) -> None:
-        """Probe every locally-tracked agent's process liveness and reconcile it.
-
-        Gathers one ``tmux list-panes -a`` and one ``ps`` snapshot (two subprocess
-        calls total, regardless of agent count), derives each tracked agent's
-        liveness from them, and folds the result into tracked state. Scoped to
-        ``_activity_tracked_agents`` -- those are exactly the agents with a local
-        state dir, whose tmux session lives in this same container -- so no remote
-        agent is ever probed.
-        """
-        with self._lock:
-            has_tracked_agents = bool(self._activity_tracked_agents)
-        if not has_tracked_agents:
-            return
-
-        panes_output = self._probe_tmux_panes()
-        ps_output = self._probe_process_table()
-        liveness_by_agent_id = self._compute_liveness_for_tracked_agents(panes_output, ps_output)
-        if liveness_by_agent_id:
-            self._apply_agent_liveness(liveness_by_agent_id)
-
-    def _compute_liveness_for_tracked_agents(self, panes_output: str, ps_output: str) -> dict[str, bool]:
-        """Derive liveness for every activity-tracked agent from one tmux+ps snapshot.
-
-        Reconstructs each tracked agent's tmux session name (``prefix`` + name,
-        mirroring ``MngrConfig.agent_session_name``) and reads its primary-window
-        pane out of ``panes_output``. Split out from the subprocess-gathering
-        ``_poll_agent_liveness`` so the session-name -> liveness mapping is testable
-        without spawning tmux/ps.
-        """
-        with self._lock:
-            session_name_by_agent_id = {
-                agent_id: f"{self._tmux_session_prefix}{agent.name}"
-                for agent_id, agent in self._agents.items()
-                if agent_id in self._activity_tracked_agents
-            }
-        if not session_name_by_agent_id:
-            return {}
-        probe_by_session = _parse_primary_window_probe_by_session(panes_output, self._tmux_primary_window_name)
-        return _derive_process_liveness(session_name_by_agent_id, probe_by_session, ps_output)
-
-    def _probe_tmux_panes(self) -> str:
-        """Return ``tmux list-panes -a`` stdout, or empty on failure.
-
-        A nonzero exit (e.g. no tmux server after a container restart killed every
-        session) means no live sessions, so we return empty and every agent reads
-        as STOPPED -- mirroring ``BaseAgent.get_lifecycle_state``'s "probe failed
-        -> STOPPED".
-        """
-        result = run_local_command_modern_version(
-            command=_build_tmux_liveness_argv(),
-            is_checked=False,
-            timeout=_LIVENESS_PROBE_TIMEOUT_SECONDS,
-            shutdown_event=self._shutdown_event,
-        )
-        return result.stdout if result.returncode == 0 else ""
-
-    def _probe_process_table(self) -> str:
-        """Return ``ps`` stdout for descendant-process detection, or empty on failure."""
-        result = run_local_command_modern_version(
-            command=list(_PS_LIVENESS_ARGV),
-            is_checked=False,
-            timeout=_LIVENESS_PROBE_TIMEOUT_SECONDS,
-            shutdown_event=self._shutdown_event,
-        )
-        return result.stdout if result.returncode == 0 else ""
-
-    def _apply_agent_liveness(self, liveness_by_agent_id: dict[str, bool]) -> None:
-        """Fold freshly-probed process liveness into tracked state and broadcast changes.
-
-        For every tracked agent whose liveness flipped since the last probe, the
-        new value is cached and its activity state recomputed -- a now-dead agent's
-        ``is_agent_running`` gate goes False, so ``derive_activity_state`` forces
-        IDLE and its stale "Thinking..."/"Running..." indicator clears. A single
-        ``agents_updated`` broadcast then carries any change to the frontend.
-        """
-        changed_agent_ids: list[str] = []
-        with self._lock:
-            for agent_id, is_alive in liveness_by_agent_id.items():
-                if agent_id not in self._activity_tracked_agents:
-                    continue
-                if self._process_alive_by_agent.get(agent_id) != is_alive:
-                    self._process_alive_by_agent[agent_id] = is_alive
-                    changed_agent_ids.append(agent_id)
-
-        if not changed_agent_ids:
-            return
-
-        for agent_id in changed_agent_ids:
-            self._recompute_activity_state(agent_id, broadcast_on_change=False)
-        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
-
     def _handle_observe_output_line(self, line: str, is_stdout: bool) -> None:
         """Parse and dispatch a single line of output from mngr observe.
 
@@ -1134,51 +946,67 @@ class AgentManager:
         if not is_stdout:
             _loguru_logger.warning("mngr observe stderr: {}", stripped)
             return
-        event = parse_discovery_event_line(stripped)
+        event = parse_observe_event_line(stripped)
         if event is None:
-            # parse_discovery_event_line only returns None for empty/whitespace lines,
-            # which we filtered out above; reaching here indicates an internal contract
-            # violation in the parser.
-            raise MngrError(f"parse_discovery_event_line returned None for non-empty line: {stripped[:200]!r}")
-        self._handle_discovery_event(event)
+            # The agents stream carries only AGENT_STATE / AGENTS_FULL_STATE /
+            # AGENT_REMOVED; parse_observe_event_line returns None for empty lines
+            # (filtered above) and for any other/forward-compatible type, which we
+            # simply ignore. (Malformed JSON raises out of the parser.)
+            return
+        self._handle_observe_event(event)
 
-    def _handle_discovery_event(self, event: DiscoveryEvent) -> None:
-        """Fold a discovery event into the aggregator and reconcile tracked state.
+    def _handle_observe_event(self, event: AgentStateEvent | FullAgentStateEvent | AgentRemovedEvent) -> None:
+        """Fold one observe agents-stream event into the tracked agent view.
 
-        Every parsed discovery event -- per-provider snapshots and incremental
-        agent/host events alike -- is applied to the shared
-        :class:`DiscoveryStateAggregator`, which maintains the
-        per-provider-correct view (a per-provider snapshot is authoritative only
-        for its own provider, and an item with a newer incremental event is not
-        clobbered by an in-flight snapshot). ``self._agents`` and
-        ``self._match_by_agent_id`` are then rebuilt wholesale from that
-        consistent view, while the returned membership delta drives per-agent
-        resource start/stop (app watcher, activity tracking) and assist
-        auto-open. This replaces the old per-event-type dispatch and centralizes
-        the "what changed" decision in the aggregator.
+        ``AGENTS_FULL_STATE`` rebuilds the whole set, ``AGENT_STATE`` upserts one
+        agent, and ``AGENT_REMOVED`` drops one. ``self._agents`` and
+        ``self._match_by_agent_id`` are then rebuilt from the folded view -- now
+        carrying each agent's real lifecycle ``state`` (``AgentDetails.state``)
+        rather than a hardcoded literal -- while the before/after key diff drives
+        per-agent resource start/stop (app watcher, activity tracking) and assist
+        auto-open, exactly as the discovery membership delta used to.
         """
-        delta = self._aggregator.apply_event(event)
+        with self._lock:
+            before_details = dict(self._agent_details_by_id)
+            match event:
+                case FullAgentStateEvent():
+                    self._agent_details_by_id = {str(agent.id): agent for agent in event.agents}
+                case AgentStateEvent():
+                    self._agent_details_by_id[str(event.agent.id)] = event.agent
+                case AgentRemovedEvent():
+                    self._agent_details_by_id.pop(str(event.agent_id), None)
+            details_by_id = dict(self._agent_details_by_id)
 
-        agent_by_id = self._aggregator.get_agent_by_id()
+        before_ids = set(before_details)
+        after_ids = set(details_by_id)
+        added_agent_ids = after_ids - before_ids
+        removed_agent_ids = before_ids - after_ids
+        # Persisting agents whose lifecycle state changed (e.g. RUNNING -> STOPPED
+        # when a process dies) need their activity indicator re-gated below.
+        state_changed_ids = {
+            agent_id
+            for agent_id, agent in details_by_id.items()
+            if agent_id in before_details and before_details[agent_id].state != agent.state
+        }
+
         new_agents: dict[str, AgentStateItem] = {}
         new_matches: dict[str, AgentMatch] = {}
-        for agent_id, agent in agent_by_id.items():
+        for agent_id, agent in details_by_id.items():
             new_agents[agent_id] = AgentStateItem(
                 id=agent_id,
-                name=str(agent.agent_name),
-                state="RUNNING",
+                name=str(agent.name),
+                state=agent.state.value,
                 labels=dict(agent.labels),
-                work_dir=str(agent.work_dir) if agent.work_dir else None,
+                work_dir=str(agent.work_dir),
             )
             new_matches[agent_id] = _build_agent_match(agent)
 
         with self._lock:
             # Rebuilding ``_agents`` wholesale drops the per-agent ``activity_state``
-            # (the discovery payload carries no such field). Re-apply the cached
-            # value so the broadcast below does not blank the indicator for agents
-            # that are already tracked: only ids in ``delta.added_agent_ids`` get an
-            # ``_ensure_activity_tracking`` recompute, so persisting agents rely on
-            # this re-application to keep their state.
+            # (the observe payload carries no such field). Re-apply the cached value
+            # so the broadcast below does not blank the indicator for agents that are
+            # already tracked; the recompute pass just below then re-derives it from
+            # the (possibly changed) lifecycle state.
             for agent_id, agent_state in new_agents.items():
                 cached_state = self._activity_state_by_agent.get(agent_id)
                 if cached_state is not None:
@@ -1193,7 +1021,7 @@ class AgentManager:
             self._agents = new_agents
             self._match_by_agent_id = new_matches
 
-        for agent_id in delta.added_agent_ids:
+        for agent_id in added_agent_ids:
             added_agent_state = new_agents.get(agent_id)
             if added_agent_state is None:
                 continue
@@ -1201,9 +1029,21 @@ class AgentManager:
                 self._start_app_watcher(agent_id, Path(added_agent_state.work_dir))
             self._ensure_activity_tracking(agent_id)
 
-        for agent_id in delta.removed_agent_ids:
+        for agent_id in removed_agent_ids:
             self._stop_app_watcher(agent_id)
             self._stop_activity_tracking(agent_id)
+
+        # Re-derive activity for persisting agents whose lifecycle state changed,
+        # so a RUNNING -> STOPPED transition (e.g. a process dying) re-gates the
+        # activity indicator through the unchanged ``is_agent_running`` gate --
+        # otherwise a stopped agent would keep a stale "Thinking..." indicator.
+        # Added agents were already recomputed via _ensure_activity_tracking above;
+        # unchanged agents keep their re-applied cached state. broadcast_on_change
+        # is False so the single broadcast below stays authoritative.
+        with self._lock:
+            recompute_ids = [agent_id for agent_id in state_changed_ids if agent_id in self._activity_tracked_agents]
+        for agent_id in recompute_ids:
+            self._recompute_activity_state(agent_id, broadcast_on_change=False)
 
         # Broadcast the updated agent list BEFORE any auto-open: the frontend's open
         # handler resolves ``chat:<name>`` against its known-agents list and drops the
@@ -1214,7 +1054,7 @@ class AgentManager:
         # auto-open assist chats that have appeared. ``_maybe_auto_open_assist``
         # dedupes, so an assist chat already present (including at startup) is not
         # reopened.
-        for agent_id in delta.added_agent_ids:
+        for agent_id in added_agent_ids:
             appeared_agent_state = new_agents.get(agent_id)
             if appeared_agent_state is not None:
                 self._maybe_auto_open_assist(appeared_agent_state)
@@ -1302,10 +1142,10 @@ class AgentManager:
         are tracked on a remote host and have no local transcript to watch.
         Idempotent: a second call does not duplicate work. The cached activity
         state is re-applied to ``_agents`` on every call, which matters because
-        the lifecycle handlers (``_handle_discovery_event``, ``_refresh_agents``)
-        rebuild ``_agents`` entries from raw discovery data with
+        the lifecycle handlers (``_handle_observe_event``, ``_refresh_agents``)
+        rebuild ``_agents`` entries from raw observe data with
         ``activity_state=None`` and rely on this method (for newly-added agents)
-        or on ``_handle_discovery_event``'s own cached-state re-application (for
+        or on ``_handle_observe_event``'s own cached-state re-application (for
         agents that persist across events) to repopulate it.
         """
         state_dir = self._get_agent_state_dir(agent_id)
@@ -1323,7 +1163,6 @@ class AgentManager:
             self._last_event_type_by_agent.pop(agent_id, None)
             self._last_event_timestamp_by_agent.pop(agent_id, None)
             self._activity_state_by_agent.pop(agent_id, None)
-            self._process_alive_by_agent.pop(agent_id, None)
 
     def _read_process_started_at(self, agent_id: str) -> float | None:
         """Return the mtime of the agent's ``claude_process_started`` marker, or None.
@@ -1364,14 +1203,8 @@ class AgentManager:
             has_pending_tool = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
             cached_last_event_type = self._last_event_type_by_agent.get(agent_id)
             tail_event_at = parse_iso_timestamp_to_epoch(self._last_event_timestamp_by_agent.get(agent_id))
-            # The liveness poll owns "is the process alive". A missing entry (agent
-            # not yet probed, or the poll never started) falls back to the discovery
-            # lifecycle state, which the stream reports as RUNNING.
-            is_process_alive = self._process_alive_by_agent.get(agent_id)
-            if is_process_alive is None:
-                is_process_alive = agent_state.state in RUNNING_LIFECYCLE_STATES
             new_state = derive_activity_state(
-                is_agent_running=is_process_alive,
+                is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
                 has_pending_tool_use=has_pending_tool,
                 tail_event_type=cached_last_event_type,
                 tail_event_at=tail_event_at,

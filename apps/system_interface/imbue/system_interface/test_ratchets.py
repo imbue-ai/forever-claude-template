@@ -262,7 +262,11 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # (a ``threading.Lock`` and a holder dict mutated under that lock) that
     # is not a natural fit for a Pydantic model, matching the precedent
     # already set by session_watcher / event_queues entries here.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(5))
+    # +1 for oom_prioritizer.ChatOomPrioritizer.__init__. Same category: it
+    # holds a ``threading.Lock``, mutable presence sets, a recency-timestamp
+    # dict mutated under that lock, and injected callables -- runtime state
+    # that is not a natural fit for a Pydantic model.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
 
 
 def test_prevent_cast_usage() -> None:

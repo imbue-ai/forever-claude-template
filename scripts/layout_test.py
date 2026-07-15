@@ -125,9 +125,9 @@ def test_open_waits_for_registration_then_posts(tmp_path: Path, monkeypatch: pyt
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["open", "web"])
+    rc = layout.main(["open", "web", "--layout", "desktop"])
     assert rc == 0
-    assert posted == [("open", {"ref": "service:web", "new_group": False})]
+    assert posted == [("open", {"ref": "service:web", "new_group": False, "layout": "desktop"})]
 
 
 def test_open_fails_when_service_not_registered(
@@ -142,7 +142,7 @@ def test_open_fails_when_service_not_registered(
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["open", "web"])
+    rc = layout.main(["open", "web", "--layout", "desktop"])
     assert rc == layout.EXIT_ERROR
     assert posted == []
     err = capsys.readouterr().err
@@ -156,9 +156,9 @@ def test_open_full_ref_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["open", "service:web"])
+    rc = layout.main(["open", "service:web", "--layout", "desktop"])
     assert rc == 0
-    assert posted == [("open", {"ref": "service:web", "new_group": False})]
+    assert posted == [("open", {"ref": "service:web", "new_group": False, "layout": "desktop"})]
 
 
 def test_open_new_group_flag_sets_payload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,9 +169,9 @@ def test_open_new_group_flag_sets_payload(tmp_path: Path, monkeypatch: pytest.Mo
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["open", "service:web", "--new-group"])
+    rc = layout.main(["open", "service:web", "--new-group", "--layout", "desktop"])
     assert rc == 0
-    assert posted == [("open", {"ref": "service:web", "new_group": True})]
+    assert posted == [("open", {"ref": "service:web", "new_group": True, "layout": "desktop"})]
 
 
 def test_open_chat_terminal_ref_skips_registration_and_posts_through(
@@ -189,9 +189,9 @@ def test_open_chat_terminal_ref_skips_registration_and_posts_through(
     # No applications.toml is set up: if the script misclassified the ref
     # as ``service:chat-terminal:alice`` the registration poll would fire.
 
-    rc = layout.main(["open", "chat-terminal:alice"])
+    rc = layout.main(["open", "chat-terminal:alice", "--layout", "desktop"])
     assert rc == 0
-    assert posted == [("open", {"ref": "chat-terminal:alice", "new_group": False})]
+    assert posted == [("open", {"ref": "chat-terminal:alice", "new_group": False, "layout": "desktop"})]
 
 
 def test_normalize_ref_preserves_chat_terminal_prefix() -> None:
@@ -218,9 +218,9 @@ def test_open_external_url_skips_registration_and_posts_bare_url(monkeypatch: py
     # No applications.toml set up and no _wait_for_registration override:
     # if the URL were misclassified as a service this would fail/hang.
 
-    rc = layout.main(["open", "https://example.com/dashboard"])
+    rc = layout.main(["open", "https://example.com/dashboard", "--layout", "desktop"])
     assert rc == 0
-    assert posted == [("open", {"ref": "https://example.com/dashboard", "new_group": False})]
+    assert posted == [("open", {"ref": "https://example.com/dashboard", "new_group": False, "layout": "desktop"})]
 
 
 def test_open_terminal_prints_returned_ref_to_stdout(
@@ -240,9 +240,9 @@ def test_open_terminal_prints_returned_ref_to_stdout(
         layout, "_post_layout", _make_fake_post(posted, (200, {"ok": True, "ref": "terminal:abcd1234"}))
     )
 
-    rc = layout.main(["open", "terminal"])
+    rc = layout.main(["open", "terminal", "--layout", "desktop"])
     assert rc == 0
-    assert posted == [("open", {"ref": "service:terminal", "new_group": False})]
+    assert posted == [("open", {"ref": "service:terminal", "new_group": False, "layout": "desktop"})]
     assert capsys.readouterr().out.strip() == "terminal:abcd1234"
 
 
@@ -259,7 +259,7 @@ def test_open_without_returned_ref_emits_nothing(
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["open", "web"])
+    rc = layout.main(["open", "web", "--layout", "desktop"])
     assert rc == 0
     assert capsys.readouterr().out == ""
 
@@ -275,7 +275,7 @@ def test_split_terminal_prints_returned_ref_to_stdout(
         layout, "_post_layout", _make_fake_post(posted, (200, {"ok": True, "ref": "terminal:beef0000"}))
     )
 
-    rc = layout.main(["split", "terminal", "--relative-to", "self", "--direction", "below"])
+    rc = layout.main(["split", "terminal", "--relative-to", "self", "--direction", "below", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "split"
@@ -288,9 +288,9 @@ def test_open_url_prefix_alias_is_stripped(monkeypatch: pytest.MonkeyPatch) -> N
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["open", "url:https://example.com"])
+    rc = layout.main(["open", "url:https://example.com", "--layout", "desktop"])
     assert rc == 0
-    assert posted == [("open", {"ref": "https://example.com", "new_group": False})]
+    assert posted == [("open", {"ref": "https://example.com", "new_group": False, "layout": "desktop"})]
 
 
 def test_split_accepts_external_url_target(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,7 +298,7 @@ def test_split_accepts_external_url_target(monkeypatch: pytest.MonkeyPatch) -> N
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["split", "https://example.com", "--relative-to", "self"])
+    rc = layout.main(["split", "https://example.com", "--relative-to", "self", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "split"
@@ -312,7 +312,7 @@ def test_split_passes_relative_to_and_direction(monkeypatch: pytest.MonkeyPatch)
     # Bypass the registration wait for this synthetic non-service ref.
     monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
 
-    rc = layout.main(["split", "url:abc12345", "--relative-to", "chat:alice", "--direction", "above"])
+    rc = layout.main(["split", "url:abc12345", "--relative-to", "chat:alice", "--direction", "above", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "split"
@@ -322,6 +322,7 @@ def test_split_passes_relative_to_and_direction(monkeypatch: pytest.MonkeyPatch)
         "direction": "above",
         "ratio": 0.6,
         "new_group": False,
+        "layout": "desktop",
     }
 
 
@@ -331,7 +332,7 @@ def test_split_new_group_flag_sets_payload(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
     monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
 
-    rc = layout.main(["split", "service:web", "--relative-to", "chat:alice", "--new-group"])
+    rc = layout.main(["split", "service:web", "--relative-to", "chat:alice", "--new-group", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "split"
@@ -344,7 +345,7 @@ def test_move_new_group_flag_sets_payload(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
     rc = layout.main(
-        ["move", "service:web", "--relative-to", "chat:alice", "--direction", "right", "--new-group"]
+        ["move", "service:web", "--relative-to", "chat:alice", "--direction", "right", "--new-group", "--layout", "desktop"]
     )
     assert rc == 0
     op, args = posted[0]
@@ -358,7 +359,7 @@ def test_split_preserves_self_in_relative_to(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
     monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
 
-    rc = layout.main(["split", "service:web", "--relative-to", "self"])
+    rc = layout.main(["split", "service:web", "--relative-to", "self", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "split"
@@ -371,7 +372,7 @@ def test_split_normalizes_bare_service_in_relative_to(monkeypatch: pytest.Monkey
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
     monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
 
-    rc = layout.main(["split", "service:api", "--relative-to", "web"])
+    rc = layout.main(["split", "service:api", "--relative-to", "web", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "split"
@@ -383,7 +384,7 @@ def test_move_preserves_self_in_relative_to(monkeypatch: pytest.MonkeyPatch) -> 
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["move", "service:web", "--relative-to", "self", "--direction", "right"])
+    rc = layout.main(["move", "service:web", "--relative-to", "self", "--direction", "right", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "move"
@@ -395,7 +396,7 @@ def test_move_requires_known_direction(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
     with pytest.raises(SystemExit):
-        layout.main(["move", "service:web", "--relative-to", "chat:alice", "--direction", "diagonal"])
+        layout.main(["move", "service:web", "--relative-to", "chat:alice", "--direction", "diagonal", "--layout", "desktop"])
     assert posted == []
 
 
@@ -406,7 +407,7 @@ def test_replace_url_rejects_non_service_non_https(
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
     with pytest.raises(SystemExit) as exc_info:
-        layout.main(["replace-url", "service:web", "http://insecure.local/"])
+        layout.main(["replace-url", "service:web", "http://insecure.local/", "--layout", "desktop"])
     assert exc_info.value.code == layout.EXIT_ERROR
     assert posted == []
     err = capsys.readouterr().err
@@ -417,11 +418,11 @@ def test_replace_url_accepts_service_shorthand(monkeypatch: pytest.MonkeyPatch) 
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["replace-url", "service:web", "service:api/health"])
+    rc = layout.main(["replace-url", "service:web", "service:api/health", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "replace-url"
-    assert args == {"ref": "service:web", "url": "service:api/health"}
+    assert args == {"ref": "service:web", "url": "service:api/health", "layout": "desktop"}
 
 
 def test_refresh_posts_ref_with_service_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -437,9 +438,9 @@ def test_close_normalizes_bare_service_shorthand(monkeypatch: pytest.MonkeyPatch
     posted: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
-    rc = layout.main(["close", "web"])
+    rc = layout.main(["close", "web", "--layout", "desktop"])
     assert rc == 0
-    assert posted == [("close", {"ref": "service:web"})]
+    assert posted == [("close", {"ref": "service:web", "layout": "desktop"})]
 
 
 def test_network_failure_returns_exit_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -464,7 +465,7 @@ def test_conflict_returns_distinct_exit_code(
         "in_flight": {"agent_id": "other-agent", "operation": "move", "args": {}, "started_at": 1700000000.0},
     }
     monkeypatch.setattr(layout, "_post_layout", lambda op, args: (409, body))
-    rc = layout.main(["focus", "service:web"])
+    rc = layout.main(["focus", "service:web", "--layout", "desktop"])
     assert rc == layout.EXIT_CONFLICT
     assert rc != layout.EXIT_ERROR
     err = capsys.readouterr().err
@@ -474,13 +475,13 @@ def test_conflict_returns_distinct_exit_code(
 
 def test_not_found_folds_into_exit_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(layout, "_post_layout", lambda op, args: (404, {"detail": "unknown ref"}))
-    rc = layout.main(["focus", "service:nonexistent"])
+    rc = layout.main(["focus", "service:nonexistent", "--layout", "desktop"])
     assert rc == layout.EXIT_ERROR
 
 
 def test_bad_request_folds_into_exit_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(layout, "_post_layout", lambda op, args: (400, {"detail": "bad arg"}))
-    rc = layout.main(["close", "service:web"])
+    rc = layout.main(["close", "service:web", "--layout", "desktop"])
     assert rc == layout.EXIT_ERROR
 
 
@@ -514,7 +515,7 @@ def test_post_layout_sends_agent_id_header_and_body(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(layout.urllib.request, "urlopen", fake_urlopen)
 
-    status, body = layout._post_layout("focus", {"ref": "service:web"})
+    status, body = layout._post_layout("focus", {"ref": "service:web", "layout": "desktop"})
     assert status == 200
     assert body == {"ok": True}
     assert captured["url"] == "http://127.0.0.1:8000/api/layout/broadcast"
@@ -522,7 +523,11 @@ def test_post_layout_sends_agent_id_header_and_body(monkeypatch: pytest.MonkeyPa
     header_names = {k.lower(): v for k, v in captured["headers"].items()}
     assert header_names.get("x-mngr-agent-id") == "agent-42"
     parsed_body = json.loads(captured["body"].decode("utf-8"))
-    assert parsed_body == {"op": "focus", "args": {"ref": "service:web"}, "agent_id": "agent-42"}
+    assert parsed_body == {
+        "op": "focus",
+        "args": {"ref": "service:web", "layout": "desktop"},
+        "agent_id": "agent-42",
+    }
 
 
 # ---------- New surface: within direction, where, wait-stable, no-op, compact ----------
@@ -537,7 +542,7 @@ def test_split_within_direction_is_accepted_and_passed_through(monkeypatch: pyte
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
     monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
 
-    rc = layout.main(["split", "service:web", "--relative-to", "chat:alice", "--direction", "within"])
+    rc = layout.main(["split", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--layout", "desktop"])
     assert rc == 0
     op, args = posted[0]
     assert op == "split"
@@ -553,7 +558,7 @@ def test_move_within_direction_is_accepted_and_passed_through(monkeypatch: pytes
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
     rc = layout.main(
-        ["move", "service:web", "--relative-to", "chat:alice", "--direction", "within"]
+        ["move", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--layout", "desktop"]
     )
     assert rc == 0
     op, args = posted[0]
@@ -572,7 +577,7 @@ def test_split_within_with_new_group_is_rejected(
     monkeypatch.setattr(layout, "_wait_for_registration", lambda *a, **kw: True)
 
     rc = layout.main(
-        ["split", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--new-group"]
+        ["split", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--new-group", "--layout", "desktop"]
     )
     assert rc == layout.EXIT_ERROR
     assert posted == []
@@ -587,7 +592,7 @@ def test_move_within_with_new_group_is_rejected(
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted))
 
     rc = layout.main(
-        ["move", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--new-group"]
+        ["move", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--new-group", "--layout", "desktop"]
     )
     assert rc == layout.EXIT_ERROR
     assert posted == []
@@ -851,7 +856,7 @@ def test_move_within_explicit_anchor_uses_share_group_predicate(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["move", "service:web", "--relative-to", "chat:alice", "--direction", "within"])
+    rc = layout.main(["move", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--layout", "desktop"])
     assert rc == 0
     err = capsys.readouterr().err
     # Success diff (not a timeout); predicate matched on the after layout.
@@ -885,7 +890,7 @@ def test_move_within_explicit_anchor_emits_noop_when_already_tab_mates(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["move", "service:web", "--relative-to", "chat:alice", "--direction", "within"])
+    rc = layout.main(["move", "service:web", "--relative-to", "chat:alice", "--direction", "within", "--layout", "desktop"])
     assert rc == 0
     # The move was NOT POSTed (only inspect snapshots ran).
     assert posted == []
@@ -976,7 +981,7 @@ def test_rename_emits_diff_after_observed_change(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["rename", "chat:alice", "Alice (lead)"])
+    rc = layout.main(["rename", "chat:alice", "Alice (lead)", "--layout", "desktop"])
     assert rc == 0
     err = capsys.readouterr().err
     assert "renamed chat:alice" in err
@@ -1003,7 +1008,7 @@ def test_rename_emits_noop_message_when_title_already_matches(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["rename", "chat:alice", "frozen"])
+    rc = layout.main(["rename", "chat:alice", "frozen", "--layout", "desktop"])
     assert rc == 0
     # No-op: the mutation op was never POSTed (only the inspect snapshot).
     assert posted == []
@@ -1037,11 +1042,11 @@ def test_maximize_is_unobservable_and_notes_it(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["maximize", "service:web"])
+    rc = layout.main(["maximize", "service:web", "--layout", "desktop"])
     assert rc == 0
     # Only the broadcast went out -- the unobservable op skips the
     # wait-stable poll (the pre-flight inspect is not recorded here).
-    assert posted == [("maximize", {"ref": "service:web"})]
+    assert posted == [("maximize", {"ref": "service:web", "layout": "desktop"})]
     err = capsys.readouterr().err
     assert "no observable layout-state change" in err
 
@@ -1079,7 +1084,7 @@ def test_open_https_url_succeeds_when_url_panel_appears(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["open", target_url])
+    rc = layout.main(["open", target_url, "--layout", "desktop"])
     assert rc == 0
     err = capsys.readouterr().err
     assert "opened" in err
@@ -1116,7 +1121,7 @@ def test_open_https_url_emits_noop_when_url_already_open(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["open", target_url])
+    rc = layout.main(["open", target_url, "--layout", "desktop"])
     assert rc == 0
     # No-op: the mutation op was never POSTed (only inspect snapshots).
     assert posted == []
@@ -1168,7 +1173,7 @@ def test_split_https_url_uses_url_predicate_not_ref(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["split", target_url, "--relative-to", "chat:alice"])
+    rc = layout.main(["split", target_url, "--relative-to", "chat:alice", "--layout", "desktop"])
     assert rc == 0
     err = capsys.readouterr().err
     assert "split" in err
@@ -1218,7 +1223,7 @@ def test_move_within_self_uses_any_change_predicate_not_share_group(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["move", "service:web", "--relative-to", "self", "--direction", "within"])
+    rc = layout.main(["move", "service:web", "--relative-to", "self", "--direction", "within", "--layout", "desktop"])
     assert rc == 0
     err = capsys.readouterr().err
     # Success diff, not a timeout error.
@@ -1283,7 +1288,7 @@ def test_replace_url_predicate_matches_resolved_service_url_not_shorthand(
 
     monkeypatch.setattr(layout, "_post_layout", fake_post)
 
-    rc = layout.main(["replace-url", "service:web", "service:api/health"])
+    rc = layout.main(["replace-url", "service:web", "service:api/health", "--layout", "desktop"])
     assert rc == 0
     err = capsys.readouterr().err
     # Success diff (with resolved URL), not a timeout error.

@@ -14,22 +14,17 @@ service.
 
 `uv run bootstrap` runs, in order:
 
-1. **Global git config** - rewrites `git@`/`ssh://` GitHub remotes to `https://`
-   and points `core.hooksPath` at `scripts/git_hooks`. (This replaces the old
-   `git_auth_setup` extra_window, minus the retired `gh auth setup-git`.)
-2. **runtime/ worktree init** - ensures `runtime/` is a git worktree of the
-   per-agent backup branch `mindsbackup/$MNGR_AGENT_ID`, so anything written
-   under `runtime/` (Claude memory, tickets, transcripts, the
-   `initial_chat_created` signal, etc.) is replicated off-box by the
-   `runtime-backup` service. Done before supervisord starts so the
-   runtime-backup / host-backup services find `runtime/` in place.
-3. **CLAUDE_CONFIG_DIR host-env write** - records the services agent's per-agent
+1. **Global git config** - rewrites `git@`/`ssh://` GitHub remotes to `https://`.
+   (`core.hooksPath` is deliberately NOT set here: the post-commit auto-push
+   hook only becomes active when the opt-in github-sync skill wires it up --
+   see `libs/github_sync/README.md`.)
+2. **CLAUDE_CONFIG_DIR host-env write** - records the services agent's per-agent
    Claude config dir in `$MNGR_HOST_DIR/env` so every other agent on the host
    inherits it.
-4. **Initial chat agent** - on first boot only (gated by
+3. **Initial chat agent** - on first boot only (gated by
    `runtime/initial_chat_created`), commits the rsynced workspace onto a clean
    `main` branch and creates the welcome chat agent (`--message /welcome`).
-5. **Launch supervisord** - `exec supervisord -n -c supervisord.conf`. Running
+4. **Launch supervisord** - `exec supervisord -n -c supervisord.conf`. Running
    via `exec` keeps the bootstrap tmux window alive as supervisord and lets the
    supervised services inherit this shell's already-sourced agent environment.
 
@@ -48,15 +43,27 @@ writes separate, rotated, container-local logs under
 
 To add, change, or remove a service, edit `supervisord.conf` and run
 `supervisorctl reread && supervisorctl update` (and `supervisorctl restart
-<name>` to bounce one). See the `edit-services` skill for details.
+<name>` to bounce one). See the `update-service` skill, or
+`.agents/shared/references/service-processes.md`, for details.
 
 ## Deferred-install service
 
 The `deferred-install` program in `supervisord.conf` runs
 `scripts/deferred_install.sh`, which installs packages that are too heavy to
 bake into the Docker image but aren't required by any boot-time service.
-Currently it covers Playwright's Chromium browser + its apt system libraries
-(`uv run playwright install --with-deps chromium`).
+Currently it covers:
+
+- Playwright's Chromium browser + its apt system libraries
+  (`uv run playwright install --with-deps chromium`).
+
+(The publish-inspiration scan gate's two secret-scanner binaries --
+`betterleaks`, `kingfisher` -- are NOT deferred: they are baked into the
+workspace image at build time by the common `scripts/setup_system.sh` (which
+the Dockerfile RUNs and the Lima provider runs directly in the VM), which
+invokes `scripts/install_secret_scanners.sh`, the single source of truth for
+the version pins and per-arch sha256 checksums. If a binary is ever missing,
+that script is runnable by hand to install both; the scan gate aborts rather
+than running without either of them.)
 
 It is a one-shot supervisord program (`autorestart=false`, `startsecs=0`,
 `exitcodes=0`): supervisord starts it once on boot and leaves it stopped after a

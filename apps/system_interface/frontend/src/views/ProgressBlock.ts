@@ -21,6 +21,7 @@ import {
   renderUserMessage,
 } from "./message-renderers";
 import type { StepNode, StepStatus, TimelineItem } from "./turn-grouping";
+import { statusDoneIcon, statusPendingIcon, statusRingIcon } from "./icons";
 
 interface ProgressBlockAttrs {
   /** Timeline items in transcript order (steps, ungrouped runs, chips). */
@@ -37,37 +38,20 @@ interface ProgressBlockAttrs {
   id?: string;
 }
 
-function statusIcon(status: StepStatus, is_frontier: boolean): m.Vnode {
+function statusIcon(status: StepStatus, is_frontier: boolean): m.Children {
   if (status === "done") {
-    return m(
-      "svg.pv-icon.pv-icon--done",
-      { width: 16, height: 16, viewBox: "0 0 16 16", fill: "none" },
-      m.trust(
-        '<circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M4.5 8L7 10.5L11.5 6" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>',
-      ),
-    );
+    return m.trust(statusDoneIcon());
   }
   if (status === "active") {
     // The live frontier step spins; any other active step is settled (a
     // static partial ring) -- a past-turn carryover, an idle agent, or a step
     // superseded by a later one.
     if (!is_frontier) {
-      return m(
-        "svg.pv-icon.pv-icon--in-flight",
-        { width: 16, height: 16, viewBox: "0 0 16 16", fill: "none" },
-        m.trust(
-          '<circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5" opacity="0.35"/>' +
-            '<path d="M8 2 A6 6 0 0 1 14 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
-        ),
-      );
+      return m.trust(statusRingIcon());
     }
     return m("span.pv-icon.pv-icon--active", m("span.pv-spinner"));
   }
-  return m(
-    "svg.pv-icon.pv-icon--pending",
-    { width: 16, height: 16, viewBox: "0 0 16 16", fill: "none" },
-    m.trust('<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1" stroke-dasharray="2 2"/>'),
-  );
+  return m.trust(statusPendingIcon());
 }
 
 /** Sub-caption under the step title:

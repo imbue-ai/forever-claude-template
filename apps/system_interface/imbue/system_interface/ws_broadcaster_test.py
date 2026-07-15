@@ -338,3 +338,90 @@ def test_shutdown_delivers_sentinel_even_to_full_queue() -> None:
     while not stuck_queue.empty():
         drained.append(stuck_queue.get_nowait())
     assert drained[-1] is None
+
+
+def test_set_client_info_and_layout_lookup() -> None:
+    broadcaster = WebSocketBroadcaster()
+    first_queue = broadcaster.register()
+    broadcaster.register()
+
+    broadcaster.set_client_info(first_queue, "client-1", "desktop", "desktop")
+
+    assert broadcaster.has_client_on_layout("desktop") is True
+    assert broadcaster.has_client_on_layout("mobile") is False
+    infos = broadcaster.get_connected_client_infos()
+    assert infos == [{"client_id": "client-1", "active_layout_slug": "desktop", "device_kind": "desktop"}]
+
+
+def test_set_client_info_ignores_unregistered_queue() -> None:
+    broadcaster = WebSocketBroadcaster()
+    stray_queue: queue.Queue[str | None] = queue.Queue()
+
+    broadcaster.set_client_info(stray_queue, "client-1", "desktop", "desktop")
+
+    assert broadcaster.get_connected_client_infos() == []
+
+
+def test_unregister_drops_client_info() -> None:
+    broadcaster = WebSocketBroadcaster()
+    client_queue = broadcaster.register()
+    broadcaster.set_client_info(client_queue, "client-1", "desktop", "desktop")
+
+    broadcaster.unregister(client_queue)
+
+    assert broadcaster.has_client_on_layout("desktop") is False
+
+
+def test_broadcast_to_layout_targets_only_matching_clients() -> None:
+    broadcaster = WebSocketBroadcaster()
+    desktop_queue = broadcaster.register()
+    mobile_queue = broadcaster.register()
+    unregistered_queue = broadcaster.register()
+    broadcaster.set_client_info(desktop_queue, "client-1", "desktop", "desktop")
+    broadcaster.set_client_info(mobile_queue, "client-2", "mobile", "mobile")
+
+    broadcaster.broadcast_layout_op("close", {"ref": "service:web"}, "agent-1", target_layout_slug="desktop")
+
+    message = json.loads(_get_message(desktop_queue))
+    assert message["op"] == "close"
+    assert mobile_queue.empty()
+    # A client that never registered its layout is not targeted either.
+    assert unregistered_queue.empty()
+
+
+def test_broadcast_layout_op_without_target_reaches_everyone() -> None:
+    broadcaster = WebSocketBroadcaster()
+    desktop_queue = broadcaster.register()
+    unregistered_queue = broadcaster.register()
+    broadcaster.set_client_info(desktop_queue, "client-1", "desktop", "desktop")
+
+    broadcaster.broadcast_layout_op("refresh", {"ref": "service:web"}, "agent-1")
+
+    assert json.loads(_get_message(desktop_queue))["op"] == "refresh"
+    assert json.loads(_get_message(unregistered_queue))["op"] == "refresh"
+
+
+def test_layout_registry_broadcasts_reach_all_clients() -> None:
+    broadcaster = WebSocketBroadcaster()
+    client_queue = broadcaster.register()
+
+    broadcaster.broadcast_layout_saved("desktop", "desktop", "client-1")
+    broadcaster.broadcast_layout_deleted("mobile", "desktop")
+    broadcaster.broadcast_load_layout("desktop", "desktop", None)
+
+    saved = json.loads(_get_message(client_queue))
+    assert saved == {
+        "type": "layout_saved",
+        "layout_slug": "desktop",
+        "display_name": "desktop",
+        "saved_by_client_id": "client-1",
+    }
+    deleted = json.loads(_get_message(client_queue))
+    assert deleted == {"type": "layout_deleted", "layout_slug": "mobile", "fallback_layout_slug": "desktop"}
+    load = json.loads(_get_message(client_queue))
+    assert load == {
+        "type": "load_layout",
+        "layout_slug": "desktop",
+        "display_name": "desktop",
+        "target_client_id": None,
+    }

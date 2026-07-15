@@ -12,7 +12,7 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 - NEVER amend commits or rebase--always create new commits.
 - If you ever need to work with another *git* repo that is *outside* of this monorepo as a read-only dependency, you should do so by adding a git subtree under `vendor/`.
 - If you need to *actively develop* against an external repo (e.g. `mngr`), check out a standalone clone of it under `.external_worktrees/<repo-name>/`. This directory is gitignored so the external clones don't pollute the monorepo. The branch in the external clone should mirror the branch you're on in this monorepo.
-- This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `runtime/tickets/` (the path is set via the `TICKETS_DIR` env var so tickets ride the `mindsbackup/$MNGR_AGENT_ID` runtime-backup branch).
+- This project uses a CLI ticket system (`tk`) for task management. Run `tk help` when you need to use it. Tickets live under `runtime/tickets/` (the path is set via the `TICKETS_DIR` env var so tickets sit with the rest of the workspace's runtime state).
 - All relative paths in this repo assume cwd = repo root (`/code`). Supervisord runs the services from there; any process started elsewhere (manual launch, subprocess from a different cwd) must either set cwd to the repo root or use absolute paths. State directories live under `runtime/<feature>/`.
 - When adding a new web app, do NOT edit `libs/web_server/` -- it's an example placeholder. Use the `build-web-service` skill, which sets up a new lib + service entry + `forward_port.py` registration on its own port.
 
@@ -30,10 +30,10 @@ Because step titles and close-summaries populate the progress view, **every one 
 The first thing you do on any prompt that warrants real work is decompose it into steps and create them all up front, BEFORE doing any of the work — the step sequence is the user-visible plan. Concretely:
 
 1. (Optional) one short prose acknowledgement, e.g. "Sure, looking into that now." Keep it to one line; don't narrate the plan here.
-2. `tk create --step "..."` for every step you currently expect, in order (you may batch these in one tool call). Each prints `Created <id>: <title>` — note the ids. Do NOT `tk start` any yet.
+2. `tk create --step "..."` for every step you currently expect, in order. You may batch them into one tool call, but each step must be its **own separate `tk create` command** (on its own line or joined with `;`) — each `tk create` makes exactly one step, so never pass multiple `--step`s to a single `tk create` (tk rejects that). **Never redirect the output of a `tk create`/`start`/`close`** (`>`, `>>`, `2>`, `&>`, `| tee`, …): the progress view reads each step from the command's visible output (`Created <id>: <title>`), so a redirect makes the step drop out of the plan. Note the ids. Do NOT `tk start` any yet.
 3. `tk start <id>` the first step, do its work, then `tk close <id> "summary"`. Move to the next. Only one step is `in_progress` at a time.
 
-**`tk start` and `tk close` must each be the only command in their tool call** — no `cd` prefix, no chaining (`&&`, `;`, `|`, `&`, newline), no redirection; otherwise the progress view can't place the step. (You can still batch `tk create --step` calls.)
+**`tk start` and `tk close` must each be the only command in their tool call** — no `cd` prefix, no chaining (`&&`, `;`, `|`, `&`, newline), no redirection; otherwise the progress view can't place the step. (You can still batch several `tk create` commands into one tool call — as separate commands, one `--step` each, with no redirection.)
 
 Add steps mid-turn (`tk create --step`) as sub-problems surface; drop ones that turn out unneeded (`tk close <id> "No longer needed — covered by the previous step."`). Granularity follows the user's mental model of the work — "first X, then Y, then Z" is three steps — not one-per-tool-call and not one-for-the-whole-turn. Typically 2–5 per substantive turn.
 
@@ -200,7 +200,7 @@ You can (and should) modify your own configuration to improve yourself:
 
 - **CLAUDE.md**: (this file) update these instructions if you discover better ways to operate.
 - **.agents/skills/**: Create new skills or modify existing ones. Each skill is a directory with a SKILL.md file. (Also symlinked from `.claude/skills/`.)
-- **supervisord.conf**: Add, modify, or remove background services. See the `edit-services` skill.
+- **supervisord.conf**: Add, modify, or remove background services. See the `update-service` skill.
 - **scripts/**: Add utility scripts that help you accomplish your purpose.
 
 Commit your changes to git after making modifications.
@@ -229,27 +229,27 @@ The upstream is defined in `parent.toml`.
 # Memory
 
 Use Claude's built-in memory system. Your memory directory is `runtime/memory/` (configured via `autoMemoryDirectory` in `.claude/settings.json`).
-Memory is gitignored from the main branch but is backed up automatically by the runtime-backup service onto the `mindsbackup/$MNGR_AGENT_ID` branch when `GH_TOKEN` is set, so it survives container loss.
+Memory is gitignored from the main branch. When the user has enabled GitHub sync (the `github-sync` skill), the github-sync service ships it -- with the rest of `runtime/` -- to the `runtime-sync` branch of the workspace's private sync repo, so it survives container loss.
 
 # Services
+
+**Before editing any code that belongs to a supervisord service -- a user-facing web service or a background daemon -- load the `update-service` skill first.** It owns the live change loop (apply, refresh, verify) and the turn-end hardening flow; do not hand-edit a service's code or `supervisord.conf` without it.
 
 You can define background services as supervisord programs in `supervisord.conf`.
 Supervisord (launched by `bootstrap` after first-boot setup) supervises them; each program writes its own rotated logs under `/var/log/supervisor/<name>-stdout.log` and `/var/log/supervisor/<name>-stderr.log`.
 To add, change, or remove a service, edit `supervisord.conf` and run `supervisorctl reread && supervisorctl update` (and `supervisorctl restart <name>` to bounce one). Inspect with `supervisorctl status` / `supervisorctl tail -f <name> stderr`.
-See the `edit-services` skill for details.
+See the `update-service` skill for details.
 
 # Git
 
 Commit your changes locally.
 `runtime/` is gitignored from the main branch (it includes `runtime/memory/` for Claude memory and other transient state).
 
-Chat file uploads (files a user attaches to a message) are stored in the top-level `uploads/` directory inside the repo working tree -- NOT under `runtime/`. Uploads can be arbitrarily large and any format, so they don't belong in version-controllable content; `uploads/` is gitignored. Being outside `runtime/`, uploads are NOT carried by the `runtime-backup` orphan branch (which ships only `runtime/`), but the host-level `host-backup` service (a restic snapshot of the whole host dir) does capture them, so uploads still survive container loss. See `libs/host_backup/README.md`.
+Chat file uploads (files a user attaches to a message) are stored in the top-level `uploads/` directory inside the repo working tree -- NOT under `runtime/`. Uploads can be arbitrarily large and any format, so they don't belong in version-controllable content; `uploads/` is gitignored. Being outside `runtime/`, uploads are NOT carried by the opt-in GitHub sync (which ships only `runtime/`), but the host-level `host-backup` service (a restic snapshot of the whole host dir) does capture them, so uploads still survive container loss. See `libs/host_backup/README.md`.
 
-A `post-commit` hook installed via `core.hooksPath = /mngr/code/scripts/git_hooks` auto-pushes the active branch to `origin` in the background, but only when `GH_TOKEN` is set in the environment. You do not need to push manually. The hook never blocks the commit; output is captured at `/tmp/post-commit-push.log`.
+GitHub sync is opt-in via the `github-sync` skill. When the user has enabled it: a `post-commit` hook auto-pushes the active branch of every checkout to `origin` (the workspace's dedicated private repo) in the background -- you do not need to push manually; the hook never blocks the commit, and output is captured at `/tmp/post-commit-push.log`. The `github-sync` service additionally syncs `runtime/` onto a separate orphan branch (`runtime-sync`) on the same `origin`. See `libs/github_sync/README.md`.
 
-`runtime/` is backed up automatically by the `runtime-backup` service onto a separate orphan branch (`mindsbackup/$MNGR_AGENT_ID`) on the same `origin`, also gated on `GH_TOKEN`. See `libs/runtime_backup/README.md`.
-
-If `GH_TOKEN` is unset, both auto-pushes silently no-op; commits stay local.
+When GitHub sync is not enabled, there is no auto-push and no GitHub remote to push to; commits stay local (the restic `host-backup` still protects the whole host dir).
 
 - Don't include auto-generated lockfile churn (`uv.lock`, `package-lock.json`, etc.) in commits unless the change intentionally bumps a dependency.
 
@@ -264,3 +264,5 @@ If you get a failure when trying to commit the first time, just try committing a
 # Dealing with the unexpected
 
 If something unexpected happens -- errors, confusing state, things not working as documented -- use the `dealing-with-the-unexpected` skill for guidance.
+
+A background OOM-prevention daemon (earlyoom) kills ("sheds") memory-heavy processes under sustained memory pressure -- most-expendable first (an agent's build/test/browser subprocesses before the agent itself). If a command of yours dies with exit 137 (or SIGKILL/SIGTERM) and you did not kill it, confirm by checking the shed ledger at `/mngr/code/runtime/oom_priority/events/shed.jsonl` for a record naming it (matched by pid or process name). If it was shed, do NOT blindly re-run a memory-heavy command -- it will likely be shed again; find a lower-memory approach (smaller batches, streaming, releasing data you no longer need) and only retry if you can.

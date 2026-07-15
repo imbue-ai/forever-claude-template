@@ -25,6 +25,17 @@ Pick **committed** when the user was explicitly in the design loop *and* the
 change is already committed. Otherwise **emergent** (the safe default; its
 Gate 1 re-surfaces the design for an approval pass).
 
+**Confirm the user actually wants the change before you dispatch (committed
+origin).** Applying a change live is not the user approving it. Do not launch
+the hardening worker in the same turn you made the change: end that turn by
+surfacing the change and asking whether it's what they wanted, and only invoke
+this flow once they've given a clear go-ahead. Like any incremental work this
+can take **several rounds** -- the user may keep responding with adjustments;
+treat each as another live iteration and do not launch the worker until you
+are sure they're satisfied with the update, not just at a single mid-thread
+"looks fine." (The emergent origin is transparent work with no live change to
+approve, so this gate doesn't apply there; its Gate 1 covers design approval.)
+
 "Repeatable" covers deterministic extensions (an extra flag, a new output
 format), model-judgement extensions (an additional judgement step with a stable
 recipe, scripted as `[ai-script]`), and executor meta-work. One-off creative or
@@ -48,6 +59,13 @@ Use `$TARGET` for the artifact (e.g. `migrate-config`, a service name). Then:
   `runtime/harden/update-$TARGET/task.md`
 
 ## Step 1: Open a tracking ticket
+
+**Single-flight check first.** At most one harden pass per artifact may be in
+flight (counting `heal` passes on the same target). Run the pre-dispatch check
+in [`.agents/shared/references/harden-contention.md`](../../shared/references/harden-contention.md);
+if another agent's pass is live, leave the note it describes on their ticket
+and stop -- the superseding pass forced at their merge time covers your change.
+Only dispatch if no pass is live (or you took over an abandoned one).
 
 ```bash
 mkdir -p runtime/harden/update-$TARGET
@@ -144,7 +162,15 @@ Flow-specific substitutions:
 
 ## Step 4: Merge and go live
 
-On `done`, merge `mngr/update-$TARGET`, then go live by artifact:
+On `done`, first run the merge-time checks in
+[`.agents/shared/references/harden-contention.md`](../../shared/references/harden-contention.md):
+wait out any foreground editing lease on the service, confirm the branch is
+still fresh (the artifact's footprint has not changed since the worker
+branched), and never hand-resolve a conflicted merge -- a stale or conflicted
+pass is discarded and superseded by one new pass covering everything since the
+last hardened merge.
+
+Then merge `mngr/update-$TARGET` and go live by artifact:
 
 - **skill**: nothing beyond the merge (the worker's cross-reference sweep is part
   of the change). If the target is a built-in upstream skill, note the local

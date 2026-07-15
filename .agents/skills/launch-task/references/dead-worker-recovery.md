@@ -2,6 +2,24 @@
 
 When a worker (sub-agent created via `launch-task`) is in `STOPPED` state -- claude session died mid-iteration, but the worktree (and any uncommitted work in it) is still intact -- the default path is to restart it, not to manually salvage. `mngr start` only re-creates the tmux session and re-execs claude in the existing worktree; it does not touch git state, so uncommitted changes survive the restart.
 
+## First: was the worker shed for memory pressure?
+
+A worker can die because the **OOM daemon** (earlyoom) shed it -- the container was running out of memory and earlyoom killed the most-expendable work first. Check the shed ledger before reviving:
+
+```bash
+# Did the OOM daemon shed this worker? (look for your worker's name)
+# Absolute path: the ledger is shared at /mngr/code/runtime/, but your cwd is
+# your own worktree, so a relative `runtime/...` would miss it.
+grep '"agent_name": *"<worker>"' /mngr/code/runtime/oom_priority/events/shed.jsonl
+```
+
+Revival guidelines when a worker was shed:
+
+- **Revive at most once** with `mngr start <worker> --restart`, then nudge it to continue (`mngr message <worker> -m continue`). A shed agent needs `--restart` -- a plain `mngr start` or `mngr message` will not relaunch it. You do not need to resend the task: it survives in the worker's conversation history, and a SessionStart hook already tells the revived worker it was paused, so it re-checks state before continuing.
+- **If the same worker has already been shed twice** (two `process_shed` lines naming it): stop. Do not keep reviving -- surface to the user with the ledger details, because something about this worker's footprint is incompatible with the current memory budget. Reviving again will most likely just be shed a third time.
+
+If the worker was *not* in the ledger, it died for some other reason (e.g. a claude crash); proceed with the normal restart path below, where a plain `mngr start` suffices.
+
 ## Default: restart the worker and resume
 
 1. Bring claude back up in the existing worktree:

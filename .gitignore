@@ -9,8 +9,8 @@
 
 # Default Workspace Template runtime state.
 # memory/ now lives at runtime/memory/ (configured via .claude/settings.json's
-# autoMemoryDirectory) so the runtime-backup service backs it up alongside
-# the rest of runtime/.
+# autoMemoryDirectory) so the opt-in github-sync service (see the github-sync
+# skill) covers it alongside the rest of runtime/.
 **/runtime/
 
 # chat attachment uploads (arbitrary size/format; kept out of version control)

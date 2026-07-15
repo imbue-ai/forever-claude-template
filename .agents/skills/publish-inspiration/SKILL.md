@@ -5,6 +5,9 @@ description: Publish a clean, shareable snapshot of the apps/features this mind 
 
 # Publish an inspiration
 
+Version: v1 (inspirations flow). This versions the publish/adopt flow and the
+`inspiration-<slug>.md` manifest format.
+
 An "inspiration" is a clean, shareable, **bootable** snapshot of the apps and
 features this mind built, published to a new GitHub repo so another mind can
 be created FROM it (not just read its app code). One repo can accumulate
@@ -83,8 +86,20 @@ Ask the user, in plain language. Never enumerate files at them:
   repo-root-relative include paths, e.g. `apps/slack-inbox`, `libs/slack_inbox`,
   plus their service wiring -- you reason about the backing paths, the user does
   not);
-- whether any data should be included. **Default: NO user data.** Include data
-  paths only if the user explicitly asks for them;
+- what data should be included -- and this is NOT an all-or-nothing default.
+  Judge each candidate data path by whether it is **personal**: information
+  about the user or specific real people (names, emails, accounts, messages,
+  contacts, private notes -- anything identifying, or that they'd reasonably
+  consider theirs). **Personal data is kept private by default -- excluded from
+  the snapshot.** **Non-personal data -- generic seed/sample/reference data,
+  fixtures, config defaults, and public or synthetic datasets with no tie to a
+  real person -- is included by default**, since shipping it is what makes the
+  inspiration bootable and genuinely useful to an adopter. For anything
+  **remotely close to the boundary** -- arguably personal, a mix of personal
+  and non-personal, or simply data you are not sure how to classify -- do NOT
+  silently pick a side: ask the user what they want and let their answer
+  decide. When in doubt, treat it as near-the-boundary and ask rather than
+  guessing;
 - whether anything should be **changed, removed, or generalized in the
   published version only** -- hardcoded personal preferences, account or
   channel names, anything they'd rather not ship. Their live files stay
@@ -101,9 +116,12 @@ include paths yourself.
 include set as final, and before dispatching the worker (§3). This is a hard
 gate.** Send ONE message that lays out, in plain language:
 
-- what WILL be included (apps/features, not file lists);
-- what will NOT be included that they might expect (their data, other apps
-  this mind has, secrets/config) -- so surprises surface now;
+- what WILL be included (apps/features, plus any non-personal data that ships
+  with them -- not file lists);
+- what will NOT be included that they might expect (their personal data, other
+  apps this mind has, secrets/config) -- so surprises surface now;
+- any data near the personal/non-personal boundary you flagged in the data
+  question above, restated so they can settle it before assembly begins;
 - the published-version modifications you will apply (or "none");
 - the proposed title and repo name, marked as adjustable later;
 - the default private visibility.
@@ -274,16 +292,20 @@ worktree to a clean template base and deletes gitignored state -- including
    channel with a neutral default the adopter sets" -- or the single line
    "None requested.">
 
-   After applying them, re-run the secret token scan over every file you
-   modified (the same pattern the assembly script enforces); it must print
-   nothing:
+   After applying them, re-run the secret scan over every file you modified,
+   with the same shared script the assembly's scan gate uses. It runs both
+   scanners (betterleaks, kingfisher) and exits non-zero on any finding, any
+   scanner error, or any missing scanner -- there is no fallback scanner:
 
    ```bash
-   grep -nIE -- 'ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{24,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----' <each modified file>
+   bash .agents/skills/publish-inspiration/scripts/scan_secrets.sh <each modified file>
    ```
 
-   A hit means a modification did not fully remove a credential -- fix it or
-   report `stuck`; never leave it in.
+   A finding means a modification did not fully remove a credential -- fix
+   it or report `stuck`; never leave it in. If the script reports a missing
+   scanner, or the script itself is absent from your assembled tree (a
+   BASE_REF that predates it), report `stuck` -- do not substitute a weaker
+   ad-hoc scan.
 
 3. **Flesh out the manifest.** `inspiration-<slug>.md` at the repo root has
    `<!-- FILL-IN (publishing agent): ... -->` comment blocks in "What it is,"
@@ -303,6 +325,13 @@ worktree to a clean template base and deletes gitignored state -- including
    nothing to add, say so explicitly in prose; never leave a placeholder
    comment in place and never leave a section blank.
 
+   The generated `README.md` at the repo root (the repo's GitHub landing
+   page) carries ONE `<!-- FILL-IN (publishing agent): ... -->` block too --
+   a short overview of this inspiration. Replace it with a GitHub-flavored
+   version of the manifest's "What it is" (2-4 sentences). The rest of the
+   README is generated correctly and describes this inspiration, not the
+   template -- do not revert it to the default-workspace-template README.
+
 4. **Design the thumbnail.** `inspiration-<slug>.svg` at the repo root is a
    generic placeholder the script generated -- it must never be published.
    Replace its entire contents with a bespoke SVG you design for THIS app: a
@@ -321,7 +350,7 @@ worktree to a clean template base and deletes gitignored state -- including
    report `done`:
 
    ```bash
-   grep -n -- '<!-- FILL-IN (publishing agent)' inspiration-<slug>.md
+   grep -n -- '<!-- FILL-IN (publishing agent)' inspiration-<slug>.md README.md
    grep -nEi -- 'minds-placeholder-thumbnail|<script|<foreignObject|on[a-z]+[[:space:]]*=' inspiration-<slug>.svg
    ```
 
@@ -344,7 +373,9 @@ worktree to a clean template base and deletes gitignored state -- including
 
 - `build_inspiration.sh` exited 0 and its commit is on `mngr/<slug>`.
 - Every published-version modification applied, its files re-scanned clean.
-- Every FILL-IN block replaced with real prose (or an explicit "none").
+- Every FILL-IN block replaced with real prose (or an explicit "none") -- in
+  BOTH `inspiration-<slug>.md` and `README.md`.
+- `README.md` describes this inspiration (not the default-workspace-template).
 - `inspiration-<slug>.svg` is a bespoke design for this app; the placeholder
   marker is gone and the safety grep is clean.
 - Follow-up edits committed on `mngr/<slug>`; `git status` clean.
@@ -409,7 +440,7 @@ liveness on a timeout) -- with one critical override:
   clean:
 
   ```bash
-  grep -n -- '<!-- FILL-IN (publishing agent)' "$WT/inspiration-<slug>.md"
+  grep -n -- '<!-- FILL-IN (publishing agent)' "$WT/inspiration-<slug>.md" "$WT/README.md"
   grep -nEi -- 'minds-placeholder-thumbnail|<script|<foreignObject|on[a-z]+[[:space:]]*=' "$WT/inspiration-<slug>.svg"
   ```
 
@@ -438,8 +469,13 @@ things the script cannot: the manifest prose and the bespoke thumbnail.
 The worker maps any non-zero exit to a `stuck` report quoting the script's
 stderr. What each exit means, and what you do:
 
-- **Secret scan (exit 1).** A credential/token rode in on an overlaid path.
-  Nothing was committed; surface the flagged path (value redacted) and stop.
+- **Secret scan (exit 1).** A credential/token rode in on an overlaid path,
+  OR one of the two required scanners (betterleaks / kingfisher) was missing
+  or errored -- the stderr says which. Nothing was committed; for a finding,
+  surface the flagged path (value redacted) and stop. For a missing/broken
+  scanner, the environment is broken (the binaries are baked into the
+  workspace image; if one is missing, the stderr names the command to
+  reinstall both) -- never publish around the gate.
 - **No-diff guard (exit 3).** The resolved include set contributes nothing
   beyond `BASE_REF` (the assembled tree equals the base tree). Tell the user
   plainly and do NOT create a repo -- there are no empty inspiration repos.
@@ -591,7 +627,7 @@ exit 1
 
 If the user never approves, surface a clear message and stop, leaving the
 assembled commit intact. Do NOT fall back to any other credential or
-mechanism (no `GH_TOKEN`-in-URL pushes, no partial-tree API uploads -- see
+mechanism (no token-in-URL pushes, no partial-tree API uploads -- see
 the "MUST BE BOOTABLE" callout).
 
 ## 8. Create the repo and push
@@ -629,19 +665,50 @@ in one call):**
 ```bash
 latchkey curl -X POST https://api.github.com/user/repos \
     -H 'Content-Type: application/json' \
-    -d '{"name": "<repo_name>", "description": "<description>", "private": <true|false>}'
+    -d '{"name": "<repo_name>", "description": "<description> (minds inspiration v1)", "private": <true|false>}'
 ```
 
 Take `<owner>` from the response's `.owner.login`. `"private"` is `true` for
-the default private visibility, `false` only if the user chose public. You
+the default private visibility, `false` only if the user chose public. The
+repo description is always the confirmed `<description>` followed by the
+literal suffix ` (minds inspiration v1)` -- the flow-version marker every
+published repo carries; keep it verbatim. You
 already validated `repo_name` against `^[A-Za-z0-9._-]+$` in §6; keep the
 JSON built from variables, never string-interpolated shell.
 
 **Step 2 -- mint ONE snapshot commit and push it as `main` (git through the
 latchkey gateway):**
 
-The published history must be the public template's history plus EXACTLY ONE
-snapshot commit. The worker's branch accumulates intermediate commits (the
+The published history must be **the public template's full history with
+EXACTLY ONE new commit on top** -- the template's commits, unchanged, capped
+by a single commit that carries ONLY this mind's changes (the delta over
+`BASE_REF`). "One commit" here means **one commit OF CHANGES, never one commit
+TOTAL.** The distinction is load-bearing and is the single easiest thing to
+get wrong:
+
+- **Right:** `git commit-tree ... -p <BASE_REF> ...` -- a new commit parented
+  on `BASE_REF`, so `BASE_REF` and its entire ancestry come along in the push.
+  The published `main` therefore has MANY commits (the template's whole
+  history) plus this one snapshot on top. That is correct and expected -- a
+  correct publish is NEVER a single-commit repo.
+- **Wrong:** collapsing everything -- the base template included -- into one
+  parentless/orphan commit (e.g. an empty `<BASE_REF>` so `git commit-tree`
+  silently drops `-p`, a `git checkout --orphan`, a full-history squash, or a
+  `git init` of the final tree). This also *looks* like "one commit," which is
+  exactly why the mistake happens, but it throws away the shared base.
+
+Why the shared base matters: because the published repo keeps `BASE_REF` and
+its ancestry, it shares a real **merge-base** with the template and with every
+other inspiration built on that template. That common ancestor is what lets an
+adopting mind cleanly **merge this inspiration into itself (or into another
+template)** -- a 3-way merge against `BASE_REF` brings in exactly this
+snapshot's changes and nothing else. An orphan single-commit repo has NO common
+ancestor with anything, so adopting it degenerates from "merge just the
+changes" into a whole-tree conflict (or a blind overwrite). Keeping the base
+history is what makes an inspiration composable with other templates rather
+than a dead-end snapshot.
+
+The worker's branch accumulates intermediate commits (the
 raw assembly, then the modification/manifest/thumbnail follow-ups, then any
 §6 edits) -- pushing the branch would publish every intermediate state, and
 a published-version modification would leak the very thing it removed (a
@@ -655,11 +722,24 @@ push that commit -- the branch itself is never pushed:
     && SNAPSHOT_COMMIT="$(git commit-tree 'HEAD^{tree}' -p <BASE_REF> -m "inspiration: <slug>
 
 Assembled on clean DEFAULT_WORKSPACE_TEMPLATE base <BASE_REF> (provenance link only; no upstream fetch).")" \
+    && git merge-base --is-ancestor <BASE_REF> "$SNAPSHOT_COMMIT" \
+    && test "$(git rev-list --count "$SNAPSHOT_COMMIT")" -gt 1 \
     && git \
     -c "http.extraHeader=X-Latchkey-Gateway-Password: $LATCHKEY_GATEWAY_PASSWORD" \
     -c "http.extraHeader=X-Latchkey-Gateway-Permissions-Override: $LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE" \
     push "$LATCHKEY_GATEWAY/gateway/https://github.com/<owner>/<repo_name>.git" "${SNAPSHOT_COMMIT}:refs/heads/main" )
 ```
+
+The two checks between the mint and the push are the guard against the
+"one commit TOTAL" failure above, and they run BEFORE anything reaches the
+remote: `git merge-base --is-ancestor <BASE_REF> "$SNAPSHOT_COMMIT"` fails
+(aborting the `&&` chain) unless the snapshot is genuinely parented on the
+base, and `rev-list --count > 1` fails if the mint came out parentless
+(an empty `<BASE_REF>` makes `git commit-tree` drop `-p` and produce a lone
+orphan). If either check fails, nothing is pushed -- STOP, re-resolve
+`BASE_REF` per §2 (its tree must name `pyproject.toml` and `supervisord.conf`),
+re-mint, and only then push. A correct push always lands MORE than one commit
+on `main`.
 
 Pushing `<sha>:refs/heads/main` publishes only that one commit plus the base
 history it is parented on, so the published tree is exactly `$WT`'s final
@@ -758,7 +838,7 @@ the VM). Interface (cwd = worktree repo root):
   --slug <slug> \
   --title <title> \
   --include <path> [--include <path> ...] \   # repo-root-relative app/feature paths to overlay
-  [--data-include <path> ...] \    # only when the user opted in; default none
+  [--data-include <path> ...] \    # non-personal data (included by default); personal data excluded; boundary cases asked -- see §1
   [--description <text>]
 ```
 
@@ -781,8 +861,13 @@ What it does, in order (see the script for the exact commands):
 5. Carries forward any existing accumulated `inspiration-*.md` + `.svg` at the
    repo root.
 6. Runs a deterministic secret scan that HARD-FAILS (non-zero, abort before any
-   commit/push) on token patterns and credential filenames. This is the
-   authoritative blocker, not LLM prose.
+   commit/push). The scan is the sibling `scan_secrets.sh` over the staged
+   overlay: TWO scanners -- betterleaks (configured by the sibling
+   `betterleaks.toml`: its default ruleset plus the credential-filename
+   blocklist and a broader Anthropic key rule) and kingfisher (always
+   `--no-validate`) -- where a finding from EITHER of them, any scanner error,
+   or any missing scanner binary fails the scan. There is no fallback scanner.
+   This is the authoritative blocker, not LLM prose.
 7. Generates the manifest `inspiration-<slug>.md` at the repo root (with the
    FILL-IN blocks the worker must replace).
 8. Generates a placeholder thumbnail `inspiration-<slug>.svg` carrying a

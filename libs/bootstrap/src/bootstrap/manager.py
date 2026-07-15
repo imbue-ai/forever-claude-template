@@ -1,12 +1,10 @@
 """Bootstrap: first-boot setup, then launch supervisord.
 
 `uv run bootstrap` runs once per container boot (from the `bootstrap`
-extra_window). It performs first-boot setup -- global git config, ensuring
-runtime/ exists as a git worktree of the per-agent backup branch
-(mindsbackup/$MNGR_AGENT_ID), writing CLAUDE_CONFIG_DIR into the host env,
-and creating the initial chat agent -- and then
-`exec`s the system supervisord in the foreground. supervisord (configured by
-supervisord.conf) owns every background service from then on.
+extra_window). It performs first-boot setup -- global git config, writing
+CLAUDE_CONFIG_DIR into the host env, and creating the initial chat agent --
+and then `exec`s the system supervisord in the foreground. supervisord
+(configured by supervisord.conf) owns every background service from then on.
 
 Running supervisord via exec keeps the bootstrap tmux window alive as
 supervisord and lets the supervised services inherit this shell's already-
@@ -15,7 +13,6 @@ sourced agent environment (MNGR_AGENT_STATE_DIR, CLAUDE_CONFIG_DIR, etc.).
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -29,13 +26,10 @@ SUPERVISORD_CONF = Path("supervisord.conf")
 SUPERVISOR_LOG_DIR = Path("/var/log/supervisor")
 
 RUNTIME_DIR = Path("runtime")
-RUNTIME_PREEXISTING_DIR = Path("runtime.preexisting")
-RUNTIME_BACKUP_USER_NAME = "runtime-backup"
-RUNTIME_BACKUP_USER_EMAIL = "runtime-backup@mindsbackup.local"
 
 # Signal file gating exactly-once creation of the initial chat agent. Lives
-# under runtime/ so the runtime-backup service replicates it to the
-# mindsbackup/$MNGR_AGENT_ID branch (survives container loss).
+# under runtime/, which persists with the container volume (and is synced to
+# GitHub when the opt-in github-sync skill has been enabled).
 INITIAL_CHAT_SIGNAL = RUNTIME_DIR / "initial_chat_created"
 # Basename (under $MNGR_HOST_DIR) of the file holding the initial chat agent's id,
 # read by system_interface's welcome_resend to address the resend by id.
@@ -47,9 +41,14 @@ _AGENT_STATE_DIR_ENV_VAR = "MNGR_AGENT_STATE_DIR"
 _HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
 _CLAUDE_CONFIG_DIR_ENV_VAR = "CLAUDE_CONFIG_DIR"
 
-# Global git config the old git_auth_setup extra_window used to apply (minus the
-# retired `gh auth setup-git`): rewrite git@ / ssh:// GitHub remotes to https and
-# point core.hooksPath at the repo's git_hooks.
+# Global git config applied on every boot: rewrite git@ / ssh:// GitHub
+# remotes to https (there are no SSH credentials in the container). Note that
+# git applies at most one insteadOf rewrite per URL, so this rewrite's output
+# is NOT further rewritten by github-sync's latchkey gateway wiring: only
+# remotes stored as https://github.com/ URLs (the shape the github-sync skill
+# always configures) route through the gateway.
+# core.hooksPath is deliberately NOT set here -- the post-commit auto-push
+# hook only becomes active when the github-sync skill wires it up.
 _GIT_GLOBAL_CONFIG_ARGVS = (
     (
         "config",
@@ -65,7 +64,6 @@ _GIT_GLOBAL_CONFIG_ARGVS = (
         "url.https://github.com/.insteadOf",
         "ssh://git@github.com/",
     ),
-    ("config", "--global", "core.hooksPath", "/mngr/code/scripts/git_hooks"),
 )
 
 
@@ -239,6 +237,11 @@ def _build_create_chat_command(host_name: str, labels: dict[str, str]) -> list[s
         "chat",
         "--message",
         "/welcome",
+        # Tags the initial chat as a user-created agent so the OOM agent-tagging
+        # hook puts it in the protected user-agent band (matching the New Chat /
+        # New Agent paths in apps/system_interface).
+        "--label",
+        "user_created=true",
         "--no-connect",
         "--format",
         "json",
@@ -412,7 +415,7 @@ def _maybe_create_initial_chat() -> None:
     Touches the signal file only on a successful create -- a failed create
     leaves the signal file absent so the next bootstrap run retries. The
     user's manually-destroyed initial chat agent is *not* recreated,
-    because the signal file persists in the runtime-backup branch.
+    because the signal file persists in runtime/.
     """
     if INITIAL_CHAT_SIGNAL.exists():
         logger.debug(
@@ -448,12 +451,11 @@ def _bootstrap_init_chat_dir() -> None:
 
 
 def _configure_git_global() -> None:
-    """Apply the global git config the old git_auth_setup extra_window set.
+    """Apply the boot-time global git config.
 
-    Rewrites git@ / ssh:// GitHub remotes to https and points core.hooksPath at
-    the repo's git_hooks (see _GIT_GLOBAL_CONFIG_ARGVS). The retired
-    `gh auth setup-git` step is intentionally dropped. Best-effort: a failure
-    here should not block the supervisord launch.
+    Rewrites git@ / ssh:// GitHub remotes to https (see
+    _GIT_GLOBAL_CONFIG_ARGVS). Best-effort: a failure here should not block
+    the supervisord launch.
     """
     for argv in _GIT_GLOBAL_CONFIG_ARGVS:
         result = subprocess.run(
@@ -494,238 +496,12 @@ def _exec_supervisord() -> None:
     os.execvp("supervisord", ["supervisord", "-n", "-c", str(SUPERVISORD_CONF)])
 
 
-def _git_noninteractive_env() -> dict[str, str]:
-    """Environment for bootstrap git calls: never prompt for credentials.
-
-    Git prompts for a username/password on the controlling TTY (bypassing our
-    captured pipes) when a remote needs auth and no credential is available --
-    e.g. the "best-effort" fetch in _init_runtime_worktree against a PRIVATE
-    origin (a mind created from a private inspiration repo) with no GH_TOKEN.
-    That prompt blocks bootstrap forever, so supervisord never starts and the
-    workspace sits on "Loading workspace" indefinitely. GIT_TERMINAL_PROMPT=0
-    turns the prompt into a fast failure, which every caller here already
-    handles (all bootstrap git calls are best-effort by design).
-    """
-    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-
-
-def _git_main(*args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command in the main checkout, never raising or prompting."""
-    return subprocess.run(
-        ["git", *args],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_git_noninteractive_env(),
-    )
-
-
-def _git_runtime(*args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command inside the runtime worktree, never raising or prompting."""
-    return subprocess.run(
-        ["git", "-C", str(RUNTIME_DIR), *args],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_git_noninteractive_env(),
-    )
-
-
-def _restore_preexisting_into_worktree() -> None:
-    """Move any files from runtime.preexisting/ back into runtime/."""
-    if not RUNTIME_PREEXISTING_DIR.exists():
-        return
-    for entry in list(RUNTIME_PREEXISTING_DIR.iterdir()):
-        target = RUNTIME_DIR / entry.name
-        if target.exists():
-            # Don't clobber what the worktree already has (e.g. a fresh
-            # .gitignore we just wrote).
-            continue
-        shutil.move(str(entry), str(target))
-    try:
-        RUNTIME_PREEXISTING_DIR.rmdir()
-    except OSError:
-        logger.warning(
-            "{} not empty after restore; leaving for inspection",
-            RUNTIME_PREEXISTING_DIR,
-        )
-
-
-def _stage_preexisting_aside() -> None:
-    """Move runtime/'s contents to runtime.preexisting/ so we can add a worktree.
-
-    Only called when runtime/ exists with files but is not yet a git worktree.
-    """
-    if RUNTIME_PREEXISTING_DIR.exists():
-        # Stale leftover from a prior failed init -- clear it.
-        shutil.rmtree(RUNTIME_PREEXISTING_DIR)
-    shutil.move(str(RUNTIME_DIR), str(RUNTIME_PREEXISTING_DIR))
-
-
-def _runtime_dir_has_files() -> bool:
-    """Return True if runtime/ exists and contains anything."""
-    if not RUNTIME_DIR.exists():
-        return False
-    return any(RUNTIME_DIR.iterdir())
-
-
-def _create_orphan_runtime_worktree(branch: str) -> subprocess.CompletedProcess[str]:
-    """Add runtime/ as a worktree on a fresh orphan branch, git-version-agnostically.
-
-    `git worktree add --orphan` only exists in git >= 2.42, but the Lima
-    provider's Debian 12 base ships git 2.39. So build the orphan branch with
-    plumbing that has worked for ages -- a parentless commit on the empty tree --
-    then do a normal `git worktree add` for it. Returns the final worktree-add
-    CompletedProcess; if an earlier plumbing step fails, returns that failing
-    CompletedProcess so the caller's existing error handling fires.
-    """
-    empty_tree = _git_main("hash-object", "-w", "-t", "tree", "/dev/null")
-    if empty_tree.returncode != 0:
-        return empty_tree
-    # Commit identity is passed via -c because the container may have no global
-    # git identity yet, and commit-tree refuses to run without one.
-    orphan_commit = _git_main(
-        "-c",
-        f"user.name={RUNTIME_BACKUP_USER_NAME}",
-        "-c",
-        f"user.email={RUNTIME_BACKUP_USER_EMAIL}",
-        "commit-tree",
-        empty_tree.stdout.strip(),
-        "-m",
-        "runtime backup: init",
-    )
-    if orphan_commit.returncode != 0:
-        return orphan_commit
-    branch_result = _git_main("branch", branch, orphan_commit.stdout.strip())
-    if branch_result.returncode != 0:
-        return branch_result
-    return _git_main("worktree", "add", str(RUNTIME_DIR), branch)
-
-
-def _init_runtime_worktree() -> None:
-    """One-time setup of runtime/ as a worktree of mindsbackup/$MNGR_AGENT_ID.
-
-    Best-effort: logs and returns rather than raising on any failure, so a
-    transient git problem does not prevent other services from starting.
-    """
-    agent_id = os.environ.get("MNGR_AGENT_ID")
-    if not agent_id:
-        logger.warning(
-            "MNGR_AGENT_ID is unset; skipping runtime worktree init "
-            "(runtime-backup service will also no-op)"
-        )
-        return
-
-    branch = f"mindsbackup/{agent_id}"
-
-    if (RUNTIME_DIR / ".git").exists():
-        logger.info("runtime/ is already a worktree; skipping init")
-        # A prior init may have staged runtime/ content aside and been killed
-        # before restoring it (leaving runtime.preexisting/ behind while the
-        # worktree itself already exists). Recover that content now rather
-        # than stranding it. _restore_preexisting_into_worktree no-ops when
-        # runtime.preexisting/ is absent, which is the common case.
-        _restore_preexisting_into_worktree()
-        return
-
-    logger.info("Initializing runtime worktree on branch {}", branch)
-
-    # Best-effort fetch so we can detect a pre-existing remote branch (e.g.
-    # restored after a container restart on the same agent id).
-    fetch_result = _git_main("fetch", "origin", branch)
-    remote_ref = f"origin/{branch}"
-    has_remote = (
-        fetch_result.returncode == 0
-        and _git_main("rev-parse", "--verify", remote_ref).returncode == 0
-    )
-
-    staged_aside = False
-    if _runtime_dir_has_files():
-        logger.warning(
-            "runtime/ already has files; staging them aside before adding the worktree"
-        )
-        _stage_preexisting_aside()
-        staged_aside = True
-
-    if has_remote:
-        result = _git_main(
-            "worktree", "add", "-B", branch, str(RUNTIME_DIR), remote_ref
-        )
-    else:
-        result = _create_orphan_runtime_worktree(branch)
-
-    if result.returncode != 0:
-        logger.error(
-            "git worktree add failed (rc={}): {}",
-            result.returncode,
-            result.stderr.strip(),
-        )
-        # Restore preexisting files so other services don't lose them.
-        if staged_aside:
-            if not RUNTIME_DIR.exists():
-                shutil.move(str(RUNTIME_PREEXISTING_DIR), str(RUNTIME_DIR))
-            else:
-                _restore_preexisting_into_worktree()
-        return
-
-    # Configure bot identity for backup commits inside this worktree only.
-    _git_runtime("config", "user.name", RUNTIME_BACKUP_USER_NAME)
-    _git_runtime("config", "user.email", RUNTIME_BACKUP_USER_EMAIL)
-
-    if has_remote:
-        # Make sure the local branch tracks the remote (some git versions
-        # don't set this automatically with -B + an explicit ref).
-        _git_runtime("branch", "--set-upstream-to", remote_ref)
-    else:
-        # Fresh orphan branch: write the .gitignore for secrets and make an
-        # initial empty commit so push has something to push.
-        gitignore = RUNTIME_DIR / ".gitignore"
-        gitignore.write_text("secrets\n")
-        _git_runtime("add", ".gitignore")
-        commit = _git_runtime("commit", "--allow-empty", "-m", "runtime backup: init")
-        if commit.returncode != 0:
-            logger.error(
-                "initial commit failed (rc={}): {}",
-                commit.returncode,
-                commit.stderr.strip(),
-            )
-
-    # Restore staged-aside content. Calling unconditionally (rather than
-    # gating on the `staged_aside` flag) also recovers content left by a
-    # prior init that staged aside but was killed before it could restore.
-    _restore_preexisting_into_worktree()
-
-    if os.environ.get("GH_TOKEN"):
-        if has_remote:
-            push = _git_runtime("push")
-        else:
-            push = _git_runtime("push", "--set-upstream", "origin", branch)
-        if push.returncode != 0:
-            logger.warning(
-                "initial push failed (rc={}): {} (runtime-backup service will retry)",
-                push.returncode,
-                push.stderr.strip(),
-            )
-    else:
-        logger.info("No GH_TOKEN; skipping initial push")
-
-
 def main() -> None:
     logger.info("Bootstrap starting: first-boot setup, then supervisord")
 
-    # Apply the global git config (https rewrites + repo hooksPath) before any
-    # service or agent runs git. Replaces the old git_auth_setup extra_window.
+    # Apply the global git config (https rewrites) before any service or
+    # agent runs git.
     _configure_git_global()
-
-    # Restore runtime/ FIRST so the initial_chat_created signal file (which
-    # lives inside the worktree and is replicated to mindsbackup/$MNGR_AGENT_ID
-    # by the runtime-backup service) is in place before we decide whether to
-    # create the initial chat agent. Without this ordering, every container
-    # restart sees an empty runtime/, treats the boot as first-ever, and
-    # re-creates the welcome chat agent (and auto-commits any uncommitted
-    # work_dir state). This must also happen before supervisord starts the
-    # runtime-backup / host-backup services that write into runtime/.
-    _init_runtime_worktree()
 
     _bootstrap_init_chat_dir()
 

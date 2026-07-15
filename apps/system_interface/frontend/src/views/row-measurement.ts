@@ -20,6 +20,18 @@ export const OVERSCAN_PX = 800;
 export const ESTIMATED_USER_HEIGHT_PX = 90;
 export const ESTIMATED_ASSISTANT_HEIGHT_PX = 240;
 
+// Hysteresis for `measureRows`: a measured height must differ from the cached
+// value by MORE than this many pixels to count as a real change. This breaks the
+// measure->redraw->reflow->measure feedback loop that caused a continuous ~1px
+// vertical jitter: a row sitting at a sub-pixel vertical offset would reflow by a
+// fraction of a pixel each frame, and without a threshold that fraction was read
+// as a "change", scheduling another redraw that shifted it again, forever. A
+// sub-threshold spacer error for off-screen rows is harmless (it is corrected the
+// moment the row genuinely changes height by more than the threshold), so
+// ignoring these tiny deltas costs nothing and stops the loop. Genuine content
+// changes (a streamed line is ~1.5x the font size) clear this threshold easily.
+export const MEASURE_HYSTERESIS_PX = 1;
+
 export interface RowMeasurer {
   /**
    * Read each rendered row's height from the DOM and cache it by its id, so the
@@ -60,8 +72,20 @@ export function createRowMeasurer(): RowMeasurer {
       if (key === "") {
         continue; // spacer
       }
-      const height = element.offsetHeight;
-      if (height > 0 && rowHeights.get(key) !== height) {
+      // Sub-pixel, position-independent layout height. Unlike ``offsetHeight``
+      // (integer, device-pixel-snapped and therefore dependent on the row's
+      // fractional vertical position), this does not flip by 1px as the row
+      // drifts a fraction of a pixel, which is the other half of the jitter fix.
+      const height = element.getBoundingClientRect().height;
+      if (height <= 0) {
+        continue; // not laid out / hidden
+      }
+      const cached = rowHeights.get(key);
+      // First measurement, or a change large enough to matter (see
+      // MEASURE_HYSTERESIS_PX). Sub-threshold deltas are ignored entirely: we
+      // neither update the cache nor report a change, so the cached height stays
+      // anchored and the feedback loop cannot sustain itself.
+      if (cached === undefined || Math.abs(height - cached) > MEASURE_HYSTERESIS_PX) {
         rowHeights.set(key, height);
         changed = true;
       }

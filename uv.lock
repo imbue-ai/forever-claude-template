@@ -29,9 +29,10 @@ members = [
     "browser",
     "cloudflare-tunnel",
     "default-workspace-template",
+    "github-sync",
     "host-backup",
     "mngr-cli-contract",
-    "runtime-backup",
+    "oom-priority",
     "system-interface",
     "tk-command-parsing",
     "web-server",
@@ -386,6 +387,7 @@ dependencies = [
     { name = "browser-use", extra = ["core"] },
     { name = "flask" },
     { name = "flask-sock" },
+    { name = "oom-priority" },
     { name = "simple-websocket" },
     { name = "werkzeug" },
 ]
@@ -395,6 +397,7 @@ requires-dist = [
     { name = "browser-use", extras = ["core"], specifier = "==0.13.1" },
     { name = "flask", specifier = ">=3.0" },
     { name = "flask-sock", specifier = ">=0.7" },
+    { name = "oom-priority", editable = "libs/oom_priority" },
     { name = "simple-websocket", specifier = ">=1.0" },
     { name = "werkzeug", specifier = ">=3.0" },
 ]
@@ -942,11 +945,11 @@ dependencies = [
     { name = "bootstrap" },
     { name = "browser" },
     { name = "cloudflare-tunnel" },
+    { name = "github-sync" },
     { name = "host-backup" },
     { name = "imbue-common" },
     { name = "litellm" },
     { name = "playwright" },
-    { name = "runtime-backup" },
     { name = "tk-command-parsing" },
     { name = "tomlkit" },
     { name = "web-server" },
@@ -973,11 +976,11 @@ requires-dist = [
     { name = "bootstrap", editable = "libs/bootstrap" },
     { name = "browser", editable = "libs/browser" },
     { name = "cloudflare-tunnel", editable = "libs/cloudflare_tunnel" },
+    { name = "github-sync", editable = "libs/github_sync" },
     { name = "host-backup", editable = "libs/host_backup" },
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
     { name = "litellm", specifier = ">=1.88.1" },
     { name = "playwright", specifier = "==1.58.0" },
-    { name = "runtime-backup", editable = "libs/runtime_backup" },
     { name = "tk-command-parsing", editable = "libs/tk_command_parsing" },
     { name = "tomlkit", specifier = ">=0.12" },
     { name = "web-server", editable = "libs/web_server" },
@@ -1262,6 +1265,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b1/c4/1fe2817daca8e97c365fd739dd4057f71cce26ef600fb8465deb8060c83c/gevent-26.4.0-cp314-cp314-musllinux_1_2_aarch64.whl", hash = "sha256:dc38137ba2f43794c488615aafa2eefd0cc142f484a8274d4c827ed7a031a1e2", size = 1805672, upload-time = "2026-04-08T22:26:55.792Z" },
     { url = "https://files.pythonhosted.org/packages/e7/cc/ccbcbd56e7e85482291fbb90a317f5febf630ec4174a91506f4167ba0912/gevent-26.4.0-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:29a225d2d4da37e20c7a246754a64442d0e43e4534b8cc764f89530bb22a4237", size = 2145594, upload-time = "2026-04-08T22:00:05.275Z" },
     { url = "https://files.pythonhosted.org/packages/8e/b9/7dd37b6001d16f692b1bfb6e68cad642beb38b34a753c29bbff312f46e4b/gevent-26.4.0-cp314-cp314-win_amd64.whl", hash = "sha256:d1c08bc9bb6bd79732a26710a99588b5e9b67b668e165dd609704b876f41baab", size = 1703189, upload-time = "2026-04-08T22:48:31.713Z" },
+]
+
+[[package]]
+name = "github-sync"
+version = "0.1.0"
+source = { editable = "libs/github_sync" }
+dependencies = [
+    { name = "click" },
+    { name = "loguru" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.0" },
+    { name = "loguru", specifier = ">=0.7.0" },
 ]
 
 [[package]]
@@ -1763,7 +1781,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy", specifier = ">=1.5.0" },
-    { name = "psutil", specifier = ">=5.9" },
+    { name = "psutil", specifier = ">=7.2" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pygtail", specifier = ">=0.14.0" },
     { name = "pyinfra", specifier = ">=3.0" },
@@ -2444,6 +2462,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/9d/5a/652dac4b7affc2b37
 wheels = [
     { url = "https://files.pythonhosted.org/packages/47/4f/4a617ee93d8208d2bcf26b2d8b9402ceaed03e3853c754940e2290fed063/ollama-0.6.1-py3-none-any.whl", hash = "sha256:fc4c984b345735c5486faeee67d8a265214a31cbb828167782dc642ce0a2bf8c", size = 14354, upload-time = "2025-11-13T23:02:16.292Z" },
 ]
+
+[[package]]
+name = "oom-priority"
+version = "0.1.0"
+source = { editable = "libs/oom_priority" }
 
 [[package]]
 name = "openai"
@@ -6376,17 +6399,6 @@ wheels = [
 ]
 
 [[package]]
-name = "runtime-backup"
-version = "0.1.0"
-source = { editable = "libs/runtime_backup" }
-dependencies = [
-    { name = "loguru" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "loguru", specifier = ">=0.7.0" }]
-
-[[package]]
 name = "s3transfer"
 version = "0.19.1"
 source = { registry = "https://pypi.org/simple" }
@@ -6567,6 +6579,7 @@ dependencies = [
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-claude" },
+    { name = "oom-priority" },
     { name = "pexpect" },
     { name = "pluggy" },
     { name = "pydantic-settings" },
@@ -6600,6 +6613,7 @@ requires-dist = [
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
     { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
     { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
+    { name = "oom-priority", editable = "libs/oom_priority" },
     { name = "pexpect", specifier = ">=4.9" },
     { name = "pluggy", specifier = ">=1.5" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },

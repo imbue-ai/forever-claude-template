@@ -15,7 +15,8 @@ any other file is offered as a download.
 
 1. Write the image to disk under `runtime/chat-images/` (create it once with
    `mkdir -p runtime/chat-images` if it does not exist). That directory is
-   gitignored and is backed up along with the rest of `runtime/`.
+   gitignored and persists with the rest of `runtime/` (covered by the opt-in
+   GitHub sync when the user has enabled the `github-sync` skill).
 
    Give each image a unique, descriptive filename, e.g.
    `revenue-by-quarter-2026.png`. Served image URLs are cached immutably, so

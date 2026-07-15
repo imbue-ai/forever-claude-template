@@ -13,6 +13,7 @@ import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
+from imbue.mngr.utils.polling import wait_for
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.config import Config
@@ -150,12 +152,18 @@ def _running_e2e_server(
     tmp_path: Path,
     port: int,
     session_events: list[dict[str, Any]] | None = None,
+    primary_agent_id: str = "",
 ) -> Generator[tuple[str, AgentInfo, Path], None, None]:
     """Run the web server with a single mock agent, ready for Playwright + layout ops.
 
     Yields ``(base_url, agent_info, session_file)``. Shared by the default
     ``e2e_server`` fixture and any test that needs a bespoke conversation
     (e.g. a long transcript) or a distinct port.
+
+    ``primary_agent_id`` controls layout persistence: empty (the default)
+    clears MNGR_AGENT_ID so the layout endpoints have no primary-agent dir
+    (nothing persists; the UI auto-opens the fixture chat); a non-empty id
+    persists named layouts under ``tmp_path/agents/<id>/workspace_layout``.
     """
     base_url = f"http://127.0.0.1:{port}"
     agent_info, session_file = _make_agent_fixture(tmp_path, session_events=session_events)
@@ -163,13 +171,12 @@ def _running_e2e_server(
 
     # Isolate the workspace environment: point MNGR_HOST_DIR at the fixture's
     # tmp tree so the session endpoint (_find_agent) resolves the fixture agent's
-    # state dir + env file, and clear MNGR_AGENT_ID so the layout endpoint has no
-    # primary-agent dir to read from (returns 404 -> the UI auto-opens the fixture
-    # chat) and never reads or writes the real workspace's layout.json. This
-    # overrides the autouse _isolate_system_interface_tests fixture's env for the
-    # duration of the test.
+    # state dir + env file, and set MNGR_AGENT_ID per ``primary_agent_id`` so
+    # the layout endpoints either run unpersisted or write under the tmp tree --
+    # never the real workspace's layout state. This overrides the autouse
+    # _isolate_system_interface_tests fixture's env for the duration of the test.
     with (
-        patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": ""}),
+        patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": primary_agent_id}),
         patch("imbue.system_interface.server.discover_agents", return_value=agents),
     ):
         # Seed the agent into a manager and inject it; the manager is never started,
@@ -223,6 +230,41 @@ def test_page_loads_and_shows_title(e2e_server: tuple[str, list[AgentInfo], Path
     base_url, _, _ = e2e_server
     page.goto(base_url)
     expect(page).to_have_title("System Interface")
+
+
+def test_chat_transcript_area_is_pure_white(e2e_server: tuple[str, list[AgentInfo], Path], page: Page) -> None:
+    """The chat conversation panel renders on a pure-white background.
+
+    Regression test for making the chat area exactly ``#ffffff`` -- both the
+    transcript (``.app-content``) and the composer footer strip (``.app-footer``),
+    which were previously the shared off-white ``--color-bg``. The change is
+    scoped to the chat panel via the dedicated ``--color-bg-chat`` token: the
+    shared shell background token ``--color-bg`` must stay off-white, so this also
+    guards against a future edit whitening the whole shell via the shared variable.
+    """
+    base_url, _, _ = e2e_server
+    page.goto(base_url)
+
+    # The transcript container must exist and actually hold the message list, so
+    # the assertion below cannot pass against an empty or wrong tree.
+    content = page.locator(".app-content")
+    expect(content).to_be_visible(timeout=15000)
+    expect(content.locator(".message-list")).to_have_count(1)
+
+    content_bg = page.eval_on_selector(".app-content", "e => getComputedStyle(e).backgroundColor")
+    assert content_bg == "rgb(255, 255, 255)", f"chat transcript area should be pure white, got {content_bg}"
+
+    # The composer footer strip is now unified with the transcript -- also pure white.
+    footer_bg = page.eval_on_selector(".app-footer", "e => getComputedStyle(e).backgroundColor")
+    assert footer_bg == "rgb(255, 255, 255)", f"composer footer should be pure white, got {footer_bg}"
+
+    # Scoping guard: the whitening went through --color-bg-chat, so the shared
+    # shell background token must stay off-white (the tab bar / other panels rely
+    # on it). This catches a future edit that whitens the whole shell instead.
+    shell_bg = page.eval_on_selector("html", "e => getComputedStyle(e).getPropertyValue('--color-bg').trim()")
+    assert shell_bg not in ("#ffffff", "#fff", "rgb(255, 255, 255)"), (
+        f"shared shell --color-bg should stay off-white, got {shell_bg}"
+    )
 
 
 @_STALE_DOCKVIEW_SKIP
@@ -427,16 +469,35 @@ def _broadcast_layout_op(base_url: str, op: str, args: dict[str, Any], agent_id:
     This is the same path ``scripts/layout.py`` drives, so issuing a ``split``
     here exercises the real frontend ``handleSplit`` handler (which carves the
     second group) rather than reaching into dockview internals from the test.
+
+    Mutating ops are layout-targeted: they carry the desktop layout (the one a
+    Playwright browser picks by default) and only succeed once the page's
+    ``client_state`` registration has landed, so a 412 is retried until the
+    registration catches up.
     """
-    payload = json.dumps({"op": op, "args": args, "agent_id": agent_id}).encode()
+    payload = json.dumps({"op": op, "args": {**args, "layout": "desktop"}, "agent_id": agent_id}).encode()
     request = urllib.request.Request(
         f"{base_url}/api/layout/broadcast",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        assert response.status == 200, f"layout broadcast failed: {response.status}"
+
+    def _attempt() -> bool:
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return bool(response.status == 200)
+        except urllib.error.HTTPError as e:
+            if e.code == 412:
+                return False
+            raise
+
+    wait_for(
+        _attempt,
+        timeout=15.0,
+        poll_interval=0.2,
+        error_message=f"layout broadcast for op {op!r} never succeeded (client registration missing?)",
+    )
 
 
 # Selects "New terminal" from the add-tab dropdown, which spawns a real tmux
@@ -734,3 +795,201 @@ def test_no_agents_shows_empty_state(page: Page, tmp_path: Path) -> None:
         finally:
             server.shutdown()
             thread.join(timeout=5.0)
+
+
+_LAYOUT_DIALOG_PORT = 18867
+
+
+# Opening the "+" dropdown fetches the live terminal fleet, which shells out
+# to ``tmux list-sessions`` server-side -- hence the tmux mark.
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
+def test_named_layout_dialogs_end_to_end(tmp_path: Path, page: Page) -> None:
+    """The "+" menu's Save/Load/Delete layout dialogs drive the named-layout registry.
+
+    End-to-end over the real frontend + server: initial UA-based selection
+    (desktop) with WebSocket registration, debounced autosave materializing
+    the fresh layout's file, save-as creating + switching to a new layout,
+    load switching to the (empty) mobile layout, and deleting the active
+    layout falling back to the first remaining one.
+    """
+    primary_agent_id = "primary-services-agent"
+    with _running_e2e_server(tmp_path, _LAYOUT_DIALOG_PORT, primary_agent_id=primary_agent_id) as (
+        base_url,
+        _agent_info,
+        _session_file,
+    ):
+        layout_dir = tmp_path / "agents" / primary_agent_id / "workspace_layout"
+        # The delete-fallback path surfaces a notice via alert(); auto-accept it.
+        page.on("dialog", lambda dialog: dialog.accept())
+        page.goto(base_url)
+
+        # Initial: desktop is chosen (desktop UA), the fixture chat auto-opens,
+        # and the debounced autosave materializes desktop.json.
+        expect(page.locator(".dv-default-tab-content", has_text="test-agent").first).to_be_visible(timeout=15000)
+        page.wait_for_function("localStorage.getItem('si-active-layout-slug') === 'desktop'", timeout=10000)
+        wait_for(
+            lambda: (layout_dir / "layouts" / "desktop.json").exists(),
+            timeout=15.0,
+            poll_interval=0.1,
+            error_message="autosave never materialized desktop.json",
+        )
+
+        # Save layout...: prefilled with the current name; saving under a new
+        # name creates it and switches onto it.
+        page.locator(".dockview-add-tab-button").first.click()
+        page.locator(".dockview-add-tab-dropdown-item", has_text="Save layout...").click()
+        dialog_input = page.locator(".custom-url-dialog-input")
+        expect(dialog_input).to_be_visible(timeout=5000)
+        assert dialog_input.input_value() == "desktop"
+        assert "desktop (current)" in page.locator(".layout-dialog-list").inner_text()
+        dialog_input.fill("My Phone Setup")
+        page.locator(".custom-url-dialog-open").click()
+        page.wait_for_function("localStorage.getItem('si-active-layout-slug') === 'my-phone-setup'", timeout=10000)
+        wait_for(
+            lambda: (layout_dir / "layouts" / "my-phone-setup.json").exists(),
+            timeout=10.0,
+            poll_interval=0.1,
+            error_message="save-as never wrote my-phone-setup.json",
+        )
+
+        # Load layout...: switching to the never-saved mobile layout renders
+        # the fresh state (the welcome chat auto-opens again).
+        page.locator(".dockview-add-tab-button").first.click()
+        page.locator(".dockview-add-tab-dropdown-item", has_text="Load layout...").click()
+        page.locator(".layout-dialog-item", has_text="mobile").click()
+        page.locator(".custom-url-dialog-open").click()
+        page.wait_for_function("localStorage.getItem('si-active-layout-slug') === 'mobile'", timeout=10000)
+        expect(page.locator(".dv-default-tab-content", has_text="test-agent").first).to_be_visible(timeout=15000)
+
+        # Delete layout... on the active layout: the client auto-switches to
+        # the fallback and the registry drops the deleted entry.
+        page.locator(".dockview-add-tab-button").first.click()
+        page.locator(".dockview-add-tab-dropdown-item", has_text="Delete layout...").click()
+        page.locator(".layout-dialog-item", has_text="mobile (current)").click()
+        page.locator(".custom-url-dialog-open").click()
+        page.wait_for_function("localStorage.getItem('si-active-layout-slug') === 'desktop'", timeout=10000)
+        registry = json.loads((layout_dir / "layouts_meta.json").read_text())
+        assert "mobile" not in registry["display_name_by_slug"]
+        assert "my-phone-setup" in registry["display_name_by_slug"]
+
+
+_LAYOUT_RESTORE_PORT = 18868
+
+
+def _switch_layout_via_dialog(page: Page, layout_label: str) -> None:
+    """Drive the "+" menu's Load-layout dialog to switch onto ``layout_label``."""
+    page.locator(".dockview-add-tab-button").first.click()
+    page.locator(".dockview-add-tab-dropdown-item", has_text="Load layout...").click()
+    page.locator(".layout-dialog-item", has_text=layout_label).first.click()
+    page.locator(".custom-url-dialog-open").click()
+
+
+# Opening the "+" dropdown fetches the live terminal fleet, which shells out to
+# ``tmux list-sessions`` server-side -- hence the tmux mark.
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
+def test_switching_layouts_preserves_chat_transcript(tmp_path: Path, page: Page) -> None:
+    """A chat pane restored by a layout switch still shows its own transcript.
+
+    Regression test: ``fromJSON`` disposes the outgoing panels before creating
+    the incoming ones, and the removal handler deletes their ``panelParams``.
+    Because panel ids are deterministic, a chat present in BOTH layouts had its
+    freshly-seeded params deleted mid-restore and came back bound to the primary
+    (services) agent -- the tab kept its title but showed an empty transcript.
+    """
+    primary_agent_id = "primary-services-agent"
+    with _running_e2e_server(tmp_path, _LAYOUT_RESTORE_PORT, primary_agent_id=primary_agent_id) as (
+        base_url,
+        _agent_info,
+        _session_file,
+    ):
+        layout_dir = tmp_path / "agents" / primary_agent_id / "workspace_layout"
+        page.on("dialog", lambda dialog: dialog.accept())
+        page.goto(base_url)
+
+        # The fixture chat auto-opens on the desktop layout and shows its transcript.
+        expect(page.locator(".message-user", has_text="Hello agent!").first).to_be_visible(timeout=15000)
+        page.wait_for_function("localStorage.getItem('si-active-layout-slug') === 'desktop'", timeout=10000)
+        wait_for(
+            lambda: (layout_dir / "layouts" / "desktop.json").exists(),
+            timeout=15.0,
+            poll_interval=0.1,
+            error_message="autosave never materialized desktop.json",
+        )
+
+        # Away to the (empty) mobile layout, then back to desktop.
+        _switch_layout_via_dialog(page, "mobile")
+        page.wait_for_function("localStorage.getItem('si-active-layout-slug') === 'mobile'", timeout=10000)
+        expect(page.locator(".dv-default-tab-content", has_text="test-agent").first).to_be_visible(timeout=15000)
+
+        _switch_layout_via_dialog(page, "desktop")
+        page.wait_for_function("localStorage.getItem('si-active-layout-slug') === 'desktop'", timeout=10000)
+
+        # The restored chat must show ITS transcript -- not the primary agent's
+        # (which would render an empty / no-conversation state under the same tab).
+        expect(page.locator(".message-user", has_text="Hello agent!").first).to_be_visible(timeout=15000)
+        expect(page.locator(".message-list-empty")).to_have_count(0)
+        expect(page.locator(".message-list-not-found")).to_have_count(0)
+
+
+@pytest.mark.timeout(120)
+def test_layout_missing_panel_params_recovers_chat_binding(tmp_path: Path, page: Page) -> None:
+    """A saved layout whose panelParams are missing still binds the chat correctly.
+
+    Panel ids encode identity (``chat-<agent-id>``), so a params-less panel is
+    rebuilt from its id rather than silently defaulting to the primary agent.
+    This also self-heals layout files corrupted by the restore bug above.
+    """
+    primary_agent_id = "primary-services-agent"
+    with _running_e2e_server(tmp_path, _LAYOUT_RESTORE_PORT + 1, primary_agent_id=primary_agent_id) as (
+        base_url,
+        agent_info,
+        _session_file,
+    ):
+        # Hand-write a desktop layout holding the agent's chat panel with an
+        # EMPTY panelParams map -- the shape the restore bug used to persist.
+        layout_dir = tmp_path / "agents" / primary_agent_id / "workspace_layout"
+        layouts_dir = layout_dir / "layouts"
+        layouts_dir.mkdir(parents=True)
+        panel_id = f"chat-{agent_info.id}"
+        (layouts_dir / "desktop.json").write_text(
+            json.dumps(
+                {
+                    "dockview": {
+                        "activeGroup": "group-1",
+                        "grid": {
+                            "root": {
+                                "type": "branch",
+                                "data": [
+                                    {
+                                        "type": "leaf",
+                                        "data": {"views": [panel_id], "activeView": panel_id, "id": "group-1"},
+                                        "size": 1000,
+                                    }
+                                ],
+                            },
+                            "width": 1000,
+                            "height": 1000,
+                            "orientation": "HORIZONTAL",
+                        },
+                        "panels": {
+                            panel_id: {
+                                "id": panel_id,
+                                "contentComponent": "chat",
+                                "tabComponent": "custom",
+                                "title": agent_info.name,
+                            }
+                        },
+                    },
+                    "panelParams": {},
+                }
+            )
+        )
+
+        page.goto(base_url)
+
+        # The chat is rebuilt from its panel id, so it shows its own transcript.
+        expect(page.locator(".message-user", has_text="Hello agent!").first).to_be_visible(timeout=15000)
+        expect(page.locator(".message-list-empty")).to_have_count(0)
+        expect(page.locator(".message-list-not-found")).to_have_count(0)

@@ -6,7 +6,6 @@ from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
-from imbue.system_interface.activity_state import is_lifecycle_process_alive
 from imbue.system_interface.activity_state import is_transcript_tail_stale
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
@@ -183,33 +182,6 @@ def test_derive_activity_state_non_running_agent_is_always_idle(lifecycle_state:
         tail_event_type="user_message",
     )
     assert state == ActivityState.IDLE
-
-
-@pytest.mark.parametrize(
-    "lifecycle_state, expected",
-    [
-        pytest.param("RUNNING", True, id="running_is_alive"),
-        pytest.param("WAITING", True, id="waiting_is_alive"),
-        pytest.param("RUNNING_UNKNOWN_AGENT_TYPE", True, id="running_unknown_is_alive"),
-        pytest.param("STOPPED", False, id="stopped_is_dead"),
-        pytest.param("DONE", False, id="done_is_dead"),
-        pytest.param("REPLACED", False, id="replaced_is_dead"),
-        pytest.param("UNKNOWN", False, id="unknown_is_dead"),
-    ],
-)
-def test_is_lifecycle_process_alive(lifecycle_state: str, expected: bool) -> None:
-    assert is_lifecycle_process_alive(lifecycle_state) is expected
-
-
-def test_running_lifecycle_states_are_a_subset_of_alive_states() -> None:
-    """Everything the discovery gate treats as running must count as process-alive.
-
-    Guards against the two sets drifting: the liveness poll's alive set is broader
-    (it adds WAITING), but it must never be narrower than the discovery-state gate,
-    or a fallback-gated agent could read running while the poll reads dead.
-    """
-    for state in RUNNING_LIFECYCLE_STATES:
-        assert is_lifecycle_process_alive(state)
 
 
 @pytest.mark.parametrize(

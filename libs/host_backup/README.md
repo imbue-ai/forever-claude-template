@@ -3,8 +3,8 @@
 Background service that continuously backs up the agent's full `host_dir`
 (`/mngr/`) to a remote restic repository (Cloudflare R2 by default).
 
-Distinct from `runtime_backup`, which only ships `runtime/` to a GitHub
-orphan branch as a fine-grained checkpoint. `host_backup` covers the whole
+Distinct from the opt-in `github_sync` service, which only ships `runtime/`
+to a GitHub orphan branch as a fine-grained checkpoint. `host_backup` covers the whole
 host_dir (code, worktrees, agent state, chat sessions, logs) and pushes to
 an encrypted restic repo on cheaper object storage.
 
@@ -14,9 +14,10 @@ an encrypted restic repo on cheaper object storage.
   (defined in `supervisord.conf`, started by supervisord after `bootstrap`).
   Restart policy: `autorestart=true`.
 - The repository is created (and keyed) by the minds app, not by
-  host_backup: minds runs `restic init` + `restic key add` from outside the
-  workspace and injects the resulting `restic.env`. host_backup just backs up
-  to the existing repository -- it does not probe-then-init.
+  host_backup: minds runs `restic init` from outside the workspace -- the
+  workspace's own random password is the repository's single key -- and
+  injects the resulting `restic.env`. host_backup just backs up to the
+  existing repository -- it does not probe-then-init.
 - Each tick reads two optional on-disk inputs:
   - `runtime/backup.toml`: purely *user* settings -- backup interval,
     retention, exclude patterns. Optional: when absent the service runs on
@@ -31,7 +32,8 @@ an encrypted restic repo on cheaper object storage.
     `AWS_SECRET_ACCESS_KEY` for an S3/R2 backend). Written only by the minds
     app (injected whole); a missing file means backups are not configured.
     `restic.env` is gitignored (rides nothing). `backup.toml` is *not*
-    gitignored so it survives container loss via runtime-backup.
+    gitignored, so it also rides the opt-in GitHub sync of runtime/ when
+    that is enabled.
 - A tick only runs once both `RESTIC_REPOSITORY` and `RESTIC_PASSWORD` are
   set in `restic.env`. Backend credentials are not gated by host_backup --
   restic reports its own error if the chosen backend needs one that is
@@ -58,8 +60,8 @@ an encrypted restic repo on cheaper object storage.
   M --keep-weekly W --keep-monthly O` runs (cheap, index-only). At most
   once per `prune_interval_hours` (default 24) we additionally run
   `restic prune` (the slow data deletion step); gated by
-  `runtime/last-restic-prune` (a timestamp file that rides runtime-backup
-  so it survives container loss).
+  `runtime/last-restic-prune` (a timestamp file under runtime/, covered by
+  the opt-in GitHub sync when enabled).
 - The outer loop never exits. Every exception is logged with full traceback
   to loguru and as a `tick_error` event in the jsonl stream; the loop
   continues to the next tick.
@@ -101,8 +103,9 @@ Each restic command's full stdout / stderr is captured into the matching
 
 In the minds app the whole `runtime/secrets/restic.env` is written for you
 when you pick a backup provider on the create form -- minds initializes the
-repository (`restic init` + `restic key add`) from outside the workspace and
-injects the file. To configure backups by hand instead, populate
+repository (`restic init`, keyed solely by the workspace's own random
+password) from outside the workspace and injects the file. To configure
+backups by hand instead, populate
 `runtime/secrets/restic.env` with `RESTIC_REPOSITORY` (e.g.
 `s3:https://<account>.r2.cloudflarestorage.com/<bucket>`), the backend
 credentials (e.g. R2 access keys), and a `RESTIC_PASSWORD`, and initialize

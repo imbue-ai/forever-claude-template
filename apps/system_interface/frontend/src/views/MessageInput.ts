@@ -24,26 +24,11 @@ import {
 import { addConnectionStateListener, removeConnectionStateListener } from "../models/AgentManager";
 import { describeRequestError, isBackendUnreachableError } from "../models/request-error";
 import { isWorkingActivityState } from "./ActivityIndicator";
+import { icon, stopIcon } from "./icons";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
 
 const MESSAGE_TEXT_KEY_PREFIX = "message-text:";
-
-const ATTACH_ICON_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
-  'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-  '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>';
-
-const REMOVE_ICON_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
-  'stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
-  '<path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>';
-
-const FILE_ICON_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" ' +
-  'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
-  '<path d="M14 3v4a1 1 0 0 0 1 1h4"/>' +
-  '<path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/></svg>';
 
 function messageTextKey(agentId: string): string {
   return `${MESSAGE_TEXT_KEY_PREFIX}${agentId}`;
@@ -98,7 +83,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
           { class: "composer-attachment-icon" },
           attachment.status === "uploading"
             ? m("span", { class: "composer-attachment-spinner" })
-            : m.trust(FILE_ICON_SVG),
+            : m.trust(icon("file", { size: 18, strokeWidth: 1.8 })),
         );
     return m(
       "div",
@@ -126,7 +111,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                 "aria-label": "Remove attachment",
                 onclick: () => removeComposerAttachment(agentId, attachment.localId),
               },
-              m.trust(REMOVE_ICON_SVG),
+              m.trust(icon("close", { size: 12, strokeWidth: 2.5 })),
             ),
       ],
     );
@@ -422,7 +407,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                   "aria-label": "Attach files",
                   onclick: openFilePicker,
                 },
-                m.trust(ATTACH_ICON_SVG),
+                m.trust(icon("attach", { size: 18 })),
               ),
               isStopButtonVisible
                 ? m(
@@ -432,9 +417,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                       title: "Interrupt current turn",
                       onclick: handleInterrupt,
                     },
-                    m.trust(
-                      '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
-                    ),
+                    m.trust(stopIcon(14)),
                   )
                 : null,
               canSend
@@ -444,9 +427,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                       class: "message-input-send-button",
                       onclick: handleSend,
                     },
-                    m.trust(
-                      '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
-                    ),
+                    m.trust(icon("send", { size: 16, strokeWidth: 2.5 })),
                   )
                 : null,
             ]),

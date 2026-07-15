@@ -5,6 +5,8 @@ Subcommands:
     list                                List addressable services + agents (open/running flags).
     inspect                             Describe the live dockview state (compact by default; --verbose for YAML tree).
     where <ref-or-service>              Show one panel: its group's tab-mates and the refs in each cardinal direction.
+    context                             Show each browser client's recent messages + current layout.
+    load <layout>                       Switch the requesting client (or --client / all clients) onto a named layout.
     open <ref-or-service>               Surface a service (focus-if-open, else tab into / split next to caller's chat).
     focus <ref-or-service>              Activate the named panel within its group.
     split <ref-or-service> [...]        Add a panel relative to another panel; tabs into an existing adjacent group by default.
@@ -15,6 +17,15 @@ Subcommands:
     restore                             Exit a maximized group.
     replace-url <ref-or-service> <url>  Swap an iframe's src (service:<name>[/<path>] or https://...).
     refresh <ref-or-service>            Reload one iframe; ``service:<name>`` reloads all iframes for that service.
+
+The workspace has multiple *named layouts* (e.g. ``desktop`` / ``mobile``);
+each connected browser client has one active. Every mutating op requires an
+explicit ``--layout <name>`` and only takes effect when a connected client
+has that layout active (the op fails with a clear error otherwise -- use
+``load`` to switch a client onto the layout first). ``inspect`` / ``where``
+/ ``list`` accept an optional ``--layout`` and default to the last active
+layout. ``context`` tells you which client (and layout) recently messaged
+each agent, so you can work out which layout a request refers to.
 
 Every ref-accepting argument (positional ref, ``--relative-to``) accepts a bare
 service name as shorthand for ``service:<name>``. ``open`` and ``split`` also
@@ -327,6 +338,11 @@ def _report_failure(op: str, status: int, body: dict[str, Any] | str) -> int:
     detail: str = ""
     if isinstance(body, dict):
         detail = str(body.get("detail", body))
+        if status == 412:
+            sys.stderr.write(
+                f"error: layout op {op!r} has no client to apply it (HTTP 412): {detail}\n"
+            )
+            return EXIT_ERROR
         if status == 409:
             in_flight = body.get("in_flight") or {}
             retry_ms = body.get("retry_after_ms")
@@ -380,14 +396,19 @@ def _emit_structured(data: Any, as_json: bool) -> None:
 # ---------- Inspect helpers (used by wait-stable, diff, where, compact view) ----------
 
 
-def _fetch_layout() -> dict[str, Any] | None:
+def _fetch_layout(layout_name: str | None = None) -> dict[str, Any] | None:
     """Run ``inspect`` once and return the parsed ``layout`` block, or None on failure.
 
-    Used by ``_wait_stable``, the diff printer, and the ``where`` command.
-    A None return means the inspect HTTP call failed -- callers treat this
-    as "state unknown" rather than "layout is empty".
+    ``layout_name`` selects which named layout to inspect; None means the
+    server's last-active layout. Used by ``_wait_stable``, the diff printer,
+    and the ``where`` command. A None return means the inspect HTTP call
+    failed -- callers treat this as "state unknown" rather than "layout is
+    empty".
     """
-    status, body = _post_layout("inspect", {})
+    inspect_args: dict[str, Any] = {}
+    if layout_name:
+        inspect_args["layout"] = layout_name
+    status, body = _post_layout("inspect", inspect_args)
     if status != 200 or not isinstance(body, dict):
         return None
     layout = body.get("layout", {})
@@ -432,7 +453,7 @@ def _find_panel_summary(layout: dict[str, Any], ref: str) -> dict[str, Any] | No
     return None
 
 
-def _require_open(op: str, *refs: str) -> int | None:
+def _require_open(op: str, *refs: str, layout_name: str | None = None) -> int | None:
     """Pre-flight check: every named ref must already be a live panel.
 
     Without this, ops on a closed / nonexistent panel post-and-wait the
@@ -456,7 +477,7 @@ def _require_open(op: str, *refs: str) -> int | None:
     """
     if os.environ.get(ENV_NO_WAIT_STABLE):
         return None
-    layout = _fetch_layout()
+    layout = _fetch_layout(layout_name)
     if layout is None:
         return None
     missing: list[str] = []
@@ -627,11 +648,13 @@ def _wait_stable(
     op: str,
     predicate: _Predicate,
     *,
+    layout_name: str | None = None,
     cap: float = _WAIT_STABLE_CAP_SECONDS,
     poll: float = _WAIT_STABLE_POLL_SECONDS,
 ) -> tuple[str, dict[str, Any] | None]:
     """Poll ``inspect`` until ``predicate(layout)`` holds or ``cap`` elapses.
 
+    ``layout_name`` names the layout to poll (the same one the op targeted).
     Returns ``(status, layout)`` where status is one of ``"changed"`` (the
     predicate held within the cap), ``"timeout"`` (the cap elapsed without
     the predicate holding), or ``"unknown"`` (inspect returned no parseable
@@ -641,7 +664,7 @@ def _wait_stable(
     deadline = time.monotonic() + cap
     last: dict[str, Any] | None = None
     while True:
-        layout = _fetch_layout()
+        layout = _fetch_layout(layout_name)
         if layout is None:
             sys.stderr.write(
                 f"warning: inspect failed while waiting for {op!r} to settle\n"
@@ -707,7 +730,8 @@ def _run_mutating_op(
         _emit_allocated_ref(body)
         return EXIT_OK
 
-    before = _fetch_layout()
+    layout_name = args.get("layout")
+    before = _fetch_layout(layout_name)
     if not skip_pre_op_noop and before is not None and predicate(before):
         sys.stderr.write(on_noop(before))
         return EXIT_OK
@@ -717,7 +741,7 @@ def _run_mutating_op(
         return _report_failure(op, status, body)
     _emit_allocated_ref(body)
 
-    wait_status, after = _wait_stable(op, predicate)
+    wait_status, after = _wait_stable(op, predicate, layout_name=layout_name)
     if wait_status == "changed" and after is not None:
         # ``before`` may be None if the pre-op inspect failed transiently
         # but the post-op poll recovered. The success diff still makes
@@ -759,7 +783,9 @@ def _run_terminal_creation_op(op: str, args: dict[str, Any]) -> int:
     if not isinstance(allocated, str):
         sys.stderr.write("(broadcast sent; server did not return an allocated ref)\n")
         return EXIT_OK
-    wait_status, after = _wait_stable(op, _predicate_ref_present(allocated))
+    wait_status, after = _wait_stable(
+        op, _predicate_ref_present(allocated), layout_name=args.get("layout")
+    )
     if wait_status == "changed" and after is not None:
         leaf = _find_leaf_for_ref(after, allocated)
         sys.stderr.write(f"created {allocated} in {_describe_group(leaf)}\n")
@@ -903,8 +929,12 @@ def _neighbors_in_direction(
 # ---------- Subcommand handlers ----------
 
 
+def _layout_query_args(layout_name: str | None) -> dict[str, Any]:
+    return {"layout": layout_name} if layout_name else {}
+
+
 def _cmd_list(args: argparse.Namespace) -> int:
-    status, body = _post_layout("list", {})
+    status, body = _post_layout("list", _layout_query_args(args.layout))
     if status != 200 or not isinstance(body, dict):
         return _report_failure("list", status, body)
     entries = body.get("entries", [])
@@ -913,13 +943,38 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
-    status, body = _post_layout("inspect", {})
+    status, body = _post_layout("inspect", _layout_query_args(args.layout))
     if status != 200 or not isinstance(body, dict):
         return _report_failure("inspect", status, body)
     layout = body.get("layout", {})
     if not isinstance(layout, dict):
         layout = {}
+    layout_slug = body.get("layout_slug")
+    if isinstance(layout_slug, str) and layout_slug and not args.json:
+        sys.stderr.write(f"(layout: {layout_slug})\n")
     _emit_layout_view(layout, as_json=args.json, verbose=args.verbose)
+    return EXIT_OK
+
+
+def _cmd_context(args: argparse.Namespace) -> int:
+    status, body = _post_layout("context", {})
+    if status != 200 or not isinstance(body, dict):
+        return _report_failure("context", status, body)
+    clients = body.get("clients", [])
+    _emit_structured(clients, args.json)
+    return EXIT_OK
+
+
+def _cmd_load(args: argparse.Namespace) -> int:
+    load_args: dict[str, Any] = {"layout": args.layout_name}
+    if args.client:
+        load_args["client"] = args.client
+    status, body = _post_layout("load", load_args)
+    if status != 200 or not isinstance(body, dict):
+        return _report_failure("load", status, body)
+    target = body.get("target_client_id")
+    target_text = f"client {target}" if target else "all clients (requesting client unknown)"
+    sys.stderr.write(f"requested load of layout {body.get('layout')!r} on {target_text}\n")
     return EXIT_OK
 
 
@@ -940,7 +995,7 @@ def _cmd_where(args: argparse.Namespace) -> int:
             "chat ref (e.g. ``chat:<your-name>``) or use ``inspect`` to see all refs\n"
         )
         return EXIT_ERROR
-    layout = _fetch_layout()
+    layout = _fetch_layout(args.layout)
     if layout is None:
         sys.stderr.write("error: inspect failed; could not locate the panel\n")
         return EXIT_ERROR
@@ -1003,7 +1058,11 @@ def _cmd_open(args: argparse.Namespace) -> int:
                 f"Did you forward_port.py / start the service?\n"
             )
             return EXIT_ERROR
-    payload: dict[str, Any] = {"ref": ref, "new_group": bool(args.new_group)}
+    payload: dict[str, Any] = {
+        "ref": ref,
+        "new_group": bool(args.new_group),
+        "layout": args.layout,
+    }
 
     # ``service:terminal`` always creates a fresh tab (no dedup), so the
     # post-op predicate is "the server-allocated terminal ref is now
@@ -1051,11 +1110,11 @@ def _cmd_open(args: argparse.Namespace) -> int:
 def _cmd_focus(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
-    if (err := _require_open("focus", ref)) is not None:
+    if (err := _require_open("focus", ref, layout_name=args.layout)) is not None:
         return err
     return _run_mutating_op(
         "focus",
-        {"ref": ref},
+        {"ref": ref, "layout": args.layout},
         _predicate_focus(ref),
         on_success=lambda b, a: f"focused {ref}\n",
         on_noop=lambda b: f"no change: {ref} is already the active tab in its group\n",
@@ -1091,7 +1150,7 @@ def _cmd_split(args: argparse.Namespace) -> int:
     # anchor must already be a live panel. (``ref`` may legitimately be a
     # closed agent / not-yet-rendered service the script is about to
     # surface; the frontend handles creation.)
-    if (err := _require_open("split", relative_to)) is not None:
+    if (err := _require_open("split", relative_to, layout_name=args.layout)) is not None:
         return err
     payload: dict[str, Any] = {
         "ref": ref,
@@ -1099,6 +1158,7 @@ def _cmd_split(args: argparse.Namespace) -> int:
         "direction": args.direction,
         "ratio": args.ratio,
         "new_group": bool(args.new_group),
+        "layout": args.layout,
     }
 
     # ``service:terminal`` always allocates a fresh ref; same pattern as
@@ -1144,7 +1204,7 @@ def _cmd_close(args: argparse.Namespace) -> int:
     _validate_ref(ref)
     return _run_mutating_op(
         "close",
-        {"ref": ref},
+        {"ref": ref, "layout": args.layout},
         _predicate_ref_absent(ref),
         on_success=lambda b, a: f"closed {ref}\n",
         on_noop=lambda b: f"no change: {ref} is already closed\n",
@@ -1164,13 +1224,14 @@ def _cmd_move(args: argparse.Namespace) -> int:
     _validate_ref(ref)
     relative_to = _normalize_ref(args.relative_to)
     _validate_ref(relative_to)
-    if (err := _require_open("move", ref, relative_to)) is not None:
+    if (err := _require_open("move", ref, relative_to, layout_name=args.layout)) is not None:
         return err
     payload: dict[str, Any] = {
         "ref": ref,
         "relative_to": relative_to,
         "direction": args.direction,
         "new_group": bool(args.new_group),
+        "layout": args.layout,
     }
 
     # For ``within`` with an explicit anchor ref the predicate is precise
@@ -1204,7 +1265,7 @@ def _cmd_move(args: argparse.Namespace) -> int:
         predicate = lambda _layout: False  # noqa: E731
         on_noop = lambda b: ""  # noqa: E731
     else:
-        before_snapshot = _fetch_layout()
+        before_snapshot = _fetch_layout(args.layout)
         if before_snapshot is None:
             sys.stderr.write(
                 "warning: inspect failed before move; will not detect a no-op\n"
@@ -1230,12 +1291,12 @@ def _cmd_move(args: argparse.Namespace) -> int:
 def _cmd_rename(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
-    if (err := _require_open("rename", ref)) is not None:
+    if (err := _require_open("rename", ref, layout_name=args.layout)) is not None:
         return err
     title = args.title
     return _run_mutating_op(
         "rename",
-        {"ref": ref, "title": title},
+        {"ref": ref, "title": title, "layout": args.layout},
         _predicate_title(ref, title),
         on_success=lambda b, a: (
             f"renamed {ref}: {(_find_panel_summary(b, ref) or {}).get('title')!r} -> {title!r}\n"
@@ -1247,21 +1308,21 @@ def _cmd_rename(args: argparse.Namespace) -> int:
 def _cmd_maximize(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
-    if (err := _require_open("maximize", ref)) is not None:
+    if (err := _require_open("maximize", ref, layout_name=args.layout)) is not None:
         return err
     return _run_mutating_op(
         "maximize",
-        {"ref": ref},
+        {"ref": ref, "layout": args.layout},
         _UNOBSERVABLE,
         on_success=lambda b, a: "",
         on_noop=lambda b: "",
     )
 
 
-def _cmd_restore(_args: argparse.Namespace) -> int:
+def _cmd_restore(args: argparse.Namespace) -> int:
     return _run_mutating_op(
         "restore",
-        {},
+        {"layout": args.layout},
         _UNOBSERVABLE,
         on_success=lambda b, a: "",
         on_noop=lambda b: "",
@@ -1271,7 +1332,7 @@ def _cmd_restore(_args: argparse.Namespace) -> int:
 def _cmd_replace_url(args: argparse.Namespace) -> int:
     ref = _normalize_ref(args.ref)
     _validate_ref(ref)
-    if (err := _require_open("replace-url", ref)) is not None:
+    if (err := _require_open("replace-url", ref, layout_name=args.layout)) is not None:
         return err
     _validate_replace_url(args.url)
     # The frontend rewrites ``service:<name>[/<path>]`` to ``/service/<name>...``
@@ -1280,7 +1341,7 @@ def _cmd_replace_url(args: argparse.Namespace) -> int:
     expected_url = _resolve_replace_url(args.url)
     return _run_mutating_op(
         "replace-url",
-        {"ref": ref, "url": args.url},
+        {"ref": ref, "url": args.url, "layout": args.layout},
         _predicate_url(ref, expected_url),
         on_success=lambda b, a: (
             f"replace-url {ref}: {(_find_panel_summary(b, ref) or {}).get('url')!r} -> {expected_url!r}\n"
@@ -1309,6 +1370,27 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
     )
 
 
+def _add_required_layout_argument(subparser: argparse.ArgumentParser) -> None:
+    subparser.add_argument(
+        "--layout",
+        required=True,
+        help=(
+            "Named layout to mutate (e.g. ``desktop`` / ``mobile``). Required: "
+            "mutating ops only apply on connected clients that have this layout "
+            "active. Use ``context`` to see each client's current layout and "
+            "``load`` to switch a client onto one."
+        ),
+    )
+
+
+def _add_optional_layout_argument(subparser: argparse.ArgumentParser) -> None:
+    subparser.add_argument(
+        "--layout",
+        default=None,
+        help="Named layout to read (defaults to the last active layout)",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1317,6 +1399,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_list = subparsers.add_parser("list", help="List addressable services + agents")
     p_list.add_argument("--json", action="store_true", help="Emit JSON instead of YAML")
+    _add_optional_layout_argument(p_list)
     p_list.set_defaults(func=_cmd_list)
 
     p_inspect = subparsers.add_parser(
@@ -1330,7 +1413,36 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Emit the full YAML tree (panel_id, URL, etc.) instead of the compact view",
     )
+    _add_optional_layout_argument(p_inspect)
     p_inspect.set_defaults(func=_cmd_inspect)
+
+    p_context = subparsers.add_parser(
+        "context",
+        help="Show each browser client's recent messages, device kind, and current layout",
+    )
+    p_context.add_argument(
+        "--json", action="store_true", help="Emit JSON instead of YAML"
+    )
+    p_context.set_defaults(func=_cmd_context)
+
+    p_load = subparsers.add_parser(
+        "load",
+        help="Switch a client onto a named layout (so mutating ops can target it)",
+    )
+    p_load.add_argument(
+        "layout_name",
+        help="The named layout to load (e.g. ``mobile``)",
+    )
+    p_load.add_argument(
+        "--client",
+        default=None,
+        help=(
+            "Explicit client id to switch (see ``context``). Defaults to the "
+            "client that most recently messaged you; falls back to every "
+            "connected client when that cannot be determined."
+        ),
+    )
+    p_load.set_defaults(func=_cmd_load)
 
     p_where = subparsers.add_parser(
         "where",
@@ -1347,6 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also include the full inspect layout under ``full_layout``",
     )
+    _add_optional_layout_argument(p_where)
     p_where.set_defaults(func=_cmd_where)
 
     p_open = subparsers.add_parser("open", help="Surface a service in the UI")
@@ -1362,12 +1475,14 @@ def main(argv: list[str] | None = None) -> int:
             "right-side group (the default reuses adjacent groups when present)."
         ),
     )
+    _add_required_layout_argument(p_open)
     p_open.set_defaults(func=_cmd_open)
 
     p_focus = subparsers.add_parser(
         "focus", help="Activate the named panel within its group"
     )
     p_focus.add_argument("ref", help="Panel ref")
+    _add_required_layout_argument(p_focus)
     p_focus.set_defaults(func=_cmd_focus)
 
     p_split = subparsers.add_parser("split", help="Open a new panel as a split")
@@ -1411,10 +1526,12 @@ def main(argv: list[str] | None = None) -> int:
             "Rejected when combined with --direction=within."
         ),
     )
+    _add_required_layout_argument(p_split)
     p_split.set_defaults(func=_cmd_split)
 
     p_close = subparsers.add_parser("close", help="Remove a panel")
     p_close.add_argument("ref", help="Panel ref")
+    _add_required_layout_argument(p_close)
     p_close.set_defaults(func=_cmd_close)
 
     p_move = subparsers.add_parser(
@@ -1441,18 +1558,22 @@ def main(argv: list[str] | None = None) -> int:
             "with --direction=within."
         ),
     )
+    _add_required_layout_argument(p_move)
     p_move.set_defaults(func=_cmd_move)
 
     p_rename = subparsers.add_parser("rename", help="Update a panel's tab title")
     p_rename.add_argument("ref", help="Panel ref")
     p_rename.add_argument("title", help="New tab title")
+    _add_required_layout_argument(p_rename)
     p_rename.set_defaults(func=_cmd_rename)
 
     p_max = subparsers.add_parser("maximize", help="Maximize a panel's group")
     p_max.add_argument("ref", help="Panel ref")
+    _add_required_layout_argument(p_max)
     p_max.set_defaults(func=_cmd_maximize)
 
     p_restore = subparsers.add_parser("restore", help="Exit a maximized group")
+    _add_required_layout_argument(p_restore)
     p_restore.set_defaults(func=_cmd_restore)
 
     p_replace = subparsers.add_parser("replace-url", help="Swap an iframe's src")
@@ -1461,6 +1582,7 @@ def main(argv: list[str] | None = None) -> int:
         "url",
         help="``service:<name>[/<path>]`` shorthand or a full https:// URL",
     )
+    _add_required_layout_argument(p_replace)
     p_replace.set_defaults(func=_cmd_replace_url)
 
     p_refresh = subparsers.add_parser(

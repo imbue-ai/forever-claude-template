@@ -7,19 +7,32 @@ ENV PATH="/root/.local/bin:$PATH"
 # Pin Claude Code; passed to setup_system.sh and recorded for the runtime version
 # check. Keep in sync with agent_types.claude.version in .mngr/settings.toml and
 # the default in scripts/setup_system.sh. Bump deliberately, not by accident.
-ARG CLAUDE_CODE_VERSION=2.1.160
+ARG CLAUDE_CODE_VERSION=2.1.207
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # ============================================================================
 # System toolchain (repo-independent). Shared verbatim with the Lima provider,
-# which runs this exact script in the VM. Copied with its sibling
-# _provision_guard.sh (which setup_system.sh sources via `dirname "$0"`) and
-# nothing else, so this expensive, stable layer caches against the scripts +
-# pinned versions, not application source.
+# which runs this exact script in the VM. setup_system.sh installs the system
+# toolchain AND invokes install_secret_scanners.sh to bake the publish-
+# inspiration scan gate's secret-scanner binaries (betterleaks + kingfisher),
+# so both docker-built images and Lima VMs get the scanners from the same
+# common script. Copied with its sibling _provision_guard.sh (which
+# setup_system.sh sources via `dirname "$0"`) and install_secret_scanners.sh
+# (which it invokes the same way) and nothing else, so this expensive, stable
+# layer caches against these scripts + pinned versions, not application source.
+# install_secret_scanners.sh is the single source of truth for the version
+# pins and per-arch sha256s; it stays installed at
+# /usr/local/bin/default-workspace-template-install-secret-scanners so it is runnable by hand
+# if a scanner ever goes missing (the scan gate's error names that command).
+# Caching tradeoff: folding the scanner install into this layer means a pin
+# bump in install_secret_scanners.sh now rebuilds the whole system-toolchain
+# layer (apt/node/uv + scanners) rather than a scanner-only layer -- accepted
+# so a single common script covers docker AND Lima.
 # ============================================================================
 COPY scripts/setup_system.sh /usr/local/bin/default-workspace-template-setup-system
 COPY scripts/_provision_guard.sh /usr/local/bin/_provision_guard.sh
-RUN chmod +x /usr/local/bin/default-workspace-template-setup-system && default-workspace-template-setup-system
+COPY scripts/install_secret_scanners.sh /usr/local/bin/default-workspace-template-install-secret-scanners
+RUN chmod +x /usr/local/bin/default-workspace-template-setup-system /usr/local/bin/default-workspace-template-install-secret-scanners && default-workspace-template-setup-system
 
 # Safety-net symlinks: /code -> /mngr/code and /worktree -> /mngr/worktree.
 # All default-workspace-template-owned paths are written as /mngr/code/... and /mngr/worktree/...
@@ -45,7 +58,7 @@ COPY pyproject.toml uv.lock /mngr/code/
 COPY libs/app_watcher/pyproject.toml /mngr/code/libs/app_watcher/pyproject.toml
 COPY libs/bootstrap/pyproject.toml /mngr/code/libs/bootstrap/pyproject.toml
 COPY libs/cloudflare_tunnel/pyproject.toml /mngr/code/libs/cloudflare_tunnel/pyproject.toml
-COPY libs/runtime_backup/pyproject.toml /mngr/code/libs/runtime_backup/pyproject.toml
+COPY libs/github_sync/pyproject.toml /mngr/code/libs/github_sync/pyproject.toml
 COPY libs/web_server/pyproject.toml /mngr/code/libs/web_server/pyproject.toml
 COPY apps/system_interface/pyproject.toml /mngr/code/apps/system_interface/pyproject.toml
 

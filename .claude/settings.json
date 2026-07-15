@@ -1,8 +1,8 @@
 {
-  "autoMemoryDirectory": "runtime/memory",
   "env": {
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000"
   },
+  "model": "opus[1m]",
   "hooks": {
     "SessionStart": [
       {
@@ -18,6 +18,10 @@
           {
             "type": "command",
             "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/ensure_tk_on_path.sh"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_shed_notice_hook.py 2>/dev/null || true"
           }
         ]
       }
@@ -36,6 +40,10 @@
           {
             "type": "command",
             "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_require_steps_pretool.sh"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_oom_tag_subprocess.py 2>/dev/null || true"
           }
         ]
       }
@@ -65,6 +73,14 @@
       }
     ]
   },
+  "statusLine": {
+    "type": "command",
+    "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_status_line.sh"
+  },
+  "enabledPlugins": {
+    "imbue-code-guardian@imbue-code-guardian": true,
+    "frontend-design@claude-code-plugins": true
+  },
   "extraKnownMarketplaces": {
     "imbue-code-guardian": {
       "source": {
@@ -79,14 +95,6 @@
       }
     }
   },
-  "enabledPlugins": {
-    "imbue-code-guardian@imbue-code-guardian": true,
-    "frontend-design@claude-code-plugins": true
-  },
-  "model": "opus[1m]",
   "effortLevel": "high",
-  "statusLine": {
-    "type": "command",
-    "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_status_line.sh"
-  }
+  "autoMemoryDirectory": "runtime/memory"
 }

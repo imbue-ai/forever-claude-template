@@ -123,32 +123,6 @@ def read_claude_config_dir_from_env_file(agent_state_dir: Path) -> Path:
     return Path.home() / ".claude"
 
 
-class TmuxNamingConfig(FrozenModel):
-    """The two config values needed to address an agent's tmux session locally.
-
-    ``AgentManager``'s liveness poll reconstructs each local agent's tmux session
-    name (``session_prefix`` + agent name, mirroring
-    ``MngrConfig.agent_session_name``) and targets its primary window
-    (``primary_window_name``) to probe process liveness -- without holding a live
-    mngr context. Loaded once at startup because both values are static config.
-    """
-
-    session_prefix: str = Field(description="Prefix mngr prepends to an agent name to form its tmux session name")
-    primary_window_name: str = Field(description="Name of the tmux window the agent's process runs in")
-
-
-def get_tmux_naming_config() -> TmuxNamingConfig:
-    """Load the tmux session-naming config from the local mngr context."""
-    mngr_ctx, cg = _get_mngr_context()
-    try:
-        return TmuxNamingConfig(
-            session_prefix=mngr_ctx.config.prefix,
-            primary_window_name=mngr_ctx.config.tmux.primary_window_name,
-        )
-    finally:
-        cg.__exit__(None, None, None)
-
-
 def discover_agents(
     provider_names: tuple[str, ...] | None = None,
     include_filters: tuple[str, ...] = (),

@@ -43,6 +43,7 @@ message, ask the user for permission first:
 latchkey curl http://latchkey-self.invalid/permissions/self | jq .rules
 
 # 2. Ask for the necessary missing permissions.
+# (Never pipe the output through jq because frontend rendering depends on seeing the full output from your tool.)
 latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
   -H 'Content-Type: application/json' \
   -d '{"agent_id": "'"$MNGR_AGENT_ID"'", "type": "file-sharing", "payload": {"path": "/home/hynek/project", "access": "READ"}, "rationale": "I'"'"'d like to access the /home/hynek/project directory in order to find the most recent accounting spreadsheet you asked me about."}'

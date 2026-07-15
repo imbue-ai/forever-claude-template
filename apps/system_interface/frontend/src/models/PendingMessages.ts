@@ -86,6 +86,27 @@ let nextPendingId = 0;
 
 const pendingByAgent: Record<string, PendingMessage[]> = {};
 
+// Listeners notified when the optimistic activity overlay changes -- a send
+// adding a forced-THINKING pending message, or one reconciling/rolling back
+// away. The mithril activity indicator picks these changes up for free by
+// re-rendering on m.redraw(); the imperative tab liveness dot is not a
+// component, so it subscribes here to update just as promptly on send.
+let activityOverlayListeners: Array<() => void> = [];
+
+export function addActivityOverlayListener(listener: () => void): void {
+  activityOverlayListeners.push(listener);
+}
+
+export function removeActivityOverlayListener(listener: () => void): void {
+  activityOverlayListeners = activityOverlayListeners.filter((l) => l !== listener);
+}
+
+function notifyActivityOverlayChanged(): void {
+  for (const listener of activityOverlayListeners) {
+    listener();
+  }
+}
+
 /** Activity states that mean the agent is mid-turn (and therefore may still
  *  dequeue a queued message). A transition out of one of these into IDLE is the
  *  signal that the queue has drained. */
@@ -136,6 +157,7 @@ export function addPendingMessage(
     prior_user_event_ids: userEventIds(currentEvents),
   });
   pendingByAgent[agentId] = list;
+  notifyActivityOverlayChanged();
   m.redraw();
   return id;
 }
@@ -214,6 +236,7 @@ export function removePendingMessage(agentId: string, id: string): void {
   const remaining = list.filter((pending) => pending.id !== id);
   if (remaining.length !== list.length) {
     pendingByAgent[agentId] = remaining;
+    notifyActivityOverlayChanged();
     m.redraw();
   }
 }
@@ -301,6 +324,7 @@ export function reconcilePendingMessages(agentId: string, events: readonly Trans
   }
   if (remaining.length !== list.length) {
     pendingByAgent[agentId] = remaining;
+    notifyActivityOverlayChanged();
   }
 }
 
@@ -370,6 +394,7 @@ function clearQueuedMessagesOnIdle(agentId: string, previous: string | null, cur
   const remaining = list.filter((pending) => pending.status !== "queued");
   if (remaining.length !== list.length) {
     pendingByAgent[agentId] = remaining;
+    notifyActivityOverlayChanged();
     m.redraw();
   }
 }

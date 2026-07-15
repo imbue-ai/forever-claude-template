@@ -58,8 +58,24 @@ is just the mechanism for that safe, separate place to work.
 
 ## 1-2. Delegate via the generic update orchestration
 
-Follow `update-artifact` Steps 1-3 (open a ticket, write the task file, launch
-the worker, background-poll the report) with these system-interface specifics:
+**Check for a concurrent system-interface pass first.** Passes here are named
+per-slug, so two can coexist without colliding on names -- but both edit
+`apps/system_interface`, so whichever merges second is guaranteed stale (see
+the freshness check in Step 4). Look for another pass in flight:
+
+```bash
+grep -l 'artifact: system-interface' runtime/harden/update-*/task.md
+```
+
+For any hit, check whether its `update <slug>` tracking ticket is still
+open/in-progress in `tk ready` (and its worker alive, per `lead-proxy.md`'s
+liveness probe). If a live one exists, tell the user and let them decide --
+dispatching in parallel is allowed but means the second merge will have to
+rebase and re-verify. This is a warning, not a hard block.
+
+Then follow `update-artifact` Steps 1-3 (open a ticket, write the task file,
+launch the worker, background-poll the report) with these system-interface
+specifics:
 
 - **Pick a slug** `$SLUG` for the change. The worker agent / branch is
   `update-$SLUG` / `mngr/update-$SLUG`; the runtime dir is
@@ -142,7 +158,11 @@ service points at that wrapper (the inner instance is registered separately as
 **not** merge, touch the served tree, or modify the worker's folder. Exit `0`
 means the preview is up; a non-zero exit means it failed to boot (or the
 work_dir was wrong / the worker was already destroyed) and tore itself down --
-diagnose before retrying.
+diagnose before retrying. One boot-refusal case is deliberate: the `si-preview`
+tab can only show one pass at a time, so if another pass's preview is already
+up, `preview` refuses rather than hijacking it -- surface that to the user and
+coordinate with the other pass (its stderr says how to tear down an abandoned
+one).
 
 Open it as a tab and ask the user to explore:
 
@@ -176,13 +196,45 @@ answer before doing anything else.
 
 If the user **approves** the preview:
 
-1. **Capture the known-good revision first** -- the served branch's current
+1. **Take the editing lease** so no other chat's merge or reveal interleaves
+   with yours -- the reveal's auto-rollback restores a captured revision, so a
+   foreign merge landing mid-motion could be swept away by it. Same advisory
+   mechanics as `update-service`'s "One editor at a time": first check
+   `tk ready` for another agent's `editing service system_interface` lease and
+   surface it to the user instead of proceeding if one is held; then
+
+   ```bash
+   LEASE_ID=$(tk create "editing service system_interface" -t chore \
+       -d "Held by $MNGR_AGENT_NAME across merge + reveal; released after teardown.")
+   ```
+
+   and `tk start "$LEASE_ID"` (as its own command). Unlike a live service
+   edit, this lease deliberately spans the whole merge + reveal motion; it is
+   released at the end of Step 5, never held across the wait for the user's
+   preview verdict (that wait happens *before* this step).
+
+2. **Freshness check** -- the branch is only mergeable if
+   `apps/system_interface/` has not changed since the worker branched (for
+   example, another pass merged in the meantime):
+
+   ```bash
+   BASE=$(git merge-base HEAD "mngr/update-$SLUG")
+   git diff --name-only "$BASE" HEAD -- apps/system_interface/
+   ```
+
+   Empty output means fresh: continue. Any output means the pass is stale --
+   do **not** merge, and never hand-resolve a conflicted merge (the
+   principle in `.agents/shared/references/harden-contention.md`). Release
+   the lease, re-brief the worker to rebase onto the current tree and
+   re-verify, and come back through preview once it reports `done` again.
+
+3. **Capture the known-good revision** -- the served branch's current
    `HEAD`, *before* you merge. This is what the reveal rolls back to if the
    change breaks:
    ```bash
    ROLLBACK_TO=$(git rev-parse HEAD)
    ```
-2. **Merge** the worker's branch (`mngr/update-$SLUG`) into the working branch
+4. **Merge** the worker's branch (`mngr/update-$SLUG`) into the working branch
    the live UI is served from. Commit the merge so the tree is clean (the reveal
    refuses to run on a dirty tree, so a rollback can never clobber unrelated
    work).
@@ -259,7 +311,9 @@ python3 scripts/layout.py close si-preview
 Do this whenever you tear the preview down -- after a successful reveal *or*
 after a rejection where nothing was merged. Once the preview is down and its tab
 is closed, the worker can be destroyed per `launch-task`. Close the
-`update-$SLUG` ticket the orchestration opened.
+`update-$SLUG` ticket the orchestration opened, and release the editing lease
+taken in Step 4 with `tk close "$LEASE_ID" "Merge and reveal finished."` (on a
+rejection no lease was taken -- Step 4 never ran).
 
 Why this exists as a script and not a checklist: if the backend fails to start,
 the user loses their entire chat UI -- there is nowhere left to surface an error
