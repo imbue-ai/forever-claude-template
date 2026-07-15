@@ -39,7 +39,9 @@ from imbue.system_interface.agent_manager import _LogQueueCallback
 from imbue.system_interface.agent_manager import _build_chat_create_command
 from imbue.system_interface.agent_manager import _build_observe_command_argv
 from imbue.system_interface.agent_manager import _build_worktree_create_command
+from imbue.system_interface.agent_manager import _derive_process_liveness
 from imbue.system_interface.agent_manager import _make_applications_file_handler
+from imbue.system_interface.agent_manager import _parse_primary_window_probe_by_session
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
@@ -1566,3 +1568,202 @@ def test_provider_snapshot_preserves_activity_state_for_tracked_agent(
             assert agent_manager._agents[str_id].activity_state == ActivityState.THINKING.value
     finally:
         agent_manager.stop()
+
+
+# --- process-liveness poll ---------------------------------------------------
+
+
+def test_parse_primary_window_probe_by_session_filters_to_primary_window() -> None:
+    """Only the primary-window pane of each session yields a probe string.
+
+    Non-primary windows (ttyd, watchers) are ignored, the first primary-window
+    pane wins (mirroring the original ``head -n 1``), and a session with no
+    primary-window pane is omitted so its agent reads as STOPPED.
+    """
+    panes_output = "\n".join(
+        [
+            "mngr-alpha|agent|0|claude|1234",
+            "mngr-alpha|ttyd|0|ttyd|1200",
+            "mngr-alpha|agent|0|ignored-second-pane|1299",
+            "mngr-beta|agent|1|bash|5678",
+            "mngr-gamma|misc|0|node|9999",
+        ]
+    )
+    probe_by_session = _parse_primary_window_probe_by_session(panes_output, primary_window_name="agent")
+    assert probe_by_session == {
+        "mngr-alpha": "0|claude|1234",
+        "mngr-beta": "1|bash|5678",
+    }
+
+
+def test_parse_primary_window_probe_by_session_ignores_malformed_lines() -> None:
+    """Lines without exactly five fields are skipped, not misparsed."""
+    panes_output = "\n".join(
+        [
+            "",
+            "mngr-alpha|agent|0",
+            "mngr-alpha|agent|0|claude|1234",
+        ]
+    )
+    probe_by_session = _parse_primary_window_probe_by_session(panes_output, primary_window_name="agent")
+    assert probe_by_session == {"mngr-alpha": "0|claude|1234"}
+
+
+def test_derive_process_liveness_classifies_alive_and_dead() -> None:
+    """A live pane reads alive; a gone session, dead pane, or bare shell reads dead."""
+    session_name_by_agent_id = {
+        "live": "mngr-live",
+        "gone": "mngr-gone",
+        "dead-pane": "mngr-dead-pane",
+        "bare-shell": "mngr-bare-shell",
+    }
+    probe_by_session = {
+        "mngr-live": "0|claude|1234",
+        # mngr-gone is intentionally absent: its tmux session no longer exists.
+        "mngr-dead-pane": "1|claude|5678",
+        "mngr-bare-shell": "0|bash|9000",
+    }
+    ps_output = "\n".join(
+        [
+            "1234 1 claude",
+            "5678 1 claude",
+            "9000 1 bash",
+        ]
+    )
+    liveness = _derive_process_liveness(session_name_by_agent_id, probe_by_session, ps_output)
+    assert liveness == {
+        "live": True,
+        "gone": False,
+        "dead-pane": False,
+        "bare-shell": False,
+    }
+
+
+def test_apply_agent_liveness_dead_process_clears_thinking_indicator(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """A tracked agent whose process the poll finds dead drops from THINKING to IDLE.
+
+    This is BUG B2 end-to-end at the manager layer: the discovery stream keeps
+    the agent at RUNNING and its transcript tail is a mid-turn user_message, so
+    without the liveness poll the indicator stays pinned at "Thinking...". Once
+    the poll reports the process gone, ``derive_activity_state``'s not-running
+    guard forces IDLE and the change is broadcast.
+    """
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+    agent_manager.update_session_events("agent-1", [{"type": "user_message", "content": "go"}])
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
+
+    listener = broadcaster.register()
+    try:
+        agent_manager._apply_agent_liveness({"agent-1": False})
+
+        with agent_manager._lock:
+            assert agent_manager._process_alive_by_agent["agent-1"] is False
+            assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+            assert agent_manager._agents["agent-1"].activity_state == ActivityState.IDLE.value
+
+        latest = _last_agents_updated(_drain(listener))
+        assert latest is not None
+        agents = latest["agents"]
+        assert isinstance(agents, list)
+        assert agents[0]["activity_state"] == ActivityState.IDLE.value
+    finally:
+        agent_manager.stop()
+
+
+def test_apply_agent_liveness_holds_idle_across_new_transcript_events(
+    agent_manager: AgentManager, tmp_path: Path
+) -> None:
+    """Once the poll marks a process dead, later transcript signals stay IDLE.
+
+    A dead agent's transcript can still gain a trailing tool_result (the abandoned
+    turn), which would normally derive THINKING; the cached liveness=False must
+    keep the gate closed so the indicator does not flicker back on.
+    """
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+
+    agent_manager._apply_agent_liveness({"agent-1": False})
+    agent_manager.update_session_events(
+        "agent-1",
+        [
+            {"type": "assistant_message", "tool_calls": [{"tool_call_id": "call_a", "tool_name": "Bash"}]},
+            {"type": "tool_result", "tool_call_id": "call_a"},
+        ],
+    )
+
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+
+
+def test_apply_agent_liveness_revival_restores_transcript_state(
+    agent_manager: AgentManager, tmp_path: Path
+) -> None:
+    """A dead-then-alive agent resumes deriving activity from its transcript."""
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    _seed_agent(agent_manager, "agent-1")
+    agent_manager._ensure_activity_tracking("agent-1")
+    agent_manager.update_session_events("agent-1", [{"type": "user_message", "content": "go"}])
+
+    agent_manager._apply_agent_liveness({"agent-1": False})
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.IDLE
+
+    agent_manager._apply_agent_liveness({"agent-1": True})
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent["agent-1"] == ActivityState.THINKING
+
+
+def test_apply_agent_liveness_ignores_untracked_agent(agent_manager: AgentManager) -> None:
+    """Liveness for an agent that is not activity-tracked leaves no residue."""
+    agent_manager._apply_agent_liveness({"ghost": False})
+    with agent_manager._lock:
+        assert "ghost" not in agent_manager._process_alive_by_agent
+
+
+def test_compute_liveness_reconstructs_session_names_and_reads_primary_window(
+    agent_manager: AgentManager, tmp_path: Path
+) -> None:
+    """The poll maps a tracked agent to its ``prefix+name`` session and reads its pane.
+
+    A live claude pane in the agent's primary window reads alive; an empty tmux
+    snapshot (its session is gone, e.g. after a container restart) reads dead.
+    Exercises the session-name reconstruction + parse + derive glue without
+    spawning tmux/ps.
+    """
+    state_dir = tmp_path / "agents" / "agent-1"
+    state_dir.mkdir(parents=True)
+    with agent_manager._lock:
+        agent_manager._agents["agent-1"] = AgentStateItem(
+            id="agent-1", name="brave-otter", state="RUNNING", labels={}, work_dir=None
+        )
+    agent_manager._tmux_session_prefix = "mngr-"
+    agent_manager._tmux_primary_window_name = "agent"
+    agent_manager._ensure_activity_tracking("agent-1")
+
+    live_panes = "mngr-brave-otter|agent|0|claude|1234"
+    ps_output = "1234 1 claude"
+    assert agent_manager._compute_liveness_for_tracked_agents(live_panes, ps_output) == {"agent-1": True}
+
+    # An empty snapshot (no tmux server / session gone) reads the agent as dead.
+    assert agent_manager._compute_liveness_for_tracked_agents("", "") == {"agent-1": False}
+
+
+def test_poll_agent_liveness_no_tracked_agents_is_noop(agent_manager: AgentManager) -> None:
+    """With nothing tracked, the poll returns without probing or broadcasting.
+
+    Guards the early-out that avoids spawning tmux/ps when there is no local agent
+    to probe (so it is safe to run on a manager that only tracks remote agents).
+    """
+    listener = agent_manager.broadcaster.register()
+    agent_manager._poll_agent_liveness()
+    with pytest.raises(queue.Empty):
+        listener.get_nowait()

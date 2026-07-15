@@ -29,6 +29,7 @@ from imbue.mngr.api.discovery_events import DiscoveryEvent
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import determine_lifecycle_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import DiscoveredAgent
@@ -38,6 +39,7 @@ from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
+from imbue.system_interface.activity_state import is_lifecycle_process_alive
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
@@ -45,6 +47,7 @@ from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import MngrMessenger
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
+from imbue.system_interface.agent_discovery import get_tmux_naming_config
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
@@ -144,6 +147,80 @@ def _build_observe_command_argv(mngr_binary: str) -> list[str]:
         "observe",
         "--discovery-only",
     ]
+
+
+# How often the liveness poll re-probes each locally-tracked agent's process. The
+# discovery stream is metadata-only and reports every agent as RUNNING, so this
+# poll is the source of truth for whether an agent's Claude process is alive
+# (which gates the "Thinking..."/"Running..." indicator). A local tmux+ps probe
+# is cheap, so this is short enough that a death (e.g. a container restart) clears
+# a stale indicator within a few seconds.
+_LIVENESS_POLL_INTERVAL_SECONDS: Final[float] = 5.0
+_LIVENESS_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
+
+# One `tmux list-panes -a` covers every session at once; each pane is emitted as
+# ``session|window|pane_dead|pane_current_command|pane_pid``. The last three
+# fields are exactly what BaseAgent._build_lifecycle_probe_command produces, so a
+# session's primary-window row feeds straight into determine_lifecycle_state.
+_TMUX_LIVENESS_PANE_FORMAT: Final[str] = "#{session_name}|#{window_name}|#{pane_dead}|#{pane_current_command}|#{pane_pid}"
+_PS_LIVENESS_ARGV: Final[tuple[str, ...]] = ("ps", "-e", "-o", "pid=,ppid=,comm=")
+
+
+def _build_tmux_liveness_argv() -> list[str]:
+    """Build the ``tmux list-panes -a`` argv used to probe every session at once. Pure."""
+    return ["tmux", "list-panes", "-a", "-F", _TMUX_LIVENESS_PANE_FORMAT]
+
+
+def _parse_primary_window_probe_by_session(panes_output: str, primary_window_name: str) -> dict[str, str]:
+    """Map each tmux session to its primary window's lifecycle probe string.
+
+    ``panes_output`` is the stdout of ``tmux list-panes -a`` in
+    :data:`_TMUX_LIVENESS_PANE_FORMAT`. For each session, the first pane in the
+    ``primary_window_name`` window yields a ``pane_dead|pane_current_command|pane_pid``
+    string in the shape ``BaseAgent._build_lifecycle_probe_command`` produces.
+    Sessions with no such pane are omitted, so a caller reads a missing session as
+    a dead (STOPPED) agent -- exactly what a container restart that killed every
+    session looks like.
+    """
+    probe_by_session: dict[str, str] = {}
+    for line in panes_output.splitlines():
+        parts = line.split("|")
+        if len(parts) != 5:
+            continue
+        session_name, window_name, pane_dead, current_command, pane_pid = parts
+        if window_name != primary_window_name:
+            continue
+        probe_by_session.setdefault(session_name, f"{pane_dead}|{current_command}|{pane_pid}")
+    return probe_by_session
+
+
+def _derive_process_liveness(
+    session_name_by_agent_id: dict[str, str],
+    probe_by_session: dict[str, str],
+    ps_output: str,
+) -> dict[str, bool]:
+    """Derive per-agent process liveness from a single tmux + ps probe.
+
+    Each agent's primary-window probe string (or ``None`` when its session is
+    gone) plus the shared ``ps`` output go to mngr's ``determine_lifecycle_state``.
+    ``expected_process_name`` is empty and ``is_agent_type_known`` is False because
+    system_interface does not load the agent-type plugins that know each agent's
+    binary: a live pane running any non-shell program reads as
+    RUNNING_UNKNOWN_AGENT_TYPE (alive), while a gone session (STOPPED) or a
+    dead/bare-shell pane (DONE) reads as not alive -- all the activity gate needs.
+    """
+    liveness_by_agent_id: dict[str, bool] = {}
+    for agent_id, session_name in session_name_by_agent_id.items():
+        probe = probe_by_session.get(session_name)
+        state = determine_lifecycle_state(
+            tmux_info=probe,
+            is_active=False,
+            expected_process_name="",
+            ps_output=ps_output,
+            is_agent_type_known=False,
+        )
+        liveness_by_agent_id[agent_id] = is_lifecycle_process_alive(state.value)
+    return liveness_by_agent_id
 
 
 # AgentMatch requires a host_name, but the send path never reads it -- it groups
@@ -313,6 +390,21 @@ class AgentManager:
     _last_event_type_by_agent: dict[str, str | None]
     _last_event_timestamp_by_agent: dict[str, str | None]
     _activity_state_by_agent: dict[str, ActivityState]
+    # Per-agent "is the Claude process alive", owned by the liveness poll
+    # (``_poll_agent_liveness``). The discovery stream reports every agent as
+    # RUNNING, so this cache -- not ``AgentStateItem.state`` -- is the source of
+    # truth for the ``is_agent_running`` gate in ``_recompute_activity_state``. A
+    # missing entry (agent not yet probed) falls back to the discovery state.
+    _process_alive_by_agent: dict[str, bool]
+    # Concurrency group hosting the liveness poll thread, and the event that stops
+    # it. A dedicated event (not ``_shutdown_event``) so the poll's cadence never
+    # contends with the observe subprocess's shutdown signal. Both are None/unset
+    # until ``_start_liveness_poll`` runs (only from ``start()``), so unit tests
+    # that build a manager without starting it never spawn the poll.
+    _liveness_cg: ConcurrencyGroup | None
+    _liveness_poll_stop: threading.Event
+    _tmux_session_prefix: str
+    _tmux_primary_window_name: str
     # Assist chats whose tab we have already auto-opened (or that existed at
     # startup, seeded by ``_initial_discover`` so we never auto-open them). Lets
     # both discovery paths -- the per-agent delta and the full snapshot -- open
@@ -359,6 +451,11 @@ class AgentManager:
         manager._last_event_type_by_agent = {}
         manager._last_event_timestamp_by_agent = {}
         manager._activity_state_by_agent = {}
+        manager._process_alive_by_agent = {}
+        manager._liveness_cg = None
+        manager._liveness_poll_stop = threading.Event()
+        manager._tmux_session_prefix = ""
+        manager._tmux_primary_window_name = ""
         manager._auto_opened_assist_ids = set()
         return manager
 
@@ -366,19 +463,27 @@ class AgentManager:
         """Start the observe subprocess and perform initial agent discovery."""
         self._initial_discover()
         self._start_observe()
+        self._start_liveness_poll()
 
     def start_without_observe(self) -> None:
         """Start with initial discovery only, no observe subprocess. For testing."""
         self._initial_discover()
 
     def stop(self) -> None:
-        """Stop the observe subprocess, file watchers, and creation threads."""
+        """Stop the observe subprocess, liveness poll, file watchers, and creation threads."""
         self._shutdown_event.set()
+        # Wake the liveness poll loop so it exits before its group joins it.
+        self._liveness_poll_stop.set()
 
         if self._observe_cg is not None:
             self._observe_cg.shutdown()
             self._observe_cg.__exit__(None, None, None)
             self._observe_cg = None
+
+        if self._liveness_cg is not None:
+            self._liveness_cg.shutdown()
+            self._liveness_cg.__exit__(None, None, None)
+            self._liveness_cg = None
 
         self._creation_cg.__exit__(None, None, None)
 
@@ -393,6 +498,7 @@ class AgentManager:
             self._has_unmatched_tool_use_by_agent.clear()
             self._last_event_type_by_agent.clear()
             self._activity_state_by_agent.clear()
+            self._process_alive_by_agent.clear()
 
     @property
     def broadcaster(self) -> WebSocketBroadcaster:
@@ -880,6 +986,142 @@ class AgentManager:
             stderr if stderr else "(empty)",
         )
 
+    def _start_liveness_poll(self) -> None:
+        """Start the periodic process-liveness poll for locally-tracked agents.
+
+        Loads the (static) tmux session-naming config once so the poll can address
+        each agent's session without a live mngr context, then spawns the loop on a
+        dedicated concurrency group. If the config cannot be loaded, the poll is
+        disabled and the activity gate falls back to the discovery lifecycle state.
+        """
+        try:
+            naming = get_tmux_naming_config()
+        except (OSError, ValueError, RuntimeError, MngrError) as e:
+            _loguru_logger.opt(exception=e).warning(
+                "Could not load tmux naming config; agent process-liveness polling disabled."
+            )
+            return
+
+        self._tmux_session_prefix = naming.session_prefix
+        self._tmux_primary_window_name = naming.primary_window_name
+
+        self._liveness_cg = ConcurrencyGroup(name="agent-manager-liveness")
+        self._liveness_cg.__enter__()
+        self._liveness_cg.start_new_thread(
+            target=self._liveness_poll_loop,
+            name="liveness-poll",
+            is_checked=False,
+        )
+
+    def _liveness_poll_loop(self) -> None:
+        """Probe local agents' process liveness on an interval until shutdown.
+
+        Probes immediately, then every ``_LIVENESS_POLL_INTERVAL_SECONDS``, exiting
+        promptly when ``stop()`` sets the poll's shutdown event.
+        """
+        self._run_liveness_poll_once()
+        while not self._liveness_poll_stop.wait(timeout=_LIVENESS_POLL_INTERVAL_SECONDS):
+            self._run_liveness_poll_once()
+
+    def _run_liveness_poll_once(self) -> None:
+        """Run one liveness-poll iteration, logging (not raising) any failure."""
+        try:
+            self._poll_agent_liveness()
+        except (OSError, ValueError, RuntimeError, ProcessError, ConcurrencyGroupError, MngrError) as e:
+            _loguru_logger.opt(exception=e).warning("Agent process-liveness poll iteration failed (continuing)")
+
+    def _poll_agent_liveness(self) -> None:
+        """Probe every locally-tracked agent's process liveness and reconcile it.
+
+        Gathers one ``tmux list-panes -a`` and one ``ps`` snapshot (two subprocess
+        calls total, regardless of agent count), derives each tracked agent's
+        liveness from them, and folds the result into tracked state. Scoped to
+        ``_activity_tracked_agents`` -- those are exactly the agents with a local
+        state dir, whose tmux session lives in this same container -- so no remote
+        agent is ever probed.
+        """
+        with self._lock:
+            has_tracked_agents = bool(self._activity_tracked_agents)
+        if not has_tracked_agents:
+            return
+
+        panes_output = self._probe_tmux_panes()
+        ps_output = self._probe_process_table()
+        liveness_by_agent_id = self._compute_liveness_for_tracked_agents(panes_output, ps_output)
+        if liveness_by_agent_id:
+            self._apply_agent_liveness(liveness_by_agent_id)
+
+    def _compute_liveness_for_tracked_agents(self, panes_output: str, ps_output: str) -> dict[str, bool]:
+        """Derive liveness for every activity-tracked agent from one tmux+ps snapshot.
+
+        Reconstructs each tracked agent's tmux session name (``prefix`` + name,
+        mirroring ``MngrConfig.agent_session_name``) and reads its primary-window
+        pane out of ``panes_output``. Split out from the subprocess-gathering
+        ``_poll_agent_liveness`` so the session-name -> liveness mapping is testable
+        without spawning tmux/ps.
+        """
+        with self._lock:
+            session_name_by_agent_id = {
+                agent_id: f"{self._tmux_session_prefix}{agent.name}"
+                for agent_id, agent in self._agents.items()
+                if agent_id in self._activity_tracked_agents
+            }
+        if not session_name_by_agent_id:
+            return {}
+        probe_by_session = _parse_primary_window_probe_by_session(panes_output, self._tmux_primary_window_name)
+        return _derive_process_liveness(session_name_by_agent_id, probe_by_session, ps_output)
+
+    def _probe_tmux_panes(self) -> str:
+        """Return ``tmux list-panes -a`` stdout, or empty on failure.
+
+        A nonzero exit (e.g. no tmux server after a container restart killed every
+        session) means no live sessions, so we return empty and every agent reads
+        as STOPPED -- mirroring ``BaseAgent.get_lifecycle_state``'s "probe failed
+        -> STOPPED".
+        """
+        result = run_local_command_modern_version(
+            command=_build_tmux_liveness_argv(),
+            is_checked=False,
+            timeout=_LIVENESS_PROBE_TIMEOUT_SECONDS,
+            shutdown_event=self._shutdown_event,
+        )
+        return result.stdout if result.returncode == 0 else ""
+
+    def _probe_process_table(self) -> str:
+        """Return ``ps`` stdout for descendant-process detection, or empty on failure."""
+        result = run_local_command_modern_version(
+            command=list(_PS_LIVENESS_ARGV),
+            is_checked=False,
+            timeout=_LIVENESS_PROBE_TIMEOUT_SECONDS,
+            shutdown_event=self._shutdown_event,
+        )
+        return result.stdout if result.returncode == 0 else ""
+
+    def _apply_agent_liveness(self, liveness_by_agent_id: dict[str, bool]) -> None:
+        """Fold freshly-probed process liveness into tracked state and broadcast changes.
+
+        For every tracked agent whose liveness flipped since the last probe, the
+        new value is cached and its activity state recomputed -- a now-dead agent's
+        ``is_agent_running`` gate goes False, so ``derive_activity_state`` forces
+        IDLE and its stale "Thinking..."/"Running..." indicator clears. A single
+        ``agents_updated`` broadcast then carries any change to the frontend.
+        """
+        changed_agent_ids: list[str] = []
+        with self._lock:
+            for agent_id, is_alive in liveness_by_agent_id.items():
+                if agent_id not in self._activity_tracked_agents:
+                    continue
+                if self._process_alive_by_agent.get(agent_id) != is_alive:
+                    self._process_alive_by_agent[agent_id] = is_alive
+                    changed_agent_ids.append(agent_id)
+
+        if not changed_agent_ids:
+            return
+
+        for agent_id in changed_agent_ids:
+            self._recompute_activity_state(agent_id, broadcast_on_change=False)
+        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
+
     def _handle_observe_output_line(self, line: str, is_stdout: bool) -> None:
         """Parse and dispatch a single line of output from mngr observe.
 
@@ -1081,6 +1323,7 @@ class AgentManager:
             self._last_event_type_by_agent.pop(agent_id, None)
             self._last_event_timestamp_by_agent.pop(agent_id, None)
             self._activity_state_by_agent.pop(agent_id, None)
+            self._process_alive_by_agent.pop(agent_id, None)
 
     def _read_process_started_at(self, agent_id: str) -> float | None:
         """Return the mtime of the agent's ``claude_process_started`` marker, or None.
@@ -1121,8 +1364,14 @@ class AgentManager:
             has_pending_tool = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
             cached_last_event_type = self._last_event_type_by_agent.get(agent_id)
             tail_event_at = parse_iso_timestamp_to_epoch(self._last_event_timestamp_by_agent.get(agent_id))
+            # The liveness poll owns "is the process alive". A missing entry (agent
+            # not yet probed, or the poll never started) falls back to the discovery
+            # lifecycle state, which the stream reports as RUNNING.
+            is_process_alive = self._process_alive_by_agent.get(agent_id)
+            if is_process_alive is None:
+                is_process_alive = agent_state.state in RUNNING_LIFECYCLE_STATES
             new_state = derive_activity_state(
-                is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
+                is_agent_running=is_process_alive,
                 has_pending_tool_use=has_pending_tool,
                 tail_event_type=cached_last_event_type,
                 tail_event_at=tail_event_at,

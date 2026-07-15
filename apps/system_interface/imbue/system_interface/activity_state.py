@@ -74,6 +74,10 @@ def has_unmatched_tool_use(events: Sequence[dict[str, Any]]) -> bool:
             # A new turn: whatever a prior turn left unfinished can never
             # complete now (the dead turn will not emit its results).
             pending.clear()
+        else:
+            # Any other event type (system events, etc.) does not bear on
+            # outstanding tool-call state, so it leaves pending/matched untouched.
+            continue
     return bool(pending - matched)
 
 
@@ -117,6 +121,27 @@ def parse_iso_timestamp_to_epoch(timestamp: str | None) -> float | None:
 
 
 RUNNING_LIFECYCLE_STATES: frozenset[str] = frozenset({"RUNNING", "RUNNING_UNKNOWN_AGENT_TYPE"})
+
+# mngr lifecycle states in which the agent's process is actually alive, so its
+# transcript tail is authoritative for THINKING / TOOL_RUNNING. Broader than
+# ``RUNNING_LIFECYCLE_STATES`` by including WAITING (alive but between turns): the
+# liveness poll only needs "is the process there", and treating a live-but-idle
+# agent as running lets a just-arrived message read as THINKING for the poll
+# interval before the process flips to RUNNING. STOPPED / DONE / REPLACED /
+# UNKNOWN are all "process gone or replaced", so their stale tail must read IDLE.
+PROCESS_ALIVE_LIFECYCLE_STATES: frozenset[str] = frozenset({"RUNNING", "WAITING", "RUNNING_UNKNOWN_AGENT_TYPE"})
+
+
+@pure
+def is_lifecycle_process_alive(lifecycle_state: str) -> bool:
+    """True iff ``lifecycle_state`` means the agent's Claude process is alive.
+
+    This is the running-process gate feeding :func:`derive_activity_state`'s
+    ``is_agent_running``: a dead agent (STOPPED / DONE / REPLACED / UNKNOWN) must
+    force IDLE so its abandoned transcript tail stops showing "Thinking..." after
+    e.g. a container restart. See :data:`PROCESS_ALIVE_LIFECYCLE_STATES`.
+    """
+    return lifecycle_state in PROCESS_ALIVE_LIFECYCLE_STATES
 
 
 @pure
