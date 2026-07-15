@@ -679,8 +679,36 @@ JSON built from variables, never string-interpolated shell.
 **Step 2 -- mint ONE snapshot commit and push it as `main` (git through the
 latchkey gateway):**
 
-The published history must be the public template's history plus EXACTLY ONE
-snapshot commit. The worker's branch accumulates intermediate commits (the
+The published history must be **the public template's full history with
+EXACTLY ONE new commit on top** -- the template's commits, unchanged, capped
+by a single commit that carries ONLY this mind's changes (the delta over
+`BASE_REF`). "One commit" here means **one commit OF CHANGES, never one commit
+TOTAL.** The distinction is load-bearing and is the single easiest thing to
+get wrong:
+
+- **Right:** `git commit-tree ... -p <BASE_REF> ...` -- a new commit parented
+  on `BASE_REF`, so `BASE_REF` and its entire ancestry come along in the push.
+  The published `main` therefore has MANY commits (the template's whole
+  history) plus this one snapshot on top. That is correct and expected -- a
+  correct publish is NEVER a single-commit repo.
+- **Wrong:** collapsing everything -- the base template included -- into one
+  parentless/orphan commit (e.g. an empty `<BASE_REF>` so `git commit-tree`
+  silently drops `-p`, a `git checkout --orphan`, a full-history squash, or a
+  `git init` of the final tree). This also *looks* like "one commit," which is
+  exactly why the mistake happens, but it throws away the shared base.
+
+Why the shared base matters: because the published repo keeps `BASE_REF` and
+its ancestry, it shares a real **merge-base** with the template and with every
+other inspiration built on that template. That common ancestor is what lets an
+adopting mind cleanly **merge this inspiration into itself (or into another
+template)** -- a 3-way merge against `BASE_REF` brings in exactly this
+snapshot's changes and nothing else. An orphan single-commit repo has NO common
+ancestor with anything, so adopting it degenerates from "merge just the
+changes" into a whole-tree conflict (or a blind overwrite). Keeping the base
+history is what makes an inspiration composable with other templates rather
+than a dead-end snapshot.
+
+The worker's branch accumulates intermediate commits (the
 raw assembly, then the modification/manifest/thumbnail follow-ups, then any
 §6 edits) -- pushing the branch would publish every intermediate state, and
 a published-version modification would leak the very thing it removed (a
@@ -694,11 +722,24 @@ push that commit -- the branch itself is never pushed:
     && SNAPSHOT_COMMIT="$(git commit-tree 'HEAD^{tree}' -p <BASE_REF> -m "inspiration: <slug>
 
 Assembled on clean DEFAULT_WORKSPACE_TEMPLATE base <BASE_REF> (provenance link only; no upstream fetch).")" \
+    && git merge-base --is-ancestor <BASE_REF> "$SNAPSHOT_COMMIT" \
+    && test "$(git rev-list --count "$SNAPSHOT_COMMIT")" -gt 1 \
     && git \
     -c "http.extraHeader=X-Latchkey-Gateway-Password: $LATCHKEY_GATEWAY_PASSWORD" \
     -c "http.extraHeader=X-Latchkey-Gateway-Permissions-Override: $LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE" \
     push "$LATCHKEY_GATEWAY/gateway/https://github.com/<owner>/<repo_name>.git" "${SNAPSHOT_COMMIT}:refs/heads/main" )
 ```
+
+The two checks between the mint and the push are the guard against the
+"one commit TOTAL" failure above, and they run BEFORE anything reaches the
+remote: `git merge-base --is-ancestor <BASE_REF> "$SNAPSHOT_COMMIT"` fails
+(aborting the `&&` chain) unless the snapshot is genuinely parented on the
+base, and `rev-list --count > 1` fails if the mint came out parentless
+(an empty `<BASE_REF>` makes `git commit-tree` drop `-p` and produce a lone
+orphan). If either check fails, nothing is pushed -- STOP, re-resolve
+`BASE_REF` per §2 (its tree must name `pyproject.toml` and `supervisord.conf`),
+re-mint, and only then push. A correct push always lands MORE than one commit
+on `main`.
 
 Pushing `<sha>:refs/heads/main` publishes only that one commit plus the base
 history it is parented on, so the published tree is exactly `$WT`'s final

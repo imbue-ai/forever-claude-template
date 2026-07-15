@@ -1,3 +1,16 @@
+- Clarified in the publish skill that "one commit" means one commit OF CHANGES
+  (a single snapshot parented on `BASE_REF`, on top of the template's full
+  preserved history), never one commit TOTAL. The push step's `git commit-tree`
+  approach was correct, but the prose ("EXACTLY ONE snapshot commit") was
+  readable as "the repo should have exactly one commit," which invites
+  collapsing the base into a parentless/orphan commit -- that destroys the
+  shared merge-base an adopting mind needs to cleanly merge the inspiration
+  into itself or another template, turning a delta-merge into a whole-tree
+  conflict. The skill now spells out the merge rationale and adds two guards in
+  the `&&` chain before the push (`git merge-base --is-ancestor <BASE_REF>
+  "$SNAPSHOT_COMMIT"` and `rev-list --count > 1`), so a base-less mint aborts
+  before anything reaches the remote.
+
 - The published repo's `README.md` now describes the inspiration instead of
   the generic workspace template. `build_inspiration.sh` overwrites the base
   README with the inspiration's title, its one-line description, a short
