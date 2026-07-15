@@ -1,14 +1,14 @@
 """Unit tests for the deterministic update-self helpers.
 
-Covers the three pieces the flow relies on being exactly right: target-tag
+Covers the pieces the flow relies on being exactly right: target-tag
 resolution (latest stable, prereleases excluded, semver not lexical order), the
-merged-vs-pulled-in classification, the path -> change-class mapping, and the
-supervisord downstream-consumer trace.
+merged-vs-pulled-in classification, and the path -> change-class mapping.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 _MODULE_PATH = Path(__file__).with_name("update_self.py")
@@ -162,105 +162,34 @@ def test_classify_merge_empty() -> None:
     assert result.projects_to_validate == []
 
 
-# --- programs_referencing --------------------------------------------------
-
-_SUPERVISORD_SAMPLE = """\
-[program:system_interface]
-command=python3 scripts/oom_tag_service.py system_interface bash -c "python3 scripts/forward_port.py --name system_interface"
-
-[program:runtime-backup]
-command=uv run runtime-backup
-
-[program:my-daemon]
-command=python3 .agents/skills/slack-inbox/scripts/poll.py
-"""
+# --- CLI wiring --------------------------------------------------------------
 
 
-def test_programs_referencing_matches_direct_command_reference() -> None:
-    assert update_self.programs_referencing(
-        "scripts/forward_port.py", _SUPERVISORD_SAMPLE
-    ) == ["system_interface"]
-
-
-def test_programs_referencing_matches_by_basename_in_agents_path() -> None:
-    assert update_self.programs_referencing(
-        ".agents/skills/slack-inbox/scripts/poll.py", _SUPERVISORD_SAMPLE
-    ) == ["my-daemon"]
-
-
-def test_programs_referencing_no_match() -> None:
-    assert (
-        update_self.programs_referencing("scripts/unused_helper.py", _SUPERVISORD_SAMPLE)
-        == []
-    )
-
-
-def test_programs_referencing_multiple_programs() -> None:
-    text = """\
-[program:a]
-command=python3 scripts/shared.py --role a
-
-[program:b]
-command=python3 scripts/shared.py --role b
-"""
-    assert update_self.programs_referencing("scripts/shared.py", text) == ["a", "b"]
-
-
-def test_programs_referencing_attributes_eventlistener_not_preceding_program() -> None:
-    # Regression: an eventlistener's command must be attributed to the
-    # eventlistener, not the [program:...] that precedes it (real supervisord.conf
-    # runs oom_tag_backstop.py under an [eventlistener:...] right after earlyoom).
-    text = """\
-[program:earlyoom]
-command=earlyoom -m 5
-
-[eventlistener:oom-tag-backstop]
-command=python3 scripts/oom_tag_backstop.py
-events=PROCESS_STATE_RUNNING
-"""
-    assert update_self.programs_referencing("scripts/oom_tag_backstop.py", text) == [
-        "oom-tag-backstop"
-    ]
-
-
-def test_programs_referencing_non_command_section_resets_current() -> None:
-    # A stray `command=`-looking setting under a non-command section (or a bare
-    # section header) must not be attributed to the preceding program.
-    text = """\
-[program:foo]
-command=/bin/foo
-
-[rpcinterface:supervisor]
-command=this-is-not-a-real-process scripts/foo.py
-"""
-    assert update_self.programs_referencing("scripts/foo.py", text) == []
-
-
-def test_repo_root_flag_accepted_after_subcommand(tmp_path) -> None:
+def test_repo_root_flag_accepted_before_and_after_subcommand(tmp_path) -> None:
     # `--repo-root` must work both before and after the subcommand; a value after
     # the subcommand previously errored because it lived only on the top parser.
-    (tmp_path / "supervisord.conf").write_text(
-        "[program:x]\ncommand=python3 scripts/x.py\n", encoding="utf-8"
+    def _git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    _git("init", "-q")
+    _git(
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=test",
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "root",
     )
-    supervisord = tmp_path / "supervisord.conf"
-    # Should parse without argparse raising SystemExit for either ordering.
+    _git("tag", "minds-v0.1.0")
+
     assert (
-        update_self.main(
-            ["trace-consumers", "--path", "scripts/x.py", "--supervisord", str(supervisord)]
-        )
+        update_self.main(["resolve-target", "--local-tags", "--repo-root", str(tmp_path)])
         == 0
     )
     assert (
-        update_self.main(
-            [
-                "--repo-root",
-                str(tmp_path),
-                "trace-consumers",
-                "--path",
-                "scripts/x.py",
-                "--supervisord",
-                str(supervisord),
-            ]
-        )
+        update_self.main(["--repo-root", str(tmp_path), "resolve-target", "--local-tags"])
         == 0
     )

@@ -20,20 +20,19 @@ validation depth, reveal by change class). This script owns the parts that are
     and map each file onto its reveal class and its test project. This drives
     both validation depth (merged set) and reveal-by-class.
 
-``trace-consumers``
-    Given a changed shared file (a ``scripts/*`` or ``.agents/**`` path), list
-    the supervisord programs whose ``command`` references it directly. A shared
-    file a live service depends on at runtime must be treated as
-    service-impacting (validate + restart), not a silent merge.
-
 ``changelog-entries``
     List ``changelog/`` entries newly added between two refs -- the raw input for
     the worker's "what's new" report.
 
+Impact analysis -- which services and skills depend on a changed file -- is
+deliberately NOT scripted here: it requires open-ended exploration (imports,
+shelled-out scripts, API-surface coupling) that a deterministic helper would
+only pretend to cover. The worker reference owns that recipe.
+
 The git-touching subcommands are thin wrappers over the pure functions below
 (``pick_latest_stable_tag``, ``resolve_target``, ``classify_path``,
-``classify_merge``, ``programs_referencing``), which carry all the logic and are
-covered by ``update_self_test.py``.
+``classify_merge``), which carry all the logic and are covered by
+``update_self_test.py``.
 """
 
 from __future__ import annotations
@@ -180,9 +179,9 @@ def classify_path(path: str) -> PathClass:
     - ``editable_tool`` -- ``vendor/mngr/**``; ``.py`` picked up live, a manifest
       change needs ``uv sync --all-packages`` / an editable reinstall.
     - ``shared_runtime`` -- ``scripts/**``, other ``libs/**``, and ``.agents/**``:
-      may be a live runtime dependency of a service, so it needs a
-      downstream-consumer trace (``trace-consumers``) before it can be called a
-      silent merge.
+      may be a live runtime dependency of a service or a workspace-added skill,
+      so it needs the worker's impact analysis before it can be called a silent
+      merge.
     - ``dockerfile`` -- ``Dockerfile``; split by hunk into live-applicable vs
       rebuild-only by worker judgement.
     - ``docs`` -- ``CLAUDE.md``, ``changelog/**``, and top-level ``*.md``.
@@ -271,63 +270,6 @@ def classify_merge(
     )
 
 
-# --- Downstream-consumer trace ---------------------------------------------
-
-# Any supervisord section header, e.g. ``[program:web]`` or ``[supervisord]``.
-_SECTION_RE = re.compile(r"^\[(?P<body>[^\]]+)\]\s*$")
-_COMMAND_RE = re.compile(r"^\s*command\s*=\s*(?P<command>.*)$")
-# Section types that carry a ``command=`` we should attribute to a live process.
-_COMMAND_SECTION_TYPES = frozenset({"program", "eventlistener", "fcgi-program"})
-
-
-def programs_referencing(path: str, supervisord_text: str) -> list[str]:
-    """Return the supervisord programs whose ``command`` references ``path``.
-
-    Parses the ``command=`` line of every command-bearing section
-    (``[program:...]``, ``[eventlistener:...]``, ``[fcgi-program:...]``) and
-    matches when either the full repo-relative ``path`` or its basename appears
-    verbatim in the command string. A hit means a live service shells out to the
-    changed file at runtime, so the change is service-impacting (validate +
-    restart), not a silent merge. Non-command sections (``[supervisord]``,
-    ``[rpcinterface:...]``) reset the current section so their stray settings are
-    never misattributed to the preceding program. Transitive or scheduled
-    invocations are worker judgement; this catches the deterministic direct
-    references.
-    """
-    basename = Path(path).name
-    current: str | None = None
-    matches: list[str] = []
-    for line in supervisord_text.splitlines():
-        section_match = _SECTION_RE.match(line)
-        if section_match is not None:
-            body = section_match.group("body")
-            section_type, _, section_name = body.partition(":")
-            # Only command-bearing sections keep a ``current`` name; anything
-            # else (a bare ``[supervisord]``, an ``[rpcinterface:...]``) clears
-            # it so a later ``command=`` isn't attributed to the wrong program.
-            current = (
-                section_name if section_type in _COMMAND_SECTION_TYPES else None
-            )
-            continue
-        if current is None:
-            continue
-        command_match = _COMMAND_RE.match(line)
-        if command_match is None:
-            continue
-        command = command_match.group("command")
-        if path in command or basename in command:
-            matches.append(current)
-    # Preserve first-seen order but drop duplicates (a program has one command,
-    # but guard against malformed configs with repeated command lines).
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for name in matches:
-        if name not in seen:
-            seen.add(name)
-            ordered.append(name)
-    return ordered
-
-
 # --- git-touching CLI wrappers ---------------------------------------------
 
 
@@ -385,13 +327,6 @@ def _cmd_classify_merge(args: argparse.Namespace) -> int:
             indent=2,
         )
     )
-    return 0
-
-
-def _cmd_trace_consumers(args: argparse.Namespace) -> int:
-    supervisord = args.supervisord.read_text(encoding="utf-8")
-    programs = programs_referencing(args.path, supervisord)
-    print(json.dumps({"path": args.path, "programs": programs}))
     return 0
 
 
@@ -467,20 +402,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Merge base (default: git merge-base <local> <target>).",
     )
     classify_parser.set_defaults(func=_cmd_classify_merge)
-
-    trace_parser = sub.add_parser(
-        "trace-consumers",
-        help="List supervisord programs whose command references a changed shared file.",
-        parents=[common],
-    )
-    trace_parser.add_argument("--path", required=True, help="Changed repo-relative path.")
-    trace_parser.add_argument(
-        "--supervisord",
-        type=Path,
-        default=Path("supervisord.conf"),
-        help="Path to supervisord.conf (default: ./supervisord.conf).",
-    )
-    trace_parser.set_defaults(func=_cmd_trace_consumers)
 
     changelog_parser = sub.add_parser(
         "changelog-entries",

@@ -1,6 +1,6 @@
 ---
 name: update-self
-description: Pull updates from the upstream template repo safely. Dispatches a background worker that merges the latest released template version on its own branch, validates the impacted services, and reports what changed; the lead confirms with you and then applies the update live (restarting the services that need it). Use when you want to incorporate upstream skills, script fixes, or config improvements. For pushing local improvements back upstream, use the `submit-upstream-changes` skill instead.
+description: Safely pull updates from the upstream template repo (default target is the latest stable release). Use when you want to incorporate upstream skills, script fixes, or config improvements. For pushing local improvements back upstream, use the `submit-upstream-changes` skill instead.
 ---
 
 # Pulling updates from the upstream template, safely
@@ -144,9 +144,11 @@ the conflicts and how the worker resolved them, the services it validated, and
 anything flagged for a manual rebuild. Present it via `send-user-message` and
 **wait for explicit approval** -- mandatory even on a clean pull.
 
-If the merge reconciled the system interface for real (not a clean pull-in), also
-give the user a live preview first, exactly as `update-system-interface` Step 3
-does (keep the worker alive until they verdict):
+**Preview rule for the system interface:** if upstream was strictly newer there
+(no merge work needed), no preview is needed; if the worker's report says
+nontrivial merge work was needed, give the user a live preview first, exactly as
+`update-system-interface` Step 3 does (keep the worker alive until they
+verdict). The report's per-surface merge-work judgment is what you go by.
 
 ```bash
 WORK_DIR=$(mngr ls --include 'name == "update-self"' --format json \
@@ -155,6 +157,12 @@ python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.p
     --slug update-self --work-dir "$WORK_DIR"
 python3 scripts/layout.py open si-preview
 ```
+
+**Other web services are optional previews.** When the report says another user
+web service took meaningful merge work, use your judgment: serve it from the
+worker's worktree via `.agents/shared/scripts/serve_isolated_instance.py` as its
+own preview tab -- or, when the system interface is also being previewed, link
+it from inside that preview. Skip previews for services that came in clean.
 
 ### 5b. Land the merge
 
@@ -213,11 +221,15 @@ The report says which classes merged. Apply each; a clean pull-in is still
 
 - **`shared_runtime` (`scripts/**`, other `libs/**`, `.agents/**`)** -- applies to
   future agents automatically unless a live service depends on the file. The
-  report's downstream-consumer trace names any live consumer; restart that
-  service (usually `mngr start --restart system-services`). Only "nothing to
-  reveal" when the trace found none.
+  report's impact analysis names any live consumer; restart that service
+  (usually `mngr start --restart system-services`). Only "nothing to reveal"
+  when the analysis found none.
 
 ## 6. Teardown
+
+If you previewed a non-system_interface service in 5a, tear that preview down
+too: stop its isolated instance and close its tab (`python3 scripts/layout.py
+close <name>`). Then:
 
 ```bash
 uv run .agents/skills/launch-task/scripts/create_worker.py destroy --name update-self
