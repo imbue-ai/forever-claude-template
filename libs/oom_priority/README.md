@@ -52,7 +52,7 @@ its `command` in `supervisord.conf` runs `scripts/oom_tag_service.py <key> <the
 real command>`, which sets its own `oom_score_adj` from `SERVICE_BANDS` and then
 `exec`s the command in place (the band survives `execve` and is inherited by
 every child). Built-in services pass their own name; a **user-created** service
-(added via the `edit-services` skill) passes the `user` key so it is shed before
+(added via the `update-service` skill) passes the `user` key so it is shed before
 any built-in service. An unknown key is tagged as `user` too (with a warning):
 an unrecognized service must fail *expendable*, never protected.
 
