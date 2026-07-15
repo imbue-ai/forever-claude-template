@@ -1,0 +1,1 @@
+README correction for the new minds workspace-sync backup flow: minds initializes the repository with `restic init` only, keyed solely by the workspace's own random password. The previous `restic init` + `restic key add` description (the master-key-on-repo scheme) no longer matches how repositories are created. host_backup behavior is unchanged.

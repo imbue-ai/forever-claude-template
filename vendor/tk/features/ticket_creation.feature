@@ -96,3 +96,13 @@ Feature: Ticket Creation
     When I run "ticket create 'First ticket'"
     Then the command should succeed
     And the tickets directory should exist
+
+  Scenario: Reject multiple --step titles in one create
+    When I run "ticket create --step 'First step' --step 'Second step' --step 'Third step'"
+    Then the command should fail
+    And the output should contain "makes ONE ticket per call"
+
+  Scenario: Reject multiple positional titles in one create
+    When I run "ticket create 'First' 'Second'"
+    Then the command should fail
+    And the output should contain "makes ONE ticket per call"

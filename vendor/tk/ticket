@@ -244,7 +244,7 @@ cmd_create() {
 
     local title="" description="" design="" acceptance=""
     local priority=2 issue_type="task" assignee="" external_ref="" parent="" tags=""
-    local is_step=0
+    local is_step=0 title_count=0
 
     # Default assignee to git user.name if available, BUT only when
     # running outside an mngr-managed agent. Inside an mngr context the
@@ -271,9 +271,19 @@ cmd_create() {
             --step) is_step=1; shift ;;
             --tags) tags="$2"; shift 2 ;;
             -*) echo "Unknown option: $1" >&2; return 1 ;;
-            *) title="$1"; shift ;;
+            *) title="$1"; title_count=$((title_count + 1)); shift ;;
         esac
     done
+
+    # `create` mints exactly one ticket, so more than one positional title is a
+    # mistake -- most often `tk create --step "A" --step "B"`, where `--step` is a
+    # boolean flag so "A" and "B" both land here as titles. Left unchecked, only
+    # the last would win and the rest would vanish silently; fail loudly instead.
+    if [[ "$title_count" -gt 1 ]]; then
+        echo "Error: 'tk create' makes ONE ticket per call, but got $title_count titles." >&2
+        echo "Each 'tk create --step' makes a single step -- run a separate 'tk create --step \"...\"' per step (they can share one shell invocation, e.g. joined with ';')." >&2
+        return 1
+    fi
 
     # Validate and resolve parent if specified
     if [[ -n "$parent" ]]; then

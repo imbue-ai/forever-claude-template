@@ -1,3 +1,50 @@
+- Clarified in the publish skill that "one commit" means one commit OF CHANGES
+  (a single snapshot parented on `BASE_REF`, on top of the template's full
+  preserved history), never one commit TOTAL. The push step's `git commit-tree`
+  approach was correct, but the prose ("EXACTLY ONE snapshot commit") was
+  readable as "the repo should have exactly one commit," which invites
+  collapsing the base into a parentless/orphan commit -- that destroys the
+  shared merge-base an adopting mind needs to cleanly merge the inspiration
+  into itself or another template, turning a delta-merge into a whole-tree
+  conflict. The skill now spells out the merge rationale and adds two guards in
+  the `&&` chain before the push (`git merge-base --is-ancestor <BASE_REF>
+  "$SNAPSHOT_COMMIT"` and `rev-list --count > 1`), so a base-less mint aborts
+  before anything reaches the remote.
+
+- The published repo's `README.md` now describes the inspiration instead of
+  the generic workspace template. `build_inspiration.sh` overwrites the base
+  README with the inspiration's title, its one-line description, a short
+  overview (a FILL-IN the worker completes, gated like the manifest's), a
+  'how to use it' section (create a mind from the repo, or `/use-inspiration
+  <url>`), and a list of every `inspiration-*.md` in the repo (marking the
+  one just published) -- so a human landing on the repo sees what it is, not
+  'default-workspace-template'. The FILL-IN and pre-push gates now cover
+  README.md alongside the manifest.
+
+- Simplified the secret-scanner delivery to just two things: the scanners are
+  baked into every workspace at build/provision time by the common
+  scripts/setup_system.sh (which invokes the pinned
+  scripts/install_secret_scanners.sh), and if one is ever missing the scan
+  gate's error names the one command to reinstall both. Because setup_system.sh
+  is the shared script the Dockerfile RUNs AND the Lima provider runs directly
+  in the VM, both docker-built images and Lima VMs get the scanners (previously
+  only docker did). Removed the deferred-install backstop for the scanners (and
+  its wrapper unit tests) -- the shared installer keeps its own tests, and the
+  deferred-install service is back to only its heavy non-boot packages
+  (Chromium/Playwright).
+
+- The secret gate now also blocks account-identifying cloud IDs, not just
+  exploitable credentials: betterleaks gains rules for AWS access key IDs
+  (all documented prefixes -- AKIA/ASIA/AROA/AIDA/...) and GCP service-account
+  emails. These are deliberately limited to STRUCTURED, unambiguous provider
+  identifiers; generic IDs (UUIDs, plain emails, commit SHAs, numeric account
+  numbers) are intentionally NOT matched, since they appear constantly in
+  legitimate code and mock data -- fuzzier 'do not publish this' judgement is
+  left to the scope gate and the published-version-modifications step. The
+  canonical AWS docs key (AKIAIOSFODNN7EXAMPLE) and placeholder emails are
+  exempted; the AWS rule uses a non-capturing group so betterleaks' finding
+  secret is the full key (a capturing group would break the example filter).
+
 - Added **inspirations**: a publishable, reusable, bootable snapshot of the
   apps and features a mind has built. A mind can publish an inspiration as its
   own clean GitHub repo, and another mind can adapt one into itself. A single
@@ -9,7 +56,9 @@
   system_interface changes remain in the final design).
 
 - New **`/publish-inspiration`** skill. The lead asks in chat what to include
-  (no user data by default), then dispatches ONE `launch-task` worker cycle.
+  (personal data excluded by default, non-personal data included, boundary
+  cases surfaced to the user -- see the data-policy bullet below), then
+  dispatches ONE `launch-task` worker cycle.
   On its isolated worktree the worker runs `build_inspiration.sh` -- reset to
   the clean FCT base the mind was created from (first-parent-root fallback
   plus a bootable-base pre-check covering `pyproject.toml` and
@@ -121,6 +170,14 @@
   `github-git-write`), and `/use-inspiration` uses it to fetch private
   inspiration repos when the anonymous fetch fails.
 
+- The inspirations flow is tagged **v1** so future revisions are
+  distinguishable: both skills carry a version line under their titles, the
+  generated manifest front-matter gains a `format: v1` key (manifests
+  published before versioning have no `format:` key and are treated as v1),
+  `build_inspiration.sh` records `INSPIRATION_FLOW_VERSION="v1"`, and every
+  published repo's GitHub description ends with the literal marker
+  `(minds inspiration v1)`.
+
 - The chat confirmation now embeds the designed thumbnail as a markdown image
   (the SVG's absolute worktree path), so the user sees exactly what will
   represent their inspiration while confirming the title, description, repo
@@ -203,3 +260,52 @@
   started from, including any uncommitted source state a dev-flow clone
   carried). The first-parent root remains only as a last resort for repos
   with no marker at all.
+
+- The publish flow's secret scan is now a two-scanner gate with no
+  fallback. The scan (extracted into the shared
+  `.agents/skills/publish-inspiration/scripts/scan_secrets.sh`, used both by
+  `build_inspiration.sh`'s section-5 gate over the staged overlay and by the
+  worker's published-version-modification re-scan) runs TWO independent
+  scanners over the same targets, and a finding from EITHER of them aborts
+  before commit:
+
+  - **betterleaks** v1.6.1 (MIT; the gitleaks author's successor project,
+    replacing gitleaks here), configured by the skill-local
+    `betterleaks.toml` (replaces `gitleaks.toml`): its default ruleset
+    extended with path-only rules replicating the credential-filename
+    blocklist (.env variants minus .env.example/.sample/.template, .netrc,
+    .git-credentials, .claude.json, .pypirc, .sesskey, gh hosts.yml) and a
+    broader Anthropic key rule (any `sk-ant-*` shape with 24+ body chars, so
+    placeholders like `sk-ant-test` never fire). Betterleaks does not honor
+    gitleaks' `[[rules.allowlists]]`, so the false-positive exemptions are
+    expressed as Expr `prefilter`/`filter` expressions instead.
+
+  - **kingfisher** v1.106.0 (Apache-2.0), always with `--no-validate` (its
+    live-validation feature would send candidate secrets to third-party APIs,
+    which must never happen with scanned content) and `--redact`.
+
+  Findings print scanner + rule + repo-relative path with values redacted.
+  There is NO fallback scanner and no tolerance for a missing tool: the
+  historical filename+grep fallback is deleted, and a missing binary or a
+  scanner that errors at runtime fails the scan (exit 1 naming the tool) --
+  a broken scanner must never silently pass. Both binaries are baked into
+  every workspace at build/provision time by the common
+  `scripts/setup_system.sh` (the Dockerfile RUNs it, and the Lima provider
+  runs it directly in the VM), which invokes
+  `scripts/install_secret_scanners.sh` -- the single source of truth for the
+  version pins and hard-coded per-arch sha256 checksums -- so docker-built
+  images and Lima VMs both get the scanners.
+
+- The data-inclusion default is no longer all-or-nothing. Instead of assuming
+  ALL user data is private (the old "Default: NO user data"), the setup Q&A
+  now classifies candidate data by whether it is **personal** -- information
+  about the user or specific real people (names, emails, accounts, messages,
+  contacts, private notes). Personal data stays private and is excluded by
+  default; **non-personal** data (generic seed/sample/reference data,
+  fixtures, config defaults, public or synthetic datasets) is **included** by
+  default, since shipping it is what makes an inspiration bootable and useful.
+  Anything **remotely close to the boundary** -- arguably personal, mixed, or
+  simply unclear -- is not decided silently: the agent asks the user and lets
+  their answer settle it, defaulting to "ask" when in doubt. The scope gate
+  restates any boundary data it flagged so the user settles it before
+  assembly.

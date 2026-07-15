@@ -1,22 +1,23 @@
----
-name: edit-services
-description: Add, modify, or remove background services managed by supervisord. Use this when you want to run a long-lived (or one-shot) process alongside your main agent.
----
+# Service process mechanics (supervisord)
 
-# Managing services
+Shared reference for the supervisord layer beneath a service -- its
+`[program:<name>]` definition, and how to add, remove, modify, or inspect a
+program. Reach for this from any service flow (`update-service`,
+`build-web-service`) when a change touches *how a service runs* (its port,
+command, logs) or adds/removes a program, rather than only its code.
 
 Background services are defined as `[program:<name>]` sections in
-`supervisord.conf` at the repo root. `uv run bootstrap` runs first-boot setup
-and then `exec`s `supervisord` in the foreground (in the `bootstrap` tmux
-window); supervisord starts and supervises every program. Unlike the old
-service manager, supervisord does **not** watch the config file -- you apply
-changes with `supervisorctl`.
+`supervisord.conf` at the repo root. `uv run bootstrap` runs first-boot
+setup and then `exec`s `supervisord` in the foreground (in the `bootstrap`
+tmux window); supervisord starts and supervises every program. supervisord
+does **not** watch the config file -- you apply changes with
+`supervisorctl`.
 
 ## Program format
 
 ```ini
 [program:my-service]
-command=uv run my-service
+command=python3 scripts/oom_tag_service.py user uv run my-service
 directory=/mngr/code
 autostart=true
 autorestart=true
@@ -38,8 +39,12 @@ Key fields:
   other shell syntax must be wrapped in `bash -c "..."`:
 
   ```ini
-  command=bash -c "python3 scripts/forward_port.py --url http://localhost:8090 --name foo && uv run foo"
+  command=python3 scripts/oom_tag_service.py user bash -c "python3 scripts/forward_port.py --url http://localhost:8090 --name foo && uv run foo"
   ```
+
+  The `python3 scripts/oom_tag_service.py user` prefix is the **OOM band tag**
+  (see below) -- keep it as the outermost command, in front of any `bash -c`
+  wrapper.
 - `directory=/mngr/code` -- run from the repo root, so cwd-relative paths
   (`runtime/...`, `scripts/...`) resolve. Set this on every program.
 - `autostart=true` -- start when supervisord boots.
@@ -60,6 +65,25 @@ Services inherit the agent environment (`MNGR_AGENT_STATE_DIR`,
 `CLAUDE_CONFIG_DIR`, `MNGR_HOST_DIR`, `LATCHKEY_*`, ...) from the bootstrap shell
 that launched supervisord -- you do not need a per-program `environment=`.
 
+## OOM priority (memory-pressure shedding)
+
+A background `earlyoom` daemon sheds processes when the container runs low on
+memory, most-expendable first (see `libs/oom_priority/README.md`). Prefix every
+service `command` with `python3 scripts/oom_tag_service.py user` so a
+**user-created** service is shed *before* any built-in service (the UI, tunnel,
+terminal, backups) under memory pressure -- those are the workspace's lifelines
+and should outlive a service you added. The wrapper sets the process's
+`oom_score_adj` and then `exec`s your real command, so it adds no runtime
+overhead.
+
+Only the built-in template services pass their own name instead of `user` (e.g.
+`... oom_tag_service.py system_interface ...`); anything you add should use
+`user`. There is no protected escape hatch: an unknown key defaults to the
+`user` band, and if you omit the prefix entirely a backstop listener
+(`oom-tag-backstop`) tags the service into the `user` band shortly after it
+starts anyway. Still include the prefix -- it applies the band at spawn rather
+than ~1s later, and it keeps the command self-documenting.
+
 ## Adding a service
 
 1. Add a new `[program:<name>]` section to `supervisord.conf`.
@@ -78,6 +102,11 @@ that launched supervisord -- you do not need a per-program `environment=`.
 1. Delete the `[program:<name>]` section from `supervisord.conf`.
 2. `supervisorctl reread && supervisorctl update` -- supervisord stops and
    forgets the removed program.
+
+For a web service, also drop its `runtime/applications.toml` entry with
+`python3 scripts/forward_port.py --name <name> --remove`; for a scaffolded
+web lib, `build-web-service`'s `cleanup.md` reference covers the full
+teardown (reverting the lib and the root `pyproject.toml` edits).
 
 ## Modifying a service
 

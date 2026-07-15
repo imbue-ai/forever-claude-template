@@ -69,6 +69,7 @@ from pydantic import PrivateAttr
 
 from browser import manifest as fleet_manifest
 from browser.names import generate_browser_name, is_valid_browser_name
+from browser.oom_retag import notify_chromium_processes_expected
 
 # browser-use phones home anonymized telemetry by default; disable it (the
 # compute has no business making that call, and it spams connection-error logs
@@ -546,6 +547,9 @@ class LiveBrowser(MutableModel):
         profile_dir.mkdir(parents=True, exist_ok=True)
         _clear_stale_singleton(profile_dir)  # a prior hard kill may have orphaned a lock
         self._bu_session = await self._start_bu_session(profile_dir, chromium_path)
+        # The Chromium tree just spawned (and its processes self-write their
+        # oom_score_adj moments later): have the OOM sweep re-band it.
+        notify_chromium_processes_expected()
         # close() may have run while we were suspended in _start_bu_session (it holds no
         # lock and pops the browser before this resumes). If so, abort -- and kill the
         # Chromium we just brought up, so we don't leak a second handle behind a browser
@@ -715,6 +719,9 @@ class LiveBrowser(MutableModel):
 
     def _on_new_page(self, page: Page) -> None:
         """A new tab appeared (human or agent opened it): follow it."""
+        # A new page usually means a new renderer process about to self-write
+        # its oom_score_adj; have the OOM sweep re-band it.
+        notify_chromium_processes_expected()
         asyncio.create_task(self._follow_new_page(page))
 
     async def _follow_new_page(self, page: Page) -> None:
@@ -740,6 +747,9 @@ class LiveBrowser(MutableModel):
         page.on("framenavigated", lambda frame, captured=page: self._on_page_nav(frame, captured))
 
     def _on_page_nav(self, frame: Any, page: Page) -> None:
+        # Any navigation (any frame, human- or agent-driven) can swap in a new
+        # renderer process (site isolation); have the OOM sweep re-band it.
+        notify_chromium_processes_expected()
         if page is self._active_page and frame == page.main_frame:
             asyncio.create_task(self._set_active_page(page))
 

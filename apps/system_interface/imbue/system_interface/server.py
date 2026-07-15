@@ -52,6 +52,8 @@ from imbue.system_interface.layout_ops import is_mutating_op
 from imbue.system_interface.layout_ops import layout_inspect
 from imbue.system_interface.layout_ops import layout_list
 from imbue.system_interface.layout_ops import parse_tmux_sessions_output
+from imbue.system_interface.models import ActivityRequest
+from imbue.system_interface.models import ActivityResponse
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentListItem
 from imbue.system_interface.models import AgentListResponse
@@ -380,6 +382,26 @@ def _send_message_endpoint(agent_id: str) -> Response:
         )
 
     return _json_response(SendMessageResponse(status="ok").model_dump())
+
+
+def _activity_endpoint() -> Response:
+    """Report the workspace UI's current agent-tab activity for OOM prioritization.
+
+    The frontend posts a snapshot ({open, visible, messaged}) whenever a tab
+    opens/closes, the visible tab changes, or a message is sent. The agent manager
+    hands it to the chat OOM prioritizer, which re-tags each chat agent's
+    ``oom_score_adj`` so more-engaged chats are more protected from a memory shed
+    (workers and the primary agent are excluded and never re-tagged). Best-effort
+    and idempotent: the endpoint just records the snapshot and returns ok.
+    """
+    activity_request = ActivityRequest.model_validate(request.get_json())
+    agent_manager: AgentManager = get_state().agent_manager
+    agent_manager.record_activity(
+        open_ids=activity_request.open,
+        visible_ids=activity_request.visible,
+        messaged_id=activity_request.messaged,
+    )
+    return _json_response(ActivityResponse(status="ok").model_dump())
 
 
 def _upload_attachment() -> Response:
@@ -1475,6 +1497,7 @@ def create_application(state: SystemInterfaceState) -> Flask:
     application.add_url_rule("/api/agents/<agent_id>/events", view_func=_get_events, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/stream", view_func=_stream_events, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/message", view_func=_send_message_endpoint, methods=["POST"])
+    application.add_url_rule("/api/activity", view_func=_activity_endpoint, methods=["POST"])
     application.add_url_rule("/api/uploads", view_func=_upload_attachment, methods=["POST"])
     application.add_url_rule("/api/uploads/<path:relative_path>", view_func=_serve_attachment, methods=["GET"])
     application.add_url_rule(

@@ -258,6 +258,15 @@ def test_build_create_chat_command_carries_no_workspace_label() -> None:
     assert all(not label.startswith("workspace=") for label in labels)
 
 
+def test_build_create_chat_command_tags_user_created() -> None:
+    """The initial chat agent is tagged ``user_created=true`` so the OOM
+    agent-tagging hook places it in the protected user-agent band (shed only as a
+    last resort)."""
+    cmd = _build_create_chat_command("my-workspace", {"workspace": "my-workspace"})
+    labels = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--label"]
+    assert "user_created=true" in labels
+
+
 def test_build_create_chat_command_passes_project_label_when_present(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -32,6 +32,7 @@ members = [
     "github-sync",
     "host-backup",
     "mngr-cli-contract",
+    "oom-priority",
     "system-interface",
     "tk-command-parsing",
 ]
@@ -385,6 +386,7 @@ dependencies = [
     { name = "browser-use", extra = ["core"] },
     { name = "flask" },
     { name = "flask-sock" },
+    { name = "oom-priority" },
     { name = "simple-websocket" },
     { name = "werkzeug" },
 ]
@@ -394,6 +396,7 @@ requires-dist = [
     { name = "browser-use", extras = ["core"], specifier = "==0.13.1" },
     { name = "flask", specifier = ">=3.0" },
     { name = "flask-sock", specifier = ">=0.7" },
+    { name = "oom-priority", editable = "libs/oom_priority" },
     { name = "simple-websocket", specifier = ">=1.0" },
     { name = "werkzeug", specifier = ">=3.0" },
 ]
@@ -1775,7 +1778,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=21.0" },
     { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy", specifier = ">=1.5.0" },
-    { name = "psutil", specifier = ">=5.9" },
+    { name = "psutil", specifier = ">=7.2" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pygtail", specifier = ">=0.14.0" },
     { name = "pyinfra", specifier = ">=3.0" },
@@ -2456,6 +2459,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/9d/5a/652dac4b7affc2b37
 wheels = [
     { url = "https://files.pythonhosted.org/packages/47/4f/4a617ee93d8208d2bcf26b2d8b9402ceaed03e3853c754940e2290fed063/ollama-0.6.1-py3-none-any.whl", hash = "sha256:fc4c984b345735c5486faeee67d8a265214a31cbb828167782dc642ce0a2bf8c", size = 14354, upload-time = "2025-11-13T23:02:16.292Z" },
 ]
+
+[[package]]
+name = "oom-priority"
+version = "0.1.0"
+source = { editable = "libs/oom_priority" }
 
 [[package]]
 name = "openai"
@@ -6568,6 +6576,7 @@ dependencies = [
     { name = "imbue-common" },
     { name = "imbue-mngr" },
     { name = "imbue-mngr-claude" },
+    { name = "oom-priority" },
     { name = "pexpect" },
     { name = "pluggy" },
     { name = "pydantic-settings" },
@@ -6601,6 +6610,7 @@ requires-dist = [
     { name = "imbue-common", editable = "vendor/mngr/libs/imbue_common" },
     { name = "imbue-mngr", editable = "vendor/mngr/libs/mngr" },
     { name = "imbue-mngr-claude", editable = "vendor/mngr/libs/mngr_claude" },
+    { name = "oom-priority", editable = "libs/oom_priority" },
     { name = "pexpect", specifier = ">=4.9" },
     { name = "pluggy", specifier = ">=1.5" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },

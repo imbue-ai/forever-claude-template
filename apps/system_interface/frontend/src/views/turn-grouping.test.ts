@@ -983,6 +983,35 @@ describe("permission resolutions", () => {
     expect(perms[1].resolution).toBe("denied");
   });
 
+  it("resolves a workspace-phrased grant so later verdicts don't land one card late", () => {
+    // Regression: the workspace handler's notification ("... permission request
+    // was granted (<verbs>) for <target>") lacks the "permission request for"
+    // phrasing, so it used to go unrecognised -- the workspace request stayed
+    // queued and every later verdict resolved the wrong (one-older) card.
+    const events = [
+      userMsg("2026-05-01T01:00:00Z", "go"),
+      permissionMsg("2026-05-01T01:00:01Z", "perm-ws"),
+      result("2026-05-01T01:00:01Z", "perm-ws", '{"request_id":"r-ws"}'),
+      userMsg(
+        "2026-05-01T01:00:02Z",
+        "Your cross-workspace permission request was granted (minds-workspaces-read) for all workspaces.",
+        "u-res-ws",
+      ),
+      permissionMsg("2026-05-01T01:00:03Z", "perm-slack"),
+      result("2026-05-01T01:00:03Z", "perm-slack", '{"request_id":"r-slack"}'),
+      userMsg(
+        "2026-05-01T01:00:04Z",
+        "Your permission request for Slack was denied. Do not retry the blocked call.",
+        "u-res-slack",
+      ),
+    ];
+    const sections = run(events);
+    const perms = sections.flatMap((s) => s.items).filter((i) => i.kind === "permission") as PermissionItem[];
+    expect(perms).toHaveLength(2);
+    expect(perms[0].resolution).toBe("granted"); // the workspace card, from its own notification
+    expect(perms[1].resolution).toBe("denied"); // the Slack card -- not shifted onto the workspace one
+  });
+
   it("leaves a notification with no open request to render as a normal turn", () => {
     const events = [
       userMsg("2026-05-01T01:00:00Z", "go"),

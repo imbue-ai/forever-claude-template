@@ -14,9 +14,10 @@ an encrypted restic repo on cheaper object storage.
   (defined in `supervisord.conf`, started by supervisord after `bootstrap`).
   Restart policy: `autorestart=true`.
 - The repository is created (and keyed) by the minds app, not by
-  host_backup: minds runs `restic init` + `restic key add` from outside the
-  workspace and injects the resulting `restic.env`. host_backup just backs up
-  to the existing repository -- it does not probe-then-init.
+  host_backup: minds runs `restic init` from outside the workspace -- the
+  workspace's own random password is the repository's single key -- and
+  injects the resulting `restic.env`. host_backup just backs up to the
+  existing repository -- it does not probe-then-init.
 - Each tick reads two optional on-disk inputs:
   - `runtime/backup.toml`: purely *user* settings -- backup interval,
     retention, exclude patterns. Optional: when absent the service runs on
@@ -102,8 +103,9 @@ Each restic command's full stdout / stderr is captured into the matching
 
 In the minds app the whole `runtime/secrets/restic.env` is written for you
 when you pick a backup provider on the create form -- minds initializes the
-repository (`restic init` + `restic key add`) from outside the workspace and
-injects the file. To configure backups by hand instead, populate
+repository (`restic init`, keyed solely by the workspace's own random
+password) from outside the workspace and injects the file. To configure
+backups by hand instead, populate
 `runtime/secrets/restic.env` with `RESTIC_REPOSITORY` (e.g.
 `s3:https://<account>.r2.cloudflarestorage.com/<bucket>`), the backend
 credentials (e.g. R2 access keys), and a `RESTIC_PASSWORD`, and initialize

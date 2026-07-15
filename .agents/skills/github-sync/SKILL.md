@@ -155,8 +155,11 @@ enabled, three pieces work together (see `libs/github_sync/README.md`):
     # Opt-in GitHub sync (added by the github-sync skill): commits + pushes
     # runtime/ to the runtime-sync branch of the private sync repo and
     # re-verifies the repo stays private. See libs/github_sync/README.md.
+    # The oom_tag_service.py prefix sets its OOM shed-priority band (see
+    # libs/oom_priority): a runtime-state backup is shed after the UI/tunnel/
+    # terminal but before host-backup, matching what runtime-backup used to get.
     [program:github-sync]
-    command=uv run github-sync run
+    command=python3 scripts/oom_tag_service.py github-sync uv run github-sync run
     directory=/mngr/code
     autostart=true
     autorestart=true

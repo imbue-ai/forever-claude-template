@@ -43,15 +43,27 @@ writes separate, rotated, container-local logs under
 
 To add, change, or remove a service, edit `supervisord.conf` and run
 `supervisorctl reread && supervisorctl update` (and `supervisorctl restart
-<name>` to bounce one). See the `edit-services` skill for details.
+<name>` to bounce one). See the `update-service` skill, or
+`.agents/shared/references/service-processes.md`, for details.
 
 ## Deferred-install service
 
 The `deferred-install` program in `supervisord.conf` runs
 `scripts/deferred_install.sh`, which installs packages that are too heavy to
 bake into the Docker image but aren't required by any boot-time service.
-Currently it covers Playwright's Chromium browser + its apt system libraries
-(`uv run playwright install --with-deps chromium`).
+Currently it covers:
+
+- Playwright's Chromium browser + its apt system libraries
+  (`uv run playwright install --with-deps chromium`).
+
+(The publish-inspiration scan gate's two secret-scanner binaries --
+`betterleaks`, `kingfisher` -- are NOT deferred: they are baked into the
+workspace image at build time by the common `scripts/setup_system.sh` (which
+the Dockerfile RUNs and the Lima provider runs directly in the VM), which
+invokes `scripts/install_secret_scanners.sh`, the single source of truth for
+the version pins and per-arch sha256 checksums. If a binary is ever missing,
+that script is runnable by hand to install both; the scan gate aborts rather
+than running without either of them.)
 
 It is a one-shot supervisord program (`autorestart=false`, `startsecs=0`,
 `exitcodes=0`): supervisord starts it once on boot and leaves it stopped after a

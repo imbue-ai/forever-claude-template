@@ -41,7 +41,7 @@ function renderCardFor(
   const rawInput = toolCall.input_preview || "";
   const rawOutput = toolResult?.output || "";
   const rawText = rawOutput ? `${rawInput}\n\n${rawOutput}` : rawInput;
-  return renderPermissionCard(details, scopeInfo, resolution, rawText);
+  return renderPermissionCard(details, scopeInfo, resolution, rawText, toolResult !== null);
 }
 
 // A realistic input_preview: the command is JSON-encoded and may be truncated
@@ -67,6 +67,11 @@ const PERMISSION_OUTPUT = `  % Total    % Received % Xferd
 // A file-sharing request: payload carries a path and access mode instead.
 const FILE_SHARING_OUTPUT = `{"request_id":"fs-1","rationale":"write the report locally","request_type":"file-sharing","payload":{"path":"/Users/you/Documents/report","access":"WRITE"}}`;
 
+// A workspace request (acting on the user's other Minds workspaces): payload
+// carries verb names and a target workspace, neither of which the card renders
+// as details for now -- only the heading and the button.
+const WORKSPACE_OUTPUT = `{"request_id":"ws-1","rationale":"export a backup of the old workspace","request_type":"workspace","payload":{"permissions":["minds-workspaces-backups-export"],"target_workspace_id":"agent-a3b7b469ee8341779c9ede1a798c447f"}}`;
+
 describe("parsePermissionRequest", () => {
   it("parses the rich details of a successful predefined creation POST", () => {
     const result = parsePermissionRequest(makeToolCall(PERMISSION_INPUT), makeResult(PERMISSION_OUTPUT));
@@ -89,6 +94,17 @@ describe("parsePermissionRequest", () => {
       path: "/Users/you/Documents/report",
       access: "WRITE",
       scope: null,
+    });
+  });
+
+  it("parses a workspace request's id and type", () => {
+    const result = parsePermissionRequest(makeToolCall(PERMISSION_INPUT), makeResult(WORKSPACE_OUTPUT));
+    expect(result).toMatchObject({
+      requestId: "ws-1",
+      requestType: "workspace",
+      rationale: "export a backup of the old workspace",
+      scope: null,
+      path: null,
     });
   });
 
@@ -212,6 +228,63 @@ describe("renderPermissionCard", () => {
     );
     expect(textOf(title)).toBe("Permission request");
     expect(findVnode(vnode, (v) => v.tag === "button")).toBeNull();
+    const status = findVnode(
+      vnode,
+      (v) =>
+        v.tag === "div" && (v as { attrs?: { className?: string } }).attrs?.className === "permission-request-status",
+    );
+    expect(textOf(status)).toBe("Waiting for the request to register\u2026");
+  });
+
+  it("says the request couldn't be read (not 'waiting') when a result arrived but has no request id", () => {
+    const vnode = renderCardFor(makeToolCall(PERMISSION_INPUT), makeResult('{"agent_id":"a"}'));
+
+    expect(findVnode(vnode, (v) => v.tag === "button")).toBeNull();
+    const status = findVnode(
+      vnode,
+      (v) =>
+        v.tag === "div" && (v as { attrs?: { className?: string } }).attrs?.className === "permission-request-status",
+    );
+    const text = textOf(status);
+    expect(text).not.toBe("Waiting for the request to register\u2026");
+    expect(text).toContain("Couldn't read this request");
+  });
+
+  it("heads a workspace request as workspace management with a button and no detail lines", () => {
+    const vnode = renderCardFor(makeToolCall(PERMISSION_INPUT), makeResult(WORKSPACE_OUTPUT));
+
+    const title = findVnode(
+      vnode,
+      (v) =>
+        v.tag === "span" && (v as { attrs?: { className?: string } }).attrs?.className === "permission-request-title",
+    );
+    expect(textOf(title)).toBe("Permission request: Workspace management");
+
+    // No "Requesting" detail line for now: neither the verb names nor the
+    // target workspace id render on the card.
+    expect(
+      findVnode(
+        vnode,
+        (v) => v.tag === "#" && (v as { children?: unknown }).children === "minds-workspaces-backups-export",
+      ),
+    ).toBeNull();
+    expect(
+      findVnode(
+        vnode,
+        (v) => v.tag === "#" && (v as { children?: unknown }).children === "agent-a3b7b469ee8341779c9ede1a798c447f",
+      ),
+    ).toBeNull();
+
+    // The rationale still shows, and the button opens the modal by request id.
+    expect(
+      findVnode(
+        vnode,
+        (v) => v.tag === "#" && (v as { children?: unknown }).children === "export a backup of the old workspace",
+      ),
+    ).not.toBeNull();
+    const button = findVnode(vnode, (v) => v.tag === "button");
+    expect(button).not.toBeNull();
+    expect(textOf(button)).toBe("Review & respond");
   });
 
   it("shows a Granted verdict and no review button once granted", () => {

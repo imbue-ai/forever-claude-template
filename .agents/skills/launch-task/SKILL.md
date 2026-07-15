@@ -100,11 +100,15 @@ Poll with `create_worker.py await` as a background task
 (`run_in_background: true`) and continue with whatever else you were doing. It
 reads `finish_report_path` from the task file
 (`runtime/launch-task/$NAME/reports/report.md`), blocks until the worker pushes
-back, then prints the report.
+back, then prints the report. `--name $NAME` is required so the poll also
+watches the OOM shed ledger: if the worker's own agent is shed for memory
+pressure (so it will never report until revived), the poll surfaces that
+promptly and actionably (exit code 75) instead of waiting out the full timeout.
 
 ```bash
 # Run with Bash run_in_background: true
 uv run .agents/skills/launch-task/scripts/create_worker.py await \
+    --name $NAME \
     --task-file runtime/launch-task/$NAME/task.md
 ```
 

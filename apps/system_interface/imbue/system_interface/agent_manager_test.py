@@ -4,7 +4,6 @@ import json
 import queue
 import shutil
 import threading
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -17,19 +16,16 @@ from watchdog.events import FileModifiedEvent
 from watchdog.events import FileMovedEvent
 from watchdog.events import FileOpenedEvent
 
-from imbue.mngr.api.discovery_events import AgentDestroyedEvent
-from imbue.mngr.api.discovery_events import DiscoveryEventType
-from imbue.mngr.api.discovery_events import HostDestroyedEvent
-from imbue.mngr.api.discovery_events import ProviderDiscoverySnapshotEvent
-from imbue.mngr.api.discovery_events import make_agent_discovery_event
-from imbue.mngr.api.discovery_events import make_host_discovery_event
-from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
+from imbue.mngr.api.observe import make_agent_removed_event
+from imbue.mngr.api.observe import make_agent_state_event
+from imbue.mngr.api.observe import make_full_agent_state_event
+from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.primitives import AgentId as MngrAgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName as MngrAgentName
-from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.polling import poll_until
@@ -68,25 +64,38 @@ def _seed_agent(manager: AgentManager, agent_id: str) -> None:
 _PROVIDER = ProviderInstanceName("local")
 
 
-def _provider_snapshot(
-    agents: Sequence[DiscoveredAgent],
-    hosts: Sequence[DiscoveredHost] = (),
+def _agent_details(
+    name: str,
+    agent_id: MngrAgentId | None = None,
+    state: AgentLifecycleState = AgentLifecycleState.RUNNING,
+    labels: dict[str, str] | None = None,
+    work_dir: str = "/tmp/work",
+    host_id: HostId | None = None,
     provider_name: ProviderInstanceName = _PROVIDER,
-) -> ProviderDiscoverySnapshotEvent:
-    """Build a per-provider discovery snapshot with a fresh (now) discovery span.
+) -> AgentDetails:
+    """Build an ``AgentDetails`` with controllable identity, state, and location.
 
-    Each snapshot is authoritative only for ``provider_name``; a later snapshot of
-    the same provider that omits an agent drops it (mirroring the aggregator's
-    per-provider reconciliation). The span is ``now``-bounded so it never collides
-    with the deterministic timestamps used by the incremental-event helpers.
+    Mirrors what the observe stream carries: a real lifecycle ``state`` and a
+    nested ``HostDetails`` whose id/provider are what ``_build_agent_match`` reads
+    to route messages. Fields the manager never inspects are given inert defaults.
     """
-    now = datetime.now(timezone.utc)
-    return make_provider_discovery_snapshot_event(
-        provider_name=provider_name,
-        agents=agents,
-        hosts=hosts,
-        discovery_started_at=now,
-        discovery_finished_at=now,
+    return AgentDetails(
+        id=agent_id if agent_id is not None else MngrAgentId(),
+        name=MngrAgentName(name),
+        type="claude",
+        command=CommandString("claude"),
+        work_dir=Path(work_dir),
+        initial_branch=None,
+        create_time=datetime.now(timezone.utc),
+        start_on_boot=False,
+        state=state,
+        labels=labels if labels is not None else {},
+        host=HostDetails(
+            id=host_id if host_id is not None else HostId(),
+            name="test-host",
+            provider_name=provider_name,
+            state=HostState.RUNNING,
+        ),
     )
 
 
@@ -312,21 +321,14 @@ def test_stop_without_start(agent_manager: AgentManager) -> None:
     agent_manager.stop()
 
 
-def test_handle_agent_discovered(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
-    """Agent discovered events update the agent list and broadcast."""
+def test_agent_state_event_adds_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
+    """An AGENT_STATE event for a new agent updates the agent list and broadcasts."""
     q = broadcaster.register()
 
     test_agent_id = MngrAgentId()
-    agent = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=test_agent_id,
-        agent_name=MngrAgentName("discovered-agent"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {"user_created": "true"}, "work_dir": "/tmp/work"},
-    )
-    event = make_agent_discovery_event(agent)
+    agent = _agent_details("discovered-agent", agent_id=test_agent_id, labels={"user_created": "true"})
 
-    agent_manager._handle_discovery_event(event)
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
 
     agents = agent_manager.get_agents()
     assert len(agents) == 1
@@ -348,14 +350,8 @@ def test_assist_labeled_agent_auto_opens_its_tab(
 ) -> None:
     """A chat spawned by the get-help flow (carrying the ``assist`` label) auto-opens its tab."""
     q = broadcaster.register()
-    agent = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName("assist-abc123"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {"assist": "true"}, "work_dir": "/tmp/work"},
-    )
-    agent_manager._handle_discovery_event(make_agent_discovery_event(agent))
+    agent = _agent_details("assist-abc123", labels={"assist": "true"})
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
 
     messages = _drain(q)
     opens = _layout_ops(messages)
@@ -371,14 +367,8 @@ def test_assist_labeled_agent_auto_opens_its_tab(
 def test_non_assist_agent_does_not_auto_open(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
     """An ordinary discovered agent (no ``assist`` label) does not trigger an auto-open."""
     q = broadcaster.register()
-    agent = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName("plain-agent"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {"user_created": "true"}, "work_dir": "/tmp/work"},
-    )
-    agent_manager._handle_discovery_event(make_agent_discovery_event(agent))
+    agent = _agent_details("plain-agent", labels={"user_created": "true"})
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
 
     assert _layout_ops(_drain(q)) == []
 
@@ -386,30 +376,18 @@ def test_non_assist_agent_does_not_auto_open(agent_manager: AgentManager, broadc
 def test_assist_agent_rediscovery_does_not_reopen(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
-    """A re-emitted discovery delta for an already-seen assist chat does not reopen its tab."""
-    agent = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName("assist-xyz"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {"assist": "true"}, "work_dir": "/tmp/work"},
-    )
-    agent_manager._handle_discovery_event(make_agent_discovery_event(agent))
-    # Register only after the first discovery so the queue captures just the re-delivery.
+    """A re-emitted AGENT_STATE event for an already-seen assist chat does not reopen its tab."""
+    agent = _agent_details("assist-xyz", labels={"assist": "true"})
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
+    # Register only after the first event so the queue captures just the re-delivery.
     q = broadcaster.register()
-    agent_manager._handle_discovery_event(make_agent_discovery_event(agent))
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
 
     assert _layout_ops(_drain(q)) == []
 
 
-def _assist_discovered_agent(name: str) -> DiscoveredAgent:
-    return DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName(name),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {"assist": "true"}, "work_dir": "/tmp/work"},
-    )
+def _assist_agent_details(name: str) -> AgentDetails:
+    return _agent_details(name, labels={"assist": "true"})
 
 
 def test_snapshot_auto_opens_a_newly_appeared_assist_chat(
@@ -418,8 +396,8 @@ def test_snapshot_auto_opens_a_newly_appeared_assist_chat(
     """A freshly-created chat usually surfaces in a full snapshot (not a per-agent delta),
     so the snapshot path must auto-open assist chats too."""
     q = broadcaster.register()
-    agent = _assist_discovered_agent("assist-snap")
-    agent_manager._handle_discovery_event(_provider_snapshot([agent]))
+    agent = _assist_agent_details("assist-snap")
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
 
     messages = _drain(q)
     opens = _layout_ops(messages)
@@ -435,11 +413,11 @@ def test_snapshot_auto_opens_a_newly_appeared_assist_chat(
 def test_snapshot_does_not_reopen_assist_chat_on_later_snapshots(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
-    agent = _assist_discovered_agent("assist-snap2")
-    agent_manager._handle_discovery_event(_provider_snapshot([agent]))
+    agent = _assist_agent_details("assist-snap2")
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
     # Register after the first snapshot so the queue captures only the second.
     q = broadcaster.register()
-    agent_manager._handle_discovery_event(_provider_snapshot([agent]))
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
 
     assert _layout_ops(_drain(q)) == []
 
@@ -449,36 +427,28 @@ def test_assist_chat_present_at_startup_is_not_auto_opened(
 ) -> None:
     """Assist chats seeded as already-handled (what ``_initial_discover`` does for chats that
     exist at startup) are not auto-opened, so a restart restores the saved layout."""
-    agent = _assist_discovered_agent("assist-existing")
+    agent = _assist_agent_details("assist-existing")
     with agent_manager._lock:
-        agent_manager._auto_opened_assist_ids.add(str(agent.agent_id))
+        agent_manager._auto_opened_assist_ids.add(str(agent.id))
     q = broadcaster.register()
-    agent_manager._handle_discovery_event(_provider_snapshot([agent]))
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
 
     assert _layout_ops(_drain(q)) == []
 
 
-def test_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
-    """Destroying an agent removes it from the tracked list and broadcasts."""
+def test_agent_removed_event_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
+    """An AGENT_REMOVED event removes the agent from the tracked list and broadcasts."""
     test_agent_id = MngrAgentId()
     str_id = str(test_agent_id)
     q = broadcaster.register()
 
-    agent = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=test_agent_id,
-        agent_name=MngrAgentName("doomed"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": None},
-    )
-    snapshot_with_agent = _provider_snapshot([agent])
-    agent_manager._handle_discovery_event(snapshot_with_agent)
+    agent = _agent_details("doomed", agent_id=test_agent_id)
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
     assert len(agent_manager.get_agents()) == 1
 
     q.get_nowait()
 
-    snapshot_without_agent = _provider_snapshot([])
-    agent_manager._handle_discovery_event(snapshot_without_agent)
+    agent_manager._handle_observe_event(make_agent_removed_event(agent.id, agent.name))
 
     agents = agent_manager.get_agents()
     assert len(agents) == 0
@@ -490,29 +460,15 @@ def test_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster:
     assert str_id not in [a["id"] for a in msg["agents"]]
 
 
-def _discovered_agent(
-    name: str,
-    agent_id: MngrAgentId | None = None,
-    host_id: HostId | None = None,
-) -> DiscoveredAgent:
-    return DiscoveredAgent(
-        host_id=host_id if host_id is not None else HostId(),
-        agent_id=agent_id if agent_id is not None else MngrAgentId(),
-        agent_name=MngrAgentName(name),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": None},
-    )
-
-
-def _snapshot_with_agent(name: str) -> tuple[MngrAgentId, HostId, ProviderDiscoverySnapshotEvent]:
-    agent = _discovered_agent(name)
-    return agent.agent_id, agent.host_id, _provider_snapshot([agent])
+def _full_snapshot_with_agent(name: str) -> tuple[MngrAgentId, HostId, AgentDetails]:
+    agent = _agent_details(name)
+    return agent.id, agent.host.id, agent
 
 
 def test_full_snapshot_populates_agent_locations(agent_manager: AgentManager) -> None:
     """A snapshot records each agent's routing location (id/host/provider) so messaging skips discovery."""
-    agent_id, host_id, snapshot = _snapshot_with_agent("locatable")
-    agent_manager._handle_discovery_event(snapshot)
+    agent_id, host_id, agent = _full_snapshot_with_agent("locatable")
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
 
     matches = agent_manager.get_agent_matches_by_id(str(agent_id))
     assert len(matches) == 1
@@ -527,23 +483,23 @@ def test_full_snapshot_populates_agent_locations(agent_manager: AgentManager) ->
 
 def test_agent_location_dropped_when_absent_from_snapshot(agent_manager: AgentManager) -> None:
     """An agent missing from a later snapshot loses its cached location."""
-    agent_id, _host_id, snapshot = _snapshot_with_agent("ephemeral")
-    agent_manager._handle_discovery_event(snapshot)
+    agent_id, _host_id, agent = _full_snapshot_with_agent("ephemeral")
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
     assert len(agent_manager.get_agent_matches_by_id(str(agent_id))) == 1
 
-    agent_manager._handle_discovery_event(_provider_snapshot([]))
+    agent_manager._handle_observe_event(make_full_agent_state_event([]))
     assert agent_manager.get_agent_matches_by_id(str(agent_id)) == []
 
 
 def test_get_agent_matches_by_id_disambiguates_shared_name(agent_manager: AgentManager) -> None:
     """Two agents sharing a name on different hosts are each retrievable by their own id."""
     host_a, host_b = HostId(), HostId()
-    agent_a = _discovered_agent("twin", host_id=host_a)
-    agent_b = _discovered_agent("twin", host_id=host_b)
-    agent_manager._handle_discovery_event(_provider_snapshot([agent_a, agent_b]))
+    agent_a = _agent_details("twin", host_id=host_a)
+    agent_b = _agent_details("twin", host_id=host_b)
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent_a, agent_b]))
 
-    matches_a = agent_manager.get_agent_matches_by_id(str(agent_a.agent_id))
-    matches_b = agent_manager.get_agent_matches_by_id(str(agent_b.agent_id))
+    matches_a = agent_manager.get_agent_matches_by_id(str(agent_a.id))
+    matches_b = agent_manager.get_agent_matches_by_id(str(agent_b.id))
     assert len(matches_a) == 1 and str(matches_a[0].host_id) == str(host_a)
     assert len(matches_b) == 1 and str(matches_b[0].host_id) == str(host_b)
 
@@ -552,13 +508,13 @@ def test_agent_location_updates_when_host_changes(agent_manager: AgentManager) -
     """A later snapshot relocating an agent (new host_id) replaces its cached location."""
     agent_id = MngrAgentId()
     host_a, host_b = HostId(), HostId()
-    agent_manager._handle_discovery_event(
-        _provider_snapshot([_discovered_agent("mover", agent_id=agent_id, host_id=host_a)])
+    agent_manager._handle_observe_event(
+        make_full_agent_state_event([_agent_details("mover", agent_id=agent_id, host_id=host_a)])
     )
     assert str(agent_manager.get_agent_matches_by_id(str(agent_id))[0].host_id) == str(host_a)
 
-    agent_manager._handle_discovery_event(
-        _provider_snapshot([_discovered_agent("mover", agent_id=agent_id, host_id=host_b)])
+    agent_manager._handle_observe_event(
+        make_full_agent_state_event([_agent_details("mover", agent_id=agent_id, host_id=host_b)])
     )
     matches = agent_manager.get_agent_matches_by_id(str(agent_id))
     assert len(matches) == 1
@@ -567,8 +523,8 @@ def test_agent_location_updates_when_host_changes(agent_manager: AgentManager) -
 
 def test_remove_agent_drops_location(agent_manager: AgentManager) -> None:
     """remove_agent (the API destroy path) drops the cached location too."""
-    agent_id, _host_id, snapshot = _snapshot_with_agent("doomed")
-    agent_manager._handle_discovery_event(snapshot)
+    agent_id, _host_id, agent = _full_snapshot_with_agent("doomed")
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
     assert len(agent_manager.get_agent_matches_by_id(str(agent_id))) == 1
 
     agent_manager.remove_agent(str(agent_id))
@@ -590,17 +546,17 @@ def test_get_agent_info_by_id_resolves_from_state(agent_manager: AgentManager, t
     assert agent_manager.get_agent_info_by_id("missing") is None
 
 
-def test_discovered_agent_is_located_immediately(agent_manager: AgentManager) -> None:
-    """A discovered-agent delta records the routing location (id/host/provider) at once,
+def test_agent_state_event_locates_agent_immediately(agent_manager: AgentManager) -> None:
+    """An AGENT_STATE event records the routing location (id/host/provider) at once,
     so the first message to a just-created agent skips discovery instead of waiting for
     the next full snapshot."""
-    fresh = _discovered_agent("freshly-created")
-    agent_manager._handle_discovery_event(make_agent_discovery_event(fresh))
+    fresh = _agent_details("freshly-created")
+    agent_manager._handle_observe_event(make_agent_state_event(fresh))
 
-    matches = agent_manager.get_agent_matches_by_id(str(fresh.agent_id))
+    matches = agent_manager.get_agent_matches_by_id(str(fresh.id))
     assert len(matches) == 1
     assert str(matches[0].agent_name) == "freshly-created"
-    assert str(matches[0].host_id) == str(fresh.host_id)
+    assert str(matches[0].host_id) == str(fresh.host.id)
     assert str(matches[0].provider_name) == "local"
 
 
@@ -646,15 +602,22 @@ def test_read_applications_handles_invalid_toml(agent_manager: AgentManager, tmp
     assert apps == []
 
 
-def test_handle_discovery_event_ignores_non_agent_events(agent_manager: AgentManager) -> None:
-    """A discovery event that describes no agents (e.g. a host event) leaves the agent list empty."""
-    host = DiscoveredHost(
-        host_id=HostId(),
-        host_name=HostName("a-host"),
-        provider_name=ProviderInstanceName("local"),
-        host_state=HostState.RUNNING,
+def test_unknown_observe_event_type_is_ignored(agent_manager: AgentManager) -> None:
+    """An observe line whose ``type`` is not one of the three agents-stream events is ignored.
+
+    ``parse_observe_event_line`` returns None for unrecognized (forward-compatible)
+    types, so the output-line handler must swallow it without raising or mutating
+    the tracked agent set.
+    """
+    line = json.dumps(
+        {
+            "type": "AGENT_STATE_CHANGE",
+            "timestamp": "2026-01-01T00:00:00.000000000Z",
+            "event_id": "test-event-id",
+            "source": "mngr/agent_states",
+        }
     )
-    agent_manager._handle_discovery_event(make_host_discovery_event(host))
+    agent_manager._handle_observe_output_line(line, True)
     assert agent_manager.get_agents() == []
 
 
@@ -766,27 +729,15 @@ def test_refresh_agents_does_not_crash(agent_manager: AgentManager, broadcaster:
     assert isinstance(agent_manager.get_agents(), list)
 
 
-def test_provider_snapshot_replaces_agent_set(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
-    """A per-provider snapshot replaces that provider's entire agent set."""
+def test_full_snapshot_replaces_agent_set(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
+    """A full state snapshot replaces the entire tracked agent set."""
     q = broadcaster.register()
 
-    agent1 = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName("agent-one"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": "/tmp/w1"},
-    )
-    agent2 = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=MngrAgentId(),
-        agent_name=MngrAgentName("agent-two"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": "/tmp/w2"},
-    )
-    event = _provider_snapshot([agent1, agent2])
+    agent1 = _agent_details("agent-one", work_dir="/tmp/w1")
+    agent2 = _agent_details("agent-two", work_dir="/tmp/w2")
+    event = make_full_agent_state_event([agent1, agent2])
 
-    agent_manager._handle_discovery_event(event)
+    agent_manager._handle_observe_event(event)
 
     agents = agent_manager.get_agents()
     assert len(agents) == 2
@@ -847,20 +798,14 @@ def test_handle_observe_output_line_raises_on_invalid_json(agent_manager: AgentM
     assert agent_manager.get_agents() == []
 
 
-def test_handle_observe_output_line_dispatches_agent_discovered(
+def test_handle_observe_output_line_dispatches_agent_state(
     agent_manager: AgentManager,
 ) -> None:
-    """Valid agent-discovered JSONL lines are parsed and dispatched."""
+    """Valid AGENT_STATE JSONL lines are parsed and dispatched."""
     test_agent_id = MngrAgentId()
-    agent = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=test_agent_id,
-        agent_name=MngrAgentName("obs-agent"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": None},
-    )
-    event = make_agent_discovery_event(agent)
-    line = event.model_dump_json()
+    agent = _agent_details("obs-agent", agent_id=test_agent_id)
+    event = make_agent_state_event(agent)
+    line = json.dumps(event.model_dump(mode="json"))
 
     agent_manager._handle_observe_output_line(line, True)
 
@@ -869,129 +814,65 @@ def test_handle_observe_output_line_dispatches_agent_discovered(
     assert agents[0].id == str(test_agent_id)
 
 
-def test_handle_discovery_event_dispatches_provider_snapshot(
+def test_handle_observe_event_dispatches_full_state(
     agent_manager: AgentManager,
 ) -> None:
-    """ProviderDiscoverySnapshotEvent events are folded into the aggregator and surface agents."""
+    """AGENTS_FULL_STATE events surface every agent they carry."""
     test_agent_id = MngrAgentId()
-    agent = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=test_agent_id,
-        agent_name=MngrAgentName("snap-agent"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": None},
-    )
-    event = _provider_snapshot([agent])
-    agent_manager._handle_discovery_event(event)
+    agent = _agent_details("snap-agent", agent_id=test_agent_id)
+    event = make_full_agent_state_event([agent])
+    agent_manager._handle_observe_event(event)
 
     agents = agent_manager.get_agents()
     assert len(agents) == 1
     assert agents[0].id == str(test_agent_id)
 
 
-def test_handle_discovery_event_dispatches_agent_discovered(
+def test_handle_observe_event_dispatches_agent_state(
     agent_manager: AgentManager,
 ) -> None:
-    """AGENT_DISCOVERED events folded through the aggregator surface the agent."""
+    """AGENT_STATE events upsert the single agent they carry."""
     test_agent_id = MngrAgentId()
-    agent = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=test_agent_id,
-        agent_name=MngrAgentName("disc-agent"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": None},
-    )
-    event = make_agent_discovery_event(agent)
-    agent_manager._handle_discovery_event(event)
+    agent = _agent_details("disc-agent", agent_id=test_agent_id)
+    event = make_agent_state_event(agent)
+    agent_manager._handle_observe_event(event)
 
     agents = agent_manager.get_agents()
     assert len(agents) == 1
     assert agents[0].id == str(test_agent_id)
 
 
-def _make_agent_destroyed_event(agent_id: MngrAgentId, host_id: HostId) -> AgentDestroyedEvent:
-    """Build an AgentDestroyedEvent for testing."""
-    return AgentDestroyedEvent.model_validate(
-        {
-            "timestamp": "2026-01-01T00:00:00.000000000Z",
-            "type": DiscoveryEventType.AGENT_DESTROYED,
-            "event_id": "test-event-id",
-            "source": "mngr/discovery",
-            "agent_id": str(agent_id),
-            "host_id": str(host_id),
-        }
-    )
-
-
-def _make_host_destroyed_event(host_id: HostId, agent_ids: list[MngrAgentId]) -> HostDestroyedEvent:
-    """Build a HostDestroyedEvent for testing."""
-    return HostDestroyedEvent.model_validate(
-        {
-            "timestamp": "2026-01-01T00:00:00.000000000Z",
-            "type": DiscoveryEventType.HOST_DESTROYED,
-            "event_id": "test-event-id",
-            "source": "mngr/discovery",
-            "host_id": str(host_id),
-            "agent_ids": [str(a) for a in agent_ids],
-        }
-    )
-
-
-def test_handle_agent_destroyed_removes_agent(agent_manager: AgentManager, broadcaster: WebSocketBroadcaster) -> None:
-    """An AGENT_DESTROYED event removes the agent and broadcasts the update."""
-    test_agent_id = MngrAgentId()
-    host_id = HostId()
-
-    agent = _discovered_agent("to-destroy", agent_id=test_agent_id, host_id=host_id)
-    agent_manager._handle_discovery_event(make_agent_discovery_event(agent))
-    assert len(agent_manager.get_agents()) == 1
-
-    # Register after the discover so the queue captures only the destroy broadcast.
-    q = broadcaster.register()
-    event = _make_agent_destroyed_event(test_agent_id, host_id)
-    agent_manager._handle_discovery_event(event)
-
-    assert len(agent_manager.get_agents()) == 0
-    assert agent_manager.get_agent_matches_by_id(str(test_agent_id)) == []
-    raw = q.get_nowait()
-    assert raw is not None
-    msg = json.loads(raw)
-    assert msg["type"] == "agents_updated"
-
-
-def test_handle_discovery_event_dispatches_agent_destroyed(
+def test_handle_observe_event_dispatches_agent_removed(
     agent_manager: AgentManager,
 ) -> None:
-    """AGENT_DESTROYED events folded through the aggregator drop the agent."""
+    """AGENT_REMOVED events drop the referenced agent."""
     test_agent_id = MngrAgentId()
-    host_id = HostId()
-    agent = _discovered_agent("to-destroy", agent_id=test_agent_id, host_id=host_id)
-    agent_manager._handle_discovery_event(make_agent_discovery_event(agent))
+    agent = _agent_details("to-destroy", agent_id=test_agent_id)
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
     assert len(agent_manager.get_agents()) == 1
 
-    event = _make_agent_destroyed_event(test_agent_id, host_id)
-    agent_manager._handle_discovery_event(event)
+    agent_manager._handle_observe_event(make_agent_removed_event(agent.id, agent.name))
     assert len(agent_manager.get_agents()) == 0
 
 
-def test_handle_host_destroyed_removes_all_agents(
+def test_full_snapshot_dropping_agents_removes_them(
     agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
 ) -> None:
-    """A HOST_DESTROYED event removes all agents on the host and broadcasts."""
+    """A later full snapshot that omits previously-tracked agents drops them and broadcasts.
+
+    There is no host event on the observe stream, so the way a whole host's worth
+    of agents disappears is a rebuild snapshot that no longer lists them.
+    """
     agent_id_1 = MngrAgentId()
     agent_id_2 = MngrAgentId()
-    host_id = HostId()
 
-    agents = [
-        _discovered_agent(f"agent-{str(aid)[:8]}", agent_id=aid, host_id=host_id) for aid in (agent_id_1, agent_id_2)
-    ]
-    agent_manager._handle_discovery_event(_provider_snapshot(agents))
+    agents = [_agent_details(f"agent-{str(aid)[:8]}", agent_id=aid) for aid in (agent_id_1, agent_id_2)]
+    agent_manager._handle_observe_event(make_full_agent_state_event(agents))
     assert len(agent_manager.get_agents()) == 2
 
-    # Register after seeding so the queue captures only the host-destroyed broadcast.
+    # Register after seeding so the queue captures only the drop broadcast.
     q = broadcaster.register()
-    event = _make_host_destroyed_event(host_id, [agent_id_1, agent_id_2])
-    agent_manager._handle_discovery_event(event)
+    agent_manager._handle_observe_event(make_full_agent_state_event([]))
 
     assert len(agent_manager.get_agents()) == 0
     assert agent_manager.get_agent_matches_by_id(str(agent_id_1)) == []
@@ -1002,18 +883,16 @@ def test_handle_host_destroyed_removes_all_agents(
     assert msg["type"] == "agents_updated"
 
 
-def test_handle_discovery_event_dispatches_host_destroyed(
+def test_full_snapshot_omitting_agent_drops_it(
     agent_manager: AgentManager,
 ) -> None:
-    """HOST_DESTROYED events folded through the aggregator drop the host's agents."""
+    """A rebuild snapshot that no longer lists a tracked agent drops it from the set."""
     agent_id = MngrAgentId()
-    host_id = HostId()
-    agent = _discovered_agent("host-agent", agent_id=agent_id, host_id=host_id)
-    agent_manager._handle_discovery_event(_provider_snapshot([agent]))
+    agent = _agent_details("host-agent", agent_id=agent_id)
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
     assert len(agent_manager.get_agents()) == 1
 
-    event = _make_host_destroyed_event(host_id, [agent_id])
-    agent_manager._handle_discovery_event(event)
+    agent_manager._handle_observe_event(make_full_agent_state_event([]))
     assert len(agent_manager.get_agents()) == 0
 
 
@@ -1022,7 +901,7 @@ def test_build_observe_command_honors_injected_binary(broadcaster: WebSocketBroa
     manager = AgentManager.build(broadcaster, mngr_binary="/path/to/custom-mngr")
     try:
         cmd = manager._build_observe_command()
-        assert cmd[0] == "/path/to/custom-mngr"
+        assert cmd == ["/path/to/custom-mngr", "observe", "--stream-events"]
     finally:
         manager.stop()
 
@@ -1065,14 +944,33 @@ def test_chat_create_argv_accepted_by_live_cli() -> None:
         primary_labels={"workspace": "ws", "project": "proj"},
     )
     assert_mngr_argv_valid(argv)
+    # The chat carries user_created so the OOM launch wrapper puts it in the
+    # dynamic chat band rather than the least-protected worker/unclassified band.
+    assert "user_created=true" in argv
+
+
+def test_get_chat_agent_ids_excludes_workers_and_primary(broadcaster: WebSocketBroadcaster) -> None:
+    """Only chats are OOM-managed: workers and the primary keep their launch bands."""
+    manager = AgentManager.build(broadcaster)
+    try:
+        with manager._lock:
+            for agent_id, labels in (
+                ("chat", {"user_created": "true"}),
+                ("worker", {"agent_created": "true"}),
+                ("primary", {"is_primary": "true"}),
+            ):
+                manager._agents[agent_id] = AgentStateItem(
+                    id=agent_id, name=agent_id, state="RUNNING", labels=labels, work_dir=None
+                )
+        assert manager.get_chat_agent_ids() == ["chat"]
+    finally:
+        manager.stop()
 
 
 def test_observe_argv_accepted_by_live_cli() -> None:
     argv = _build_observe_command_argv("mngr")
     assert_mngr_argv_valid(argv)
-    # Discovery-only must not pass --events-dir: mngr rejects the combination,
-    # and the discovery log always lives under the default host dir.
-    assert "--events-dir" not in argv
+    assert "--stream-events" in argv
 
 
 def test_resolve_observe_cwd_prefers_existing_work_dir(
@@ -1490,22 +1388,21 @@ def test_stop_activity_tracking_clears_caches(agent_manager: AgentManager, tmp_p
         assert "agent-1" not in agent_manager._last_event_timestamp_by_agent
 
 
-def test_handle_agent_destroyed_stops_activity_tracking(agent_manager: AgentManager, tmp_path: Path) -> None:
-    """An AGENT_DESTROYED event should clear the activity tracking and caches."""
+def test_agent_removed_event_fires_removal_side_effects(agent_manager: AgentManager, tmp_path: Path) -> None:
+    """An AGENT_REMOVED event drops the agent and clears its activity tracking and caches."""
     test_agent_id = MngrAgentId()
-    host_id = HostId()
     str_id = str(test_agent_id)
 
     state_dir = tmp_path / "agents" / str_id
     state_dir.mkdir(parents=True)
-    agent = _discovered_agent("to-destroy", agent_id=test_agent_id, host_id=host_id)
-    agent_manager._handle_discovery_event(make_agent_discovery_event(agent))
+    agent = _agent_details("to-destroy", agent_id=test_agent_id)
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
     with agent_manager._lock:
         assert str_id in agent_manager._activity_tracked_agents
 
-    event = _make_agent_destroyed_event(test_agent_id, host_id)
-    agent_manager._handle_discovery_event(event)
+    agent_manager._handle_observe_event(make_agent_removed_event(agent.id, agent.name))
 
+    assert agent_manager.get_agent_by_id(str_id) is None
     with agent_manager._lock:
         assert str_id not in agent_manager._activity_tracked_agents
         assert str_id not in agent_manager._activity_state_by_agent
@@ -1517,14 +1414,14 @@ def test_provider_snapshot_preserves_activity_state_for_tracked_agent(
     """A per-provider snapshot must not wipe the activity_state of agents that
     are already being tracked for activity.
 
-    Regression test: ``_handle_discovery_event`` rebuilds ``_agents`` wholesale
-    from the aggregator's raw discovery payload (which has no ``activity_state``
-    field) on every event. Only ids in the membership delta's
-    ``added_agent_ids`` get an ``_ensure_activity_tracking`` recompute, so a
-    snapshot that merely re-lists an already-known agent reports it in neither
-    add nor remove. Without re-applying the cached state, the broadcast that
-    follows would emit ``activity_state=None`` for every previously-tracked
-    agent and the chat panel indicator would briefly disappear.
+    Regression test: ``_handle_observe_event`` rebuilds ``_agents`` wholesale
+    from the raw observe payload (which has no ``activity_state`` field) on every
+    event. Only ids in the membership delta's ``added`` set get an
+    ``_ensure_activity_tracking`` recompute, so a snapshot that merely re-lists an
+    already-known agent reports it in neither add nor remove. Without re-applying
+    the cached state, the broadcast that follows would emit ``activity_state=None``
+    for every previously-tracked agent and the chat panel indicator would briefly
+    disappear.
     """
     test_agent_id = MngrAgentId()
     str_id = str(test_agent_id)
@@ -1534,14 +1431,8 @@ def test_provider_snapshot_preserves_activity_state_for_tracked_agent(
 
     # First, simulate the agent already being tracked with a live watcher
     # whose transcript signals THINKING (a user_message with no reply).
-    discovered = DiscoveredAgent(
-        host_id=HostId(),
-        agent_id=test_agent_id,
-        agent_name=MngrAgentName("snapshot-agent"),
-        provider_name=ProviderInstanceName("local"),
-        certified_data={"labels": {}, "work_dir": str(tmp_path / "work")},
-    )
-    agent_manager._handle_discovery_event(make_agent_discovery_event(discovered))
+    agent = _agent_details("snapshot-agent", agent_id=test_agent_id, work_dir=str(tmp_path / "work"))
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
     agent_manager.update_session_events(str_id, [{"type": "user_message", "content": "go"}])
     with agent_manager._lock:
         assert agent_manager._activity_state_by_agent[str_id] == ActivityState.THINKING
@@ -1551,8 +1442,8 @@ def test_provider_snapshot_preserves_activity_state_for_tracked_agent(
     # we read.
     listener = broadcaster.register()
     try:
-        snapshot_event = _provider_snapshot([discovered])
-        agent_manager._handle_discovery_event(snapshot_event)
+        snapshot_event = make_full_agent_state_event([agent])
+        agent_manager._handle_observe_event(snapshot_event)
 
         latest = _last_agents_updated(_drain(listener))
         assert latest is not None
@@ -1566,3 +1457,71 @@ def test_provider_snapshot_preserves_activity_state_for_tracked_agent(
             assert agent_manager._agents[str_id].activity_state == ActivityState.THINKING.value
     finally:
         agent_manager.stop()
+
+
+def test_agent_state_event_stopped_flips_lifecycle_and_activity_to_idle(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster, tmp_path: Path
+) -> None:
+    """A STOPPED AGENT_STATE event for a tracked, thinking agent broadcasts state=STOPPED
+    and re-gates its activity indicator to IDLE.
+
+    The observe stream now carries each agent's real lifecycle state, so an agent
+    whose process dies on its own arrives as STOPPED. Because STOPPED is not in
+    ``RUNNING_LIFECYCLE_STATES``, the recompute pass must settle its activity to
+    IDLE even though the transcript tail still reads THINKING.
+    """
+    test_agent_id = MngrAgentId()
+    str_id = str(test_agent_id)
+
+    state_dir = tmp_path / "agents" / str_id
+    state_dir.mkdir(parents=True)
+
+    running = _agent_details("dying-agent", agent_id=test_agent_id, state=AgentLifecycleState.RUNNING)
+    agent_manager._handle_observe_event(make_agent_state_event(running))
+    # A pending user_message with no reply pins the transcript-derived state at THINKING.
+    agent_manager.update_session_events(str_id, [{"type": "user_message", "content": "go"}])
+    with agent_manager._lock:
+        assert agent_manager._activity_state_by_agent[str_id] == ActivityState.THINKING
+
+    listener = broadcaster.register()
+    try:
+        stopped = _agent_details("dying-agent", agent_id=test_agent_id, state=AgentLifecycleState.STOPPED)
+        agent_manager._handle_observe_event(make_agent_state_event(stopped))
+
+        latest = _last_agents_updated(_drain(listener))
+        assert latest is not None
+        agents = latest["agents"]
+        assert isinstance(agents, list)
+        assert agents[0]["id"] == str_id
+        assert agents[0]["state"] == AgentLifecycleState.STOPPED.value
+        assert agents[0]["activity_state"] == ActivityState.IDLE.value
+
+        with agent_manager._lock:
+            assert agent_manager._agents[str_id].state == AgentLifecycleState.STOPPED.value
+            assert agent_manager._activity_state_by_agent[str_id] == ActivityState.IDLE
+    finally:
+        agent_manager.stop()
+
+
+def test_full_snapshot_rebuilds_agent_set_and_broadcasts(
+    agent_manager: AgentManager, broadcaster: WebSocketBroadcaster
+) -> None:
+    """A full snapshot rebuilds the tracked set: new agents appear, absent ones are dropped,
+    and a single agents_updated broadcast reflects the rebuilt set."""
+    first = _agent_details("first-agent")
+    agent_manager._handle_observe_event(make_full_agent_state_event([first]))
+    assert {a.id for a in agent_manager.get_agents()} == {str(first.id)}
+
+    q = broadcaster.register()
+    second = _agent_details("second-agent")
+    agent_manager._handle_observe_event(make_full_agent_state_event([second]))
+
+    tracked_ids = {a.id for a in agent_manager.get_agents()}
+    assert tracked_ids == {str(second.id)}
+    assert str(first.id) not in tracked_ids
+
+    raw = q.get_nowait()
+    assert raw is not None
+    msg = json.loads(raw)
+    assert msg["type"] == "agents_updated"
+    assert {a["id"] for a in msg["agents"]} == {str(second.id)}

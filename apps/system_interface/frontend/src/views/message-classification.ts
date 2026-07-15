@@ -113,21 +113,35 @@ export type PermissionResolution = "granted" | "denied" | "error";
  *  read here.
  *
  *  Recognised forms (anchored to the start so a normal user prompt that merely
- *  quotes one of these isn't misread):
- *   - "Your permission request for <service> was granted ..." -> granted
- *   - "Your permission request for <service> was denied ..." -> denied
- *   - "Your <access> file-sharing permission request for '<path>' was granted/denied ..."
+ *  quotes one of these isn't misread), matching the messages the latchkey
+ *  handlers in mngr actually inject (see
+ *  apps/minds/imbue/minds/desktop_client/latchkey/handlers/ in the mngr repo):
+ *   - predefined: "Your permission request for <service> was granted/denied ..."
+ *   - file-sharing: "Your <access> file-sharing permission request for '<path>'
+ *      was granted/denied ..."
+ *   - workspace: "Your cross-workspace permission request was granted (<verbs>)
+ *      for <target>." / "... was denied."
+ *   - accounts: "Your request to list this device's signed-in accounts was
+ *      granted/denied."
  *   - "Your permission request for <service> could not be completed because the
  *      user's sign-in flow did not finish ..." -> error (the request didn't
- *      complete; it is not a user decision). */
+ *      complete; it is not a user decision).
+ *
+ *  The patterns require only "Your ... request ... was granted/denied" (not
+ *  "permission request for"), because the exact phrasing differs per request
+ *  type -- an unmatched resolution is worse than a loose match here: the
+ *  request it should have resolved stays queued forever and every later
+ *  verdict then lands on the wrong (one-older) card. Misreading a genuine
+ *  user prompt stays unlikely: the pattern is anchored to the start and only
+ *  consulted while a permission request is actually awaiting a decision. */
 export function parsePermissionResolution(content: string): PermissionResolution | null {
-  if (/^Your\b.*\bpermission request for\b.*\bwas granted\b/.test(content)) {
+  if (/^Your\b.*\brequest\b.*\bwas granted\b/.test(content)) {
     return "granted";
   }
-  if (/^Your\b.*\bpermission request for\b.*\bwas denied\b/.test(content)) {
+  if (/^Your\b.*\brequest\b.*\bwas denied\b/.test(content)) {
     return "denied";
   }
-  if (/^Your\b.*\bpermission request for\b.*\bcould not be completed\b/.test(content)) {
+  if (/^Your\b.*\brequest\b.*\bcould not be completed\b/.test(content)) {
     return "error";
   }
   return null;

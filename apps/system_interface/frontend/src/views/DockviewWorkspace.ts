@@ -22,7 +22,17 @@ import { CreateBrowserModal } from "./CreateBrowserModal";
 import { DestroyConfirmDialog } from "./DestroyConfirmDialog";
 import { LayoutDialog, type LayoutDialogMode } from "./LayoutDialog";
 import { ShareModal } from "./ShareModal";
+import { effectiveLifecycleState, livenessCategoryForState } from "./agentLiveness";
+import { attachHoverTooltip } from "./hoverTooltip";
+import {
+  addActivityOverlayListener,
+  getEffectiveActivityState,
+  removeActivityOverlayListener,
+} from "../models/PendingMessages";
 import { reloadInterface } from "../reload";
+import { reportActivity } from "../models/activityReporter";
+import { icon } from "./icons";
+import type { IconName } from "./icons";
 import { apiUrl, getPrimaryAgentId } from "../base-path";
 import {
   addAgentsUpdatedListener,
@@ -37,6 +47,7 @@ import {
   getApplications,
   getProtoAgents,
   removeAgentLocally,
+  removeAgentsUpdatedListener,
   reportClientState,
   type AgentsUpdatedListener,
   type LayoutOpEvent,
@@ -73,15 +84,6 @@ const AUTOSAVE_DEBOUNCE_MS = 1500;
 // params from its id alone when the bookkeeping entry is missing.
 const CHAT_PANEL_ID_PREFIX = "chat-";
 const TERMINAL_PANEL_ID_PREFIX = "terminal-session-";
-
-// SVG path constants for tab action icons
-const SVG_CLOSE = '<line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/>';
-const SVG_TRASH =
-  '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>';
-const SVG_SHARE =
-  '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>';
-const SVG_REFRESH =
-  '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>';
 
 // Every non-system_interface service is reached at /service/<name>/ on the
 // same origin as the dockview UI itself. The system_interface's service
@@ -275,6 +277,9 @@ function createMithrilRenderer(
         // visibility -- in particular so ChatPanel restores its scroll position
         // on the first redraw after the tab is shown again.
         m.redraw();
+        // A tab switch changes which chat is visible; report so the OOM
+        // prioritizer re-scores (a visible chat is more protected).
+        reportChatTabActivity();
       });
       m.mount(element, { view: () => m(component, { ...attrs, isVisible: panelVisible }) });
     },
@@ -288,20 +293,17 @@ function createMithrilRenderer(
   };
 }
 
-function makeSvgIcon(pathContent: string, viewBox: string = "0 0 24 24"): string {
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${pathContent}</svg>`;
-}
-
 function createTabActionButton(
   title: string,
-  svgPath: string,
+  iconName: IconName,
   onClick: (ev: MouseEvent) => void,
   className: string = "",
 ): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.className = `dv-custom-tab-action ${className}`.trim();
   btn.title = title;
-  btn.innerHTML = makeSvgIcon(svgPath);
+  // No explicit size: `.dv-custom-tab-action svg` sizes these to 12px in CSS.
+  btn.innerHTML = icon(iconName);
   btn.addEventListener("pointerdown", (ev) => ev.preventDefault());
   btn.addEventListener("click", (ev) => {
     ev.preventDefault();
@@ -368,13 +370,13 @@ function createCustomTab(options: { id: string; name: string }): {
         if (pp?.serviceName && pp.serviceName !== "browser") {
           const serviceName = pp.serviceName;
           actions.appendChild(
-            createTabActionButton("Refresh", SVG_REFRESH, () => {
+            createTabActionButton("Refresh", "refresh", () => {
               reloadIframesForService(serviceName);
             }),
           );
         }
         actions.appendChild(
-          createTabActionButton("Share", SVG_SHARE, () => {
+          createTabActionButton("Share", "share", () => {
             shareServiceName = shareName;
             showShareModal = true;
             m.redraw();
@@ -388,9 +390,56 @@ function createCustomTab(options: { id: string; name: string }): {
         const primaryAgentId = getPrimaryAgentId();
         const isPrimary = chatAgentId === primaryAgentId;
 
+        // Per-agent liveness dot, to the left of the title. Distinct from the
+        // chat's activity indicator: this tracks the agent's mngr lifecycle
+        // state -- green while its claude process is working (RUNNING), yellow
+        // while it is idle and waiting on the user (WAITING), grey while it is
+        // dormant (DONE/STOPPED/etc.; revives on the next message). Hovering
+        // shows the exact lifecycle state via a body-level tooltip (a native
+        // ``title`` is suppressed on dockview's draggable tabs -- see
+        // ``attachHoverTooltip``). Hidden until the agent's state is known.
+        //
+        // The lifecycle RUNNING/WAITING split comes only from the backend's
+        // lifecycle poll and lags a sent message, so the color is resolved through
+        // ``effectiveLifecycleState`` against the prompt activity signal
+        // (transcript-derived, plus the optimistic forced-THINKING the send
+        // applies). That makes the dot turn green the instant a message is sent,
+        // in step with the activity indicator -- hence the second listener below
+        // on the activity overlay, since an optimistic send is not a WS update.
+        const processDot = document.createElement("span");
+        processDot.className = "dv-tab-process-dot";
+        const processDotTooltip = attachHoverTooltip(processDot);
+        const updateProcessDot = (): void => {
+          const state = getAgentById(chatAgentId)?.state;
+          if (!state) {
+            processDot.style.display = "none";
+            processDotTooltip.setText(null);
+            return;
+          }
+          const effective = effectiveLifecycleState(state, getEffectiveActivityState(chatAgentId));
+          processDot.style.display = "";
+          // ``data-liveness`` drives the color (the primary signal). Several
+          // lifecycle states share a color (DONE/STOPPED/REPLACED/UNKNOWN are
+          // all grey "dormant"; RUNNING/RUNNING_UNKNOWN_AGENT_TYPE are both
+          // green), so ``data-lifecycle-state`` carries the exact state and the
+          // CSS gives each a subtly different circular treatment (solid / ring /
+          // ring-with-dot / faded) so same-color states stay tellable apart.
+          processDot.setAttribute("data-liveness", livenessCategoryForState(effective));
+          processDot.setAttribute("data-lifecycle-state", effective);
+          processDotTooltip.setText(effective);
+        };
+        updateProcessDot();
+        element.insertBefore(processDot, element.firstChild);
+        const processDotListener: AgentsUpdatedListener = () => updateProcessDot();
+        addAgentsUpdatedListener(processDotListener);
+        addActivityOverlayListener(updateProcessDot);
+        disposables.push({ dispose: () => removeAgentsUpdatedListener(processDotListener) });
+        disposables.push({ dispose: () => removeActivityOverlayListener(updateProcessDot) });
+        disposables.push(processDotTooltip);
+
         const destroyBtn = createTabActionButton(
           isPrimary ? "Cannot destroy the primary agent" : "Destroy agent",
-          SVG_TRASH,
+          "trash",
           () => {
             if (isPrimary) return;
             const agent = getAgentById(chatAgentId);
@@ -415,7 +464,7 @@ function createCustomTab(options: { id: string; name: string }): {
         actions.appendChild(
           createTabActionButton(
             "Destroy terminal",
-            SVG_TRASH,
+            "trash",
             () => {
               const sessionName = pp?.terminalSessionName;
               if (!sessionName) {
@@ -434,7 +483,7 @@ function createCustomTab(options: { id: string; name: string }): {
 
       // Close button -- on all tab types
       actions.appendChild(
-        createTabActionButton("Close tab", SVG_CLOSE, () => {
+        createTabActionButton("Close tab", "close", () => {
           params.api.close();
         }),
       );
@@ -457,6 +506,27 @@ function createCustomTab(options: { id: string; name: string }): {
       disposables.length = 0;
     },
   };
+}
+
+/** Report the current open/visible chat tabs to the backend (OOM priority).
+ *
+ *  Computed from ``dockview.panels`` (the live panel set) rather than
+ *  ``panelParams`` so a just-removed panel isn't reported as still open when
+ *  this fires from ``onDidLayoutChange`` before ``onDidRemovePanel`` clears its
+ *  params. Only chat panels are reported; the report is debounced in the
+ *  reporter, so calling it on every layout/visibility change is cheap. */
+function reportChatTabActivity(): void {
+  if (!dockview) return;
+  const open: string[] = [];
+  const visible: string[] = [];
+  for (const panel of dockview.panels) {
+    const pp = panelParams.get(panel.id);
+    if (pp?.panelType !== "chat") continue;
+    const chatId = pp.chatAgentId ?? pp.agentId;
+    open.push(chatId);
+    if (panel.api.isVisible) visible.push(chatId);
+  }
+  reportActivity({ open, visible });
 }
 
 /** Get the set of agent IDs that currently have open chat panels. */
@@ -2596,6 +2666,9 @@ function initializeDockview(parentElement: HTMLElement): void {
   // Listen for layout changes and auto-save
   dv.api.onDidLayoutChange(() => {
     scheduleSave();
+    // Opening, closing, or moving a tab changes the open/visible chat set;
+    // report it so the OOM prioritizer re-scores the affected chats.
+    reportChatTabActivity();
   });
 
   // Clean up params on panel removal. We DON'T reopen anything when

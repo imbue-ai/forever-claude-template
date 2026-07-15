@@ -34,6 +34,14 @@ host_env__extend = [
     # subdirs too. /mngr/code/ is the container WORKDIR (set by the Dockerfile);
     # a /code -> /mngr/code symlink is kept in the image as a safety net.
     "TICKETS_DIR=/mngr/code/runtime/tickets",
+    # The OOM shed ledger + agent-pid registry live under runtime/ (so they ride
+    # the runtime-backup branch). The container-level earlyoom kill hook runs
+    # with work dir /mngr/code, but each agent's SessionStart hooks resolve paths
+    # relative to THEIR agent's MNGR_AGENT_WORK_DIR -- which for a worker is its
+    # own worktree, not /mngr/code. Pinning the absolute path here (same
+    # rationale as TICKETS_DIR above) makes the kill hook and every agent's hook
+    # resolve one shared ledger and registry, regardless of work dir.
+    "OOM_PRIORITY_RUNTIME_DIR=/mngr/code/runtime/oom_priority",
     # Workaround for an Apple M5 lima-VZ guest CPU mismatch: the Debian 12
     # guest kernel advertises SVE / SVE2 in /proc/cpuinfo, but lima-VZ on M5
     # traps the `cntb` SVE instruction emitted by OpenSSL's
@@ -70,12 +78,26 @@ yes = true
 [agent_types.claude]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
-cli_args = """--dangerously-skip-permissions --disallowed-tools AskUserQuestion,ExitPlanMode,TodoWrite,TaskCreate,TaskList,TaskUpdate"""
+auto_disable_questions = true
+cli_args = """--dangerously-skip-permissions --disallowed-tools ExitPlanMode,TodoWrite,TaskCreate,TaskList,TaskUpdate"""
 settings_overrides__extend = {model = "opus[1m]", fastMode = true}
+# Launch every claude agent through the OOM band wrapper instead of `claude`
+# directly. The wrapper (scripts/claude_oom_launch.py) sets its own
+# oom_score_adj to the user- or worker-agent band, records its pid in the
+# agent-pid registry, then execs the real claude with the args mngr appends
+# (assemble_command splices --settings / --resume / --session-id after this
+# base). Because it execs in place, the band-tagged process IS the claude
+# process and its subprocesses inherit the band -- so earlyoom sheds an agent's
+# subprocesses, then worker agents, then user agents, before any protected
+# service. Tagging the band at launch sets the score before any subprocess is
+# spawned. ${MNGR_AGENT_WORK_DIR:-.} mirrors
+# the OOM Claude hooks' path form; the "main" type overrides command below so
+# its sleeping window-0 is unaffected.
+command = "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_oom_launch.py"
 # Pin Claude Code to a specific version; the provisioning-time version check
 # refuses to start the agent if the installed binary diverges. Bump this in
 # sync with CLAUDE_CODE_VERSION in the Dockerfile.
-version = "2.1.160"
+version = "2.1.207"
 # Share the services agent's CLAUDE_CONFIG_DIR across every other agent so
 # auth, plugins, marketplaces, and settings are configured exactly once
 # (inside the services agent) and inherited via the host env file the
@@ -110,6 +132,13 @@ command = "sleep infinity && claude"
 # the "worker" agent type -- the default for delegated tasks
 [agent_types.worker]
 parent_type = "claude"
+# Repeat the wrapper command here, not just on [agent_types.claude]: an mngr
+# config-load bug means a child type does not inherit the parent's non-default
+# `command`, so without this a worker launches plain claude and never gets its
+# band. (load_config's final model_validate re-marks every field as set, so the
+# parent_type merge sees the worker's defaulted command and clobbers the inherited
+# one; verified live.)
+command = "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_oom_launch.py"
 
 # --- Provider configurations ---
 

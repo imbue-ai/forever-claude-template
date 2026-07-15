@@ -39,6 +39,13 @@ name). Then:
 
 ## Step 1: Open a tracking ticket
 
+**Single-flight check first.** At most one harden pass per artifact may be in
+flight (counting `update` passes on the same target). Run the pre-dispatch
+check in [`.agents/shared/references/harden-contention.md`](../../shared/references/harden-contention.md);
+if another agent's pass is live, leave the note it describes on their ticket
+and stop -- the superseding pass forced at their merge time covers your fix.
+Only dispatch if no pass is live (or you took over an abandoned one).
+
 ```bash
 mkdir -p runtime/harden/heal-$TARGET
 TICKET_ID=$(tk create "heal $TARGET" -t bug \
@@ -123,7 +130,15 @@ Flow-specific substitutions:
 
 ## Step 4: Merge and go live
 
-On `done`, merge `mngr/heal-$TARGET`, then go live by artifact: a **skill** needs
+On `done`, first run the merge-time checks in
+[`.agents/shared/references/harden-contention.md`](../../shared/references/harden-contention.md):
+wait out any foreground editing lease on the service, confirm the branch is
+still fresh (the artifact's footprint has not changed since the worker
+branched), and never hand-resolve a conflicted merge -- a stale or conflicted
+pass is discarded and superseded by one new pass covering everything since the
+last hardened merge.
+
+Then merge `mngr/heal-$TARGET` and go live by artifact: a **skill** needs
 nothing beyond the merge; a **service** wants a tab refresh (`python3
 scripts/layout.py refresh <service-name>`). Then close the ticket:
 
