@@ -15,10 +15,14 @@ import { interruptAgent, sendMessage, getEventsForAgent } from "../models/Respon
 import {
   addPendingMessage,
   getEffectiveActivityState,
+  getPendingMessage,
   markPendingMessageQueued,
+  markPendingMessageReconnecting,
+  markPendingMessageSending,
   removePendingMessage,
 } from "../models/PendingMessages";
-import { describeRequestError } from "../models/request-error";
+import { addConnectionStateListener, removeConnectionStateListener } from "../models/AgentManager";
+import { describeRequestError, isBackendUnreachableError } from "../models/request-error";
 import { isWorkingActivityState } from "./ActivityIndicator";
 
 const MAX_TEXTAREA_HEIGHT_PX = 200;
@@ -146,6 +150,10 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         if (!agentId) {
           return;
         }
+        // Bind the null-checked id to a non-nullable local so the nested failure
+        // helpers below (which TypeScript does not narrow through) can use it
+        // directly.
+        const activeAgentId = agentId;
         // Wait for in-flight uploads so a just-dropped file is included rather
         // than dropped from the message.
         await waitForComposerUploads(agentId);
@@ -169,6 +177,97 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         const pendingId = addPendingMessage(agentId, finalText, getEventsForAgent(agentId));
         m.redraw();
 
+        // Restore the user's text and attachments so an interrupted send is not
+        // silently lost -- but only if they have not already started a new draft
+        // for this agent (the input was cleared at send time, so during the
+        // in-flight request the user may have typed or attached something new;
+        // blindly restoring would clobber that newer draft). Shared by every
+        // failure path below: the rollback, the reconnecting hold, and a retry
+        // that ultimately fails.
+        function restoreDraftIfComposerEmpty(): void {
+          const currentDraft =
+            currentAgentId === activeAgentId
+              ? messageText
+              : (localStorage.getItem(messageTextKey(activeAgentId)) ?? "");
+          const isComposerEmpty =
+            currentDraft.trim().length === 0 && getComposerAttachments(activeAgentId).length === 0;
+          if (isComposerEmpty) {
+            localStorage.setItem(messageTextKey(activeAgentId), sentText);
+            restoreComposerAttachments(activeAgentId, sentAttachments);
+            if (currentAgentId === activeAgentId) {
+              messageText = sentText;
+              m.redraw();
+            }
+          }
+        }
+
+        // A genuine application error: the backend confirms delivery before
+        // resolving, so a non-connectivity rejection means the message was NOT
+        // accepted. Roll the optimistic bubble back (clearing the
+        // forced-"Thinking..." override) so the UI does not show a message that
+        // was never delivered, restore the draft, and surface the failure with an
+        // explicit alert -- the bubble vanishing on its own is too subtle to read
+        // as "your message did not send." Matches the alert-based feedback
+        // convention for user-initiated mutations in this file (see
+        // handleInterrupt).
+        function rollbackAndAlert(detail: string): void {
+          console.error(`Failed to send message to agent ${activeAgentId}: ${detail}`);
+          if (pendingId !== null) {
+            removePendingMessage(activeAgentId, pendingId);
+          }
+          restoreDraftIfComposerEmpty();
+          alert(`Failed to send message: ${detail}`);
+        }
+
+        // Re-send a message held in "reconnecting" once the live-updates
+        // connection recovers. Subscribed on the first connectivity failure and
+        // left in place across repeated outages: each reconnect edge drives one
+        // retry, a retry that hits another connectivity error returns the bubble
+        // to "reconnecting" to await the next edge, and only a success, a real
+        // application error, or the give-up backstop having already dropped the
+        // message (clearStaleReconnectingMessages) tears the listener down -- so a
+        // permanently-dead backend cannot leak it.
+        function retryOnReconnect(id: string): void {
+          let isRetryInFlight = false;
+          const listener = (isNowConnected: boolean): void => {
+            if (!isNowConnected || isRetryInFlight) {
+              return;
+            }
+            // The backstop may have already given up on this message (dropping it
+            // after RECONNECTING_GIVE_UP_MS with the connection still down); if so
+            // there is nothing left to resend, so stop listening.
+            if (getPendingMessage(activeAgentId, id) === undefined) {
+              removeConnectionStateListener(listener);
+              return;
+            }
+            isRetryInFlight = true;
+            // Flip back to "sending" for the in-flight retry, mirroring "interrupt
+            // and send", so the working->IDLE safeguard does not clear the bubble
+            // out from under the resend.
+            markPendingMessageSending(activeAgentId, id);
+            void sendMessage(activeAgentId, finalText)
+              .then(() => {
+                markPendingMessageQueued(activeAgentId, id);
+                removeConnectionStateListener(listener);
+              })
+              .catch((retryErr: unknown) => {
+                if (isBackendUnreachableError(retryErr)) {
+                  // Connection came back but the backend is still unreachable (or
+                  // dropped again): return to "reconnecting" and wait for the next
+                  // edge rather than giving up after a single retry.
+                  markPendingMessageReconnecting(activeAgentId, id);
+                } else {
+                  removeConnectionStateListener(listener);
+                  rollbackAndAlert(describeRequestError(retryErr));
+                }
+              })
+              .finally(() => {
+                isRetryInFlight = false;
+              });
+          };
+          addConnectionStateListener(listener);
+        }
+
         try {
           await sendMessage(agentId, finalText);
           // The POST resolves once the backend confirms the agent accepted the
@@ -179,37 +278,24 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
             markPendingMessageQueued(agentId, pendingId);
           }
         } catch (err) {
-          // The send genuinely failed (the backend confirms delivery before
-          // resolving, so a rejection means the message was NOT accepted). Roll
-          // the optimistic bubble back (clearing the forced-"Thinking..."
-          // override) so the UI does not show a message that was never
-          // delivered, and surface the real error.
-          const detail = describeRequestError(err);
-          console.error(`Failed to send message to agent ${agentId}: ${detail}`);
-          if (pendingId !== null) {
-            removePendingMessage(agentId, pendingId);
+          if (isBackendUnreachableError(err) && pendingId !== null) {
+            // The backend was unreachable -- a front-door proxy 502/503/504, or an
+            // offline network (classically a laptop waking to a mid-restart
+            // container) -- so the message was neither accepted nor genuinely
+            // rejected. Do NOT roll back or alert (that reads as a dropped message
+            // and blames the user for a transient outage they cannot act on):
+            // hold the bubble in "reconnecting" and re-send once the connection
+            // recovers. The draft is still restored so the text survives even if
+            // the give-up backstop later drops the held message.
+            console.warn(`Connection lost while sending to agent ${agentId}; holding message to retry on reconnect`);
+            markPendingMessageReconnecting(agentId, pendingId);
+            restoreDraftIfComposerEmpty();
+            retryOnReconnect(pendingId);
+          } else {
+            // A genuine application error (or, defensively, a connectivity failure
+            // with no optimistic bubble to hold): roll back and surface it.
+            rollbackAndAlert(describeRequestError(err));
           }
-          // Restore the user's text and attachments so the send is not silently
-          // lost -- but only if they have not already started a new draft for
-          // this agent (the input was cleared at send time, so during the
-          // in-flight request the user may have typed or attached something
-          // new; blindly restoring would clobber that newer draft).
-          const currentDraft =
-            currentAgentId === agentId ? messageText : (localStorage.getItem(messageTextKey(agentId)) ?? "");
-          const isComposerEmpty = currentDraft.trim().length === 0 && getComposerAttachments(agentId).length === 0;
-          if (isComposerEmpty) {
-            localStorage.setItem(messageTextKey(agentId), sentText);
-            restoreComposerAttachments(agentId, sentAttachments);
-            if (currentAgentId === agentId) {
-              messageText = sentText;
-              m.redraw();
-            }
-          }
-          // Surface the failure to the user with an explicit signal: the bubble
-          // vanishing on its own is too subtle to read as "your message did not
-          // send." Matches the alert-based feedback convention for user-initiated
-          // mutations in this file (see handleInterrupt).
-          alert(`Failed to send message: ${detail}`);
         }
 
         requestAnimationFrame(() => {

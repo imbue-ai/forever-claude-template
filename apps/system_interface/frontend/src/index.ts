@@ -4,7 +4,7 @@ import { runHook } from "./hooks";
 import { getPluginRouteMithrilComponents } from "./plugin-routes";
 import { getBasePath } from "./base-path";
 import { initAgentManager } from "./models/AgentManager";
-import { initQueuedMessageIdleClearing } from "./models/PendingMessages";
+import { initQueuedMessageIdleClearing, initReconnectingMessageExpiry } from "./models/PendingMessages";
 import m from "mithril";
 import "./style.css";
 import { App } from "./views/App";
@@ -39,6 +39,10 @@ async function bootstrap(): Promise<void> {
   // Backstop that drops an optimistic "queued" bubble once its agent returns to
   // idle (the message was edited away or dropped, so it will never reconcile).
   initQueuedMessageIdleClearing();
+  // Backstop that gives up on a "reconnecting" message once it has been failing
+  // to reach the backend for longer than RECONNECTING_GIVE_UP_MS (the connection
+  // never recovered), so a permanently-dead backend cannot leave a stuck bubble.
+  initReconnectingMessageExpiry();
   const rootElement = document.getElementById("app");
   if (rootElement) {
     const pluginRoutes = getPluginRouteMithrilComponents();
