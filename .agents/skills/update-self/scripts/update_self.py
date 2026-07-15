@@ -93,14 +93,20 @@ def pick_latest_stable_tag(tags: Sequence[str]) -> str | None:
     return max(stable, key=lambda item: item[0])[1]
 
 
-def resolve_target(override: str | None, tags: Sequence[str]) -> ResolvedTarget:
+def resolve_target(
+    override: str | None, tags: Sequence[str], remote: str = "upstream"
+) -> ResolvedTarget:
     """Resolve the update target ref.
 
     With no override, pick the latest stable ``minds-v*`` tag (raising if the
     upstream exposes none). An override of ``main`` selects the template's
-    default branch; an override naming a known tag is classified as ``tag``; any
-    other override is passed through verbatim as a ``ref`` for git to validate at
-    fetch time (so a user can pin an arbitrary commit or branch).
+    default branch, **remote-qualified** to ``<remote>/main`` -- a bare ``main``
+    would resolve to the *local* branch, which ``git fetch upstream`` never
+    advances, so the pull would merge stale local code. A tag, by contrast,
+    lands in the local tag namespace on fetch and resolves by its bare name, so a
+    known-tag override is returned as-is. Any other override is passed through
+    verbatim as a ``ref`` for git to validate at fetch time (so a user can pin an
+    arbitrary commit or a ref they've already qualified themselves).
     """
     if override is None:
         latest = pick_latest_stable_tag(tags)
@@ -111,7 +117,7 @@ def resolve_target(override: str | None, tags: Sequence[str]) -> ResolvedTarget:
             )
         return ResolvedTarget(latest, "tag")
     if override == "main":
-        return ResolvedTarget("main", "branch")
+        return ResolvedTarget(f"{remote}/{override}", "branch")
     if override in set(tags):
         return ResolvedTarget(override, "tag")
     return ResolvedTarget(override, "ref")
@@ -267,27 +273,41 @@ def classify_merge(
 
 # --- Downstream-consumer trace ---------------------------------------------
 
-_PROGRAM_RE = re.compile(r"^\[program:(?P<name>[^\]]+)\]\s*$")
+# Any supervisord section header, e.g. ``[program:web]`` or ``[supervisord]``.
+_SECTION_RE = re.compile(r"^\[(?P<body>[^\]]+)\]\s*$")
 _COMMAND_RE = re.compile(r"^\s*command\s*=\s*(?P<command>.*)$")
+# Section types that carry a ``command=`` we should attribute to a live process.
+_COMMAND_SECTION_TYPES = frozenset({"program", "eventlistener", "fcgi-program"})
 
 
 def programs_referencing(path: str, supervisord_text: str) -> list[str]:
     """Return the supervisord programs whose ``command`` references ``path``.
 
-    Parses ``[program:<name>]`` blocks and their ``command=`` line, and matches
-    when either the full repo-relative ``path`` or its basename appears verbatim
-    in the command string. A hit means a live service shells out to the changed
-    file at runtime, so the change is service-impacting (validate + restart),
-    not a silent merge. Transitive or scheduled invocations are worker judgement;
-    this catches the deterministic direct references.
+    Parses the ``command=`` line of every command-bearing section
+    (``[program:...]``, ``[eventlistener:...]``, ``[fcgi-program:...]``) and
+    matches when either the full repo-relative ``path`` or its basename appears
+    verbatim in the command string. A hit means a live service shells out to the
+    changed file at runtime, so the change is service-impacting (validate +
+    restart), not a silent merge. Non-command sections (``[supervisord]``,
+    ``[rpcinterface:...]``) reset the current section so their stray settings are
+    never misattributed to the preceding program. Transitive or scheduled
+    invocations are worker judgement; this catches the deterministic direct
+    references.
     """
     basename = Path(path).name
     current: str | None = None
     matches: list[str] = []
     for line in supervisord_text.splitlines():
-        program_match = _PROGRAM_RE.match(line)
-        if program_match is not None:
-            current = program_match.group("name")
+        section_match = _SECTION_RE.match(line)
+        if section_match is not None:
+            body = section_match.group("body")
+            section_type, _, section_name = body.partition(":")
+            # Only command-bearing sections keep a ``current`` name; anything
+            # else (a bare ``[supervisord]``, an ``[rpcinterface:...]``) clears
+            # it so a later ``command=`` isn't attributed to the wrong program.
+            current = (
+                section_name if section_type in _COMMAND_SECTION_TYPES else None
+            )
             continue
         if current is None:
             continue
@@ -337,7 +357,7 @@ def _cmd_resolve_target(args: argparse.Namespace) -> int:
     if not args.local_tags:
         # ``ls-remote`` lines are ``<sha>\trefs/tags/<tag>``; take the tag.
         tags = [line.rsplit("/", 1)[-1] for line in tags]
-    target = resolve_target(args.override, tags)
+    target = resolve_target(args.override, tags, remote=args.remote)
     print(json.dumps({"ref": target.ref, "kind": target.kind}))
     return 0
 
@@ -396,17 +416,21 @@ def _cmd_changelog_entries(args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    # ``--repo-root`` lives on a shared parent parser so it is accepted both
+    # before and after the subcommand (an option defined only on the top-level
+    # parser would reject ``update_self.py <subcommand> --repo-root X``).
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
         "--repo-root",
         type=Path,
         default=Path.cwd(),
         help="Repo root the git subcommands run in (default: cwd).",
     )
+    parser = argparse.ArgumentParser(description=__doc__, parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
 
     resolve_parser = sub.add_parser(
-        "resolve-target", help="Resolve the update target ref."
+        "resolve-target", help="Resolve the update target ref.", parents=[common]
     )
     resolve_parser.add_argument(
         "--override",
@@ -427,6 +451,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     classify_parser = sub.add_parser(
         "classify-merge",
         help="Split upstream-changed files into merged vs pulled-in and classify each.",
+        parents=[common],
     )
     classify_parser.add_argument(
         "--target", required=True, help="The upstream ref being merged in."
@@ -446,6 +471,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     trace_parser = sub.add_parser(
         "trace-consumers",
         help="List supervisord programs whose command references a changed shared file.",
+        parents=[common],
     )
     trace_parser.add_argument("--path", required=True, help="Changed repo-relative path.")
     trace_parser.add_argument(
@@ -459,6 +485,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     changelog_parser = sub.add_parser(
         "changelog-entries",
         help="List changelog/ entries newly added between two refs.",
+        parents=[common],
     )
     changelog_parser.add_argument("--base", required=True, help="Base ref.")
     changelog_parser.add_argument("--target", required=True, help="Target ref.")

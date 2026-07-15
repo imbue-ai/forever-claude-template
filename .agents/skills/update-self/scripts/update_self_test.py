@@ -50,10 +50,14 @@ def test_resolve_target_defaults_to_latest_stable() -> None:
     assert result == update_self.ResolvedTarget("minds-v0.3.7", "tag")
 
 
-def test_resolve_target_override_main_is_a_branch() -> None:
+def test_resolve_target_override_main_is_remote_qualified_branch() -> None:
+    # Must resolve to the remote branch, not the stale local `main`.
     assert update_self.resolve_target("main", ["minds-v0.3.7"]) == (
-        update_self.ResolvedTarget("main", "branch")
+        update_self.ResolvedTarget("upstream/main", "branch")
     )
+    assert update_self.resolve_target(
+        "main", ["minds-v0.3.7"], remote="official"
+    ) == update_self.ResolvedTarget("official/main", "branch")
 
 
 def test_resolve_target_override_known_tag_vs_arbitrary_ref() -> None:
@@ -200,3 +204,63 @@ command=python3 scripts/shared.py --role a
 command=python3 scripts/shared.py --role b
 """
     assert update_self.programs_referencing("scripts/shared.py", text) == ["a", "b"]
+
+
+def test_programs_referencing_attributes_eventlistener_not_preceding_program() -> None:
+    # Regression: an eventlistener's command must be attributed to the
+    # eventlistener, not the [program:...] that precedes it (real supervisord.conf
+    # runs oom_tag_backstop.py under an [eventlistener:...] right after earlyoom).
+    text = """\
+[program:earlyoom]
+command=earlyoom -m 5
+
+[eventlistener:oom-tag-backstop]
+command=python3 scripts/oom_tag_backstop.py
+events=PROCESS_STATE_RUNNING
+"""
+    assert update_self.programs_referencing("scripts/oom_tag_backstop.py", text) == [
+        "oom-tag-backstop"
+    ]
+
+
+def test_programs_referencing_non_command_section_resets_current() -> None:
+    # A stray `command=`-looking setting under a non-command section (or a bare
+    # section header) must not be attributed to the preceding program.
+    text = """\
+[program:foo]
+command=/bin/foo
+
+[rpcinterface:supervisor]
+command=this-is-not-a-real-process scripts/foo.py
+"""
+    assert update_self.programs_referencing("scripts/foo.py", text) == []
+
+
+def test_repo_root_flag_accepted_after_subcommand(tmp_path) -> None:
+    # `--repo-root` must work both before and after the subcommand; a value after
+    # the subcommand previously errored because it lived only on the top parser.
+    (tmp_path / "supervisord.conf").write_text(
+        "[program:x]\ncommand=python3 scripts/x.py\n", encoding="utf-8"
+    )
+    supervisord = tmp_path / "supervisord.conf"
+    # Should parse without argparse raising SystemExit for either ordering.
+    assert (
+        update_self.main(
+            ["trace-consumers", "--path", "scripts/x.py", "--supervisord", str(supervisord)]
+        )
+        == 0
+    )
+    assert (
+        update_self.main(
+            [
+                "--repo-root",
+                str(tmp_path),
+                "trace-consumers",
+                "--path",
+                "scripts/x.py",
+                "--supervisord",
+                str(supervisord),
+            ]
+        )
+        == 0
+    )

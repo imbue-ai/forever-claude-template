@@ -53,13 +53,16 @@ with open('parent.toml', 'rb') as f:
 ")"
 git fetch upstream --tags
 
-python3 .agents/skills/update-self/scripts/update_self.py resolve-target
-# honoring a user override:
-python3 .agents/skills/update-self/scripts/update_self.py resolve-target --override main
+REF=$(python3 .agents/skills/update-self/scripts/update_self.py resolve-target \
+    | python3 -c 'import sys, json; print(json.load(sys.stdin)["ref"])')
+# honoring a user override, append e.g. `--override main` or `--override minds-v0.3.6`
+# to the resolve-target call above.
+echo "$REF"
 ```
 
-It prints `{"ref": ..., "kind": "tag|branch|ref"}`. Use that `ref` below and tell
-the user which version you're updating to.
+`resolve-target` prints `{"ref": ..., "kind": "tag|branch|ref"}`; `main` resolves
+to `upstream/main` (not the stale local branch). Keep `$REF` in your shell for the
+dispatch below, and tell the user which version you're updating to.
 
 ## 3. Dispatch the worker
 
@@ -73,34 +76,37 @@ TICKET_ID=$(tk create "update-self" -t task \
 tk start "$TICKET_ID"
 ```
 
-Write the task file, filling in the three `REPLACE_WITH_*` placeholders
-($MNGR_AGENT_NAME and the resolved ref):
+Write the task file. Use the two-heredoc form the other worker skills use: an
+**unquoted** frontmatter block so `$MNGR_AGENT_NAME` and `$REF` expand, then a
+**quoted** body so its backticks stay literal:
 
 ```bash
-cat > runtime/update-self/task.md << 'TASK_EOF'
+{
+cat << FRONTMATTER_EOF
 ---
-lead_agent: REPLACE_WITH_$MNGR_AGENT_NAME
+lead_agent: $MNGR_AGENT_NAME
 finish_report_path: runtime/update-self/reports/report.md
-target_ref: REPLACE_WITH_RESOLVED_REF
+target_ref: $REF
 ---
+FRONTMATTER_EOF
+cat << 'BODY_EOF'
 
-# Task: safe update-self to `REPLACE_WITH_RESOLVED_REF`
+# Task: safe update-self
 
 ## What to do
 Follow `.agents/skills/update-self/references/update-self-worker.md` end to end:
 trial-merge conflict triage, complete the merge (preserving the `update-self:`
 merge-commit subject), validate the merged set, generate the "what's new" report,
-and report `done`.
-
-## Target
-Merge upstream ref `REPLACE_WITH_RESOLVED_REF` (already fetched into `upstream`).
+and report `done`. Your target is the `target_ref` in this file's frontmatter
+(already fetched into `upstream`).
 
 ## Reporting back
 Per `.agents/shared/references/worker-reporting.md`. Valid `name:` values:
 `question` (mid-flight gate for a genuine, unresolvable conflict), `done` /
 `stuck` (terminal). Substitutions: `<TASK_FILE_GLOB>` -> `runtime/update-self/task.md`;
 `<RUNTIME_REPORTS_DIR>` -> `runtime/update-self/reports`.
-TASK_EOF
+BODY_EOF
+} > runtime/update-self/task.md
 ```
 
 Launch with the plain `worker` template (this flow uses its own worker guidance,
@@ -158,6 +164,7 @@ off this exact `HEAD`, so the merge fast-forwards and **preserves the worker's
 
 ```bash
 ROLLBACK_TO=$(git rev-parse HEAD)
+git fetch . mngr/update-self:mngr/update-self   # materialize the worker branch locally
 git merge --ff-only mngr/update-self
 ```
 
@@ -194,7 +201,9 @@ The report says which classes merged. Apply each; a clean pull-in is still
 
 - **`editable_tool` (`vendor/mngr/**`)** -- `.py` is picked up live; a manifest
   change needs an env refresh (`uv sync --all-packages`, or `uv tool install -e
-  vendor/mngr --reinstall` for a tool entry point).
+  vendor/mngr --reinstall` for a tool entry point). Any other `is_manifest` change
+  the report flags (a root-workspace `pyproject.toml` / `uv.lock`) likewise needs
+  `uv sync --all-packages` so the new dependencies resolve.
 
 - **`Dockerfile`** -- apply the live-applicable hunks the report calls out
   (canonically a `CLAUDE_CODE_VERSION` bump -> `CLAUDE_CODE_VERSION=<v> bash
