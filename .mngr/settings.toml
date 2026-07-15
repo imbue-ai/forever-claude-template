@@ -117,9 +117,15 @@ parent_type = "claude"
 # agent_types.claude's posture (auto_allow_permissions sets codex
 # approval_policy="never"). The codex binary is baked into the image
 # (scripts/setup_system.sh, CODEX_VERSION), so check_installation is off -- do not
-# reinstall/verify at provision. model is intentionally left unset: a ChatGPT-account
-# login rejects some *-codex slugs, so leaving codex's default in force is safest;
-# pin (e.g. "gpt-5.5") only if the first message 400s.
+# reinstall/verify at provision.
+#
+# model / effort are the lateral of agent_types.claude's opus[1m] + effortLevel="high".
+# gpt-5.6-sol is the account's default slug (so no ChatGPT-account slug rejection),
+# pinned for reproducibility. model_reasoning_effort="medium": Opus-high and Sol-medium
+# are each their vendor's balanced *default* (both with tiers of headroom above), and
+# Sol is unusually capable at lower effort -- so medium is the honest match for
+# opus-high, and avoids xhigh's latency / rate-limit blowout. Bump to "high" only if
+# this agent routinely takes on unusually hard, long-horizon work.
 #
 # sandbox_mode = danger-full-access disables codex's own OS sandbox. On Linux codex
 # sandboxes exec via bubblewrap, but the bundled bwrap cannot set up its network
@@ -131,6 +137,8 @@ parent_type = "claude"
 [agent_types.codex]
 auto_dismiss_dialogs = true
 auto_allow_permissions = true
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
 sandbox_mode = "danger-full-access"
 check_installation = false
 
