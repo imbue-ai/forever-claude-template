@@ -206,6 +206,31 @@ why it breaks, and refuse the update so the live workspace is left untouched.
 Reserve this for real breakage; a change that is simply deferred-until-rebuild is
 `done` plus a rebuild flag, not `stuck`.
 
+**Coupled dependency + dependent-service changes -- the one you cannot fully
+test.** When a merge bumps a *global* dependency (a `setup_system.sh` /
+`install_secret_scanners.sh` pin, or a `Dockerfile` toolchain pin) **and** also
+changes a service that depends on that dependency, your worktree cannot faithfully
+validate the pair: worktree isolation isolates the *repo tree*, not the
+host-global toolchain, so your environment still has the **old** dependency. Do
+**not** globally install the new one to test -- that mutates the shared toolchain
+the live workspace and other agents run on. Instead:
+
+- **Research the version change online** to ground your risk assessment: look up
+  the dependency's release notes / changelog for the exact old -> new version
+  delta (breaking changes, removed flags, changed behavior, new minimum runtimes).
+  Do not rely on memory -- fetch the actual notes, and record in your report what
+  you found and how it bears on the dependent service.
+- **Validate what you honestly can** without the new dep (the service's imports,
+  lint, and tests that don't exercise the changed dependency), and **report the
+  gap explicitly**: which combination you could not test, and why.
+- **Do not mark a coupled bump live-applicable.** Hot-re-provisioning the global
+  dep under the still-running old services is unsafe -- a non-atomic substrate
+  mutation that can break them before the new code lands. Classify it
+  **rebuild-only**: the safe way to land it is a workspace recreate, which
+  provisions the new substrate and the new service code together and validates
+  itself by booting clean. If leaving it unapplied would break the running
+  workspace, that's `stuck`.
+
 An impacted *service* gets validated below (boot + suites) and flagged for
 restart in your report. An impacted *skill* (a workspace-added skill relying on
 something the update changed) gets validated per its own contract -- run its
@@ -234,7 +259,10 @@ tests, or exercise its scripts -- and called out in the report.
 - **Isolated-service boots** for each impacted service (per 4a) -- boot against a
   scratch data copy via `.agents/shared/scripts/serve_isolated_instance.py` (see
   `update-service`), never the live store; a service that won't boot on the merged
-  code is a blocker.
+  code is a blocker. Note this boot runs on the **host's global toolchain**, so it
+  does *not* exercise a global-dependency bump -- a service coupled to one is the
+  gap covered by the coupled-change note in 4a, not something an isolated boot
+  can close.
 - **Playwright** for a web surface -- system interface *or* a user service -- only
   when the merge needed nontrivial merge work there (not a clean pull). For the
   system interface, build it in your worktree (`cd apps/system_interface && uv
@@ -288,8 +316,14 @@ Per `.agents/shared/references/worker-reporting.md` (`<TASK_FILE_GLOB>` ->
     a `build_arg` / `start_arg` / runtime-flag change a running container can't
     adopt). A genuinely-breaking, unapplyable change is a `stuck` report, not a
     `done`.
+  - **Coupled dependency + service** (if the merge bumps a global dep *and* a
+    dependent service) -- what the version delta is and what your online research
+    of its release notes turned up, the combination you **could not test** in your
+    worktree and why, and your rebuild-only (or `stuck`) call. The lead must not
+    hot-apply this.
   - **Validation** -- suites/boots/Playwright and review gates run, all passing;
-    autofix fixes kept vs reverted.
+    autofix fixes kept vs reverted; and any validation **gap** (a coupled bump you
+    couldn't fully exercise) called out honestly rather than implied as covered.
 - `stuck` (`type: status`) -- you couldn't reach a clean, validated merge, or you
   hit the provisioning escape hatch above (a change you can neither apply live nor
   safely defer to a rebuild without breaking the running workspace); one sentence

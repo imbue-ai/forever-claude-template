@@ -27,6 +27,21 @@ already-tested), not `origin/main`. The user may override to a specific tag or t
 
 ## 1. Preconditions
 
+**Back up first.** Before dispatching anything, capture a restore point of the
+whole workspace so the pass is recoverable -- the reveal re-runs provisioners and
+restarts services, and a backup is the recovery path if one of those goes wrong:
+
+```bash
+uv run host-backup-now
+```
+
+It waits for any in-flight backup, forces a fresh tick, and prints the
+`restic_backup_succeeded` / `restic_backup_failed` event -- confirm success before
+continuing. If it reports backups aren't configured
+(`tick_skipped_due_to_missing_secrets` -- no `runtime/secrets/restic.env`), there
+is **no** restore point: tell the user, and get their explicit go-ahead before
+proceeding without one.
+
 **Single-flight.** One pass at a time (its worker name, branch, and runtime dir
 are fixed). Check for a live one:
 
@@ -269,6 +284,15 @@ The report says which classes merged. Apply each; a clean pull-in is still
     tree, so the content-addressed provision guard's marker no longer matches,
     and the script re-installs the pinned tools idempotently. The report names
     which pins moved.
+
+    **Exception -- a bump the report flags as coupled to a dependent service.**
+    When the merge bumps a global dep *and* a service that depends on it (the
+    worker's "coupled dependency + service" report item), do **not** hot-run the
+    provisioner: swapping the toolchain under the still-running old services is a
+    non-atomic mutation that can break them before the new code lands, and the
+    worker couldn't fully validate the pair anyway. Treat it as **rebuild-only** --
+    surface it to the user for a workspace recreate (which provisions the new
+    substrate and new service code together), exactly as an image-level hunk below.
   - A hunk that only affects a **fresh image build** -- something the idempotent
     re-run does not reproduce -- needs a **manual workspace rebuild**; tell the
     user, exactly as for an image-level `Dockerfile` hunk.
