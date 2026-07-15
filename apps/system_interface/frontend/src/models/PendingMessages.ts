@@ -39,10 +39,22 @@ import type { TranscriptEvent } from "./Response";
  * received, but may not have been processed yet. The bubble stays up in either
  * state until the real transcript event arrives (the agent genuinely received
  * it), at which point reconciliation removes it -- that is the user-facing
- * "sent". A failed send never reaches "queued"; it is rolled back via
- * removePendingMessage instead.
+ * "sent".
+ *
+ * "reconnecting" is entered when the send POST fails with a *connectivity*
+ * error rather than a real application error: the backend was unreachable -- a
+ * front-door proxy 502/503/504, or an offline network (the classic trigger is a
+ * laptop waking to find the workspace container mid-restart). The message was
+ * therefore neither accepted nor genuinely rejected. Rolling the bubble back
+ * with an alert in that case is wrong twice over: it looks like the message was
+ * dropped, and it blames the user for a transient outage they cannot act on. So
+ * the bubble is instead held in "reconnecting" and re-sent once the connection
+ * recovers (the caller drives the retry -- see ``getReconnectingMessages`` and
+ * ``markPendingMessageReconnecting``). A genuine application-level rejection
+ * still never reaches "queued" or "reconnecting"; it is rolled back via
+ * ``removePendingMessage`` exactly as before.
  */
-export type PendingMessageStatus = "sending" | "queued";
+export type PendingMessageStatus = "sending" | "queued" | "reconnecting";
 
 export interface PendingMessage {
   /** Stable id for keying the rendered bubble. */
@@ -60,6 +72,14 @@ export interface PendingMessage {
    *  message was sent. Reconciliation ignores these so an older, identical
    *  message can never spuriously "claim" (and hide) this pending one. */
   prior_user_event_ids: Set<string>;
+  /** Wall-clock ms (``Date.now``) at which this message *first* entered the
+   *  "reconnecting" state -- i.e. the moment of its first connectivity failure.
+   *  Anchored to that first failure and deliberately NOT reset by later retries,
+   *  so the give-up backstop (``clearStaleReconnectingMessages``) measures total
+   *  time the message has been failing to reach the backend, not time since the
+   *  most recent attempt. Undefined until (and unless) the message ever
+   *  reconnects; only meaningful while ``status`` is "reconnecting". */
+  reconnecting_since?: number;
 }
 
 let nextPendingId = 0;
@@ -155,6 +175,32 @@ export function markPendingMessageSending(agentId: string, id: string): void {
 }
 
 /**
+ * Mark a pending message as "reconnecting" -- its send POST failed with a
+ * connectivity error (the backend was unreachable), not a real rejection. The
+ * bubble is held rather than rolled back so the caller can re-send it once the
+ * connection recovers (see ``getReconnectingMessages``).
+ *
+ * ``reconnecting_since`` is stamped on the *first* entry only and preserved
+ * across later retries (a retry flips the message back to "sending" without
+ * clearing it, so a re-failure returns here with the original anchor intact).
+ * That keeps the give-up backstop measuring from the first failure, so a message
+ * retried every few seconds cannot dodge expiry forever. ``now`` is injectable
+ * for tests. Marking an unknown id is a no-op, as is re-marking one already
+ * "reconnecting" (which would otherwise redraw for no change).
+ */
+export function markPendingMessageReconnecting(agentId: string, id: string, now: number = Date.now()): void {
+  const pending = pendingByAgent[agentId]?.find((p) => p.id === id);
+  if (pending === undefined || pending.status === "reconnecting") {
+    return;
+  }
+  pending.status = "reconnecting";
+  if (pending.reconnecting_since === undefined) {
+    pending.reconnecting_since = now;
+  }
+  m.redraw();
+}
+
+/**
  * Remove a single optimistic message by id, clearing its bubble and any
  * forced-THINKING override it triggered. Used to roll back a pending message
  * whose send failed (so no real transcript event will ever reconcile it).
@@ -175,6 +221,19 @@ export function removePendingMessage(agentId: string, id: string): void {
 /** The still-unreconciled optimistic messages for an agent, in send order. */
 export function getPendingMessages(agentId: string): PendingMessage[] {
   return pendingByAgent[agentId] ?? [];
+}
+
+/**
+ * The pending messages currently held in the "reconnecting" state, in send
+ * order. These are the messages whose sends failed on a connectivity error and
+ * are waiting to be re-sent; the caller re-drives each one when the connection
+ * recovers (flip it back to "sending" via ``markPendingMessageSending``, POST
+ * again, then ``markPendingMessageQueued`` on success or
+ * ``markPendingMessageReconnecting`` if it fails again). Returns a fresh array,
+ * so iterating it while re-marking messages is safe.
+ */
+export function getReconnectingMessages(agentId: string): PendingMessage[] {
+  return (pendingByAgent[agentId] ?? []).filter((pending) => pending.status === "reconnecting");
 }
 
 function normalizeContentForMatch(content: string): string {
@@ -289,6 +348,12 @@ export function getEffectiveActivityState(agentId: string): string | null {
  *    -> rollback); notably "interrupt and send" marks its message back to
  *    ``sending`` *before* interrupting, so the transient IDLE the interrupt
  *    produces does not clear the message it is resending.
+ *  - ``reconnecting`` messages are likewise never dropped here. A working->IDLE
+ *    transition says nothing about whether the *connection* has recovered (the
+ *    transition can be a stale pre-outage snapshot, or another agent's activity
+ *    entirely), so it is the wrong signal to give up on a message we are still
+ *    trying to deliver. Those are governed solely by their own time-based
+ *    backstop (``clearStaleReconnectingMessages``).
  *
  * ``previous``/``current`` are the raw activity_state (not the effective state,
  * which can mask IDLE as THINKING for an idle-send).
@@ -316,4 +381,69 @@ function clearQueuedMessagesOnIdle(agentId: string, previous: string | null, cur
  */
 export function initQueuedMessageIdleClearing(): void {
   addAgentActivityListener(clearQueuedMessagesOnIdle);
+}
+
+/**
+ * How long a message may stay "reconnecting" before we give up on it.
+ *
+ * Sized to sit comfortably beyond a genuine recovery. A workspace container
+ * restart -- the case this covers -- takes tens of seconds to a couple of
+ * minutes to come back and auto-start its agent, and the live-updates WebSocket
+ * reconnects on a backoff capped at ``RECONNECT_CAP_MS`` (30s), so a message can
+ * legitimately sit unsent for up to ~2 minutes before the path is restored and
+ * the retry lands. Three minutes leaves a full minute of headroom past that
+ * upper bound, so we never abandon a message that a normal recovery would still
+ * have delivered, while still bounding how long a permanently-dead backend
+ * leaves a stuck bubble on screen.
+ */
+export const RECONNECTING_GIVE_UP_MS = 3 * 60 * 1000;
+
+/** How often the self-driving backstop sweeps for expired reconnecting
+ *  messages. A backstop only needs coarse granularity: this bounds how long
+ *  after crossing ``RECONNECTING_GIVE_UP_MS`` a stuck bubble lingers. */
+const RECONNECTING_EXPIRY_SWEEP_MS = 15 * 1000;
+
+/**
+ * Drop "reconnecting" messages that have been failing to send for longer than
+ * ``RECONNECTING_GIVE_UP_MS`` -- the give-up backstop for the case the
+ * connection never recovers (e.g. the container is gone for good). Only
+ * "reconnecting" messages are eligible: a "sending" retry is in flight and owned
+ * by its POST, and a "queued" message is already accepted. Anchoring on
+ * ``reconnecting_since`` (the first failure, never reset by retries) means a
+ * message flapping between "reconnecting" and "sending" still expires on
+ * schedule. ``now`` is injectable for tests.
+ */
+export function clearStaleReconnectingMessages(agentId: string, now: number = Date.now()): void {
+  const list = pendingByAgent[agentId];
+  if (list === undefined) {
+    return;
+  }
+  const remaining = list.filter(
+    (pending) =>
+      pending.status !== "reconnecting" ||
+      pending.reconnecting_since === undefined ||
+      now - pending.reconnecting_since < RECONNECTING_GIVE_UP_MS,
+  );
+  if (remaining.length !== list.length) {
+    pendingByAgent[agentId] = remaining;
+    m.redraw();
+  }
+}
+
+/**
+ * Start the self-driving backstop that expires stuck "reconnecting" messages.
+ *
+ * Unlike the working->IDLE safeguard, giving up on a message *because the
+ * connection never came back* cannot be driven by any inbound event -- the
+ * defining feature of that case is that nothing arrives. A periodic timer is the
+ * only signal available, so this sweeps every agent's pending list on an
+ * interval. Call once at app startup (alongside ``initQueuedMessageIdleClearing``).
+ */
+export function initReconnectingMessageExpiry(): void {
+  setInterval(() => {
+    const now = Date.now();
+    for (const agentId of Object.keys(pendingByAgent)) {
+      clearStaleReconnectingMessages(agentId, now);
+    }
+  }, RECONNECTING_EXPIRY_SWEEP_MS);
 }

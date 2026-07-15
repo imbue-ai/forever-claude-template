@@ -15,6 +15,7 @@ import {
   markPendingMessageSending,
   removePendingMessage,
 } from "../models/PendingMessages";
+import type { PendingMessageStatus } from "../models/PendingMessages";
 import { interruptAgent, sendMessage } from "../models/Response";
 import { describeRequestError } from "../models/request-error";
 import { renderUserMessage } from "./message-renderers";
@@ -52,9 +53,15 @@ export async function interruptAndResend(agentId: string, id: string): Promise<v
 
 /** The status row shown beneath a pending bubble, keyed so it can sit alongside
  *  the keyed bubble vnode (Mithril requires all-or-no keys among siblings). */
-function renderStatusRow(agentId: string, id: string, status: "sending" | "queued"): m.Vnode {
+function renderStatusRow(agentId: string, id: string, status: PendingMessageStatus): m.Vnode {
   if (status === "sending") {
     return m("div", { key: `pending-status-${id}`, class: "pending-message-status" }, "Sending…");
+  }
+  if (status === "reconnecting") {
+    // The send hit a connectivity failure; the message is held and will be
+    // re-sent once the connection recovers. No interrupt action -- there is
+    // nothing queued on the agent to interrupt.
+    return m("div", { key: `pending-status-${id}`, class: "pending-message-status" }, "Reconnecting…");
   }
   // queued: accepted into the agent's queue, awaiting processing -- offer an
   // icon action to interrupt the agent and send it now.
@@ -100,7 +107,9 @@ export function renderPendingMessages(agentId: string): m.Vnode[] {
       timestamp: "",
     });
     if (bubble === null) continue;
-    const isSending = pending.status === "sending";
+    // Both "sending" and "reconnecting" are undelivered, so they share the
+    // dimmed style; only a "queued" (accepted) bubble gets the queued style.
+    const isUndelivered = pending.status !== "queued";
     // renderUserMessage returns a keyed vnode, so every sibling in this wrapper
     // must also be keyed: Mithril throws if a children array mixes keyed and
     // unkeyed vnodes (or contains a null hole alongside keyed nodes). Build the
@@ -111,7 +120,9 @@ export function renderPendingMessages(agentId: string): m.Vnode[] {
         "div",
         {
           key: `pending-wrap-${pending.id}`,
-          class: isSending ? "pending-message pending-message--sending" : "pending-message pending-message--queued",
+          class: isUndelivered
+            ? "pending-message pending-message--sending"
+            : "pending-message pending-message--queued",
         },
         children,
       ),

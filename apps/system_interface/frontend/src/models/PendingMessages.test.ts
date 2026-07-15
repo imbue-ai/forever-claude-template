@@ -30,12 +30,16 @@ import {
   addPendingMessage,
   getPendingMessages,
   getPendingMessage,
+  getReconnectingMessages,
   reconcilePendingMessages,
   removePendingMessage,
   markPendingMessageQueued,
   markPendingMessageSending,
+  markPendingMessageReconnecting,
+  clearStaleReconnectingMessages,
   getEffectiveActivityState,
   initQueuedMessageIdleClearing,
+  RECONNECTING_GIVE_UP_MS,
 } from "./PendingMessages";
 
 // Register the safeguard once and drive it via the captured listener. Calling a
@@ -385,5 +389,141 @@ describe("clearing a stuck queued bubble when the agent goes idle", () => {
     queueWhileWorking(agentId, "keep going");
     emitActivityTransition(agentId, "THINKING", "TOOL_RUNNING");
     expect(getPendingMessages(agentId)).toHaveLength(1);
+  });
+});
+
+describe("reconnecting on a connectivity failure", () => {
+  it("holds a message in the reconnecting state instead of removing it", () => {
+    const agentId = freshAgentId();
+    const id = addPendingMessage(agentId, "hold me", []) as string;
+    markPendingMessageReconnecting(agentId, id);
+
+    const pending = getPendingMessages(agentId);
+    expect(pending).toHaveLength(1);
+    expect(pending[0].status).toBe("reconnecting");
+  });
+
+  it("is a no-op for an unknown id", () => {
+    const agentId = freshAgentId();
+    addPendingMessage(agentId, "hello", []);
+    markPendingMessageReconnecting(agentId, "pending-does-not-exist");
+    expect(getPendingMessages(agentId)[0].status).toBe("sending");
+  });
+
+  it("exposes only reconnecting messages via getReconnectingMessages", () => {
+    const agentId = freshAgentId();
+    const first = addPendingMessage(agentId, "one", []) as string;
+    const second = addPendingMessage(agentId, "two", []) as string;
+    markPendingMessageReconnecting(agentId, second);
+
+    const reconnecting = getReconnectingMessages(agentId);
+    expect(reconnecting).toHaveLength(1);
+    expect(reconnecting[0].id).toBe(second);
+    // The still-sending message is not offered up for retry.
+    expect(reconnecting.some((p) => p.id === first)).toBe(false);
+  });
+
+  it("retries successfully: reconnecting -> sending -> queued -> reconciled", () => {
+    const agentId = freshAgentId();
+    const id = addPendingMessage(agentId, "deliver me", []) as string;
+    markPendingMessageReconnecting(agentId, id);
+    expect(getReconnectingMessages(agentId)).toHaveLength(1);
+
+    // The connection recovers; the caller re-drives the send.
+    markPendingMessageSending(agentId, id);
+    expect(getPendingMessage(agentId, id)?.status).toBe("sending");
+    markPendingMessageQueued(agentId, id);
+    expect(getPendingMessage(agentId, id)?.status).toBe("queued");
+
+    // The real transcript event finally lands and the bubble reconciles away.
+    reconcilePendingMessages(agentId, [userMsg("u1", "deliver me")]);
+    expect(getPendingMessages(agentId)).toHaveLength(0);
+  });
+
+  it("survives the working->IDLE safeguard (unlike a queued bubble)", () => {
+    const agentId = freshAgentId();
+    mockActivityState = "THINKING";
+    const id = addPendingMessage(agentId, "still trying", []) as string;
+    markPendingMessageReconnecting(agentId, id);
+
+    // The working->IDLE transition drops queued bubbles, but a reconnecting one
+    // is governed only by its own time-based backstop and must survive.
+    emitActivityTransition(agentId, "THINKING", "IDLE");
+
+    const pending = getPendingMessages(agentId);
+    expect(pending).toHaveLength(1);
+    expect(pending[0].status).toBe("reconnecting");
+  });
+
+  it("keeps a reconnecting message that is still within the give-up window", () => {
+    const agentId = freshAgentId();
+    const id = addPendingMessage(agentId, "recover soon", []) as string;
+    markPendingMessageReconnecting(agentId, id, 0);
+
+    // Two minutes in -- a normal container restart can still be recovering, so
+    // the message must not be abandoned yet.
+    clearStaleReconnectingMessages(agentId, 2 * 60 * 1000);
+    expect(getPendingMessages(agentId)).toHaveLength(1);
+
+    // Right up to the deadline it is still held.
+    clearStaleReconnectingMessages(agentId, RECONNECTING_GIVE_UP_MS - 1);
+    expect(getPendingMessages(agentId)).toHaveLength(1);
+  });
+
+  it("drops a reconnecting message once the give-up window elapses", () => {
+    const agentId = freshAgentId();
+    const id = addPendingMessage(agentId, "never recovers", []) as string;
+    markPendingMessageReconnecting(agentId, id, 0);
+
+    clearStaleReconnectingMessages(agentId, RECONNECTING_GIVE_UP_MS);
+    expect(getPendingMessages(agentId)).toHaveLength(0);
+  });
+
+  it("never expires a sending or queued message, however old", () => {
+    const agentId = freshAgentId();
+    const sending = addPendingMessage(agentId, "a sending one", []) as string;
+    const queued = addPendingMessage(agentId, "a queued one", []) as string;
+    markPendingMessageQueued(agentId, queued);
+
+    // Far past any deadline -- neither carries a reconnecting anchor, so the
+    // sweep leaves both untouched.
+    clearStaleReconnectingMessages(agentId, 10 * RECONNECTING_GIVE_UP_MS);
+    const ids = getPendingMessages(agentId).map((p) => p.id);
+    expect(ids).toContain(sending);
+    expect(ids).toContain(queued);
+  });
+
+  it("anchors the give-up deadline to the first failure, not the latest retry", () => {
+    const agentId = freshAgentId();
+    const id = addPendingMessage(agentId, "flapping", []) as string;
+    // First connectivity failure at t=0.
+    markPendingMessageReconnecting(agentId, id, 0);
+    // A recovery attempt flips it back to sending, then it fails again much
+    // later. The anchor must stay at the first failure, not reset to now.
+    markPendingMessageSending(agentId, id);
+    markPendingMessageReconnecting(agentId, id, RECONNECTING_GIVE_UP_MS - 1);
+
+    // Measured from the first failure the window has elapsed, so it is dropped;
+    // had the retry reset the anchor it would still be held.
+    clearStaleReconnectingMessages(agentId, RECONNECTING_GIVE_UP_MS);
+    expect(getPendingMessages(agentId)).toHaveLength(0);
+  });
+
+  it("clears the forced THINKING override when an idle-send is finally given up", () => {
+    const agentId = freshAgentId();
+    mockActivityState = "IDLE";
+    const id = addPendingMessage(agentId, "idle send", []) as string;
+    // The idle-send forces THINKING while it is optimistically pending...
+    expect(getEffectiveActivityState(agentId)).toBe("THINKING");
+
+    // ...and keeps forcing while held reconnecting (still pending, just undelivered).
+    markPendingMessageReconnecting(agentId, id, 0);
+    expect(getEffectiveActivityState(agentId)).toBe("THINKING");
+
+    // Once the backstop gives up, the bubble and its override clear together so
+    // the idle agent no longer looks busy forever.
+    clearStaleReconnectingMessages(agentId, RECONNECTING_GIVE_UP_MS);
+    expect(getPendingMessages(agentId)).toHaveLength(0);
+    expect(getEffectiveActivityState(agentId)).toBe("IDLE");
   });
 });
