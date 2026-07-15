@@ -173,8 +173,6 @@ They are inherently flaky due to timing and useless in CI, but valuable for agen
 
 # Communication
 
-To talk to the user, always go through the `send-user-message` skill; do NOT hardcode a specific channel from other skills.
-
 If the user talks to you about files or directories on disk, assume (unless context indicates otherwise) they mean their local disk, not the one in your sandbox -- use the `file-sharing` skill to bridge the two.
 
 # Work delegation

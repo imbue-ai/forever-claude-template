@@ -188,7 +188,7 @@ default. If a real conversation motivated the change:
   worker's empty agent; they switch via the `+` dropdown to the motivating
   agent).
 
-Then confirm with the user via `send-user-message`: a binary keep/discard *and*
+Then confirm with the user: a binary keep/discard *and*
 room for free-form notes (what looks off, what they'd change). Wait for their
 answer before doing anything else.
 

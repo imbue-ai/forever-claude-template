@@ -9,8 +9,8 @@ reusable skill via `crystallize-artifact` (artifact = skill) -- and the
 1. Try to name a concrete skill shape: one sentence of the form "a skill
    that does X given (Y) produces Z." You do NOT have to be confident
    it's a great skill. A plausible shape is enough.
-2. If you can name one: send a one-line question to the user via
-   `send-user-message` proposing that shape, and let the user decide.
+2. If you can name one: send a one-line question to the user
+   proposing that shape, and let the user decide.
 3. If you genuinely cannot name any shape after trying: decline.
    "Genuinely cannot" means the work had no stable structure across
    hypothetical re-runs -- not merely that you're skeptical the skill
