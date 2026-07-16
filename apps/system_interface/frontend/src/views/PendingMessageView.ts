@@ -18,6 +18,7 @@ import {
 import { interruptAgent, sendMessage } from "../models/Response";
 import { describeRequestError } from "../models/request-error";
 import { renderUserMessage } from "./message-renderers";
+import { icon } from "./icons";
 
 /**
  * Interrupt the agent and re-send a queued message.
@@ -72,9 +73,7 @@ function renderStatusRow(agentId: string, id: string, status: "sending" | "queue
         onclick: () => interruptAndResend(agentId, id),
       },
       // Up-arrow ("send") icon, matching the message-input send button.
-      m.trust(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>',
-      ),
+      m.trust(icon("send", { size: 14, strokeWidth: 2.5 })),
     ),
   ]);
 }

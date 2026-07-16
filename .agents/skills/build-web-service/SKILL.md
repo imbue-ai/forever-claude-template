@@ -13,7 +13,7 @@ through the system_interface.
 
 There is one canonical path (scaffold a new Flask lib) and one
 escape hatch (wrap a pre-existing third-party server). Modify/remove
-flows go through the `edit-services` skill.
+flows go through the `update-service` skill.
 
 ## This is the web specialization of the interactive-delivery shape
 
@@ -81,8 +81,8 @@ Adding a Python proxy in front of the third-party server adds a hop,
 costs an extra process, and complicates WebSocket and streaming
 behavior. Use the escape hatch instead.
 
-Do not extend `libs/web_server/` to add a new view. That lib runs the
-top-level workspace UI; new web views go in their own scaffolded lib
+Do not extend `apps/system_interface/` to add a new view. That app runs
+the top-level workspace UI; new web views go in their own scaffolded lib
 under `libs/<your-package>/` so they get an isolated tab and prefix.
 
 ## Pre-flight (both paths)
@@ -90,12 +90,12 @@ under `libs/<your-package>/` so they get an isolated tab and prefix.
 - **Pick a kebab-case service name.** Becomes the URL segment
   `/service/<name>/`. Short and descriptive (`news`, `docs-viewer`)
   beats clever. Avoid names already used in `supervisord.conf`
-  (`web`, `system_interface`, etc. are reserved by the scaffolder).
+  (`system_interface`, `browser`, etc. are reserved by the scaffolder).
 - **Pick a free port.** `ss -tln` lists what's bound. The scaffolder
-  picks the lowest free port at or above 8081 by parsing
+  picks the lowest free port at or above 8080 by parsing
   `supervisord.conf` and `runtime/applications.toml`; if you're choosing
-  manually, avoid `8000` (system_interface) and `8080` (the example
-  `web` service).
+  manually, avoid `8000` (system_interface) and `8081` (the browser
+  service).
 - **Bind to `127.0.0.1`** (not `0.0.0.0`). The forwarder reaches your
   app from inside the same container; binding to all interfaces is
   noise. The scaffolder does this. For the wrap-existing path, many
@@ -138,7 +138,14 @@ What gets generated:
   Builds a `Flask` app and serves it with
   `werkzeug.serving.run_simple(..., threaded=True)`. It serves at `/`;
   the system_interface proxy handles the `/service/<name>/` prefixing,
-  so no `root_path`/`ROOT_PATH` is needed.
+  so no `root_path`/`ROOT_PATH` is needed. It also defines a `DATA_DIR`
+  constant (defaults to `runtime/<name>/`, overridable via the
+  `<PACKAGE_UPPER>_DATA_DIR` env var) -- route all persistent state
+  through it (see File-path conventions below) -- and a `PORT` constant
+  (defaults to this service's assigned port, overridable via the
+  `<PACKAGE_UPPER>_PORT` env var) bound in `run_simple`. Both overrides
+  are what let a future edit boot a throwaway instance on a spare port
+  against a data copy (see `update-service`).
 - `libs/<package>/test_<package>_ratchets.py` -- standard ratchets at
   zero.
 - `libs/<package>/README.md` -- one-line description.
@@ -153,7 +160,7 @@ What gets updated:
 
   ```ini
   [program:<name>]
-  command=bash -c "python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && uv run <name>"
+  command=python3 scripts/oom_tag_service.py user bash -c "python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && uv run <name>"
   directory=/mngr/code
   autostart=true
   autorestart=true
@@ -165,7 +172,10 @@ What gets updated:
   rewrites absolute paths in served HTML and installs a scoped service
   worker that prepends the prefix to the page's own fetches). The
   `bash -c "..."` wrapper is required because supervisord runs commands
-  directly (no shell) and this one chains `forward_port.py` with `&&`.
+  directly (no shell) and this one chains `forward_port.py` with `&&`. The
+  `oom_tag_service.py user` prefix tags this user-created service so it is
+  shed before any built-in service under memory pressure (see
+  `libs/oom_priority/README.md`).
 
 supervisord does not watch the config, so tell it to pick up the new
 program, then confirm it is running:
@@ -283,11 +293,18 @@ announced.
 
 Two cases, two patterns:
 
-- **Runtime state files** (caches, cursors, last-visit timestamps,
-  JSON snapshots written and read across runs): use cwd-relative
-  paths like `Path("runtime/<name>/...")`. The supervisord-managed
-  services run from `/mngr/code` (repo root), so this resolves
-  consistently. Do NOT use `Path(__file__)`-based paths for runtime
+- **Persistent state** (caches, cursors, last-visit timestamps, JSON
+  snapshots, user records -- anything written and read across runs):
+  read and write it under the generated `DATA_DIR` constant, never a
+  hardcoded `runtime/<name>/` at the call site. `DATA_DIR` defaults to
+  `runtime/<name>/` (cwd-relative, resolved from `/mngr/code` where the
+  supervisord-managed service runs) but honors the
+  `<PACKAGE_UPPER>_DATA_DIR` env var. That override is what makes a
+  future edit safe: an agent changing the service can run a throwaway
+  instance against a *copy* of the data instead of the live store (see
+  `update-service`), so keep every read/write going through `DATA_DIR`
+  -- a hardcoded `runtime/<name>/` silently bypasses the override and
+  re-exposes the live data. Do NOT use `Path(__file__)`-based paths for
   state.
 - **Static assets shipped alongside the .py file** (templates,
   default configs, bundled JSON): `Path(__file__).parent / "assets/..."`
@@ -393,11 +410,14 @@ For pre-existing third-party tools, do not scaffold a lib. Add a
 `[program:<name>]` block to `supervisord.conf` that runs
 `forward_port.py` and then your existing start command. supervisord runs
 commands directly (no shell), so wrap any command that chains with `&&`
-in `bash -c "..."`:
+in `bash -c "..."`, and prefix the whole thing with
+`python3 scripts/oom_tag_service.py user` so this user-created service is
+shed before any built-in service under memory pressure (see
+`libs/oom_priority/README.md`):
 
 ```ini
 [program:<name>]
-command=bash -c "python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && <existing_start_command>"
+command=python3 scripts/oom_tag_service.py user bash -c "python3 scripts/forward_port.py --url http://localhost:<port> --name <name> && <existing_start_command>"
 directory=/mngr/code
 autostart=true
 autorestart=true
@@ -409,7 +429,7 @@ Two valid shapes:
 
   ```ini
   [program:docs-viewer]
-  command=bash -c "python3 scripts/forward_port.py --url http://localhost:8090 --name docs-viewer && jupyter notebook --port 8090 --ip 127.0.0.1 --no-browser"
+  command=python3 scripts/oom_tag_service.py user bash -c "python3 scripts/forward_port.py --url http://localhost:8090 --name docs-viewer && jupyter notebook --port 8090 --ip 127.0.0.1 --no-browser"
   directory=/mngr/code
   autostart=true
   autorestart=true
@@ -427,7 +447,7 @@ Two valid shapes:
 
   ```ini
   [program:<name>]
-  command=bash scripts/run_<name>.sh
+  command=python3 scripts/oom_tag_service.py user bash scripts/run_<name>.sh
   directory=/mngr/code
   autostart=true
   autorestart=true
@@ -440,8 +460,8 @@ The `forward_port.py` call MUST come first in the command -- the port
 must be registered before the app starts listening, otherwise the
 app-watcher races with the backend coming up.
 
-For the full program schema and logging knobs, see the `edit-services`
-skill.
+For the full program schema and logging knobs, see the shared
+[`.agents/shared/references/service-processes.md`](../../shared/references/service-processes.md).
 
 Verification and gotchas references apply identically to this path.
 

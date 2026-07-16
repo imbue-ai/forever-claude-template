@@ -6,7 +6,7 @@ It deliberately stores NO ownership/queue state (that is connection/process-scop
 and dies with the old container) and NO Chromium profile bytes (cookies/logins/
 history live in each browser's persistent ``user_data_dir`` on the workspace volume;
 see ``session.py``). Because it's tiny JSON it can live under ``runtime/`` and ride
-the mindsbackup branch, so even a full container rebuild restores the tab list.
+the opt-in GitHub sync, so even a full container rebuild restores the tab list.
 
 Pure synchronous file IO (no asyncio here, on purpose): writes are atomic via a
 temp file + ``os.replace`` so a reader on the next boot sees either the old or the

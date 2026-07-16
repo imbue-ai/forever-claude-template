@@ -35,22 +35,20 @@ from tomlkit.items import Array, Table
 # a snake-cased existing service name is also rejected.
 RESERVED_NAMES = frozenset(
     {
-        "web",
-        "web-server",
         "system-interface",
         "system_interface",
         "cloudflared",
         "cloudflare-tunnel",
         "app-watcher",
         "bootstrap",
-        "runtime-backup",
+        "github-sync",
         "host-backup",
         "terminal",
         "deferred-install",
         "imbue-common",
     }
 )
-LOWEST_AUTO_PORT = 8081
+LOWEST_AUTO_PORT = 8080
 KEBAB_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 LOCALHOST_PORT_RE = re.compile(r"http://(?:localhost|127\.0\.0\.1):(\d+)")
 
@@ -140,19 +138,30 @@ packages = ["src/{package}"]
 
 
 def _lib_runner(name: str, package: str, description: str, port: int) -> str:
+    env_var = f"{package.upper()}_DATA_DIR"
+    port_env_var = f"{package.upper()}_PORT"
     return f'''"""{description}.
 
 Services run from /mngr/code (the repo root). Conventions:
 
-- Runtime state files (anything written and read across runs, e.g.
-  cursors, caches, last-visit timestamps): use cwd-relative paths like
-  ``Path("runtime/{name}/...")``. Do NOT use ``Path(__file__)``-based
-  paths for runtime state -- the bug to avoid is one process writing
-  to ``/mngr/code/runtime/...`` while another reads from
+- Persistent state (anything written and read across runs -- cursors,
+  caches, snapshots, user records): read and write it under ``DATA_DIR``
+  (defined below), never a hardcoded ``runtime/{name}/`` at the call
+  site. ``DATA_DIR`` defaults to ``runtime/{name}/`` but honors the
+  ``{env_var}`` env var, so an editing agent can point a throwaway
+  instance at a *copy* of the data instead of the live store (see the
+  update-service skill). Do NOT use ``Path(__file__)``-based paths for
+  state -- the bug to avoid is one process writing to
+  ``/mngr/code/runtime/...`` while another reads from
   ``/mngr/code/libs/<pkg>/runtime/...``.
 - Static assets shipped alongside this file (templates, default
   configs, bundled JSON): ``Path(__file__).parent / "assets/..."`` is
   fine and is the right pattern.
+- Listen port: bind ``PORT`` (defined below), which defaults to this
+  service's assigned port but honors the ``{port_env_var}`` env var, so
+  an editing agent can boot a throwaway instance on a *spare* port
+  alongside the live one (see the update-service skill). Never hardcode
+  the port at the ``run_simple`` call.
 
 This is a synchronous Flask app served by the threaded Werkzeug server.
 The system_interface proxy at ``/service/{name}/`` rewrites absolute
@@ -161,9 +170,26 @@ the prefix to the page's own fetches, so the app can serve at ``/`` and
 still work behind the proxy. Use ``flask_sock`` if you need WebSockets.
 """
 
-from flask import Flask
-from flask import Response
+import os
+from pathlib import Path
+
+from flask import Flask, Response
 from werkzeug.serving import run_simple
+
+# Persistent state for this service lives under DATA_DIR. It defaults to
+# ``runtime/{name}/`` but is overridable via the ``{env_var}`` env var so a
+# throwaway instance can run against a *copy* of the data while editing --
+# see the update-service skill. Always read/write state through DATA_DIR;
+# never hardcode ``runtime/{name}/`` at a call site, or the override is
+# bypassed. A writing call site should ``DATA_DIR.mkdir(parents=True,
+# exist_ok=True)`` before writing.
+DATA_DIR = Path(os.environ.get("{env_var}", "runtime/{name}"))
+
+# Listen port. Defaults to this service's assigned port but is overridable via
+# the ``{port_env_var}`` env var so an editing agent can boot a throwaway
+# instance on a spare port next to the live one (see the update-service skill).
+# Never hardcode the port at the ``run_simple`` call, or the override is bypassed.
+PORT = int(os.environ.get("{port_env_var}", "{port}"))
 
 app = Flask("{package}", static_folder=None)
 
@@ -185,7 +211,9 @@ def health() -> Response:
 
 
 def main() -> None:
-    run_simple("127.0.0.1", {port}, app, threaded=True, use_reloader=False, use_debugger=False)
+    run_simple(
+        "127.0.0.1", PORT, app, threaded=True, use_reloader=False, use_debugger=False
+    )
 
 
 if __name__ == "__main__":
@@ -345,7 +373,7 @@ def _update_root_pyproject(repo_root: Path, name: str, package: str) -> None:
 
 _SUPERVISORD_PROGRAM_TEMPLATE = """\
 [program:{name}]
-command=bash -c "python3 scripts/forward_port.py --url http://localhost:{port} --name {name} && uv run {name}"
+command=python3 scripts/oom_tag_service.py user bash -c "python3 scripts/forward_port.py --url http://localhost:{port} --name {name} && uv run {name}"
 directory=/mngr/code
 autostart=true
 autorestart=true
@@ -366,7 +394,9 @@ def _update_supervisord_conf(repo_root: Path, name: str, port: int) -> None:
     # preserving, so append a [program:<name>] block as text rather than
     # round-tripping through a parser. The command is wrapped in `bash -c "..."`
     # because supervisord exec's commands directly (no shell) and this one chains
-    # forward_port.py with `&&`.
+    # forward_port.py with `&&`; the `oom_tag_service.py user` prefix tags the
+    # new (user-created) service so it is shed before any built-in service under
+    # memory pressure (see libs/oom_priority/README.md).
     path = repo_root / "supervisord.conf"
     if not path.exists():
         sys.exit(f"error: {path} not found (cannot register the new service)")

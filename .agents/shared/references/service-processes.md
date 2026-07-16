@@ -1,0 +1,137 @@
+# Service process mechanics (supervisord)
+
+Shared reference for the supervisord layer beneath a service -- its
+`[program:<name>]` definition, and how to add, remove, modify, or inspect a
+program. Reach for this from any service flow (`update-service`,
+`build-web-service`) when a change touches *how a service runs* (its port,
+command, logs) or adds/removes a program, rather than only its code.
+
+Background services are defined as `[program:<name>]` sections in
+`supervisord.conf` at the repo root. `uv run bootstrap` runs first-boot
+setup and then `exec`s `supervisord` in the foreground (in the `bootstrap`
+tmux window); supervisord starts and supervises every program. supervisord
+does **not** watch the config file -- you apply changes with
+`supervisorctl`.
+
+## Program format
+
+```ini
+[program:my-service]
+command=python3 scripts/oom_tag_service.py user uv run my-service
+directory=/mngr/code
+autostart=true
+autorestart=true
+startretries=1000000
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/var/log/supervisor/my-service-stdout.log
+stderr_logfile=/var/log/supervisor/my-service-stderr.log
+stdout_logfile_maxbytes=10MB
+stderr_logfile_maxbytes=10MB
+stdout_logfile_backups=3
+stderr_logfile_backups=3
+```
+
+Key fields:
+
+- `command` -- the program to run. **supervisord exec's this directly (no
+  shell)**, so anything that chains with `&&`, sets an inline env var, or uses
+  other shell syntax must be wrapped in `bash -c "..."`:
+
+  ```ini
+  command=python3 scripts/oom_tag_service.py user bash -c "python3 scripts/forward_port.py --url http://localhost:8090 --name foo && uv run foo"
+  ```
+
+  The `python3 scripts/oom_tag_service.py user` prefix is the **OOM band tag**
+  (see below) -- keep it as the outermost command, in front of any `bash -c`
+  wrapper.
+- `directory=/mngr/code` -- run from the repo root, so cwd-relative paths
+  (`runtime/...`, `scripts/...`) resolve. Set this on every program.
+- `autostart=true` -- start when supervisord boots.
+- `autorestart=true` -- restart a long-lived daemon whenever it exits. (This is
+  the replacement for the old `restart = "on-failure"`; the standard daemons all
+  use `true`.) For a **one-shot** task that should run once and then stay
+  stopped, use `autorestart=false` plus `startsecs=0` and `exitcodes=0` (see the
+  `deferred-install` program for an example).
+- `stopasgroup=true` / `killasgroup=true` -- signal the whole `bash -c` process
+  group on stop, so a wrapped command shuts down cleanly.
+- `stdout_logfile` / `stderr_logfile` (+ `*_maxbytes` / `*_backups`) --
+  separate, rotated, container-local logs under `/var/log/supervisor/`. These
+  are **not** under `runtime/`, so they are not backed up. If you omit them,
+  supervisord writes AUTO logs into its `childlogdir` (`/var/log/supervisor`)
+  instead.
+
+Services inherit the agent environment (`MNGR_AGENT_STATE_DIR`,
+`CLAUDE_CONFIG_DIR`, `MNGR_HOST_DIR`, `LATCHKEY_*`, ...) from the bootstrap shell
+that launched supervisord -- you do not need a per-program `environment=`.
+
+## OOM priority (memory-pressure shedding)
+
+A background `earlyoom` daemon sheds processes when the container runs low on
+memory, most-expendable first (see `libs/oom_priority/README.md`). Prefix every
+service `command` with `python3 scripts/oom_tag_service.py user` so a
+**user-created** service is shed *before* any built-in service (the UI, tunnel,
+terminal, backups) under memory pressure -- those are the workspace's lifelines
+and should outlive a service you added. The wrapper sets the process's
+`oom_score_adj` and then `exec`s your real command, so it adds no runtime
+overhead.
+
+Only the built-in template services pass their own name instead of `user` (e.g.
+`... oom_tag_service.py system_interface ...`); anything you add should use
+`user`. There is no protected escape hatch: an unknown key defaults to the
+`user` band, and if you omit the prefix entirely a backstop listener
+(`oom-tag-backstop`) tags the service into the `user` band shortly after it
+starts anyway. Still include the prefix -- it applies the band at spawn rather
+than ~1s later, and it keeps the command self-documenting.
+
+## Adding a service
+
+1. Add a new `[program:<name>]` section to `supervisord.conf`.
+2. Apply it:
+
+   ```bash
+   supervisorctl reread && supervisorctl update
+   ```
+
+   `reread` re-parses the config; `update` starts newly-added programs, stops
+   removed ones, and restarts changed ones.
+3. Confirm it is running: `supervisorctl status <name>`.
+
+## Removing a service
+
+1. Delete the `[program:<name>]` section from `supervisord.conf`.
+2. `supervisorctl reread && supervisorctl update` -- supervisord stops and
+   forgets the removed program.
+
+For a web service, also drop its `runtime/applications.toml` entry with
+`python3 scripts/forward_port.py --name <name> --remove`; for a scaffolded
+web lib, `build-web-service`'s `cleanup.md` reference covers the full
+teardown (reverting the lib and the root `pyproject.toml` edits).
+
+## Modifying a service
+
+1. Change the program's `command` (or other fields) in `supervisord.conf`.
+2. `supervisorctl reread && supervisorctl update` applies the change (it
+   restarts the program when its definition changed). To bounce a program
+   without editing its config, use `supervisorctl restart <name>`.
+
+## Inspecting services
+
+```bash
+supervisorctl status                 # all programs + states
+supervisorctl status <name>          # one program
+supervisorctl tail -f <name> stderr  # follow a program's stderr log
+```
+
+Or read the log files directly under `/var/log/supervisor/`.
+
+## Important
+
+- Program names must be valid supervisord program names (no spaces).
+- supervisord only manages the programs in `supervisord.conf`; it does not touch
+  the main agent window or other tmux windows.
+- If you need a one-off command, just run it directly rather than adding a
+  program.
+- For standing up a new web service (Flask lib or wrapping a third-party
+  server), use the `build-web-service` skill -- it generates the `[program:*]`
+  block and `forward_port.py` wiring for you.

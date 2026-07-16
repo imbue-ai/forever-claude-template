@@ -52,6 +52,13 @@ class WebSocketBroadcaster(MutableModel):
     # successful enqueue. A client is only disconnected once its counter reaches
     # ``_MAX_CONSECUTIVE_QUEUE_FULL`` -- a brief stall is tolerated.
     _consecutive_queue_full_by_id: dict[int, int] = PrivateAttr(default_factory=dict)
+    # Self-reported identity of each connected client (client_id, active
+    # layout slug, device kind), keyed by ``id(queue)``. Populated when the
+    # client sends its ``client_state`` registration over the WebSocket;
+    # absent for clients that have not registered (yet). Entries die with the
+    # connection, so "connected client on layout X" means exactly "an open,
+    # registered WebSocket whose latest report named X".
+    _client_info_by_queue_id: dict[int, dict[str, str]] = PrivateAttr(default_factory=dict)
 
     def register(self) -> queue.Queue[str | None]:
         """Register a new WebSocket client. Returns a queue to drain for messages."""
@@ -65,17 +72,60 @@ class WebSocketBroadcaster(MutableModel):
         """Remove a WebSocket client's queue."""
         with self._lock:
             self._consecutive_queue_full_by_id.pop(id(client_queue), None)
+            self._client_info_by_queue_id.pop(id(client_queue), None)
             try:
                 self._client_queues.remove(client_queue)
             except ValueError:
                 pass
 
+    def set_client_info(
+        self,
+        client_queue: queue.Queue[str | None],
+        client_id: str,
+        active_layout_slug: str,
+        device_kind: str,
+    ) -> None:
+        """Record (or update) the self-reported identity of one connected client."""
+        with self._lock:
+            if client_queue not in self._client_queues:
+                return
+            self._client_info_by_queue_id[id(client_queue)] = {
+                "client_id": client_id,
+                "active_layout_slug": active_layout_slug,
+                "device_kind": device_kind,
+            }
+
+    def get_connected_client_infos(self) -> list[dict[str, str]]:
+        """A snapshot of every registered client's self-reported identity."""
+        with self._lock:
+            return [dict(info) for info in self._client_info_by_queue_id.values()]
+
+    def has_client_on_layout(self, layout_slug: str) -> bool:
+        """Whether any registered client currently has ``layout_slug`` active."""
+        with self._lock:
+            return any(info["active_layout_slug"] == layout_slug for info in self._client_info_by_queue_id.values())
+
     def broadcast(self, message: dict[str, Any]) -> None:
         """Serialize and send a message to all connected clients. Thread-safe."""
+        self._broadcast_to_matching(message, target_layout_slug=None)
+
+    def broadcast_to_layout(self, message: dict[str, Any], layout_slug: str) -> None:
+        """Send a message only to registered clients whose active layout is ``layout_slug``.
+
+        Clients that have not (yet) sent their ``client_state`` registration
+        never match: without a report there is no layout to compare against.
+        """
+        self._broadcast_to_matching(message, target_layout_slug=layout_slug)
+
+    def _broadcast_to_matching(self, message: dict[str, Any], target_layout_slug: str | None) -> None:
         text = json.dumps(message)
         with self._lock:
             dead_queues: list[queue.Queue[str | None]] = []
             for client_queue in self._client_queues:
+                if target_layout_slug is not None:
+                    info = self._client_info_by_queue_id.get(id(client_queue))
+                    if info is None or info["active_layout_slug"] != target_layout_slug:
+                        continue
                 try:
                     client_queue.put_nowait(text)
                     self._consecutive_queue_full_by_id[id(client_queue)] = 0
@@ -96,6 +146,7 @@ class WebSocketBroadcaster(MutableModel):
         old asyncio task cancellation.
         """
         self._consecutive_queue_full_by_id.pop(id(dead_queue), None)
+        self._client_info_by_queue_id.pop(id(dead_queue), None)
         try:
             self._client_queues.remove(dead_queue)
         except ValueError:
@@ -147,7 +198,13 @@ class WebSocketBroadcaster(MutableModel):
             }
         )
 
-    def broadcast_layout_op(self, op: str, args: dict[str, Any], requester_agent_id: str = "") -> None:
+    def broadcast_layout_op(
+        self,
+        op: str,
+        args: dict[str, Any],
+        requester_agent_id: str = "",
+        target_layout_slug: str | None = None,
+    ) -> None:
         """Broadcast a layout_op event telling the frontend to mutate the dockview layout.
 
         The frontend dispatches on ``op`` (e.g. ``open``, ``focus``, ``split``,
@@ -159,8 +216,62 @@ class WebSocketBroadcaster(MutableModel):
         ``requester_agent_id`` is the ``MNGR_AGENT_ID`` of the agent that invoked
         ``scripts/layout.py``. The frontend uses it to anchor splits against the
         requester's own chat panel and to resolve the ``self`` ref.
+
+        ``target_layout_slug`` restricts delivery to clients whose active layout
+        matches (mutating ops are layout-targeted); None broadcasts to everyone
+        (state-preserving ops like ``refresh`` / ``reload_system_interface``).
         """
-        self.broadcast({"type": "layout_op", "op": op, "args": args, "requester_agent_id": requester_agent_id})
+        message = {"type": "layout_op", "op": op, "args": args, "requester_agent_id": requester_agent_id}
+        if target_layout_slug is None:
+            self.broadcast(message)
+        else:
+            self.broadcast_to_layout(message, target_layout_slug)
+
+    def broadcast_layout_saved(self, layout_slug: str, display_name: str, saved_by_client_id: str) -> None:
+        """Broadcast that a named layout's content was saved.
+
+        Sent to every client (not just those on the layout): the "+" menu
+        dialogs list all layouts, so everyone needs the fresh registry. A
+        client with the layout active (other than the saver, identified by
+        ``saved_by_client_id``) re-fetches and re-applies the content.
+        """
+        self.broadcast(
+            {
+                "type": "layout_saved",
+                "layout_slug": layout_slug,
+                "display_name": display_name,
+                "saved_by_client_id": saved_by_client_id,
+            }
+        )
+
+    def broadcast_layout_deleted(self, layout_slug: str, fallback_layout_slug: str) -> None:
+        """Broadcast that a named layout was deleted.
+
+        Clients with the layout active switch to ``fallback_layout_slug``.
+        """
+        self.broadcast(
+            {
+                "type": "layout_deleted",
+                "layout_slug": layout_slug,
+                "fallback_layout_slug": fallback_layout_slug,
+            }
+        )
+
+    def broadcast_load_layout(self, layout_slug: str, display_name: str, target_client_id: str | None) -> None:
+        """Broadcast an agent-driven request that a client switch to a layout.
+
+        ``target_client_id`` names the one client that should switch; None
+        means every client switches (the fallback when the requesting client
+        could not be resolved from message metadata).
+        """
+        self.broadcast(
+            {
+                "type": "load_layout",
+                "layout_slug": layout_slug,
+                "display_name": display_name,
+                "target_client_id": target_client_id,
+            }
+        )
 
     def broadcast_terminal_session(self, terminal_id: str | None, session_id: str, session_name: str) -> None:
         """Broadcast that a terminal tab's tmux client switched to / renamed a session.
@@ -191,3 +302,4 @@ class WebSocketBroadcaster(MutableModel):
                     pass
             self._client_queues.clear()
             self._consecutive_queue_full_by_id.clear()
+            self._client_info_by_queue_id.clear()

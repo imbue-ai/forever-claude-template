@@ -6,13 +6,16 @@
   --color-bg-sidebar: #f3f2ef;
   --color-bg-hover: #edecea;
   --color-bg-active: #e8e6e1;
-  --color-bg-user-bubble: #eae8e4;
+  --color-bg-user-bubble: #ededed;
   --color-bg-composer: #ffffff;
-  --color-text-primary: #37352f;
-  --color-text-secondary: #787774;
-  --color-text-faint: #b4b4b0;
+  --color-bg-chat: #ffffff;
+  --color-bg-code: #f0f0f0;
+  --color-text-primary: #202020;
+  --color-text-secondary: #666666;
+  --color-text-faint: #8c8c8c;
   --color-border: #e4e3df;
   --color-border-faint: #efeeeb;
+  --color-border-code: #e0e0e0;
   --color-accent: #2f6b4f;
   --color-accent-hover: #24573f;
   --color-accent-light: #e9f2ee;
@@ -88,7 +91,9 @@ body {
 
 /* ── Messages area ── */
 .app-content {
-  background: var(--color-bg);
+  /* The chat transcript area is pure white, distinct from the shared off-white
+     --color-bg used by the surrounding shell (footer, tabs, other panels). */
+  background: var(--color-bg-chat);
   /* Native scroll anchoring stays ON (the browser default) so the viewport holds
      steady when rows above it load or measure to their real height, with no
      per-frame JS scrollTop writes. The virtualization spacers opt out of anchoring
@@ -114,7 +119,7 @@ body {
   border-radius: var(--radius-bubble) var(--radius-bubble) 4px var(--radius-bubble);
   padding: 12px 18px;
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.5;
   color: var(--color-text-primary);
   /* Break long unbreakable tokens (e.g. API keys, URLs) so they wrap inside
      the bubble instead of overflowing past its edge. */
@@ -124,9 +129,10 @@ body {
 .message-user-bubble code {
   font-family: var(--font-family-mono);
   font-size: 0.85em;
-  background: rgba(0, 0, 0, 0.06);
-  padding: 1px 5px;
-  border-radius: 3px;
+  background-color: var(--color-bg-code);
+  border: 1px solid var(--color-border-code);
+  border-radius: 0.25em;
+  padding: 0.08em 0.2em;
 }
 
 /* ── Optimistic (pending) message ── */
@@ -255,7 +261,7 @@ body {
 .app-footer {
   padding: 0 32px 24px;
   flex-shrink: 0;
-  background: var(--color-bg);
+  background: var(--color-bg-chat);
   border: none;
 }
 
@@ -263,7 +269,7 @@ body {
   margin-top: 6px;
   text-align: center;
   font-size: 11px;
-  color: var(--color-text-muted, #94a3b8);
+  color: var(--color-text-faint);
 }
 
 .chat-agent-terminal-link button {
@@ -716,146 +722,9 @@ body {
   background: var(--color-accent-light);
 }
 
-/* ── New conversation page ── */
-.new-conversation {
-  background: var(--color-bg);
-}
-
-.new-conversation-title {
-  font-family: var(--font-family-heading);
-  color: var(--color-text-primary);
-}
-
-.new-conversation-input-box {
-  background: var(--color-bg-composer);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-composer);
-  box-shadow:
-    0 -4px 20px rgba(55, 53, 47, 0.06),
-    0 -1px 6px rgba(55, 53, 47, 0.04);
-  transition:
-    border-color 150ms,
-    box-shadow 200ms;
-}
-
-.new-conversation-input-box:focus-within {
-  border-color: var(--color-accent);
-  box-shadow:
-    0 -4px 24px rgba(47, 107, 79, 0.08),
-    0 -1px 8px rgba(47, 107, 79, 0.06);
-}
-
-.new-conversation-textbox {
-  font-family: var(--font-family-base);
-  font-size: 15px;
-}
-
-.new-conversation-textbox::placeholder {
-  color: var(--color-text-faint);
-}
-
-.new-conversation-send-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  color: #fff;
-  background: var(--color-accent);
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-  transition:
-    background 120ms,
-    opacity 150ms,
-    visibility 150ms;
-  flex-shrink: 0;
-}
-
-.new-conversation-send-button:hover:not(:disabled) {
-  background: var(--color-accent-hover);
-}
-
-.system-prompt-toggle {
-  color: var(--color-text-secondary);
-}
-
-.system-prompt-toggle:hover {
-  color: var(--color-text-primary);
-}
-
-.system-prompt-textbox {
-  border-color: var(--color-border);
-  font-family: var(--font-family-base);
-}
-
-.system-prompt-textbox:focus {
-  border-color: var(--color-accent);
-}
-
-/* ── Tool selector ── */
-.tool-selector-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tool-selector-toggle {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  background: transparent;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  align-self: flex-start;
-  transition: color 120ms;
-}
-
-.tool-selector-toggle:hover {
-  color: var(--color-text-primary);
-}
-
-.tool-selector-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.tool-selector-option {
-  display: inline-flex;
-  align-items: center;
-  font-family: var(--font-family-mono);
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  background: var(--color-bg-sidebar);
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  padding: 4px 10px;
-  cursor: pointer;
-  transition:
-    background 120ms,
-    border-color 120ms,
-    color 120ms;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.tool-selector-option:hover {
-  border-color: var(--color-accent);
-  color: var(--color-text-primary);
-}
-
-.tool-selector-option--selected {
-  color: var(--color-accent);
-  font-weight: 500;
-  background: var(--color-accent-light);
-  border-color: var(--color-accent);
-}
-
 /* ── Markdown content styling ── */
 .markdown-content {
-  line-height: 1.75;
+  line-height: 1.5;
   font-size: 15px;
   color: var(--color-text-primary);
 }
@@ -929,9 +798,10 @@ body {
 .markdown-content code {
   font-family: var(--font-family-mono);
   font-size: 0.85em;
-  background-color: var(--color-bg-active);
-  border-radius: 3px;
-  padding: 2px 5px;
+  background-color: var(--color-bg-code);
+  border: 1px solid var(--color-border-code);
+  border-radius: 0.25em;
+  padding: 0.08em 0.2em;
 }
 
 .markdown-content pre {
@@ -1487,7 +1357,9 @@ body {
 }
 
 .dockview-theme-light .dv-tabs-container {
-  border-bottom: 1px solid var(--color-border);
+  /* No bottom border: the selected tab shares the content's background
+     (--color-bg), so dropping the line lets it bleed straight into the panel. */
+  border-bottom: none;
 }
 
 .dockview-theme-light .dv-default-tab {
@@ -1517,6 +1389,9 @@ body {
   position: relative;
   display: flex;
   align-items: center;
+  /* Full height so align-items:center vertically centers the + within the tab
+     bar (its parent .dv-left-actions-container is display:block, 35px tall). */
+  height: 100%;
   padding: 0 4px;
 }
 
@@ -1532,6 +1407,7 @@ body {
   font-size: 18px;
   font-weight: 300;
   cursor: pointer;
+  line-height: 1;
   border-radius: var(--radius-base);
   transition:
     background 100ms,
@@ -1668,9 +1544,112 @@ body {
   background: var(--color-accent-hover);
 }
 
+.custom-url-dialog-open:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Layout save/load/delete dialog ── */
+.layout-dialog-list {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  margin-bottom: 12px;
+}
+
+.layout-dialog-item {
+  padding: 8px 12px;
+  font-size: 14px;
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.layout-dialog-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.layout-dialog-item-selected {
+  background: var(--color-bg-hover);
+  font-weight: 600;
+}
+
 /* ── Custom tab renderer ── */
 .dv-custom-tab {
   gap: 4px;
+}
+
+/* Per-agent liveness dot on chat tabs, reflecting the agent's mngr lifecycle
+   state. Distinct from the chat's activity indicator, which tracks work within
+   a running process. Grey (the default) is "dormant" -- the process is not
+   running (DONE/STOPPED/etc.) but revives on the next message.
+
+   Color (from data-liveness) is the primary signal; ``currentColor`` carries
+   the hue so the per-state shape variants below can render as a solid disc, a
+   hollow ring, or a ring-with-dot in that same color without repeating it. */
+.dv-tab-process-dot {
+  box-sizing: border-box;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+  background: currentColor;
+}
+
+/* Process up and working (RUNNING) -- green, matching the activity indicator. */
+.dv-tab-process-dot[data-liveness="active"] {
+  color: var(--color-accent);
+}
+
+/* Process up but idle, waiting on the user (WAITING) -- yellow. */
+.dv-tab-process-dot[data-liveness="waiting"] {
+  color: #ca8a04;
+}
+
+/* Within a color, subtly vary the shape so states that share a hue stay
+   distinguishable (color is still the primary signal; the tooltip names the
+   exact state). Solid disc = the "expected" state of each color: RUNNING
+   (green), WAITING (yellow), DONE (grey, a clean exit to the shell).
+
+   Hollow ring -- the process is up but its agent type is unconfirmed
+   (RUNNING_UNKNOWN_AGENT_TYPE, green), or dormant because its tmux window is
+   gone (STOPPED, grey). */
+.dv-tab-process-dot[data-lifecycle-state="RUNNING_UNKNOWN_AGENT_TYPE"],
+.dv-tab-process-dot[data-lifecycle-state="STOPPED"] {
+  background: transparent;
+  border: 1.5px solid currentColor;
+}
+
+/* Ring with a center dot -- REPLACED (superseded by a newer process). */
+.dv-tab-process-dot[data-lifecycle-state="REPLACED"] {
+  background: radial-gradient(currentColor 0 1px, transparent 1.4px);
+  border: 1.5px solid currentColor;
+}
+
+/* Faded solid -- UNKNOWN (dormant, exact state indeterminate). */
+.dv-tab-process-dot[data-lifecycle-state="UNKNOWN"] {
+  opacity: 0.45;
+}
+
+/* Hover tooltip for the liveness dot, appended to <body> and positioned (fixed)
+   just below the dot by attachHoverTooltip. It lives on the body rather than as
+   a ::after bubble because the tab strip clips overflow, and as a JS element
+   rather than a native title because dockview's draggable tabs suppress those. */
+.dv-tab-hover-tooltip {
+  position: fixed;
+  z-index: 1000;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--color-text-primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
 }
 
 .dv-custom-tab-actions {
@@ -2106,8 +2085,11 @@ body {
   --pv-active: var(--color-accent);
   --pv-done: #5a564a;
   --pv-pending: #c2bfb6;
+  /* The "glint" that sweeps across active-step narration. Kept independent of
+     the text scale so the shimmer stays visible against the muted caption. */
+  --pv-shimmer: #bcbcbc;
   font-size: 14.5px;
-  line-height: 1.55;
+  line-height: 1.5;
   color: var(--pv-fg);
 }
 
@@ -2193,7 +2175,7 @@ body {
   position: absolute;
   left: 7.5px;
   top: 8px;
-  bottom: 8px;
+  bottom: 0;
   width: 1px;
   background: var(--pv-line);
 }
@@ -2210,7 +2192,7 @@ body {
 .pv-tl-bullet {
   position: relative;
   z-index: 1;
-  background: var(--color-bg);
+  background: var(--color-bg-chat);
   padding: 1px 0;
   flex-shrink: 0;
   width: 16px;
@@ -2234,22 +2216,20 @@ body {
 
 .pv-tl-summary {
   margin-top: 3px;
-  padding-left: 10px;
-  border-left: 2px solid var(--pv-line);
+  padding-left: 2px;
   font-size: 13px;
   color: var(--pv-fg-muted);
-  line-height: 1.55;
+  line-height: 1.5;
 }
 
 .pv-tl-narration {
   margin-top: 3px;
-  padding-left: 10px;
-  border-left: 2px solid var(--pv-active);
+  padding-left: 2px;
   font-size: 13px;
   font-style: italic;
   color: var(--pv-fg-muted);
-  line-height: 1.55;
-  background: linear-gradient(90deg, var(--pv-fg-muted) 0%, var(--pv-fg-faint) 40%, var(--pv-fg-muted) 80%);
+  line-height: 1.5;
+  background: linear-gradient(90deg, var(--pv-fg-muted) 0%, var(--pv-shimmer) 40%, var(--pv-fg-muted) 80%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -2271,12 +2251,11 @@ body {
    styling below is shared with .pv-tl-narration via the grouped selectors. */
 .pv-tl-narration--static {
   margin-top: 3px;
-  padding-left: 10px;
-  border-left: 2px solid var(--pv-line);
+  padding-left: 2px;
   font-size: 13px;
   font-style: italic;
   color: var(--pv-fg-muted);
-  line-height: 1.55;
+  line-height: 1.5;
 }
 .pv-tl-narration p,
 .pv-tl-narration--static p {
@@ -2296,6 +2275,12 @@ body {
   -webkit-text-fill-color: var(--pv-fg-muted);
   -webkit-background-clip: padding-box;
   background-clip: padding-box;
+}
+/* The live (shimmering) narration keeps its pre-unification borderless code
+   chip; only the settled/static narration adopts the bordered chip. Both still
+   draw their fill/text from the shared --pv-* tokens above. */
+.pv-tl-narration code {
+  border: none;
 }
 .pv-tl-narration pre,
 .pv-tl-narration--static pre {
@@ -2352,7 +2337,7 @@ body {
 /* Steps are creator-private progress markers -- they read like sub-items, so
    we keep the title weight lighter and the typography slightly de-emphasized. */
 .pv-tl-node--step .pv-tl-title {
-  font-weight: 400;
+  font-weight: 500;
   font-size: 13.5px;
   color: var(--pv-fg-soft);
 }
@@ -2372,7 +2357,7 @@ body {
 }
 .pv-expanded p {
   margin: 0 0 0.6em;
-  line-height: 1.65;
+  line-height: 1.5;
   color: var(--pv-fg);
 }
 .pv-expanded p:last-child {
@@ -2387,7 +2372,7 @@ body {
   margin-top: 16px;
   padding: 0;
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.5;
   color: var(--pv-fg);
 }
 
@@ -2397,7 +2382,7 @@ body {
   margin-bottom: 16px;
   padding: 0;
   font-size: 15px;
-  line-height: 1.65;
+  line-height: 1.5;
   color: var(--pv-fg);
 }
 
@@ -2405,12 +2390,14 @@ body {
    the ungrouped block it sits above the timeline thread (opaque background +
    z-index) so the thread doesn't draw through the chip. The chip itself keeps
    its own collapsible styling; this wrapper only handles positioning and
-   masking the thread. */
+   masking the thread. The background is the pure-white transcript color
+   (--color-bg-chat), not the shell's off-white --color-bg, so the mask blends
+   into the transcript instead of showing as a band. */
 .pv-stophook {
   position: relative;
   z-index: 2;
   margin: 6px 0 14px 0;
-  background: var(--color-bg);
+  background: var(--color-bg-chat);
 }
 
 /* Ungrouped work/prose: real work the agent did with no step open (e.g.
@@ -2420,19 +2407,23 @@ body {
 .pv-ungrouped {
   position: relative;
   z-index: 2;
-  margin: 6px 0 14px 0;
-  background: var(--color-bg);
+  /* Top space as padding, not margin, so the white background extends up and
+     masks a bit of the timeline line above the ungrouped run. */
+  margin: 0 0 14px 0;
+  padding-top: 6px;
+  background: var(--color-bg-chat);
 }
 
 /* Agent permission request, lifted out of any open step so it is always
-   directly visible and breaks the timeline flow. Positioned like an ungrouped
-   run (opaque background + z-index) so the timeline thread doesn't draw through
-   it; the request block carries its own permission-request styling and button. */
+   directly visible and breaks the timeline flow. Lifted above the timeline
+   thread with z-index so the thread doesn't draw through it; the permission-request
+   card carries its own opaque surface, so it masks the thread on its own and this
+   wrapper needs no background of its own (a background here would paint the shell's
+   off-white --color-bg over the pure-white --color-bg-chat transcript). */
 .pv-permission {
   position: relative;
   z-index: 2;
   margin: 6px 0 14px 0;
-  background: var(--color-bg);
 }
 
 /* ─────────────────────────────────────────────────────────────────────

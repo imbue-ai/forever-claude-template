@@ -172,8 +172,9 @@ record their answer and confirm; the daily job wakes you again on the next caden
        (`supervisorctl status` + a few targeted greps of `/var/log/supervisor/`);
      - check for uncommitted work with `git status` in the workspace repo.
        Work that is finished but never committed belongs in history --
-       committing makes it visible and durable there, and triggers the
-       automatic push to origin. Judge what "should be committed":
+       committing makes it visible and durable there (and, when the user has
+       enabled GitHub sync, the post-commit hook pushes it to their private
+       repo). Judge what "should be committed":
        completed-looking changes qualify; something that looks actively
        mid-edit (half-written code, debug scaffolding), or so freshly
        modified that another agent may still be working on it, does not --
@@ -192,10 +193,11 @@ record their answer and confirm; the daily job wakes you again on the next caden
    scan found finished-but-uncommitted work and "fix small things on its own"
    is `yes`, commit it with a clear, descriptive message (group unrelated
    changes into separate commits; never amend or rebase). Only commit when the
-   repo is on a named branch -- on a detached HEAD the automatic push is
-   silently skipped, so mention the situation in your summary instead of
-   committing. If that permission is not `yes`, mention the uncommitted work
-   in your closing summary instead.
+   repo is on a named branch -- a detached HEAD is a sign something unusual is
+   going on (and if GitHub sync is enabled, its push is silently skipped
+   there), so mention the situation in your summary instead of committing. If
+   that permission is not `yes`, mention the uncommitted work in your closing
+   summary instead.
 5. **Closing message to the user.** A short, friendly, non-technical summary of
    what you found and what you propose or did -- e.g. "Your notes page was briefly
    failing to load each morning; I restarted it and it's been fine since." If you

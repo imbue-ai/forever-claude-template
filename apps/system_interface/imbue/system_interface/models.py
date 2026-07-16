@@ -34,6 +34,9 @@ class SendMessageRequest(FrozenModel):
     """Request body for sending a message to an agent."""
 
     message: str = Field(description="The message text to send")
+    client_id: str = Field(default="", description="Per-browser client id of the sender ('' for legacy callers)")
+    active_layout: str = Field(default="", description="The sender's active layout slug at send time")
+    device_kind: str = Field(default="", description="'mobile' or 'desktop', derived from the sender's user agent")
 
 
 class SendMessageResponse(FrozenModel):
@@ -53,6 +56,27 @@ class InterruptAgentResponse(FrozenModel):
     """Response from the /api/agents/{id}/interrupt endpoint."""
 
     status: str = Field(description="Status of the interrupt operation")
+
+
+class ActivityRequest(FrozenModel):
+    """Request body for the /api/activity endpoint.
+
+    A snapshot of the workspace UI's current agent-tab activity, posted by the
+    frontend whenever a tab opens/closes, the visible tab changes, or a message
+    is sent. The backend uses it to re-tag chat agents' OOM priority. ``open`` and
+    ``visible`` are the full current sets (replaced wholesale); ``messaged`` is
+    set only when the report was triggered by a send, to bump that chat's recency.
+    """
+
+    open: list[str] = Field(default_factory=list, description="Agent ids of all currently open tabs")
+    visible: list[str] = Field(default_factory=list, description="Agent ids of the currently visible tabs")
+    messaged: str | None = Field(default=None, description="Agent id just messaged, if this report was a send")
+
+
+class ActivityResponse(FrozenModel):
+    """Response from the /api/activity endpoint."""
+
+    status: str = Field(description="Status of the activity report")
 
 
 class ErrorResponse(FrozenModel):

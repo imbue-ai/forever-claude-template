@@ -1,0 +1,123 @@
+# Betterleaks config for scan_secrets.sh (the publish-inspiration secret
+# scan). Betterleaks is one of the two scanners the scan runs; this config
+# applies only to it (kingfisher has no filename-based rules and runs with its
+# own flags).
+#
+# Scope: the scan runs `betterleaks dir` over the STAGING directory, which
+# holds exactly the files overlaid out of the live mind (the selected
+# --include / --data-include paths plus carried-forward inspiration-*.md/.svg).
+# The clean template base is trusted, public, and never scanned -- its own
+# test fixtures legitimately contain placeholder token strings.
+#
+# Format notes: betterleaks accepts gitleaks-shaped TOML ([extend], [[rules]]
+# with `path`/`regex`/`keywords`), but it does NOT honor gitleaks'
+# [[rules.allowlists]] tables -- false-positive exemptions are written as
+# Expr `prefilter`/`filter` expressions instead (and rule-level `filter` only
+# runs for regex matches, not for path-only findings, which is why the .env
+# template exemption below is a global prefilter). Regexes still compile with
+# RE2 -- no lookaheads.
+
+# The .env template exemption: .env.example / .env.sample / .env.template are
+# deliberately non-secret placeholder templates and are allowed to ship, so
+# skip those files before any rule runs (this also skips betterleaks' content
+# rules for them; the other scanner in scan_secrets.sh (kingfisher) still
+# content-scans every file, so a real credential pasted into a template file
+# is still caught).
+prefilter = '''
+filter.matchesAny(get(attributes, "path", ""), [
+  `(^|/)\.env\.(example|sample|template)$`,
+])
+'''
+
+# Extend betterleaks' default ruleset (GitHub PATs, AWS keys, private-key
+# headers, and hundreds of provider-specific value rules) rather than
+# replacing it. Everything below is ADDED on top of those defaults.
+[extend]
+useDefault = true
+
+# --- credential FILENAMES ----------------------------------------------------
+# The default ruleset matches secret VALUES inside files; these path-only
+# rules replicate the historical credential-filename blocklist so a
+# credential-bearing file is blocked by NAME even when its contents evade
+# every value pattern.
+
+[[rules]]
+id = "minds-env-file"
+description = "Env file present (.env / .env.*) -- these carry real credentials"
+path = '''(^|/)\.env(\.[^/]+)?$'''
+
+[[rules]]
+id = "minds-credential-file"
+description = "Well-known credential-store filename present (git/gh/pypi/claude/session credentials)"
+path = '''(^|/)(\.netrc|\.git-credentials|\.claude\.json|\.pypirc|\.sesskey)$'''
+
+[[rules]]
+id = "minds-gh-hosts-file"
+description = "gh CLI hosts.yml present -- it stores OAuth tokens (matched by path suffix, not basename)"
+path = '''(^|/)\.config/gh/hosts\.yml$'''
+
+# --- broader Anthropic key rule ----------------------------------------------
+# The default ruleset's Anthropic rule only matches the strict
+# `sk-ant-api03-...` shape; real Anthropic tokens come in other `sk-ant-*`
+# shapes (admin keys, OAuth tokens), so match any sk-ant- prefix followed by a
+# plausibly-secret body. Requiring 24+ body characters keeps short
+# placeholders like `sk-ant-test` from firing (real keys are ~90+ chars).
+# The filter drops long documentation placeholders that would otherwise
+# satisfy the 24+ char body (matched case-insensitively against the secret).
+[[rules]]
+id = "minds-anthropic-key-broad"
+description = "Anthropic sk-ant-* API key/token of any shape"
+regex = '''sk-ant-[A-Za-z0-9_-]{24,}'''
+keywords = ["sk-ant-"]
+filter = '''
+filter.containsAny(lower(finding["secret"]), [
+  "example",
+  "placeholder",
+  "redacted",
+  "xxxxxxxx",
+])
+'''
+
+# --- account-identifying cloud IDs (not just exploitable secrets) ------------
+# For a PUBLISHED snapshot we hold a stricter bar than "is this an exploitable
+# credential?": account-identifying provider IDs should not ship either, even
+# when they cannot authenticate on their own (an AWS access key ID needs its
+# paired secret to be usable, but still names an account and aids targeted
+# attacks). These rules cover STRUCTURED, unambiguous provider identifiers with
+# a fixed shape -- deliberately NOT generic IDs (UUIDs, emails, numeric account
+# numbers, commit SHAs), which appear constantly in legitimate code and mock
+# data; catching those would flag nearly every publish. Fuzzier "personal
+# stuff" is handled by the human review layers (the scope gate and the
+# published-version modifications), not this deterministic gate.
+
+[[rules]]
+id = "minds-aws-access-key-id"
+description = "AWS access key ID (AKIA/ASIA/AROA/AIDA/... + 16 base32) -- account-identifying even without its secret"
+# All documented AWS key-id prefixes (long-term AKIA, temporary ASIA, role
+# AROA, user AIDA, plus the rarer ANPA/ANVA/ABIA/ACCA/AGPA/AIPA/AISA/APKA),
+# each followed by exactly 16 uppercase-alnum chars.
+# Non-capturing group (?:...) is load-bearing: betterleaks sets the finding's
+# "secret" to the captured group when one exists, so a capturing (...) here
+# would make the `example` filter below see only the 4-char prefix and never
+# match "AKIAIOSFODNN7EXAMPLE". With (?:...) the secret is the full match.
+regex = '''\b(?:AKIA|ASIA|AROA|AIDA|ANPA|ANVA|ABIA|ACCA|AGPA|AIPA|AISA|APKA)[A-Z0-9]{16}\b'''
+keywords = ["AKIA", "ASIA", "AROA", "AIDA", "ANPA", "ANVA", "ABIA", "ACCA", "AGPA", "AIPA", "AISA", "APKA"]
+# AWS's canonical docs key (AKIAIOSFODNN7EXAMPLE) and any EXAMPLE-tagged one.
+filter = '''
+filter.containsAny(lower(finding["secret"]), [
+  "example",
+])
+'''
+
+[[rules]]
+id = "minds-gcp-service-account-email"
+description = "GCP service-account email (<name>@<project>.iam.gserviceaccount.com) -- names a project/account"
+regex = '''[a-z][a-z0-9-]{4,}@[a-z][a-z0-9-]{4,}\.iam\.gserviceaccount\.com'''
+keywords = ["gserviceaccount.com"]
+filter = '''
+filter.containsAny(lower(finding["secret"]), [
+  "example",
+  "your-project",
+  "my-project",
+])
+'''

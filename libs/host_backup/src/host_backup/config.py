@@ -8,7 +8,7 @@ Two on-disk inputs, both optional from the service's point of view:
   `[snapshot]` section old bootstraps keep writing forever) and malformed
   values produce log warnings and fall back to defaults -- they never crash
   the service and never block the remaining valid settings from applying.
-  Rides the runtime-backup git push.
+  Rides the opt-in GitHub sync of runtime/ when that is enabled.
 - `runtime/secrets/restic.env` -- restic's repository address + all secrets
   (`RESTIC_REPOSITORY`, `RESTIC_PASSWORD`, and any backend credentials restic
   reads from the environment, e.g. `AWS_ACCESS_KEY_ID` /

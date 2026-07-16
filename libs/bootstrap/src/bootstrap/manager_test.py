@@ -21,7 +21,6 @@ from bootstrap.manager import (
     _apply_container_timezone,
     _build_create_chat_command,
     _configure_git_global,
-    _create_orphan_runtime_worktree,
     _ensure_host_claude_config_dir,
     _fallback_timezone_for_unknown,
     _fetch_user_timezone,
@@ -41,12 +40,14 @@ from bootstrap.manager import (
 # --- _configure_git_global ---
 
 
-def test_configure_git_global_sets_insteadof_and_hookspath(
+def test_configure_git_global_sets_insteadof_but_not_hookspath(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # Isolate the global git config to a tmp file so the test does not touch the
     # developer's real ~/.gitconfig. _configure_git_global should set both
-    # insteadOf rewrites (git@ and ssh://) plus core.hooksPath.
+    # insteadOf rewrites (git@ and ssh://). core.hooksPath must NOT be set:
+    # the post-commit auto-push hook only becomes active when the opt-in
+    # github-sync skill wires it up.
     gitconfig = tmp_path / ".gitconfig"
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
@@ -68,7 +69,7 @@ def test_configure_git_global_sets_insteadof_and_hookspath(
         text=True,
         check=False,
     ).stdout.strip()
-    assert hooks_path == "/mngr/code/scripts/git_hooks"
+    assert hooks_path == ""
 
 
 # --- Env-file helpers ---
@@ -264,6 +265,15 @@ def test_build_create_chat_command_carries_no_workspace_label() -> None:
     # workspace label (the label was removed from the naming model).
     labels = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--label"]
     assert all(not label.startswith("workspace=") for label in labels)
+
+
+def test_build_create_chat_command_tags_user_created() -> None:
+    """The initial chat agent is tagged ``user_created=true`` so the OOM
+    agent-tagging hook places it in the protected user-agent band (shed only as a
+    last resort)."""
+    cmd = _build_create_chat_command("my-workspace", {"workspace": "my-workspace"})
+    labels = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--label"]
+    assert "user_created=true" in labels
 
 
 def test_build_create_chat_command_passes_project_label_when_present(
@@ -587,40 +597,6 @@ def test_initialize_workspace_main_branch_is_idempotent_on_clean_main(
     _initialize_workspace_main_branch()
     branch = _git_in(work_dir, "branch", "--show-current").stdout.strip()
     assert branch == "main"
-
-
-# --- _create_orphan_runtime_worktree ---
-
-
-def test_create_orphan_runtime_worktree_creates_empty_orphan_branch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """The helper must add runtime/ as a worktree on a brand-new orphan branch
-    (no parent, empty tree) using only plumbing that works on old git -- no
-    `git worktree add --orphan` (git >= 2.42), which Lima's Debian 12 lacks."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git_in(repo, "init", "-q", "--initial-branch=main")
-    _git_in(repo, "config", "user.email", "seed@test.local")
-    _git_in(repo, "config", "user.name", "seed")
-    (repo / "README.md").write_text("seed\n")
-    _git_in(repo, "add", "-A")
-    _git_in(repo, "commit", "-qm", "seed")
-
-    monkeypatch.chdir(repo)
-    result = _create_orphan_runtime_worktree("mindsbackup/agent-test")
-    assert result.returncode == 0, result.stderr
-
-    runtime = repo / "runtime"
-    assert (runtime / ".git").exists()
-    # The branch is an orphan: its tip commit has no parents.
-    parents = _git_in(runtime, "rev-list", "--parents", "-1", "HEAD").stdout.split()
-    assert len(parents) == 1  # just the commit sha, no parent sha
-    # Nothing is tracked yet (empty tree); the worktree has no repo content.
-    assert _git_in(runtime, "ls-files").stdout.strip() == ""
-    assert not (runtime / "README.md").exists()
-
-
 # --- _apply_container_timezone ---
 
 

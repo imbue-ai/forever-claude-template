@@ -5,6 +5,9 @@ description: Adapt an existing inspiration (a published snapshot of apps/feature
 
 # Adapting an inspiration
 
+Version: v1 (inspirations flow). This versions the publish/adopt flow and the
+`inspiration-<slug>.md` manifest format.
+
 An inspiration is a publishable, reusable snapshot of the apps and features a mind
 has built. It lives in its own GitHub repo as a real default-workspace-template tree
 plus one or more `inspiration-<slug>.md` manifests at the repo root (each with a
@@ -89,7 +92,10 @@ Locate the manifest at the repo root:
 - Template path: `inspiration-<slug>.md` for the latest slug named in the
   repo's `/welcome` skill (or the one the user chose).
 
-Read its front-matter (`title`, `description`, `thumbnail`) and its body sections:
+Read its front-matter (`title`, `description`, `thumbnail`, and optionally
+`format`, the inspirations flow version that produced the manifest; manifests
+published before versioning omit it, so treat an absent `format` as `v1`) and
+its body sections:
 `What it is`, `How it works`, `Prerequisites`, `How to adapt it`, `Holes`, and
 `Adaptation history` (older manifests may have `Apps included` instead of `How
 it works`, `Permissions it may need` instead of `Prerequisites`, and no `How to
@@ -158,7 +164,8 @@ one never removes or overwrites the manifests of the others.
 
 ## 7. Commit
 
-Commit the adaptation per the repo's git conventions (a plain local commit; the
-post-commit hook handles any push). Include the merged-in tree, the modified
+Commit the adaptation per the repo's git conventions (a plain local commit;
+when the user has enabled GitHub sync, the post-commit hook handles any push).
+Include the merged-in tree, the modified
 files from filling holes, and the updated manifest with its new `Adaptation
 history` entry.

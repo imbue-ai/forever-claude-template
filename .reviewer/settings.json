@@ -1,6 +1,7 @@
 {
     "stop_hook": {
-        "enabled_when": "false"
+        "enabled_when": "false",
+        "fetch_and_merge": false
     },
     "autofix": {
         "is_enabled": false,

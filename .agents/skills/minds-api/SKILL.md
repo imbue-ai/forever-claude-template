@@ -68,6 +68,7 @@ dedicated `type: "workspace"` request (distinct from the predefined-service
 requests in the `latchkey` skill):
 
 ```bash
+# (Never pipe the output through jq because frontend rendering depends on seeing the full output from your tool.)
 latchkey curl -XPOST http://latchkey-self.invalid/permission-requests \
   -H 'Content-Type: application/json' \
   -d '{
@@ -134,9 +135,12 @@ schema. A `400` with `{error, field}` means a field-level problem; a `422`
 
 **Backups: always create with backups unconfigured.** Leave every `backup_*`
 field unset (the default is `backup_provider=CONFIGURE_LATER`). Configuring
-backups can require the user's backup *master password*, which is a secret you
-must NEVER ask the user for and never send through this API -- the user enables
-backups themselves from the minds desktop app afterwards.
+backups can involve the user's storage credentials (`backup_api_key_env`),
+which are secrets you must NEVER ask the user for and never send through this
+API -- the user enables backups themselves from the minds desktop app
+afterwards. (The user's *master password* is likewise never yours to handle;
+newer minds versions use it only inside the desktop app to protect
+cross-device sync, and it does not appear in this API at all.)
 
 ### SSH into another workspace (`minds-workspaces-ssh`)
 

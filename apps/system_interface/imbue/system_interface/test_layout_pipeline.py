@@ -51,21 +51,21 @@ _LAYOUT_SCRIPT = _REPO_ROOT / "scripts" / "layout.py"
 
 
 def _server_is_up(url: str) -> bool:
-    """Probe ``/api/layout`` and treat a 200 or 404 as "lifespan finished".
+    """Probe ``/api/layouts`` and treat any HTTP response as "lifespan finished".
 
-    Hits ``/api/layout`` rather than ``/api/agents`` because the latter
+    Hits ``/api/layouts`` rather than ``/api/agents`` because the latter
     calls ``discover_agents``, which reads the real mngr config and can
-    fail with HTTP 500 in dev environments. ``/api/layout`` is a pure
-    file-system read against the redirected ``MNGR_HOST_DIR``. A 404
-    here means the lifespan has run (so ``app.state.broadcaster`` /
+    fail with HTTP 500 in dev environments. ``/api/layouts`` is a pure
+    file-system read against the redirected ``MNGR_HOST_DIR``. Any HTTP
+    response means the lifespan has run (so ``app.state.broadcaster`` /
     ``app.state.layout_mutex`` are set), which is what later assertions
     actually depend on.
     """
     try:
-        urllib.request.urlopen(f"{url}/api/layout", timeout=0.5)
+        urllib.request.urlopen(f"{url}/api/layouts", timeout=0.5)
         return True
-    except urllib.error.HTTPError as e:
-        return e.code == 404
+    except urllib.error.HTTPError:
+        return True
     except OSError:
         return False
 
@@ -188,6 +188,38 @@ def test_inspect_round_trips_through_script_and_endpoint(
     assert parsed == {"active_panel": None, "panels": [], "tree": None}
 
 
+def test_context_round_trips_through_script_and_endpoint(
+    layout_server: tuple[str, WebSocketBroadcaster],
+    tmp_path: Path,
+) -> None:
+    """``scripts/layout.py context --json`` returns a (possibly empty) client list."""
+    base_url, _ = layout_server
+    sandbox = tmp_path / "cwd"
+    sandbox.mkdir()
+
+    result = _run_layout_script(["context", "--json"], base_url=base_url, cwd=sandbox)
+
+    assert result.returncode == 0, f"stderr={result.stderr!r}"
+    assert json.loads(result.stdout) == []
+
+
+def test_mutating_op_without_client_on_layout_fails_with_412(
+    layout_server: tuple[str, WebSocketBroadcaster],
+    tmp_path: Path,
+) -> None:
+    """With no connected client on the target layout, the script reports the 412 clearly."""
+    base_url, _ = layout_server
+    sandbox = tmp_path / "cwd"
+    sandbox.mkdir()
+
+    result = _run_layout_script(
+        ["close", f"chat:{_AGENT_NAME}", "--layout", "desktop"], base_url=base_url, cwd=sandbox
+    )
+
+    assert result.returncode == 1
+    assert "No connected client has layout" in result.stderr
+
+
 def test_list_round_trips_and_includes_seeded_agent(
     layout_server: tuple[str, WebSocketBroadcaster],
     tmp_path: Path,
@@ -230,8 +262,9 @@ def test_open_terminal_returns_ref_via_stdout_and_broadcasts_panel_id(
     )
 
     client_queue = broadcaster.register()
+    broadcaster.set_client_info(client_queue, "client-1", "desktop", "desktop")
     try:
-        result = _run_layout_script(["open", "terminal"], base_url=base_url, cwd=sandbox)
+        result = _run_layout_script(["open", "terminal", "--layout", "desktop"], base_url=base_url, cwd=sandbox)
         assert result.returncode == 0, f"stderr={result.stderr!r}"
         printed_ref = result.stdout.strip()
         assert printed_ref.startswith("terminal:"), printed_ref
@@ -258,8 +291,11 @@ def test_open_close_chat_ref_broadcasts_layout_ops(
     sandbox.mkdir()
 
     client_queue = broadcaster.register()
+    broadcaster.set_client_info(client_queue, "client-1", "desktop", "desktop")
     try:
-        open_result = _run_layout_script(["open", f"chat:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox)
+        open_result = _run_layout_script(
+            ["open", f"chat:{_AGENT_NAME}", "--layout", "desktop"], base_url=base_url, cwd=sandbox
+        )
         assert open_result.returncode == 0, f"stderr={open_result.stderr!r}"
         open_msg = _await_layout_op(client_queue, timeout=2.0)
         assert open_msg["op"] == "open"
@@ -267,7 +303,9 @@ def test_open_close_chat_ref_broadcasts_layout_ops(
         # the args dict through unchanged.
         assert open_msg["args"] == {"ref": f"chat:{_AGENT_NAME}", "new_group": False}
 
-        close_result = _run_layout_script(["close", f"chat:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox)
+        close_result = _run_layout_script(
+            ["close", f"chat:{_AGENT_NAME}", "--layout", "desktop"], base_url=base_url, cwd=sandbox
+        )
         assert close_result.returncode == 0, f"stderr={close_result.stderr!r}"
         close_msg = _await_layout_op(client_queue, timeout=2.0)
         assert close_msg["op"] == "close"
@@ -293,8 +331,11 @@ def test_open_chat_terminal_ref_broadcasts_through_pipeline(
     sandbox.mkdir()
 
     client_queue = broadcaster.register()
+    broadcaster.set_client_info(client_queue, "client-1", "desktop", "desktop")
     try:
-        result = _run_layout_script(["open", f"chat-terminal:{_AGENT_NAME}"], base_url=base_url, cwd=sandbox)
+        result = _run_layout_script(
+            ["open", f"chat-terminal:{_AGENT_NAME}", "--layout", "desktop"], base_url=base_url, cwd=sandbox
+        )
         assert result.returncode == 0, f"stderr={result.stderr!r}"
         msg = _await_layout_op(client_queue, timeout=2.0)
         assert msg["op"] == "open"

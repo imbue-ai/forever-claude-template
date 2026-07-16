@@ -1,2 +1,11 @@
 # Vendored snapshots (mngr, etc.) -- not authored here; collapse in PR diffs.
 vendor/** linguist-generated=true
+
+# Generated lockfiles: git's line-level auto-merge can silently interleave two
+# divergent locks into a semantically invalid file (e.g. duplicate [[package]]
+# entries uv can't parse), which has taken down live workspaces. merge=binary
+# turns any divergence into a hard conflict; resolve it by regenerating the
+# lock from the merged manifest (uv lock / npm install --package-lock-only),
+# never by side-picking or hand-merging.
+uv.lock merge=binary
+package-lock.json merge=binary

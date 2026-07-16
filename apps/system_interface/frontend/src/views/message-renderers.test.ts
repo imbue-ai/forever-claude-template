@@ -78,6 +78,26 @@ describe("parsePermissionResolution", () => {
     ).toBe("error");
   });
 
+  it("reads the verdict from workspace and accounts notifications (phrased without 'permission request for')", () => {
+    // The workspace handler says "permission request was granted (...) for <target>"
+    // -- 'for' comes after the verdict -- and the accounts handler says
+    // "request to list ..." with no 'permission' at all. Both must still
+    // resolve, or they poison the order-based correlation queue and every
+    // later verdict lands on the wrong card.
+    expect(
+      parsePermissionResolution(
+        "Your cross-workspace permission request was granted (minds-workspaces-backups-export) for workspace old-mind.",
+      ),
+    ).toBe("granted");
+    expect(parsePermissionResolution("Your cross-workspace permission request was denied.")).toBe("denied");
+    expect(parsePermissionResolution("Your request to list this device's signed-in accounts was granted.")).toBe(
+      "granted",
+    );
+    expect(parsePermissionResolution("Your request to list this device's signed-in accounts was denied.")).toBe(
+      "denied",
+    );
+  });
+
   it("ignores ordinary user messages", () => {
     expect(parsePermissionResolution("can you grant me access to slack?")).toBeNull();
     expect(parsePermissionResolution("Your permission request looks good")).toBeNull();

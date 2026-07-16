@@ -2,7 +2,9 @@
 # Assemble a clean, shareable "inspiration" snapshot on top of the DEFAULT_WORKSPACE_TEMPLATE base the
 # mind was created from, then commit it. Run by the launch-task WORKER the
 # publish-inspiration skill dispatches, from the worker's own git worktree
-# (cwd = worktree repo root); the live mind's /code is never touched.
+# (cwd = worktree repo root); the live mind's /code is never touched. This is
+# v1 of the inspirations flow (see INSPIRATION_FLOW_VERSION below); the
+# generated manifest records it as `format: v1` in its front-matter.
 #
 # The dev `create-new-mind-repo` recipe is NOT available in the VM, so this is
 # self-contained. It does the assembly + secret scan + manifest/thumbnail +
@@ -18,17 +20,32 @@
 #     incl. secrets). No upstream fetch/pull -- provenance link only.
 #   - Overlay via `rsync -a "$STAGE/" "$REPO/"` (root-to-root), NEVER
 #     `cp -a "$STAGE/apps" "$REPO/apps"` (nests into apps/apps).
-#   - Secret scan is a hard-failing (exit-non-zero, abort-before-commit) gate on
-#     token patterns and credential filenames -- the authoritative blocker.
+#   - Secret scan is a hard-failing (exit-non-zero, abort-before-commit) gate
+#     -- the authoritative blocker. It runs the sibling scan_secrets.sh, which
+#     requires BOTH scanners (betterleaks with the sibling betterleaks.toml
+#     config, kingfisher with --no-validate) and fails on any finding, any
+#     scanner error, or any missing scanner binary. There is NO fallback
+#     scanner: the binaries are baked into the workspace image, so a missing
+#     one is a broken environment.
 #   - Boot smoke-check via the supervisor python lib (realize/process_config),
 #     NEVER `supervisord -t` (in supervisord, -t means --strip_ansi and LAUNCHES
 #     the daemon).
 #
-# Exit codes: 0 = success; 1 = secret scan hit; 2 = usage error; 3 = nothing to
-# publish beyond the base; 4 = boot smoke-check failed; 5 = --base-ref does not
-# resolve to a bootable template tree.
+# Exit codes: 0 = success; 1 = secret scan hit OR a required scanner was
+# missing/errored; 2 = usage error; 3 = nothing to publish beyond the base;
+# 4 = boot smoke-check failed; 5 = --base-ref does not resolve to a bootable
+# template tree.
 
 set -euo pipefail
+
+# Version of the inspirations flow (and of the manifest format this script
+# writes into the generated manifest's `format:` front-matter key).
+INSPIRATION_FLOW_VERSION="v1"
+
+# Resolve this script's own directory up front, before any cd: the sibling
+# scan_secrets.sh + betterleaks.toml live next to this script, and the script
+# is invoked by a path that may be relative to the caller's cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- argument parsing --------------------------------------------------------
 
@@ -137,8 +154,25 @@ fi
 # them first. Also stage any pre-existing accumulated inspiration manifests +
 # thumbnails so they carry forward (step 4).
 STAGE="$(mktemp -d)"
-cleanup() { rm -rf "$STAGE"; }
+SCAN_TOOLS_DIR="$(mktemp -d)"
+cleanup() {
+    rm -rf "$STAGE" "$SCAN_TOOLS_DIR"
+}
 trap cleanup EXIT
+
+# Snapshot the secret-scan script + its betterleaks config OUT of the worktree
+# before step 2's reset: BASE_REF may predate them, in which case the
+# read-tree would delete them from the worktree before step 5's scan runs.
+# There is no fallback scanner, so both files are REQUIRED -- abort now,
+# before any destructive step, if either is missing. Copied side by side so
+# scan_secrets.sh finds its sibling config without a --config flag.
+for scan_file in scan_secrets.sh betterleaks.toml; do
+    if [ ! -f "$SCRIPT_DIR/$scan_file" ]; then
+        echo "build_inspiration.sh: $SCRIPT_DIR/$scan_file is missing (required for the secret scan; no fallback exists); aborting before touching the worktree" >&2
+        exit 1
+    fi
+    cp "$SCRIPT_DIR/$scan_file" "$SCAN_TOOLS_DIR/"
+done
 
 stage_one() {
     # Stage a single repo-root-relative path if it exists in the live worktree.
@@ -185,109 +219,32 @@ rsync -a "$STAGE/" "$REPO/"
 
 # --- 5. secret scan (authoritative, hard-failing blocker) --------------------
 
-# Token patterns and credential filenames. A hit prints the offending path (and
-# a redacted marker for value hits) and exits non-zero so the worker reports
-# `stuck` and NOTHING is committed or pushed. This is the enforced gate on top
-# of the .gitignore denylist -- not LLM prose.
-
-scan_failed=0
-
-# Files to scan: ONLY the content overlaid out of the live mind (the selected
-# --include / --data-include paths, plus any carried-forward inspiration-*.md /
-# .svg). The clean base is the trusted, public default workspace template -- it cannot contain
-# the user's secrets, and its own test fixtures legitimately hold placeholder
-# token strings (e.g. "sk-ant-test"), so scanning it only produces false
-# positives that block every publish. The real risk is a secret riding in from
-# the live mind's overlaid paths, so that is exactly what we scan. Enumerating
-# only the overlay also keeps the scan cheap regardless of how large the base is
-# (never traverses vendor/, the base's fixtures, etc.).
+# The scan is the snapshotted scan_secrets.sh (with its sibling
+# betterleaks.toml) over the STAGING dir. It runs TWO scanners --
+# betterleaks, kingfisher (--no-validate) -- and exits non-zero on a finding
+# from EITHER of them, on any scanner error, or on any missing scanner binary
+# (no fallback: the binaries are baked into the workspace image, so a missing
+# one is a broken environment, never a reason to scan less). A hit
+# prints the offending path (value redacted, never printed) and this script
+# exits 1, so the worker reports `stuck` and NOTHING is committed or pushed.
+# This is the enforced gate on top of the .gitignore denylist -- not LLM
+# prose.
 #
-# SCAN_ROOTS holds the repo-root-relative paths that were overlaid; ALL_FILES is
-# every file under them that now exists in the assembled tree.
-SCAN_ROOTS=()
-for rel in "${INCLUDE_PATHS[@]}" "${DATA_INCLUDE_PATHS[@]}"; do
-    [ -e "$rel" ] && SCAN_ROOTS+=("$rel")
-done
-shopt -s nullglob
-for existing in inspiration-*.md inspiration-*.svg; do
-    SCAN_ROOTS+=("$existing")
-done
-shopt -u nullglob
+# Scanning the STAGE (not the assembled tree) means the scan covers exactly
+# the content overlaid out of the live mind: the selected --include /
+# --data-include paths plus any carried-forward inspiration-*.md/.svg. The
+# clean base is the trusted, public default workspace template -- it cannot
+# contain the user's secrets, and its own test fixtures legitimately hold
+# placeholder token strings (e.g. "sk-ant-test"), so scanning it would only
+# produce false positives that block every publish. The real risk is a secret
+# riding in from the live mind's overlaid paths, and that is exactly what the
+# stage holds. It also keeps the scan cheap regardless of how large the base
+# is (never traverses vendor/, the base's fixtures, etc.). rsync -aR staged
+# every file at its repo-relative path, so scan_secrets.sh's
+# relative-to-scanned-dir finding paths ARE repo-root-relative.
 
-ALL_FILES=()
-if [ "${#SCAN_ROOTS[@]}" -gt 0 ]; then
-    mapfile -d '' ALL_FILES < <(find "${SCAN_ROOTS[@]}" -type f -print0)
-fi
-
-# 5a. credential filenames (basename or path-suffix match).
-CREDENTIAL_BASENAMES=(
-    ".git-credentials"
-    ".netrc"
-    ".claude.json"
-    ".sesskey"
-    ".pypirc"
-)
-# Path-suffix credential locations (not just basename).
-CREDENTIAL_SUFFIXES=(
-    ".config/gh/hosts.yml"
-)
-# Paths in ALL_FILES are already repo-root-relative (that is how they were
-# overlaid), so they can be printed as-is.
-for f in "${ALL_FILES[@]}"; do
-    base="$(basename "$f")"
-    for bad in "${CREDENTIAL_BASENAMES[@]}"; do
-        if [ "$base" = "$bad" ]; then
-            echo "build_inspiration.sh: SECRET SCAN FAILED: credential file present: ${f}" >&2
-            scan_failed=1
-        fi
-    done
-    for suffix in "${CREDENTIAL_SUFFIXES[@]}"; do
-        case "$f" in
-            *"$suffix")
-                echo "build_inspiration.sh: SECRET SCAN FAILED: credential file present: ${f}" >&2
-                scan_failed=1
-                ;;
-        esac
-    done
-    # .env / .env.* (but not .env.example / .env.sample templates, which are
-    # deliberately non-secret; a bare .env or .env.<anything-else> is blocked).
-    case "$base" in
-        .env | .env.*)
-            case "$base" in
-                .env.example | .env.sample | .env.template) ;;
-                *)
-                    echo "build_inspiration.sh: SECRET SCAN FAILED: env file present: ${f}" >&2
-                    scan_failed=1
-                    ;;
-            esac
-            ;;
-    esac
-done
-
-# 5b. token / key value patterns inside file contents.
-# Patterns match the token PREFIX immediately followed by enough secret-body
-# characters to be a real credential, so short placeholder values that share a
-# prefix (e.g. "sk-ant-test", "ghp_example") do NOT fire:
-#   - GitHub PATs:    ghp_ / gho_ + 36 base62 chars; github_pat_ + 22+ base62/_.
-#   - Anthropic keys: sk-ant- + 24+ chars of [A-Za-z0-9-_] (real keys are ~90+;
-#                     "sk-ant-test" is only 4 trailing chars and is skipped).
-#   - AWS access ids: AKIA + 16 upper alnum.
-#   - PEM headers:    a private-key header line.
-TOKEN_PATTERN='ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|sk-ant-[A-Za-z0-9_-]{24,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
-if [ "${#ALL_FILES[@]}" -gt 0 ]; then
-    # -I skips binary files, -E enables the alternation, -l lists matching paths.
-    # One grep over the overlaid file list (not a fork per file). Paths are
-    # already repo-root-relative. grep exits 1 (no matches) or 2 (only
-    # unreadable-file warnings) harmlessly; a real hit prints the path here.
-    while IFS= read -r hit; do
-        [ -n "$hit" ] || continue
-        echo "build_inspiration.sh: SECRET SCAN FAILED: token/key pattern in: ${hit} (value redacted)" >&2
-        scan_failed=1
-    done < <(grep -IElE -- "$TOKEN_PATTERN" "${ALL_FILES[@]}" 2>/dev/null)
-fi
-
-if [ "$scan_failed" -ne 0 ]; then
-    echo "build_inspiration.sh: aborting before commit -- secret scan found credentials or tokens in the assembled tree" >&2
+if ! bash "$SCAN_TOOLS_DIR/scan_secrets.sh" "$STAGE"; then
+    echo "build_inspiration.sh: aborting before commit -- the secret scan found credentials/tokens in the overlaid content, or a required scanner was missing or failed (see above)" >&2
     exit 1
 fi
 
@@ -334,6 +291,7 @@ cat > "$MANIFEST" <<MANIFEST_EOF
 title: ${TITLE}
 description: ${manifest_description}
 thumbnail: ${THUMBNAIL}
+format: ${INSPIRATION_FLOW_VERSION}
 ---
 
 # ${TITLE}
@@ -502,6 +460,63 @@ named above is the latest; treat the others as reference (they were likely
 already adapted upstream).
 WELCOME_EOF
 
+# --- 8.5 overwrite README.md to describe the inspiration ---------------------
+
+# The clean base's README describes the generic default-workspace-template.
+# That is wrong for a published inspiration: the repo's landing page (what a
+# human sees on GitHub) must describe THIS specific inspiration, not the
+# template. Overwrite it, mirroring the manifest: a title, the one-line
+# description, and a FILL-IN overview the worker completes (a GitHub-flavored
+# version of the manifest's "What it is"). Deterministic full-file write;
+# idempotent across accumulated publishes (regenerated each publish, titled by
+# the latest inspiration, listing ALL manifests in the repo).
+
+# List every inspiration manifest in the assembled tree (the new one from step
+# 6 plus any carried forward in step 1), titled from each manifest's
+# front-matter, marking the one just published.
+inspirations_list=""
+shopt -s nullglob
+for m in inspiration-*.md; do
+    m_slug="${m#inspiration-}"
+    m_slug="${m_slug%.md}"
+    m_title="$(sed -n 's/^title: //p' "$m" | head -1)"
+    [ -n "$m_title" ] || m_title="$m_slug"
+    if [ "$m_slug" = "$SLUG" ]; then
+        inspirations_list+="- **${m_title}** -- [\`${m}\`](${m}) (published now)"$'\n'
+    else
+        inspirations_list+="- ${m_title} -- [\`${m}\`](${m})"$'\n'
+    fi
+done
+shopt -u nullglob
+
+cat > README.md <<README_EOF
+# ${TITLE}
+
+${manifest_description}
+
+<!-- FILL-IN (publishing agent): BEFORE reporting done, replace this comment
+with a short overview (2-4 sentences) of what this inspiration is and does --
+a GitHub-landing-page version of the manifest's "What it is". Write for a
+human browsing the repo who has never seen the original mind. -->
+
+This repository is a published **minds inspiration**: a clean, bootable
+snapshot of the apps and features a mind built, ready to adapt into your own.
+It is NOT the generic workspace template -- it is this specific project.
+
+## Use it
+
+- **Create a new mind from it:** point a new minds workspace at this repo's
+  URL. On first boot the mind reads the inspiration and helps you connect your
+  own accounts and adapt it.
+- **Bring it into an existing mind:** run \`/use-inspiration <this repo's URL>\`.
+
+## What's inside
+
+${inspirations_list}
+Each \`inspiration-<slug>.md\` is the full manifest for that inspiration: what
+it is, how it works, the prerequisites it needs, and how to adapt it.
+README_EOF
+
 # --- 9. boot smoke-check WITHOUT side effects, then single commit -------------
 
 # Validate supervisord.conf via the supervisor python lib -- realize() +
@@ -586,9 +601,11 @@ if [ "${#DATA_INCLUDE_PATHS[@]}" -gt 0 ]; then
 fi
 echo "  manifest:  ${MANIFEST}"
 echo "  thumbnail: ${THUMBNAIL}"
+echo "  readme:    README.md (regenerated to describe this inspiration)"
 echo "  boot smoke-check: passed"
 echo "  NEXT: ${MANIFEST} still has <!-- FILL-IN (publishing agent): ... --> placeholders in"
-echo "  'What it is', 'How it works', 'Prerequisites', and 'Holes', and ${THUMBNAIL}"
+echo "  'What it is', 'How it works', 'Prerequisites', and 'Holes'; README.md has one FILL-IN"
+echo "  (its overview); and ${THUMBNAIL}"
 echo "  is a generic placeholder (marker comment inside). Replace ALL FILL-INs with real content"
 echo "  (or explicit 'none' prose) AND replace the placeholder with a bespoke SVG for this app,"
 echo "  then commit and self-check before reporting done."

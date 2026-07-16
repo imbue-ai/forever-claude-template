@@ -38,7 +38,7 @@ agent, identified by its `MNGR_AGENT_ID`, or the human).
   its own persistent Chromium profile under `$MNGR_HOST_DIR/browser-profiles/`
   (Tier A -- on the workspace volume), so cookies/logins/history come back; Chromium
   does this itself, we just point `user_data_dir` at a durable dir. A tiny manifest
-  (`runtime/browser-fleet.json`, Tier B -- git-backed to the mindsbackup branch)
+  (`runtime/browser-fleet.json`, Tier B -- covered by the opt-in GitHub sync)
   records which browsers existed and their tab URLs, so even a full rebuild restores
   the tab list (logged out, since profiles are volume-only). On daemon startup the
   fleet is restored **eager-sequentially** (one browser at a time, no cold-boot
@@ -51,3 +51,12 @@ agent, identified by its `MNGR_AGENT_ID`, or the human).
     on purpose -- it makes browser_use's `_copy_profile()` use the dir in place
     instead of copying it to a temp dir (which would silently defeat persistence).
     Pinned by `browser-use==0.13.1` and guarded by an integration test.
+- **Memory shedding** (`oom_retag.py`): the daemon is tagged as the most
+  expendable thing in the workspace, but Chromium overwrites the inherited
+  `oom_score_adj` with its own values, which would leave renderers more
+  protected than the agents they serve. Every fleet event that can spawn a
+  Chromium process (launch, new page -- from any origin, including a human in
+  the viewer -- and navigation) triggers a short burst of sweeps on a daemon
+  thread that remaps Chromium's self-assigned values back into the browser
+  band, preserving their relative order. See "The Chromium exception" in
+  `libs/oom_priority/README.md`.

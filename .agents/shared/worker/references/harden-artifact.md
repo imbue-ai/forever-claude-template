@@ -44,12 +44,73 @@ status values its flow uses.
   the same coverage in both.
 - **Run every suite that applies** plus the relevant ratchets.
 
+## Optimize independent work -- parallelize what the incremental pass left serial
+
+The foreground pass optimizes for getting *something* working, so it tends to
+leave independent operations running one after another. The harden pass is where
+you make the artifact fast, since the expensive rethink is deliberately deferred
+to here. **When the artifact performs multiple independent I/O-bound operations
+-- data fetches, API calls, subprocess invocations -- that do not depend on each
+other's results, run them concurrently rather than in a serial loop.** This is
+most impactful for fetch-heavy pipelines (the fetch-process-show shape), where a
+serial loop over many sources is often the dominant cost and parallelizing it is
+a large, cheap win.
+
+Guardrails:
+
+- **Bound the concurrency** and respect the provider's rate limits -- an
+  unbounded fan-out that trips throttling or bans is slower and worse than the
+  serial version. Use a semaphore / worker pool sized to what the source allows.
+- **Only parallelize genuinely independent work.** Keep steps serial where one
+  depends on another's output, where ordering matters, or where the source
+  requires sequential access (cursor pagination, stateful sessions).
+- Preserve deterministic output: collect concurrent results and order them
+  explicitly rather than relying on completion order, so tests and surfaces stay
+  stable.
+
+## Tolerate partial failure and support resumption
+
+A pipeline that touches many external sources will eventually hit a failure on
+one of them -- a timeout, a rate-limit, a malformed record. The harden pass is
+where you make the artifact survive that gracefully instead of crashing. This
+applies to any multi-item pipeline, but parallel fan-out makes it urgent, since
+more operations in flight means more failure surface.
+
+- **Isolate failures -- one failed operation must not sink the whole run.**
+  Capture each item's outcome (result or error) independently, continue past a
+  single failure, and report which items failed and why. A partial result over
+  the sources that succeeded is far more useful than a crash that discards the
+  ones that worked; surface the failures so the user knows the result is partial
+  rather than silently dropping them.
+- **Persist results incrementally so a run can resume.** Write each result to
+  durable storage as it completes rather than accumulating everything in memory
+  and saving at the end -- then a re-run (after a crash, a rate-limit pause, or a
+  transient failure) picks up from what already landed instead of refetching
+  from scratch. This dovetails with the preserve-and-surface contract below:
+  persist the raw payload keyed by its source id, so the same store serves both
+  resumption and later re-derivation.
+
 ## Review gates
 
 Run the repo's review gates -- `/autofix` and the architecture gates -- and
 fix what they flag **before** writing the final gate report, so the user sees
 a single report that already reflects the review verdicts rather than a
 report-then-verify-then-report-again pattern.
+
+Autofix's normal final step asks the user to keep or revert each proposed fix
+via AskUserQuestion, which is unavailable in a worker -- so split that decision
+out and make it yourself. Invoke autofix so it *applies* its fixes but leaves
+the keep/revert judgment to you:
+
+    /autofix Run fully unattended: never call AskUserQuestion. Run the fix
+    loop, leave every fix commit applied, and report the fix commits (hash +
+    full message). Do not revert anything yourself -- the caller will decide.
+
+Then review those fix commits against what this branch is meant to do. You hold
+the task context the fix subagents run without, so you are the right judge of
+whether each fix is correct. Keep fixes by default; revert only the ones that
+undo intended behavior or are otherwise wrong (`git revert --no-edit <hash>`,
+newest first). Record which you kept and which you reverted in your gate report.
 
 ## Preserve and surface captured data
 

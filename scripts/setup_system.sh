@@ -18,18 +18,20 @@ provision_skip_if_done setup_system
 : "${TTYD_VERSION:=1.7.7}"
 : "${CLOUDFLARED_VERSION:=2026.3.0}"
 : "${UV_VERSION:=0.11.7}"
-: "${CLAUDE_CODE_VERSION:=2.1.160}"
+: "${CLAUDE_CODE_VERSION:=2.1.207}"
 : "${MODAL_VERSION:=1.4.2}"
 : "${NODE_MAJOR:=20}"
 : "${LATCHKEY_VERSION:=2.20.0}"
 
 # System packages (tini for signal handling; supervisor runs our background
 # services; cron runs the recurring jobs, driven from supervisord rather than an
-# init system; the rest are agent/runtime deps). supervisor provides the system
-# supervisord + supervisorctl that `uv run bootstrap` execs into the foreground.
+# init system; earlyoom is the OOM-prevention daemon that sheds memory under
+# pressure before the kernel kills an arbitrary victim; the rest are
+# agent/runtime deps). supervisor provides the system supervisord + supervisorctl
+# that `uv run bootstrap` execs into the foreground.
 apt-get update
 apt-get install -y --no-install-recommends \
-    bash build-essential ca-certificates cron curl fd-find git git-lfs jq less nano \
+    bash build-essential ca-certificates cron curl earlyoom fd-find git git-lfs jq less nano \
     openssh-server procps restic ripgrep rsync sqlite3 supervisor tini tmux unison util-linux wget \
     xxd xmlstarlet
 rm -rf /var/lib/apt/lists/*
@@ -122,6 +124,23 @@ chmod 600 /root/.ssh/known_hosts
 # latchkey (gateway CLI) and modal (python tool).
 npm install -g "latchkey@${LATCHKEY_VERSION}"
 uv tool install "modal==${MODAL_VERSION}"
+
+# Secret-scanner binaries (betterleaks + kingfisher) for the publish-inspiration
+# scan gate. install_secret_scanners.sh is the single source of truth for the
+# version pins + per-arch sha256s; invoking it here means BOTH docker-built
+# images (this script runs in a Dockerfile RUN) and Lima-provisioned VMs (this
+# script runs directly in the VM) bake in the scanners from one common place.
+# The installer is reachable two ways depending on how we were invoked: in a
+# Dockerfile build it sits beside this script's install path as
+# default-workspace-template-install-secret-scanners; run straight from the repo (Lima/Modal)
+# it is its sibling install_secret_scanners.sh. It is idempotent (skips any tool
+# already at its pinned version without network access).
+setup_dir="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$setup_dir/install_secret_scanners.sh" ]; then
+    bash "$setup_dir/install_secret_scanners.sh"
+else
+    bash "$setup_dir/default-workspace-template-install-secret-scanners"
+fi
 
 # Playwright + Chromium is deliberately NOT installed here; the deferred-install
 # service installs it idempotently on first boot.
