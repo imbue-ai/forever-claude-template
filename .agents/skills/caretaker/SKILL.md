@@ -1,6 +1,6 @@
 ---
 name: caretaker
-description: The single idempotent Caretaker skill, invoked via /caretaker on every run. On the very first run it does one look-only scan (no fixes), then introduces itself with what it found and asks whether to keep checking each night; on every later run it does the nightly routine -- greets the user, scans the workspace's service logs for problems and checks for finished-but-uncommitted work with permission, reviews the previous run, proposes (or, with permission, applies) fixes and commits, and summarizes, always in plain user-experience terms.
+description: The single idempotent Caretaker skill, invoked via /caretaker on every run. On the very first run it does one look-only scan (no fixes), then introduces itself with what it found and asks whether to keep checking each night; on every later run it does the nightly routine -- greets the user, scans the workspace's service logs for problems, checks basic system health (disk, memory and swap, CPU load, OOM shedding), and checks for finished-but-uncommitted work, all with permission; reviews the previous run, proposes (or, with permission, applies) fixes and commits, and summarizes, always in plain user-experience terms.
 ---
 
 # Caretaker
@@ -61,10 +61,13 @@ first impression of you is that single message.
 1. **Open a log.** Create `runtime/caretaker/<timestamp>.md` (format
    `YYYY-MM-DDTHH-MM-SS`) and note what you check and find as you go. This file is
    private -- none of it appears in the chat.
-2. **Scan, but change nothing.** Two checks, both look-only:
+2. **Scan, but change nothing.** Three checks, all look-only:
    - Use the **`check-app-errors`** skill to look over the workspace's services
      efficiently (`supervisorctl status` plus a few targeted greps of
      `/var/log/supervisor/`).
+   - Check basic system health: disk (`df -h /`), memory and swap (`free -h`),
+     CPU load (`uptime`), and whether the OOM guard shed anything
+     (`runtime/oom_priority/events/shed.jsonl`, if present).
    - Check for uncommitted work: `git status` in the workspace repo. Note
      whether finished-looking work is sitting uncommitted.
 
@@ -167,9 +170,19 @@ record their answer and confirm; the daily job wakes you again on the next caden
    `runtime/caretaker/permissions.md`.
    - `no` or not set: do **not** scan (no permission yet). Skip to step 5; your
      hello already re-offered, so just close warmly.
-   - `yes`: two checks, noting what you find **in your log**, in plain terms:
+   - `yes`: three checks, noting what you find **in your log**, in plain terms:
      - use the **`check-app-errors`** skill to scan the services efficiently
        (`supervisorctl status` + a few targeted greps of `/var/log/supervisor/`);
+     - check basic system health: disk (`df -h /`; if it is nearly full, a
+       quick `du` for the biggest offenders), memory and swap (`free -h`),
+       CPU load (`uptime` -- load persistently above the core count means
+       something is spinning), and whether the OOM guard shed any processes
+       since the last run (`runtime/oom_priority/events/shed.jsonl`, if
+       present). Worth flagging: disk above ~85 percent, swap heavily used,
+       sustained high load, or anything shed overnight. These findings are
+       usually report-only -- freeing disk means deleting things, so treat
+       cleanups as bigger fixes unless the target is unambiguously safe to
+       remove (stale rotated logs, caches);
      - check for uncommitted work with `git status` in the workspace repo.
        Work that is finished but never committed belongs in history --
        committing makes it visible and durable there (and, when the user has

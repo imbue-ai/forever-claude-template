@@ -47,9 +47,11 @@ cron entry -- no new agent template. The daily **Caretaker** is the
 built-in instance, baked into `/etc/cron.d/minds-caretaker` at image build (delete
 that file to switch it off): once a night it quietly checks the apps and services in your
 workspace for problems -- a page that stopped loading, a service that crashed,
-errors piling up -- and checks for finished work left uncommitted (committing
-it, with permission, so it is safely in history and backed up), and either
-fixes what it found or explains it, always in plain, non-technical language. On its very first night it does one look-only scan
+errors piling up -- along with basic system health (disk filling up, memory
+and swap pressure, CPU load, anything the OOM guard had to shed) and finished
+work left uncommitted (committing it, with permission, so it is safely in
+history), and either fixes what it found or explains it, always in plain,
+non-technical language. On its very first night it does one look-only scan
 (changing nothing), then introduces itself with what it found and asks whether to
 keep checking each night, fix small things on its own, or be switched off; from
 the second night on it scans only once you've opted in. It greets you each night
