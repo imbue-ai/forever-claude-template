@@ -20,6 +20,15 @@ import { describeRequestError } from "../models/request-error";
 import { renderUserMessage } from "./message-renderers";
 import { icon } from "./icons";
 
+// Agents with an interrupt-and-resend sequence currently in flight. Each queued
+// bubble renders its own interrupt-and-send action, so without this guard a user
+// with several queued messages can fire overlapping restarts of the SAME agent;
+// the concurrent teardowns/re-spawns race and a send lands mid-restart, failing
+// with "0 successful agents". Keyed by agent because the race is overlapping
+// restarts of one agent -- a restart clears that agent's queue anyway, so
+// ignoring a second bubble's resend while one is in flight is correct.
+const interruptResendInFlight = new Set<string>();
+
 /**
  * Interrupt the agent and re-send a queued message.
  *
@@ -29,13 +38,20 @@ import { icon } from "./icons";
  * message must be re-sent afterward. Conversation history is preserved (the
  * interrupt resumes the same session). On failure the bubble is rolled back and
  * the error surfaced.
+ *
+ * At most one interrupt-and-resend runs per agent at a time: if one is already in
+ * flight for this agent, the call is a no-op (see ``interruptResendInFlight``).
  */
 export async function interruptAndResend(agentId: string, id: string): Promise<void> {
+  if (interruptResendInFlight.has(agentId)) {
+    return;
+  }
   const pending = getPendingMessage(agentId, id);
   if (pending === undefined) {
     return;
   }
   const text = pending.content;
+  interruptResendInFlight.add(agentId);
   // Back to "sending" -- this also hides the action button so it can't double-fire.
   markPendingMessageSending(agentId, id);
   m.redraw();
@@ -48,6 +64,8 @@ export async function interruptAndResend(agentId: string, id: string): Promise<v
     console.error(`Failed to interrupt and send to agent ${agentId}: ${detail}`);
     removePendingMessage(agentId, id);
     alert(`Failed to interrupt and send: ${detail}`);
+  } finally {
+    interruptResendInFlight.delete(agentId);
   }
 }
 
