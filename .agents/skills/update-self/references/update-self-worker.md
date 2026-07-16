@@ -213,22 +213,29 @@ safe to apply live depends on **who consumes the new version**. Your worktree
 cannot itself validate the pair -- worktree isolation isolates the *repo tree*,
 not the host-global toolchain, so your env still has the **old** dep; do **not**
 globally install the new one to test, that mutates the shared toolchain the live
-workspace and other agents run on. So decide by provenance of the dependent:
+workspace and other agents run on. So decide by the **provenance** of the
+dependent -- does its code come from the upstream template, or was it built in
+this workspace? Decide this by *origin, not directory*: path is not the signal
+(a workspace's own `build-web-service` app lands as a new lib under `libs/`, right
+alongside the template's built-in `libs/*` services). The check is whether the
+dependent's code exists in upstream at the target ref -- e.g. `git cat-file -e
+"$TARGET_REF":<path>` for its files, or whether it's part of the merge base's
+template rather than added locally.
 
-- **Dependent is built-in code** (shipped by the template -- `system_interface`,
-  the `libs/*` services, anything that arrived under this `update-self:` merge from
-  upstream): **trust it and apply live.** The upstream release tested that built-in
-  code against the bumped dependency *together*, so re-running the provisioner and
-  restarting the built-in service is safe -- the same "trust upstream's testing"
-  basis the whole pulled-in set rides on. Not rebuild-only.
-- **Dependent is user-created** (a local service, web app, or script the workspace
-  built -- a crystallized skill's scripts under `.agents/skills/<skill>/`, a
-  `build-web-service` app, a workspace-added `libs/` service): **unsafe to
-  hot-apply.** Upstream never saw that code, so it never tested it against the new
-  dependency, and you can't either (shared toolchain). Classify it **rebuild-only**
-  -- the safe way to land it is a workspace recreate, which provisions the new
-  substrate and re-runs the user code against it. If leaving it unapplied would
-  break the running workspace, that's `stuck`.
+- **Dependent is built-in code** (present in the upstream template at the target
+  ref -- e.g. `apps/system_interface`, a template-shipped `libs/*` service, a
+  `.agents/shared/` script): **trust it and apply live.** The upstream release
+  tested that built-in code against the bumped dependency *together*, so re-running
+  the provisioner and restarting the built-in service is safe -- the same "trust
+  upstream's testing" basis the whole pulled-in set rides on. Not rebuild-only.
+- **Dependent is user-created** (absent from upstream -- built in this workspace:
+  a `build-web-service` app in its own `libs/` lib, a crystallized skill's scripts
+  under `.agents/skills/<skill>/`, a local script): **unsafe to hot-apply.**
+  Upstream never saw that code, so it never tested it against the new dependency,
+  and you can't either (shared toolchain). Classify it **rebuild-only** -- the safe
+  way to land it is a workspace recreate, which provisions the new substrate and
+  re-runs the user code against it. If leaving it unapplied would break the running
+  workspace, that's `stuck`.
 
 For either case:
 - **Research the version change online** to ground your assessment: look up the
@@ -328,10 +335,12 @@ Per `.agents/shared/references/worker-reporting.md` (`<TASK_FILE_GLOB>` ->
     `done`.
   - **Global-dependency bump with a dependent** (if the merge bumps a global dep
     that something depends on) -- the version delta and what your online research
-    turned up, **which dependent(s)** and whether each is **built-in** (upstream-
-    tested -> apply live) or **user-created** (couldn't validate -> rebuild-only,
-    or `stuck` if it would break the running workspace). Call out any gap honestly;
-    the lead applies the built-in case and does not hot-apply the user case.
+    turned up, **which dependent(s)** and whether each is **built-in** (its code is
+    in upstream at the target ref, so upstream-tested -> apply live) or
+    **user-created** (absent from upstream, built in this workspace; couldn't
+    validate -> rebuild-only, or `stuck` if it would break the running workspace).
+    Judge by origin, not directory. Call out any gap honestly; the lead applies the
+    built-in case and does not hot-apply the user case.
   - **Validation** -- suites/boots/Playwright and review gates run, all passing;
     autofix fixes kept vs reverted; and any validation **gap** (a coupled bump you
     couldn't fully exercise) called out honestly rather than implied as covered.

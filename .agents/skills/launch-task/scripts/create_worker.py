@@ -664,6 +664,16 @@ def launch_sync(
         return await_rc
 
     report = parse_report(buffer.getvalue())
+    # Consume the report now that its contents are captured (and about to be
+    # emitted below): ``launch`` refuses to start if anything sits at
+    # ``finish_report_path``, and ``destroy`` only removes the worker's
+    # agent/worktree -- not this report, which lives in the caller's runtime dir.
+    # Leaving it behind would trap the next ``launch_sync`` on the same task file
+    # (the fixed-path pattern services use). The raw report is preserved in the
+    # emitted result (``raw_report`` in the JSON, plus ``result_path`` if set), so
+    # removing the on-disk copy loses nothing. ``missing_ok`` guards a race where
+    # something already cleared it between the await and here.
+    report_path.unlink(missing_ok=True)
     if destroy_on_finish:
         destroy(name, runner)
     _emit_run_result(

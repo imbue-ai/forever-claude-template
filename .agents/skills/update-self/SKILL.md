@@ -286,14 +286,15 @@ The report says which classes merged. Apply each; a clean pull-in is still
     which pins moved.
 
     **Exception -- a bump the report flags as coupled to a *user-created*
-    dependent.** The report says who depends on the bumped dep. If the dependent
-    is **built-in** (`system_interface`, a `libs/*` service -- code the same
-    upstream release tested against the new dep), hot-running the provisioner is
-    safe; apply it live as above. If the dependent is **user-created** (a local
-    service / web app / script the workspace built), do **not** hot-run the
-    provisioner: upstream never tested that code against the new dep and the worker
-    couldn't validate it either, so treat it as **rebuild-only** -- surface it to
-    the user for a workspace recreate (which provisions the new substrate and
+    dependent.** The report says who depends on the bumped dep and classifies it
+    by origin (not directory). If the dependent is **built-in** (its code is in the
+    upstream template -- the same release tested it against the new dep),
+    hot-running the provisioner is safe; apply it live as above. If the dependent
+    is **user-created** (built in this workspace, absent from upstream -- e.g. a
+    `build-web-service` app, which also lives under `libs/`), do **not** hot-run
+    the provisioner: upstream never tested that code against the new dep and the
+    worker couldn't validate it either, so treat it as **rebuild-only** -- surface
+    it to the user for a workspace recreate (which provisions the new substrate and
     re-runs the user code against it), exactly as an image-level hunk below.
   - A hunk that only affects a **fresh image build** -- something the idempotent
     re-run does not reproduce -- needs a **manual workspace rebuild**; tell the

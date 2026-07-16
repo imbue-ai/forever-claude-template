@@ -980,6 +980,61 @@ def test_launch_sync_collects_report_and_destroys(tmp_path: Path) -> None:
     assert json.loads(out.getvalue()) == expected
 
 
+def test_launch_sync_consumes_report_so_a_repeated_call_is_not_blocked(
+    tmp_path: Path,
+) -> None:
+    # Regression: launch_sync calls launch(), whose stale-report guard refuses to
+    # launch when anything sits at finish_report_path. destroy() removes the
+    # worker's agent/worktree but NOT the report (it lives in the caller's runtime
+    # dir), so without cleanup the report launch_sync just collected would trap the
+    # next call. A non-interactive caller (a service) that calls launch_sync
+    # repeatedly with the same task file -- hence the same report path -- must not
+    # be blocked by its own previous report. So launch_sync consumes (removes) the
+    # report once it has been collected and emitted.
+    runtime, task, _ = _make_layout(tmp_path)
+    report = runtime / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    _write_launch_sync_task(task, report)
+
+    def _run_once(runner: create_worker_mod.Runner) -> int:
+        return create_worker_mod.launch_sync(
+            name="demo-worker",
+            template="worker",
+            runtime_dir=runtime,
+            task_file=task,
+            timeout_seconds=1800,
+            poll_interval_seconds=5,
+            runner=runner,
+            sleeper=_write_report_on_sleep(
+                report, "---\ntype: status\nname: done\n---\n\nround\n"
+            ),
+            clock=lambda: 0.0,
+            out=io.StringIO(),
+        )
+
+    first = _RecordingRunner()
+    assert _run_once(first) == 0
+    # The collected report is cleared from the report path, not left behind.
+    assert not report.exists()
+
+    # A second identical call re-creates the worker and returns 0 instead of
+    # aborting on the guard (exit 2, which would emit no `mngr create`).
+    second = _RecordingRunner()
+    assert _run_once(second) == 0
+    create_calls = [c.argv for c in second.calls if c.argv[:2] == ["mngr", "create"]]
+    assert create_calls == [
+        [
+            "mngr",
+            "create",
+            "demo-worker",
+            "-t",
+            "worker",
+            "--label",
+            "agent_created=true",
+        ]
+    ]
+
+
 def test_launch_sync_keep_agent_skips_destroy(tmp_path: Path) -> None:
     runtime, task, _ = _make_layout(tmp_path)
     report = runtime / "reports" / "report.md"
