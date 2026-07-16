@@ -170,10 +170,46 @@ relay their resolution via `mngr message`, consume the report, and re-arm.
 
 ### 5a. Approval gate
 
-The `done` report is a "what's new" summary: the new changelog entries in range,
-the conflicts and how the worker resolved them, the services it validated, and
-anything flagged for a manual rebuild. Present it via `send-user-message` and
-**wait for explicit approval** -- mandatory even on a clean pull.
+The `done` report is *your* raw material, not the user's message. It is a
+comprehensive, technical digest for the lead -- changelog entries in range, the
+conflicts and how the worker resolved them, reveal-class breakdown, impact
+analysis, lockfile handling, and validation. **Do not forward it verbatim.**
+Keep it available (it is persisted under `runtime/update-self/reports/` -- offer
+to show it if the user wants the specifics), and **compose a plain-language
+approval message** from it. Then **wait for explicit approval** -- mandatory even
+on a clean pull.
+
+Write the message a non-technical reader skims top-to-bottom, in this fixed
+order:
+
+1. **Verdict headline** (one line, first thing they see): "ready to apply,"
+   "ready to apply, with one caveat," or "needs your input on X."
+2. **What's new** -- always first after the headline. Keep this *detailed*: some
+   readers want the specifics, others happily skim it as "great, they're on it."
+   Do not thin it out -- carry the worker's digest, just in prose a lay reader
+   parses (describe what each change does, not the file names).
+3. **Conflicts** -- "none," or what needed reconciling.
+4. **Validation** -- did the suite pass; is any failure pre-existing/unrelated.
+5. **Caveats** -- only if any; what to expect after applying.
+6. **Pre-existing issues** -- only if any, and only after verifying attribution
+   (see the worker guidance's §4a): state plainly whether each lives in
+   **built-in** code (present at the target ref -> report upstream) or the
+   **user's own** code. Never call built-in code "workspace-added."
+7. **The ask** -- see the language rule below.
+
+**Detail in the informational sections (2-4); plain language at the decision
+points.** Spend deliberate plain-language care only where the message asks the
+user to **decide or act** -- the verdict headline, any caveat that needs their
+action, and the closing ask. Those carry no jargon: never "merge," "land," or
+"fast-forward" there. Frame the ask around *applying the update to their
+workspace* (many users just want their workspace improved and don't think in
+terms of merges), e.g. "Everything's ready -- want me to apply the update to
+your workspace now?"
+
+**Drop dependency/lockfile mechanics** from the user message unless there is an
+action the *user* must take. **Command rule:** never print a command *you* will
+run -- describe it in plain language ("I'll refresh it automatically if it comes
+up"). Show a literal command only when the *user* must run it themselves.
 
 **Preview rule for the system interface:** if upstream was strictly newer there
 (no merge work needed), no preview is needed; if the worker's report says
