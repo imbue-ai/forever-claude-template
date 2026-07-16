@@ -7,6 +7,31 @@ on:
     branches: ['**']
 
 jobs:
+  # Changelog gate. Diffs the PR branch against its real base branch and fails
+  # if any touched project is missing its per-PR changelog entry. Pure stdlib,
+  # so no `uv sync`; just enough git history to compute the diff.
+  check-changelog:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Fetch base branch and deepen HEAD for the changelog diff
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check changelog entries
+        run: python scripts/check_changelog_entries.py
+
   test:
     runs-on: ubuntu-latest
 

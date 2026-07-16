@@ -130,6 +130,17 @@ Only after doing all of the above should you begin writing code.
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
+# Changelog
+
+Every PR must include one changelog entry file **per project it touches**. CI's `check-changelog` gate (`scripts/check_changelog_entries.py`) fails the PR if any are missing.
+
+- A "project" is a directory under `libs/` or `apps/` that contains a `pyproject.toml` (e.g. `bootstrap`, `system_interface`), or the synthetic top-level `dev` project for root-level files (`scripts/`, `.github/`, repo-root docs, top-level config).
+- Each project holds its per-PR entries in its own `<project_dir>/changelog/` directory.
+- For each project a PR touches, create one entry file at `<project_dir>/changelog/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
+  - Example: a branch `feat/new-thing` that touches `libs/browser` and root-level `scripts/` needs both `libs/browser/changelog/feat-new-thing.md` and `dev/changelog/feat-new-thing.md`.
+- Each file should briefly describe the user-visible changes in the PR that pertain to *that* project. If an entry uses a list, separate the bullets with a blank line.
+- Adding a `<project_dir>/changelog/<branch>.md` entry is itself an edit under that project, so it inherently satisfies the requirement for that project.
+
 # Ratchets
 
 Each project has a `test_ratchets.py` file containing automated code quality checks ("ratchets"). 

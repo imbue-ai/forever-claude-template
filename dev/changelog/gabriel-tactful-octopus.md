@@ -1,0 +1,1 @@
+Added a CI changelog gate. `scripts/check_changelog_entries.py` runs on every PR and fails it unless each touched project (a `libs/`/`apps/` directory with a `pyproject.toml`, or the synthetic `dev` bucket for root-level files) has a per-PR entry at `<project_dir>/changelog/<branch>.md`. Documented the requirement in `CLAUDE.md`.
