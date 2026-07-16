@@ -20,6 +20,7 @@ import {
   isHiddenUserMessage,
   isPermissionRequestCall,
   isSkillExpansionUserMessage,
+  systemSourceLabel,
 } from "./message-classification";
 import { PermissionCard } from "./permission-card";
 
@@ -135,7 +136,14 @@ export function StableUserMessage(): m.Component<{ event: UserMessageEvent }> {
       // images show inline and other files as download links. Classification
       // still runs on the text before the block (see below).
       const { visibleText, attachmentBlock } = parseMessageAttachments(content);
-      const collapsible = isCollapsibleUserMessage(visibleText);
+      // An automated `mngr message` send (e.g. the browser fleet) carries a
+      // `system_source` the parser lifted from the <system-injected> sentinel;
+      // its `content` is already the stripped body, so we collapse on the field
+      // rather than sniffing the text. Falls back to the text-based classifiers
+      // (stop hook, skill) for everything else.
+      const collapsible = event.system_source
+        ? { label: systemSourceLabel(event.system_source) }
+        : isCollapsibleUserMessage(visibleText);
 
       if (collapsible) {
         return m("div", { class: "tool-call-block" }, [
@@ -178,7 +186,9 @@ export function renderUserMessage(event: UserMessageEvent): m.Vnode | null {
   if (isHiddenUserMessage(visibleText)) {
     return null;
   }
-  const collapsible = isCollapsibleUserMessage(visibleText);
+  // Mirror StableUserMessage: automated sends collapse on `system_source`, all
+  // else on the text-based classifiers.
+  const collapsible = event.system_source ? true : isCollapsibleUserMessage(visibleText) !== null;
   const messageClass = collapsible ? "message message-system-collapsed" : "message message-user";
   // id mirrors the assistant rows so the virtualized list can measure every
   // rendered row's height by querying ``.message-list > [id]``.

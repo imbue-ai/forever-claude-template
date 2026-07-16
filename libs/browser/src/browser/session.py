@@ -1174,6 +1174,13 @@ class LiveBrowser(MutableModel):
                 "mngr",
                 "message",
                 target,
+                # These nudges are framework-generated, not the human speaking, so
+                # tag them so the transcript UI collapses them instead of rendering
+                # a bare user bubble (see mngr `system_injected.wrap_system_injected`
+                # and the system_interface transcript parser). UI-only: the agent
+                # still resumes its turn on receipt exactly as before.
+                "--system-source",
+                "browser-fleet",
                 "--message",
                 text,
                 # Run from the repo root so the `mngr` dev shim resolves this checkout

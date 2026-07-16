@@ -108,6 +108,36 @@ _QUEUED_COMMAND_PROMPT_MODE = "prompt"
 _COMMAND_NAME_PATTERN = re.compile(r"<command-name>(.*?)</command-name>", re.DOTALL)
 _COMMAND_ARGS_PATTERN = re.compile(r"<command-args>(.*?)</command-args>", re.DOTALL)
 
+# Sentinel wrapping an automated (non-human) message that was injected into the
+# agent's transcript via ``mngr message`` -- e.g. the agentic browser fleet
+# nudging a queued agent that its browser is free. Such a message arrives as an
+# ordinary user turn, indistinguishable from something the human typed; the
+# sentinel lets us recognise it, strip the wrapper, and stamp ``system_source``
+# on the emitted event so the frontend renders it collapsed rather than as a bare
+# user bubble. This is the parser half of a cross-repo contract -- the wrapper is
+# ``system_injected.wrap_system_injected`` in the mngr repo; keep the tag format
+# in sync. Anchored to the start (with optional trailing whitespace) and
+# ``DOTALL`` so a multi-line body is captured whole; the ``source`` group mirrors
+# the lowercase-slug shape the wrapper enforces.
+_SYSTEM_INJECTED_RE = re.compile(
+    r'^<system-injected source="([a-z0-9][a-z0-9-]*)">(.*)</system-injected>\s*$',
+    re.DOTALL,
+)
+
+
+def _strip_system_injected(text: str) -> tuple[str, str | None]:
+    """Split a ``<system-injected>`` message into (visible_text, system_source).
+
+    Returns ``(inner_text, source)`` when ``text`` is a system-injected message,
+    or ``(text, None)`` when it is a normal user message. The wrapper is removed
+    so the transcript stores only the human-readable body; the ``source`` slug is
+    carried on the event for the frontend to render a collapsed chip.
+    """
+    match = _SYSTEM_INJECTED_RE.match(text)
+    if match is None:
+        return text, None
+    return match.group(2), match.group(1)
+
 
 def _normalize_slash_command(text: str) -> str:
     """Rebuild ``/name args`` from a Claude Code slash-command expansion.
@@ -424,6 +454,12 @@ def _parse_user_message(
         if event_id not in existing_event_ids:
             text = _normalize_slash_command(_extract_text_content(content))
             if text and text.strip() != _INTERRUPT_SENTINEL_TEXT and not _is_resume_continuation_marker(raw):
+                # Automated sends (e.g. the browser fleet) arrive wrapped in the
+                # <system-injected> sentinel: strip it to the visible body and
+                # carry the source so the frontend collapses it (see
+                # _SYSTEM_INJECTED_RE). Turn grouping is deliberately unaffected --
+                # the event is still a normal user_message.
+                text, system_source = _strip_system_injected(text)
                 event: dict[str, Any] = {
                     "timestamp": timestamp,
                     "type": "user_message",
@@ -433,6 +469,8 @@ def _parse_user_message(
                     "content": text,
                     "message_uuid": uuid,
                 }
+                if system_source is not None:
+                    event["system_source"] = system_source
                 if session_id is not None:
                     event["session_id"] = session_id
                 existing_event_ids.add(event_id)

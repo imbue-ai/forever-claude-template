@@ -40,6 +40,25 @@ export function isStopHookFeedback(content: string): boolean {
   return content.startsWith("Stop hook feedback:\n");
 }
 
+/** Display label for an automated `mngr message` send, keyed by the `system_source`
+ *  slug the parser lifted from the `<system-injected>` sentinel (see the mngr-side
+ *  `wrap_system_injected`). Known slugs get a friendly name; any other well-formed
+ *  slug is title-cased so a new source renders sensibly without a frontend change. */
+const SYSTEM_SOURCE_LABELS: Record<string, string> = {
+  "browser-fleet": "Browser fleet",
+};
+
+export function systemSourceLabel(source: string): string {
+  const known = SYSTEM_SOURCE_LABELS[source];
+  if (known !== undefined) {
+    return known;
+  }
+  return source
+    .split("-")
+    .map((word) => (word.length > 0 ? word[0].toUpperCase() + word.slice(1) : word))
+    .join(" ");
+}
+
 export function isCollapsibleUserMessage(content: string): { label: string } | null {
   if (isStopHookFeedback(content)) {
     return { label: "Stop hook feedback" };

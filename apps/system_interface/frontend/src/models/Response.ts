@@ -55,6 +55,11 @@ export interface UserMessageEvent extends BaseTranscriptEvent {
   type: "user_message";
   role: string;
   content: string;
+  // Set only for automated, non-human messages injected via `mngr message`
+  // (e.g. the browser fleet): the source slug the parser lifted from the
+  // <system-injected> sentinel. Drives collapsed rendering (see
+  // systemSourceLabel); the `content` is already the stripped, visible body.
+  system_source?: string;
 }
 
 /**

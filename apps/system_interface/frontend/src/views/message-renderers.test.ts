@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ToolCall, TranscriptEvent } from "../models/Response";
 import { buildToolResultsWithSkillExpansions, renderSubagentCard } from "./message-renderers";
-import { isSkillExpansionUserMessage, parsePermissionResolution } from "./message-classification";
+import { isSkillExpansionUserMessage, parsePermissionResolution, systemSourceLabel } from "./message-classification";
 
 // Avoid importing the heavy/DOM-dependent module graph (dockview, dompurify) at test time;
 // renderSubagentCard only needs openSubagentTab, and the card path never calls MarkdownContent.
@@ -52,6 +52,16 @@ describe("isSkillExpansionUserMessage", () => {
     expect(isSkillExpansionUserMessage("Base directory for this skill: /x")).toBe(true);
     expect(isSkillExpansionUserMessage("hello")).toBe(false);
     expect(isSkillExpansionUserMessage("Stop hook feedback:\n...")).toBe(false);
+  });
+});
+
+describe("systemSourceLabel", () => {
+  it("maps a known source slug to a friendly label", () => {
+    expect(systemSourceLabel("browser-fleet")).toBe("Browser fleet");
+  });
+  it("title-cases an unknown slug so a new source still renders", () => {
+    expect(systemSourceLabel("some-new-source")).toBe("Some New Source");
+    expect(systemSourceLabel("latchkey")).toBe("Latchkey");
   });
 });
 

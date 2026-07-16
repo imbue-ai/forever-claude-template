@@ -186,6 +186,47 @@ def test_queued_task_notification_attachment_not_emitted() -> None:
     assert events == []
 
 
+def test_system_injected_message_strips_wrapper_and_sets_source() -> None:
+    """A <system-injected> message (e.g. a browser-fleet nudge) surfaces as a
+    normal user_message with the wrapper stripped and system_source set."""
+    lines = [
+        _make_user_line(
+            "uuid-si",
+            "2026-01-01T00:00:00Z",
+            '<system-injected source="browser-fleet">Browser foo-1 was handed back to you.</system-injected>',
+        )
+    ]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "Browser foo-1 was handed back to you."
+    assert events[0]["system_source"] == "browser-fleet"
+
+
+def test_system_injected_message_preserves_multiline_body() -> None:
+    """The DOTALL match captures a multi-line body whole."""
+    lines = [
+        _make_user_line(
+            "uuid-si2",
+            "2026-01-01T00:00:00Z",
+            '<system-injected source="browser-fleet">line one\nline two</system-injected>',
+        )
+    ]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["content"] == "line one\nline two"
+    assert events[0]["system_source"] == "browser-fleet"
+
+
+def test_normal_user_message_has_no_system_source() -> None:
+    """A genuine human message is untouched and carries no system_source."""
+    lines = [_make_user_line("uuid-h", "2026-01-01T00:00:00Z", "just a normal message")]
+    events = parse_session_lines(lines)
+    assert len(events) == 1
+    assert events[0]["content"] == "just a normal message"
+    assert "system_source" not in events[0]
+
+
 def test_non_queued_command_attachment_ignored() -> None:
     """Other attachment types (hook output, diagnostics, etc.) produce no events."""
     lines = [
