@@ -206,30 +206,40 @@ why it breaks, and refuse the update so the live workspace is left untouched.
 Reserve this for real breakage; a change that is simply deferred-until-rebuild is
 `done` plus a rebuild flag, not `stuck`.
 
-**Coupled dependency + dependent-service changes -- the one you cannot fully
-test.** When a merge bumps a *global* dependency (a `setup_system.sh` /
-`install_secret_scanners.sh` pin, or a `Dockerfile` toolchain pin) **and** also
-changes a service that depends on that dependency, your worktree cannot faithfully
-validate the pair: worktree isolation isolates the *repo tree*, not the
-host-global toolchain, so your environment still has the **old** dependency. Do
-**not** globally install the new one to test -- that mutates the shared toolchain
-the live workspace and other agents run on. Instead:
+**A global-dependency bump with a dependent -- safety turns on who depends on it.**
+When a merge bumps a *global* dependency (a `setup_system.sh` /
+`install_secret_scanners.sh` pin, or a `Dockerfile` toolchain pin), whether it is
+safe to apply live depends on **who consumes the new version**. Your worktree
+cannot itself validate the pair -- worktree isolation isolates the *repo tree*,
+not the host-global toolchain, so your env still has the **old** dep; do **not**
+globally install the new one to test, that mutates the shared toolchain the live
+workspace and other agents run on. So decide by provenance of the dependent:
 
-- **Research the version change online** to ground your risk assessment: look up
-  the dependency's release notes / changelog for the exact old -> new version
-  delta (breaking changes, removed flags, changed behavior, new minimum runtimes).
-  Do not rely on memory -- fetch the actual notes, and record in your report what
-  you found and how it bears on the dependent service.
-- **Validate what you honestly can** without the new dep (the service's imports,
-  lint, and tests that don't exercise the changed dependency), and **report the
-  gap explicitly**: which combination you could not test, and why.
-- **Do not mark a coupled bump live-applicable.** Hot-re-provisioning the global
-  dep under the still-running old services is unsafe -- a non-atomic substrate
-  mutation that can break them before the new code lands. Classify it
-  **rebuild-only**: the safe way to land it is a workspace recreate, which
-  provisions the new substrate and the new service code together and validates
-  itself by booting clean. If leaving it unapplied would break the running
-  workspace, that's `stuck`.
+- **Dependent is built-in code** (shipped by the template -- `system_interface`,
+  the `libs/*` services, anything that arrived under this `update-self:` merge from
+  upstream): **trust it and apply live.** The upstream release tested that built-in
+  code against the bumped dependency *together*, so re-running the provisioner and
+  restarting the built-in service is safe -- the same "trust upstream's testing"
+  basis the whole pulled-in set rides on. Not rebuild-only.
+- **Dependent is user-created** (a local service, web app, or script the workspace
+  built -- a crystallized skill's scripts under `.agents/skills/<skill>/`, a
+  `build-web-service` app, a workspace-added `libs/` service): **unsafe to
+  hot-apply.** Upstream never saw that code, so it never tested it against the new
+  dependency, and you can't either (shared toolchain). Classify it **rebuild-only**
+  -- the safe way to land it is a workspace recreate, which provisions the new
+  substrate and re-runs the user code against it. If leaving it unapplied would
+  break the running workspace, that's `stuck`.
+
+For either case:
+- **Research the version change online** to ground your assessment: look up the
+  dependency's release notes / changelog for the exact old -> new delta (breaking
+  changes, removed flags, changed behavior, new minimum runtimes). Don't rely on
+  memory -- fetch the actual notes and record what you found and how it bears on
+  the dependent (this is what tells you whether a *user* dependent is likely fine
+  or genuinely at risk).
+- **Report the coupling** explicitly: which dependent, whether it's built-in or
+  user-created, what you could/couldn't validate, and your apply / rebuild-only /
+  `stuck` call.
 
 An impacted *service* gets validated below (boot + suites) and flagged for
 restart in your report. An impacted *skill* (a workspace-added skill relying on
@@ -316,11 +326,12 @@ Per `.agents/shared/references/worker-reporting.md` (`<TASK_FILE_GLOB>` ->
     a `build_arg` / `start_arg` / runtime-flag change a running container can't
     adopt). A genuinely-breaking, unapplyable change is a `stuck` report, not a
     `done`.
-  - **Coupled dependency + service** (if the merge bumps a global dep *and* a
-    dependent service) -- what the version delta is and what your online research
-    of its release notes turned up, the combination you **could not test** in your
-    worktree and why, and your rebuild-only (or `stuck`) call. The lead must not
-    hot-apply this.
+  - **Global-dependency bump with a dependent** (if the merge bumps a global dep
+    that something depends on) -- the version delta and what your online research
+    turned up, **which dependent(s)** and whether each is **built-in** (upstream-
+    tested -> apply live) or **user-created** (couldn't validate -> rebuild-only,
+    or `stuck` if it would break the running workspace). Call out any gap honestly;
+    the lead applies the built-in case and does not hot-apply the user case.
   - **Validation** -- suites/boots/Playwright and review gates run, all passing;
     autofix fixes kept vs reverted; and any validation **gap** (a coupled bump you
     couldn't fully exercise) called out honestly rather than implied as covered.

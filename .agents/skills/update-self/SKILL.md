@@ -285,14 +285,16 @@ The report says which classes merged. Apply each; a clean pull-in is still
     and the script re-installs the pinned tools idempotently. The report names
     which pins moved.
 
-    **Exception -- a bump the report flags as coupled to a dependent service.**
-    When the merge bumps a global dep *and* a service that depends on it (the
-    worker's "coupled dependency + service" report item), do **not** hot-run the
-    provisioner: swapping the toolchain under the still-running old services is a
-    non-atomic mutation that can break them before the new code lands, and the
-    worker couldn't fully validate the pair anyway. Treat it as **rebuild-only** --
-    surface it to the user for a workspace recreate (which provisions the new
-    substrate and new service code together), exactly as an image-level hunk below.
+    **Exception -- a bump the report flags as coupled to a *user-created*
+    dependent.** The report says who depends on the bumped dep. If the dependent
+    is **built-in** (`system_interface`, a `libs/*` service -- code the same
+    upstream release tested against the new dep), hot-running the provisioner is
+    safe; apply it live as above. If the dependent is **user-created** (a local
+    service / web app / script the workspace built), do **not** hot-run the
+    provisioner: upstream never tested that code against the new dep and the worker
+    couldn't validate it either, so treat it as **rebuild-only** -- surface it to
+    the user for a workspace recreate (which provisions the new substrate and
+    re-runs the user code against it), exactly as an image-level hunk below.
   - A hunk that only affects a **fresh image build** -- something the idempotent
     re-run does not reproduce -- needs a **manual workspace rebuild**; tell the
     user, exactly as for an image-level `Dockerfile` hunk.
