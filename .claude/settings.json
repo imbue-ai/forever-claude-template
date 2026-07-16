@@ -35,6 +35,10 @@
           },
           {
             "type": "command",
+            "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_block_pipe_tail_head.sh"
+          },
+          {
+            "type": "command",
             "command": "${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_tk_standalone.sh"
           },
           {
