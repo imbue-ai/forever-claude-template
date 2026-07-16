@@ -2447,14 +2447,15 @@ body {
 }
 
 /* Agent permission request, lifted out of any open step so it is always
-   directly visible and breaks the timeline flow. Positioned like an ungrouped
-   run (opaque background + z-index) so the timeline thread doesn't draw through
-   it; the request block carries its own permission-request styling and button. */
+   directly visible and breaks the timeline flow. Lifted above the timeline
+   thread with z-index so the thread doesn't draw through it; the permission-request
+   card carries its own opaque surface, so it masks the thread on its own and this
+   wrapper needs no background of its own (a background here would paint the shell's
+   off-white --color-bg over the pure-white --color-bg-chat transcript). */
 .pv-permission {
   position: relative;
   z-index: 2;
   margin: 6px 0 14px 0;
-  background: var(--color-bg);
 }
 
 /* ─────────────────────────────────────────────────────────────────────
