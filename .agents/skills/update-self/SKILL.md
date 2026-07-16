@@ -25,6 +25,12 @@ The default target is the **latest stable `minds-v*` tag** (released,
 already-tested), not `origin/main`. The user may override to a specific tag or to
 `main`.
 
+Because the update flow itself evolves, once the target is resolved this pass
+**re-points itself at the target version's own copy of the update-self skill**
+(Step 2a) and runs the rest -- lead *and* worker -- from there. So a fix to the
+conflict triage, validation, or reveal logic that shipped in the release is
+applied on the way *in*, instead of staying a release behind in the local copy.
+
 ## 1. Preconditions
 
 **Back up first.** Before dispatching anything, capture a restore point of the
@@ -88,6 +94,47 @@ change as if upstream were reverting it, which reads as phantom upstream churn:
 git diff --name-status "$(git merge-base HEAD "$REF")" "$REF"
 ```
 
+### 2a. Hand off to the target's own update-self flow
+
+Now re-point the rest of this pass at the update-self skill **as it exists at
+`$REF`**. Extract the target's copy (from the already-fetched objects -- no
+network, no working-tree mutation) and compare it to your local one:
+
+```bash
+BOOTSTRAP=$(python3 .agents/skills/update-self/scripts/update_self.py bootstrap-skill --ref "$REF")
+echo "$BOOTSTRAP"
+SKILL_DIR=$(echo "$BOOTSTRAP" | python3 -c 'import sys, json; print(json.load(sys.stdin)["skill_dir"] or "")')
+DIFFERS=$(echo "$BOOTSTRAP" | python3 -c 'import sys, json; print(json.load(sys.stdin)["differs"])')
+echo "skill_dir=$SKILL_DIR differs=$DIFFERS"
+```
+
+Then branch on the result:
+
+- **`differs` is `False`** (the target's flow is byte-identical to yours), **or
+  `$SKILL_DIR` is empty** (the ref predates the skill, so there is nothing to
+  bootstrap from) -> **continue with this document** and set
+
+  ```bash
+  export UPDATE_SELF_SKILL_DIR=.agents/skills/update-self
+  ```
+
+- **`differs` is `True`** -> the target ships a changed update flow. **Stop
+  following this document.** Export the extracted copy as your skill dir and
+  follow *its* `SKILL.md` from **Step 3** onward:
+
+  ```bash
+  export UPDATE_SELF_SKILL_DIR="$SKILL_DIR"   # absolute path to the target's copy
+  # now read and follow "$UPDATE_SELF_SKILL_DIR/SKILL.md" from Step 3
+  ```
+
+  You have already completed Steps 1-2 (backup, single-flight, clean tree, target
+  resolved), so do **not** re-run the extracted doc's Step 2 or re-extract -- just
+  carry `$REF` and `$UPDATE_SELF_SKILL_DIR` forward into its Step 3.
+
+Either way, `$UPDATE_SELF_SKILL_DIR` now names the copy of the flow to run.
+Everything below reaches the skill's scripts and worker reference through it (and
+passes it to the worker), so both paths dispatch against the correct version.
+
 ## 3. Dispatch the worker
 
 Open a tracking ticket, write the task file, launch via the `launch-task`
@@ -118,6 +165,7 @@ cat << FRONTMATTER_EOF
 lead_agent: $MNGR_AGENT_NAME
 finish_report_path: runtime/update-self/reports/report.md
 target_ref: $REF
+update_self_skill_dir: $UPDATE_SELF_SKILL_DIR
 ---
 FRONTMATTER_EOF
 cat << 'BODY_EOF'
@@ -125,11 +173,15 @@ cat << 'BODY_EOF'
 # Task: safe update-self
 
 ## What to do
-Follow `.agents/skills/update-self/references/update-self-worker.md` end to end:
-trial-merge conflict triage, complete the merge (preserving the `update-self:`
-merge-commit subject), validate the merged set, generate the "what's new" report,
-and report `done`. Your target is the `target_ref` in this file's frontmatter
-(already fetched into `upstream`).
+Follow the worker guide at `$UPDATE_SELF_SKILL_DIR/references/update-self-worker.md`
+end to end: trial-merge conflict triage, complete the merge (preserving the
+`update-self:` merge-commit subject), validate the merged set, generate the
+"what's new" report, and report `done`. `$UPDATE_SELF_SKILL_DIR` is set for you
+from this file's `update_self_skill_dir` frontmatter by the worker guide's Step 1
+`parse_task_frontmatter.py` eval, and points at the copy of the update-self flow
+shipped with the version being updated to -- run *all* its `update_self.py` calls
+from `$UPDATE_SELF_SKILL_DIR/scripts/` too. Your target is the `target_ref` in
+this file's frontmatter (already fetched into `upstream`).
 
 ## Reporting back
 Per `.agents/shared/references/worker-reporting.md`. Valid `name:` values:

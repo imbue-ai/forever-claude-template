@@ -24,6 +24,14 @@ validation depth, reveal by change class). This script owns the parts that are
     List ``changelog/`` entries newly added between two refs -- the raw input for
     the worker's "what's new" report.
 
+``bootstrap-skill``
+    Extract the target ref's *own* copy of the update-self skill (SKILL.md,
+    references, scripts) into a staging dir and report whether it differs from the
+    local copy. This is what lets the flow, after resolving the target, hand off
+    to the update-self process *as it exists at the version being updated to* --
+    so fixes to the update flow itself are applied live rather than being gated on
+    the possibly-stale local copy.
+
 Impact analysis -- which services and skills depend on a changed file -- is
 deliberately NOT scripted here: it requires open-ended exploration (imports,
 shelled-out scripts, API-surface coupling) that a deterministic helper would
@@ -38,12 +46,20 @@ The git-touching subcommands are thin wrappers over the pure functions below
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from typing import NamedTuple, Sequence
+
+# The repo-relative directory holding the update-self skill (SKILL.md,
+# references/, scripts/). Used by ``bootstrap-skill`` to extract the target
+# ref's own copy of the flow.
+SKILL_DIR_REL = ".agents/skills/update-self"
 
 # --- Target resolution -----------------------------------------------------
 
@@ -315,6 +331,34 @@ def classify_merge(
     )
 
 
+# --- Skill bootstrap -------------------------------------------------------
+
+
+def read_tree(root: Path) -> dict[str, bytes]:
+    """Map every regular file under ``root`` to its bytes, keyed by relative path.
+
+    Keys are POSIX-relative paths so the mapping is comparable across two
+    checkouts of the same tree. Directories and symlinks are skipped -- only file
+    contents bear on whether two copies of the skill are byte-identical.
+    """
+    tree: dict[str, bytes] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            tree[path.relative_to(root).as_posix()] = path.read_bytes()
+    return tree
+
+
+def trees_differ(left: Path, right: Path) -> bool:
+    """Whether two directory trees differ in their file set or any file's content.
+
+    A missing tree (either side absent) counts as an empty tree, so comparing an
+    existing tree against a missing one reports ``True``.
+    """
+    left_tree = read_tree(left) if left.is_dir() else {}
+    right_tree = read_tree(right) if right.is_dir() else {}
+    return left_tree != right_tree
+
+
 # --- git-touching CLI wrappers ---------------------------------------------
 
 
@@ -404,6 +448,47 @@ def _cmd_changelog_entries(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bootstrap_skill(args: argparse.Namespace) -> int:
+    repo_root = _repo_root(args).resolve()
+    dest = Path(args.dest)
+    dest_root = (dest if dest.is_absolute() else repo_root / dest).resolve()
+
+    # If the target ref predates the skill, there is nothing to bootstrap from --
+    # report no staged copy so the caller stays on the local flow.
+    exists = subprocess.run(
+        ["git", "cat-file", "-e", f"{args.ref}:{SKILL_DIR_REL}"],
+        cwd=repo_root,
+        capture_output=True,
+    )
+    if exists.returncode != 0:
+        print(json.dumps({"skill_dir": None, "differs": False, "ref": args.ref}))
+        return 0
+
+    # Extract the ref's own copy of the skill via ``git archive`` (reads the
+    # already-fetched object, no network, no working-tree mutation) into a clean
+    # staging dir. The archive lays the tree down under ``SKILL_DIR_REL``.
+    if dest_root.exists():
+        shutil.rmtree(dest_root)
+    dest_root.mkdir(parents=True)
+    archive = subprocess.run(
+        ["git", "archive", args.ref, SKILL_DIR_REL],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(dest_root, filter="data")
+
+    staged_skill = dest_root / SKILL_DIR_REL
+    differs = trees_differ(staged_skill, repo_root / SKILL_DIR_REL)
+    print(
+        json.dumps(
+            {"skill_dir": str(staged_skill), "differs": differs, "ref": args.ref}
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     # ``--repo-root`` lives on a shared parent parser so it is accepted both
     # before and after the subcommand (an option defined only on the top-level
@@ -471,6 +556,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     changelog_parser.add_argument("--base", required=True, help="Base ref.")
     changelog_parser.add_argument("--target", required=True, help="Target ref.")
     changelog_parser.set_defaults(func=_cmd_changelog_entries)
+
+    bootstrap_parser = sub.add_parser(
+        "bootstrap-skill",
+        help="Extract the target ref's own update-self skill into a staging dir "
+        "and report whether it differs from the local copy.",
+        parents=[common],
+    )
+    bootstrap_parser.add_argument(
+        "--ref", required=True, help="The resolved target ref to extract the skill from."
+    )
+    bootstrap_parser.add_argument(
+        "--dest",
+        default="runtime/update-self/skill-at-target",
+        help="Staging dir the skill is extracted into (default: "
+        "runtime/update-self/skill-at-target).",
+    )
+    bootstrap_parser.set_defaults(func=_cmd_bootstrap_skill)
 
     args = parser.parse_args(argv)
     return args.func(args)

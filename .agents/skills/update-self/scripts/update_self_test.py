@@ -2,12 +2,14 @@
 
 Covers the pieces the flow relies on being exactly right: target-tag
 resolution (latest stable, prereleases excluded, semver not lexical order), the
-merged-vs-pulled-in classification, and the path -> change-class mapping.
+merged-vs-pulled-in classification, the path -> change-class mapping, and the
+skill bootstrap that extracts the target ref's own copy of the flow.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 
@@ -225,3 +227,148 @@ def test_repo_root_flag_accepted_before_and_after_subcommand(tmp_path, capsys) -
     ):
         assert update_self.main(argv) == 0, argv
         assert '"minds-v0.1.0"' in capsys.readouterr().out, argv
+
+
+# --- read_tree / trees_differ ----------------------------------------------
+
+
+def test_trees_differ_detects_content_and_file_set_changes(tmp_path) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    for root in (left, right):
+        (root / "sub").mkdir(parents=True)
+        (root / "SKILL.md").write_text("same", encoding="utf-8")
+        (root / "sub" / "a.py").write_text("print(1)", encoding="utf-8")
+    assert not update_self.trees_differ(left, right)
+
+    # A content change on one side is a difference.
+    (right / "SKILL.md").write_text("changed", encoding="utf-8")
+    assert update_self.trees_differ(left, right)
+
+    # A differing file set is a difference even when shared files match.
+    (right / "SKILL.md").write_text("same", encoding="utf-8")
+    (right / "extra.md").write_text("new", encoding="utf-8")
+    assert update_self.trees_differ(left, right)
+
+
+def test_trees_differ_missing_tree_counts_as_empty(tmp_path) -> None:
+    present = tmp_path / "present"
+    present.mkdir()
+    (present / "SKILL.md").write_text("x", encoding="utf-8")
+    assert update_self.trees_differ(present, tmp_path / "absent")
+
+
+# --- bootstrap-skill --------------------------------------------------------
+
+
+def _init_repo_with_skill(root: Path, skill_body: str) -> None:
+    """Init a git repo at ``root`` carrying the update-self skill, tagged v1."""
+
+    def _git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+
+    root.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q")
+    _git("config", "user.email", "test@example.com")
+    _git("config", "user.name", "test")
+    skill_dir = root / update_self.SKILL_DIR_REL
+    (skill_dir / "scripts").mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(skill_body, encoding="utf-8")
+    (skill_dir / "scripts" / "update_self.py").write_text("# v1\n", encoding="utf-8")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "add skill")
+    _git("tag", "minds-v1.0.0")
+
+
+def test_bootstrap_skill_extracts_tag_copy_and_flags_difference(
+    tmp_path, capsys
+) -> None:
+    # The tag carries the "original" skill; local then edits SKILL.md, so the
+    # bootstrap must extract the *tag's* copy (unchanged body) and report that it
+    # differs from the drifted local copy.
+    repo = tmp_path / "repo"
+    _init_repo_with_skill(repo, skill_body="ORIGINAL FLOW\n")
+    (repo / update_self.SKILL_DIR_REL / "SKILL.md").write_text(
+        "LOCALLY EDITED FLOW\n", encoding="utf-8"
+    )
+
+    dest = tmp_path / "staging"
+    assert (
+        update_self.main(
+            [
+                "bootstrap-skill",
+                "--ref",
+                "minds-v1.0.0",
+                "--dest",
+                str(dest),
+                "--repo-root",
+                str(repo),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["differs"] is True
+    assert payload["ref"] == "minds-v1.0.0"
+    staged_skill = Path(payload["skill_dir"])
+    # The staged copy is the tag's content, not the drifted local edit.
+    assert staged_skill.joinpath("SKILL.md").read_text() == "ORIGINAL FLOW\n"
+
+
+def test_bootstrap_skill_reports_no_difference_when_local_matches_tag(
+    tmp_path, capsys
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_skill(repo, skill_body="STABLE FLOW\n")
+
+    assert (
+        update_self.main(
+            [
+                "bootstrap-skill",
+                "--ref",
+                "minds-v1.0.0",
+                "--dest",
+                str(tmp_path / "staging"),
+                "--repo-root",
+                str(repo),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["differs"] is False
+
+
+def test_bootstrap_skill_reports_null_when_ref_predates_skill(
+    tmp_path, capsys
+) -> None:
+    # A ref with no update-self skill at all yields no staged copy, so the caller
+    # falls back to the local flow instead of trying to follow a missing one.
+    repo = tmp_path / "repo"
+
+    def _git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    repo.mkdir()
+    _git("init", "-q")
+    _git("config", "user.email", "test@example.com")
+    _git("config", "user.name", "test")
+    _git("commit", "--allow-empty", "-q", "-m", "root")
+    _git("tag", "minds-v0.0.1")
+
+    assert (
+        update_self.main(
+            [
+                "bootstrap-skill",
+                "--ref",
+                "minds-v0.0.1",
+                "--dest",
+                str(tmp_path / "staging"),
+                "--repo-root",
+                str(repo),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["skill_dir"] is None
+    assert payload["differs"] is False
