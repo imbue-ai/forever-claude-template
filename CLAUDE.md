@@ -1,5 +1,5 @@
 @AGENTS.md
 
-# Memory (Claude)
+# Memory
 
-Use Claude's built-in memory system: the memory directory is `runtime/memory/`, wired via `autoMemoryDirectory` in `.claude/settings.json`. Claude loads it automatically at the start of every session. (Its gitignore and backup behavior are covered in the shared instructions above.)
+Use Claude's built-in memory system. Your memory directory is `runtime/memory/` (configured via `autoMemoryDirectory` in `.claude/settings.json`).

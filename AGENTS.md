@@ -18,9 +18,9 @@ IF YOU FAIL TO FOLLOW ONE, YOU MUST EXPLICITLY CALL THAT OUT IN YOUR RESPONSE.
 
 # Task management (CRITICAL — read this before doing real work)
 
-You manage your work using `tk`, the vendored ticket tracker at `vendor/tk/`. It is the **only** task tracker available — your harness's built-in to-do / plan tool is not used. `tk` stores two kinds of records, distinguished by the `--step` flag at creation:
+You manage your work using `tk`, the vendored ticket tracker at `vendor/tk/`. It is the **only** task tracker available. `tk` stores two kinds of records, distinguished by the `--step` flag at creation:
 
-- **Step records** (`tk create --step "..."`) are the replacement for a built-in to-do tool: turn-bound, creator-private progress markers that render as nodes on the user-facing chat progress view (a vertical timeline with a status icon and a one-line summary per step). Most turns use only these.
+- **Step records** (`tk create --step "..."`) are turn-bound, creator-private progress markers that render as nodes on the user-facing chat progress view (a vertical timeline with a status icon and a one-line summary per step). Most turns use only these.
 - **Regular tickets** (`tk create "..."`, no flag) are substantive, cross-agent work units other agents can see and pick up. They do **not** render in the chat progress view. They matter only when work spans turns or is handed between agents.
 
 Because step titles and close-summaries populate the progress view, **every one is user-facing copy**: plain English for a non-technical reader, no file names, no tool names, no jargon.
@@ -114,7 +114,7 @@ Only after doing all of the above should you begin writing code.
 - To run tests for a single project: "cd vendor/mngr && uv run pytest" or "cd apps/minds && uv run pytest". Each project has its own pytest and coverage configuration in its pyproject.toml.
 - While you're iterating, you can pass "--no-cov --cov-fail-under=0" to disable coverge (slightly faster), but during your final check, you *MUST NOT* pass those flags (it will fail in CI anyway)
 - For faster iteration, add "-m 'not tmux and not modal and not docker and not docker_sdk and not acceptance and not release'" to skip slow infrastructure tests (~30s instead of ~95s). These still run in CI. Note that you *MUST* also pass "--no-cov --cov-fail-under=0" when doing this, otherwise it will complain about a lack of coverage.
-- When running pytest with a shell-command timeout, always set `PYTEST_MAX_DURATION_SECONDS` to match the timeout (in seconds). For example, if using a 2-minute timeout: `PYTEST_MAX_DURATION_SECONDS=120 uv run pytest ...`. This ensures the pytest global lock file records a deadline, allowing other pytest processes to break a stale lock if this one gets killed by the timeout.
+- When running pytest with a timeout, always set `PYTEST_MAX_DURATION_SECONDS` to match the timeout (in seconds). For example, if using a 2-minute timeout: `PYTEST_MAX_DURATION_SECONDS=120 uv run pytest ...`. This ensures the pytest global lock file records a deadline, allowing other pytest processes to break a stale lock if this one gets killed by the timeout.
 - Running pytest will produce files in .test_output/ (relative to the directory you ran from) for things like slow tests and coverage reports.
 - Note that "uv run pytest" defaults to running all "unit" and "integration" tests, but the "acceptance" tests also run in CI when a PR exists. Do *not* run *all* the acceptance tests locally to validate changes--let CI run them once a PR is opened (it's faster than running them locally).
 - If you need to run a specific acceptance or release test to write or fix it, iterate on that specific test locally by calling "just test <full_path>::<test_name>" from the root of the git checkout. Do this rather than re-running all tests in CI.
@@ -196,7 +196,7 @@ checking first. Use the `find-past-transcripts` skill to find and read them.
 
 You can (and should) modify your own configuration to improve yourself:
 
-- **AGENTS.md**: (the shared instructions) update these if you discover better ways to operate. Harness-specific behavior lives in your harness's own file — `CLAUDE.md` for Claude, `.codex/AGENTS.md` for Codex.
+- **AGENTS.md**: (this file) update these instructions if you discover better ways to operate.
 - **.agents/skills/**: Create new skills or modify existing ones. Each skill is a directory with a SKILL.md file.
 - **supervisord.conf**: Add, modify, or remove background services. See the `update-service` skill.
 - **scripts/**: Add utility scripts that help you accomplish your purpose.
@@ -226,10 +226,7 @@ The upstream is defined in `parent.toml`.
 
 # Memory
 
-Your durable memory lives in `runtime/memory/`. Persist facts you'll want in future sessions there as markdown files.
 Memory is gitignored from the main branch. When the user has enabled GitHub sync (the `github-sync` skill), the github-sync service ships it -- with the rest of `runtime/` -- to the `runtime-sync` branch of the workspace's private sync repo, so it survives container loss.
-
-How memory *loads* is harness-specific (auto-loaded for some harnesses, read-on-demand for others) — see your harness's own instructions.
 
 # Services
 
@@ -243,7 +240,7 @@ See the `update-service` skill for details.
 # Git
 
 Commit your changes locally.
-`runtime/` is gitignored from the main branch (it includes `runtime/memory/` for agent memory and other transient state).
+`runtime/` is gitignored from the main branch (it includes `runtime/memory/` and other transient state).
 
 Chat file uploads (files a user attaches to a message) are stored in the top-level `uploads/` directory inside the repo working tree -- NOT under `runtime/`. Uploads can be arbitrarily large and any format, so they don't belong in version-controllable content; `uploads/` is gitignored. Being outside `runtime/`, uploads are NOT carried by the opt-in GitHub sync (which ships only `runtime/`), but the host-level `host-backup` service (a restic snapshot of the whole host dir) does capture them, so uploads still survive container loss. See `libs/host_backup/README.md`.
 
