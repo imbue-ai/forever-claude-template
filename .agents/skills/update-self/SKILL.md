@@ -161,11 +161,34 @@ surfaces only genuine, unresolvable conflicts -- a real decision about how to
 reconcile a file both sides rewrote incompatibly. **Escalate it to the user**,
 relay their resolution via `mngr message`, consume the report, and re-arm.
 
+**Compose the question per the §5a rules -- plain-language and pointed at a
+resolution, not the worker's raw conflict dump.** Lead with where things stand
+("The update is almost ready -- one file needs a decision from you before I can
+finish"), explain the choice in plain terms (what the new version does vs. what
+your workspace currently does, and what's at stake each way), and **propose a way
+forward**: a recommended option when you have one, the concrete trade-offs when
+you genuinely don't. Close by inviting the user to resolve it *with* you rather
+than only to rule on it -- "tell me which you'd prefer, or talk it through with me
+and we'll land on the best option together." Reassure that nothing has been
+applied and the workspace is untouched.
+
 ## 5. Terminal status
 
 - **`stuck`** or a dead-worker timeout -> surface via
   `.agents/skills/launch-task/references/worker-failure.md`. Nothing is merged or
-  revealed; the live workspace is untouched.
+  revealed; the live workspace is untouched. **Don't relay the raw failure, but
+  don't strip the specifics either** -- this is the one message type where
+  technical detail is *preserved, not dropped*, because the user often forwards a
+  failure into a bug report and it must stand on its own to whoever reads it next.
+  Compose it in two parts: a **plain-language lead for the user** (what happened
+  and what it means -- "I couldn't complete this update cleanly; your workspace is
+  untouched and nothing was applied" -- plus a next step or an offer to work
+  through it together), followed by a **clearly-marked technical detail block for
+  whoever they escalate to**: the target ref, the step or phase that failed, the
+  specific file or component, and the **actual error text or log excerpt
+  verbatim** (not paraphrased), with a pointer to the full report and logs under
+  `runtime/update-self/reports/`. Never leave the user at a dead end, and never
+  hand them a failure so vague it's useless in a bug report.
 - **`done`** -> the approval gate below.
 
 ### 5a. Approval gate
@@ -178,6 +201,15 @@ Keep it available (it is persisted under `runtime/update-self/reports/` -- offer
 to show it if the user wants the specifics), and **compose a plain-language
 approval message** from it. Then **wait for explicit approval** -- mandatory even
 on a clean pull.
+
+**These composition rules govern every user-facing message this flow produces --
+the approval message here, the `question` gate (Step 4), and a `stuck` result
+(Step 5) alike.** Whenever the update can't simply proceed, the message names the
+blocker in plain terms and **proposes a way forward, or invites the user to
+resolve it with you** -- it never dead-ends. The one thing that varies is how
+much mechanism to keep: the approval and `question` messages drop technical
+detail the user can't act on, but a `stuck` message deliberately preserves it
+(Step 5) so it survives being pasted into a bug report.
 
 Write the message a non-technical reader skims top-to-bottom, in this fixed
 order:
