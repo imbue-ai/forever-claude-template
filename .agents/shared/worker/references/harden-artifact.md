@@ -125,14 +125,17 @@ faithfully later.
 
 ## Bound disk growth -- evict what the artifact no longer needs
 
-The persist-and-preserve contracts above tell you to write records durably and
-incrementally. Left unqualified, that turns any artifact you run more than once
--- a recurring pipeline, a service that polls on a schedule, anything that
-appends results, raw payloads, logs, caches, or fixtures -- into an
-ever-growing store that eventually fills the disk. The harden pass is where you
-give every growing store a **bounded retention policy**; an artifact that can
-only accrete and never evicts is not hardened, no matter how well-tested its
-happy path is.
+This is an always-applies invariant, not a creation-time step. It holds
+**whenever** the artifact persists anything across runs -- when you first build
+it, and equally when an `update` teaches a previously stateless skill or service
+to fetch or store, or enlarges a store it already had. The persist-and-preserve
+contracts above tell you to write records durably and incrementally. Left
+unqualified, that turns any artifact you run more than once -- a recurring
+pipeline, a service that polls on a schedule, anything that appends results, raw
+payloads, logs, caches, or fixtures -- into an ever-growing store that
+eventually fills the disk. The harden pass is where you give every growing store
+a **bounded retention policy**; an artifact that can only accrete and never
+evicts is not hardened, no matter how well-tested its happy path is.
 
 - **Find every store the artifact writes to and decide, explicitly, what bounds
   each one.** Persisted results, raw-payload archives, on-disk caches, log

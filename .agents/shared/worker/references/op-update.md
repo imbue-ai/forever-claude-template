@@ -110,6 +110,14 @@ least one must exercise the changed path (the absorbed incident in the emergent
 path; the changed path in the committed path); others exercise neighbouring or
 edge paths to catch regressions.
 
+If the change introduces a new persisted store or enlarges an existing one --
+newly fetching and storing data, adding a log/cache/archive, or widening what an
+existing store retains -- apply the bound-disk-growth contract in
+`harden-artifact.md` to that store: give it an explicit retention bound, evict as
+part of the run that writes, and cover the bound with a test. An update that
+turns a stateless artifact into one that accretes is exactly where an unbounded
+store slips in, since the harden attention is otherwise on the changed path.
+
 ### Review gates
 
 Run `/autofix` and the other gates per `harden-artifact.md`. In the committed
