@@ -137,6 +137,33 @@ instruction for agentic work, so overwrite it only when you have a good reason.
 Cost is dominated by per-call overhead, so **batch** items into fewer, larger
 calls rather than one call per item.
 
+## Scenario 3 -- full agent
+
+Reach for this over scenario 2 when the work needs its **own git worktree**:
+Claude is editing code that has to be tested and validated, or other agents are
+working in the same repo and the changes must not collide. A `launch-task` worker
+gives the run an isolated branch and worktree; scenario 2 instead runs in the
+caller's own working directory.
+
+Launch the worker synchronously and collect its structured result -- do not wrap
+it; call the script directly:
+
+```bash
+uv run .agents/skills/launch-task/scripts/create_worker.py launch-sync \
+  --name email-triage-fix-123 --template worker \
+  --runtime-dir runtime/email-triage/fix-123 \
+  --task-file  runtime/email-triage/fix-123/task.md \
+  --timeout 30m --result-json runtime/email-triage/fix-123/result.json
+```
+
+It launches, waits for the worker's finish report in the foreground, writes a JSON
+result (`timed_out`, `type`, `name`, `body`, `branch`, `raw_report`) to
+`--result-json`, and destroys the worker (the `mngr/<name>` branch survives).
+Write the task file first with `lead_agent` / `finish_report_path` frontmatter
+(see the `launch-task` skill). **User- or error-triggered, tightly scoped** -- a
+broad unattended launch is how cost and time run away. What to do with the
+returned branch (merge, review) is your concern.
+
 ## Web search -- use an agent, not a server-side tool
 
 When a scripted step needs to research the web (fetch recent context, look up
@@ -217,33 +244,6 @@ so they can decide when volume justifies setting `ANTHROPIC_API_KEY`:
   keyed_estimate = prompt_cost + completion_cost
   savings = result.cost_usd - keyed_estimate   # surface this to suggest a key
   ```
-
-## Scenario 3 -- full agent
-
-Reach for this over scenario 2 when the work needs its **own git worktree**:
-Claude is editing code that has to be tested and validated, or other agents are
-working in the same repo and the changes must not collide. A `launch-task` worker
-gives the run an isolated branch and worktree; scenario 2 instead runs in the
-caller's own working directory.
-
-Launch the worker synchronously and collect its structured result -- do not wrap
-it; call the script directly:
-
-```bash
-uv run .agents/skills/launch-task/scripts/create_worker.py launch-sync \
-  --name email-triage-fix-123 --template worker \
-  --runtime-dir runtime/email-triage/fix-123 \
-  --task-file  runtime/email-triage/fix-123/task.md \
-  --timeout 30m --result-json runtime/email-triage/fix-123/result.json
-```
-
-It launches, waits for the worker's finish report in the foreground, writes a JSON
-result (`timed_out`, `type`, `name`, `body`, `branch`, `raw_report`) to
-`--result-json`, and destroys the worker (the `mngr/<name>` branch survives).
-Write the task file first with `lead_agent` / `finish_report_path` frontmatter
-(see the `launch-task` skill). **User- or error-triggered, tightly scoped** -- a
-broad unattended launch is how cost and time run away. What to do with the
-returned branch (merge, review) is your concern.
 
 ## References
 
