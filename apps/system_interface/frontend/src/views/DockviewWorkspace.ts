@@ -57,7 +57,13 @@ import {
   type TerminalSessionInfo,
   type TerminalSessionListener,
 } from "../models/AgentManager";
-import { getActiveLayoutSlug, getClientId, getDeviceKind, getStoredLayoutSlug, setActiveLayoutSlug } from "../models/ClientIdentity";
+import {
+  getActiveLayoutSlug,
+  getClientId,
+  getDeviceKind,
+  getStoredLayoutSlug,
+  setActiveLayoutSlug,
+} from "../models/ClientIdentity";
 import { decideHighlightSurface } from "../models/highlightSurface";
 import {
   autosaveLayout,
