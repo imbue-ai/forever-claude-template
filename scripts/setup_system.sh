@@ -21,7 +21,7 @@ provision_skip_if_done setup_system
 : "${CLAUDE_CODE_VERSION:=2.1.207}"
 : "${MODAL_VERSION:=1.4.2}"
 : "${NODE_MAJOR:=20}"
-: "${LATCHKEY_VERSION:=2.20.0}"
+: "${LATCHKEY_VERSION:=2.21.0}"
 
 # System packages (tini for signal handling; supervisor runs our background
 # services; earlyoom is the OOM-prevention daemon that sheds memory under
