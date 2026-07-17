@@ -22,5 +22,6 @@ To enable:
 It introduces itself shortly afterwards (within a minute or two during the
 day; at about 3 AM if enabled in the small hours), then checks weekly.
 
-To switch it off again: `rm runtime/caretaker/enabled`. Its notes and
-permissions file stay put, so a later re-enable picks up where it left off.
+To switch it off again, use the disable-caretaker skill
+(`rm runtime/caretaker/enabled`); its notes and permissions stay put for a
+later re-enable.

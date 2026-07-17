@@ -180,8 +180,9 @@ deterministic check found something. Its entry is the single line in
   woken once regardless of findings.
 - **How it got there:** written to `/etc/cron.d/minds-caretaker` at image build
   by `scripts/build_workspace.sh`, guarded on the file's existence so re-runs
-  of that script never recreate it. `rm runtime/caretaker/enabled` switches
-  the Caretaker off; deleting the cron file removes even the no-op tick.
+  of that script never recreate it. `rm runtime/caretaker/enabled` (the
+  disable-caretaker skill) switches the Caretaker off; deleting the cron file
+  removes even the no-op tick.
 - **When the agent runs:** at most once a week, at 3 AM local when the
   container is up (first minute back up after an overdue window otherwise),
   and only with findings -- plus the one-time introduction shortly after the

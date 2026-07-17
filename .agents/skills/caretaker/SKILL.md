@@ -240,4 +240,4 @@ over.
 When a run wakes you and the permissions are still unanswered, report what the
 deterministic check found (no scan of your own, no fix) and gently re-offer.
 The user can switch you off entirely with `rm runtime/caretaker/enabled` (the
-enable-caretaker skill documents this), and re-enable you the same way later.
+disable-caretaker skill), and re-enable you later (the enable-caretaker skill).

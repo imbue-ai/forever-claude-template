@@ -60,7 +60,8 @@ of the prior run); it remembers your choices and what it saw before through
 its own notes on disk, not the conversation. Your standing permissions live in
 a single plain-language `runtime/caretaker/permissions.md` that the Caretaker
 reads each run and rewrites when you change your mind, and that you can edit
-yourself any time. You stay in full control: `rm runtime/caretaker/enabled`
+yourself any time. You stay in full control: the
+equally short **disable-caretaker** skill (`rm runtime/caretaker/enabled`)
 switches it off entirely.
 
 **Health-check skills and docs.** Adds a `check-app-errors` skill (survey
