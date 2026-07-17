@@ -101,8 +101,9 @@ def _build_worktree_create_command(
         "user_created=true",
         "--no-connect",
     ]
-    # Inherit the project label from the parent agent. The worker belongs to its
-    # workspace by sharing the host; it carries no workspace label.
+    # Inherit the project label from the parent agent. The worktree agent belongs
+    # to its workspace by sharing the host, even though its files live in a
+    # separate git worktree rather than the repo-root work_dir.
     if "project" in parent_labels:
         cmd.extend(["--label", f"project={parent_labels['project']}"])
     return cmd
@@ -132,7 +133,8 @@ def _build_chat_create_command(
         "--no-connect",
     ]
     # Inherit the project label from the primary agent. The chat agent belongs to
-    # its workspace by sharing the host; it carries no workspace label.
+    # its workspace by sharing the host (and, via ``--transfer none``, the
+    # primary's work_dir).
     if "project" in primary_labels:
         cmd.extend(["--label", f"project={primary_labels['project']}"])
     return cmd
