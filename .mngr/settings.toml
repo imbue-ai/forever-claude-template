@@ -642,12 +642,13 @@ post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-s
 [create_templates.chat]
 type = "claude"
 
-# Caretaker template: the nightly maintenance agent (the "Caretaker") -- the
+# Caretaker template: the weekly maintenance agent (the "Caretaker") -- the
 # tailored example of the generic `task_agent` template below. Like `chat`, it is
 # a plain `claude` agent sharing the services agent's CLAUDE_CONFIG_DIR via the
 # inherited host env, but it is oriented by an appended system prompt to run the
-# `caretaker` skill. It is spawned (and re-woken) once a day by the caretaker
-# job (/etc/cron.d/minds-caretaker -> scripts/run_daily_job.sh) via
+# `caretaker` skill. It is spawned (and re-woken) by the caretaker job
+# (/etc/cron.d/minds-caretaker -> scripts/caretaker_check.sh, off by default,
+# weekly and findings-gated when enabled) via
 # scripts/run_task_agent.sh, and is
 # labelled task_agent=caretaker + highlight=<run-key> so it can be found as a
 # singleton and surfaced/re-flashed as a tab in the minds UI.

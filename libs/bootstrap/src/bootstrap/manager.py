@@ -58,21 +58,6 @@ _TIMEZONE_FETCH_ATTEMPTS = 3
 _TIMEZONE_FETCH_RETRY_SECONDS = 3.0
 _TIMEZONE_FETCH_TIMEOUT_SECONDS = 5.0
 
-# The Caretaker's daily-job stamp, checked every minute by
-# scripts/run_daily_job.sh (invoked from /etc/cron.d). The script treats a
-# MISSING stamp conservatively (run only at/after the 3 AM due hour), which
-# on its own would still let a workspace created at, say, 10 AM run the
-# Caretaker within the first minute. Seeding today's date on first boot
-# (stamp absent) is what guarantees the Caretaker never runs on creation day
-# and first fires at the NEXT day's 3 AM due hour.
-_DAILY_STAMP_DIR = Path("/var/lib/minds/daily-stamps")
-_CARETAKER_STAMP_PATH = _DAILY_STAMP_DIR / "caretaker"
-# When the user's timezone cannot be fetched at first boot, pick a fixed-offset
-# zone that places the workspace's "local" clock at this hour at setup time.
-# With the daily-job runner's 3 AM due hour, a 19:00 setup hour makes the
-# Caretaker's first run land roughly 8 hours after workspace setup.
-_TZ_UNKNOWN_SETUP_LOCAL_HOUR = 19
-
 # Signal file gating exactly-once creation of the initial chat agent. Lives
 # under runtime/, which persists with the container volume (and is synced to
 # GitHub when the opt-in github-sync skill has been enabled).
@@ -661,93 +646,6 @@ def _fetch_user_timezone() -> str:
     return ""
 
 
-def _fallback_timezone_for_unknown(now_utc: datetime) -> str:
-    """Fixed-offset zone placing the local clock at _TZ_UNKNOWN_SETUP_LOCAL_HOUR now.
-
-    Used only when the user's real timezone cannot be fetched at first boot: the
-    goal is not a correct wall clock (there is no correct answer) but a sensible
-    first Caretaker run -- "local" 19:00 at setup puts the next 03:00 due hour
-    about 8 hours out. Note the POSIX sign inversion: Etc/GMT-9 means UTC+9.
-    """
-    offset_hours = (_TZ_UNKNOWN_SETUP_LOCAL_HOUR - now_utc.hour) % 24
-    if offset_hours == 0:
-        return "Etc/GMT"
-    if offset_hours <= 14:
-        return f"Etc/GMT-{offset_hours}"
-    return f"Etc/GMT+{24 - offset_hours}"
-
-
-def _caretaker_seed_marker_path(stamp_path: Path) -> Path:
-    """The sidecar marker recording that the caretaker stamp was seeded once.
-
-    Its existence -- not the stamp's -- is what identifies a workspace as
-    already past its first boot: a missing stamp alone is ambiguous, because
-    deleting the stamp is the documented way to force a same-day run (see
-    _seed_caretaker_stamp).
-    """
-    return stamp_path.with_name(stamp_path.name + ".seeded")
-
-
-def _seed_caretaker_stamp(
-    tz_name: str,
-    stamp_path: Path = _CARETAKER_STAMP_PATH,
-    now_utc: datetime | None = None,
-) -> None:
-    """Suppress the Caretaker's creation-day run (first boot only).
-
-    scripts/run_daily_job.sh checks this stamp every minute; a missing stamp
-    is treated conservatively (run only at/after the 3 AM due hour), so
-    without this a workspace created after 3 AM would spawn the Caretaker
-    within the first minute. Writing today's date (in the container's local
-    timezone, ``tz_name``; UTC when empty) marks creation day as already
-    covered, so the first run lands at the next day's 3 AM due hour. Later
-    boots leave the stamp alone -- it is the runner's own state from then on.
-    Best-effort: logs and returns rather than raising.
-
-    "First boot" is tracked by a sidecar marker (``<stamp>.seeded``), NOT by
-    the stamp's absence. A missing stamp is ambiguous: it also means "an
-    operator deleted the stamp to force a run today" (the documented way to
-    test the Caretaker at a near-term hour). Before the marker existed, any
-    reboot between that deletion and the due hour re-seeded today's date and
-    silently cancelled the forced run. The marker is written exactly once --
-    alongside the first seed, or backfilled when a pre-marker workspace
-    already carries a stamp -- and every later boot returns early on it.
-    """
-    marker_path = _caretaker_seed_marker_path(stamp_path)
-    if marker_path.exists():
-        return
-    if stamp_path.exists():
-        # Pre-marker workspace mid-life: adopt it without touching the stamp.
-        try:
-            marker_path.parent.mkdir(parents=True, exist_ok=True)
-            marker_path.write_text("")
-        except OSError as e:
-            logger.warning(
-                "Failed to write the caretaker seed marker at {}: {}", marker_path, e
-            )
-        return
-    if now_utc is None:
-        now_utc = datetime.now(timezone.utc)
-    try:
-        local_date = now_utc.astimezone(ZoneInfo(tz_name)) if tz_name else now_utc
-    except (KeyError, ValueError, OSError):
-        local_date = now_utc
-    stamp = local_date.strftime("%Y-%m-%d")
-    try:
-        stamp_path.parent.mkdir(parents=True, exist_ok=True)
-        stamp_path.write_text(stamp + "\n")
-        marker_path.write_text("")
-    except OSError as e:
-        logger.warning(
-            "Failed to seed the caretaker daily-job stamp at {}: {}", stamp_path, e
-        )
-        return
-    logger.info(
-        "Seeded caretaker daily-job stamp {} (first run: next day's 3 AM due hour)",
-        stamp,
-    )
-
-
 def _apply_container_timezone(
     tz_name: str,
     zoneinfo_dir: Path = Path("/usr/share/zoneinfo"),
@@ -843,26 +741,8 @@ def main() -> None:
     # created after 3 AM spawns the Caretaker immediately on creation.
     _write_agent_env_snapshot()
     tz_name = _fetch_user_timezone()
-    applied_tz = tz_name if tz_name and _apply_container_timezone(tz_name) else ""
-    is_first_boot = (
-        not _caretaker_seed_marker_path(_CARETAKER_STAMP_PATH).exists()
-        and not _CARETAKER_STAMP_PATH.exists()
-    )
-    if not applied_tz and is_first_boot:
-        # First boot with no known timezone: adopt a fixed-offset zone that
-        # makes the next 3 AM due hour land about 8 hours from now, so
-        # the Caretaker's first run is neither immediate nor a day away. A
-        # later boot (or the manage-scheduled-tasks skill) replaces it with
-        # the real timezone once one is known; on non-first boots the clock
-        # is left exactly as it was. First boot is "never seeded": the seed
-        # marker AND the stamp are both absent. Checking the stamp alone would
-        # misfire mid-life after an operator deletes it to force a same-day
-        # Caretaker run (a documented operation) -- a reboot with a failed
-        # timezone fetch would then clobber the real clock with this placeholder.
-        fallback_tz = _fallback_timezone_for_unknown(datetime.now(timezone.utc))
-        if _apply_container_timezone(fallback_tz):
-            applied_tz = fallback_tz
-    _seed_caretaker_stamp(applied_tz)
+    if tz_name:
+        _apply_container_timezone(tz_name)
 
     _bootstrap_init_chat_dir()
 

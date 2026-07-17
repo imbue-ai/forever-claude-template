@@ -1,6 +1,6 @@
 ---
 name: manage-scheduled-tasks
-description: Query and edit the recurring scheduled jobs that run on this host. Use when you (or the user, via you) want to see what is scheduled, add a new recurring job, change when something runs, or stop a job from running. Jobs are plain cron entries in /etc/cron.d/ -- daily jobs that must catch up after downtime tick every minute through the run_daily_job.sh due-checker, precise or sub-daily schedules are ordinary cron lines. Also covers how the built-in daily Caretaker job is wired and where all the scheduling configuration lives.
+description: Query and edit the recurring scheduled jobs that run on this host. Use when you (or the user, via you) want to see what is scheduled, add a new recurring job, change when something runs, or stop a job from running. Jobs are plain cron entries in /etc/cron.d/ -- daily jobs that must catch up after downtime tick every minute through the run_daily_job.sh due-checker, precise or sub-daily schedules are ordinary cron lines. Also covers how the built-in weekly Caretaker job is wired (off by default) and where all the scheduling configuration lives.
 ---
 
 # Managing scheduled tasks
@@ -13,7 +13,7 @@ is off or asleep is simply skipped, never made up. When a job must not be
 missed, run it through a small script, `scripts/run_daily_job.sh` (~50
 lines): an every-minute cron line ticks it, and it runs the job at its due
 hour when the machine is up -- or the first minute the machine is back up
-after a missed day. The built-in nightly **Caretaker** is the worked example
+after a missed day. The built-in weekly **Caretaker** is the worked example
 of that pattern (see below).
 
 ## First: choose the daily-job pattern or a plain cron line
@@ -48,10 +48,9 @@ latchkey curl http://latchkey-self.invalid/minds-api-proxy/api/v1/timezone
 cat /etc/timezone                          # what the container currently uses
 ```
 
-A fixed-offset `Etc/GMT*` value in `/etc/timezone` means the boot-time fetch
-failed and the bootstrap picked a placeholder (chosen so the Caretaker's first
-run landed about 8 hours after setup) -- replace it with the user's real zone.
-If they differ, update the container before writing the schedule entry:
+If the boot-time fetch failed, the container is still on UTC -- replace it
+with the user's real zone. If they differ, update the container before writing
+the schedule entry:
 
 ```bash
 ln -sf "/usr/share/zoneinfo/<Area/City>" /etc/localtime
@@ -89,6 +88,9 @@ every minute through the wrapper and the checker:
 - `job-id` -- unique name; the checker records the last covered date under
   `/var/lib/minds/daily-stamps/<job-id>`.
 - `due-hour` -- the local hour (0-23) the job is due.
+- `--interval-days N` (optional, before the command) -- run every N days
+  instead of daily, same due-hour and catch-up rules over the N-day window
+  (the Caretaker uses 7).
 
 The every-minute tick is what makes catch-up possible: the checker exits
 instantly on every tick where nothing is due, and a flock held for the job's
@@ -109,7 +111,7 @@ A job with no stamp yet runs at the first tick at or after its due hour -- so
 a job added in the afternoon with a morning due hour fires within a minute. To
 make it wait for tomorrow instead, seed the stamp with today's date first:
 `mkdir -p /var/lib/minds/daily-stamps && date +%F > /var/lib/minds/daily-stamps/<job-id>`
-(exactly what the bootstrap does for the Caretaker). Cron rescans
+Cron rescans
 `/etc/cron.d/` within a minute, so a new drop-in takes effect with nothing to
 reload.
 
@@ -154,35 +156,36 @@ agent template; otherwise the generic `task_agent` template is used.
 
 ## How the Caretaker is wired (the built-in example)
 
-The nightly Caretaker is exactly the task-agent pattern above, with a tailored
-agent template. Its entry is the single line in `/etc/cron.d/minds-caretaker`
-(job id `caretaker`, due hour 3):
+The Caretaker is the task-agent pattern above with two extra gates in front:
+it is **off by default**, and even when on, the agent only wakes when a
+deterministic check found something. Its entry is the single line in
+`/etc/cron.d/minds-caretaker`:
 
 ```
-* * * * *   root   /mngr/code/scripts/with_agent_env.sh /mngr/code/scripts/run_daily_job.sh caretaker 3 bash /mngr/code/scripts/run_task_agent.sh caretaker --template caretaker >> /var/log/supervisor/caretaker-job.log 2>&1
+* * * * *   root   /mngr/code/scripts/with_agent_env.sh bash /mngr/code/scripts/caretaker_check.sh >> /var/log/supervisor/caretaker-job.log 2>&1
 ```
 
-- **What it runs:** the env wrapper, then the due-checker (job id `caretaker`,
-  due hour 3), then `bash scripts/run_task_agent.sh caretaker --template
-  caretaker` (wake the singleton Caretaker agent for one run), with output
-  appended to `/var/log/supervisor/caretaker-job.log`.
+- **The gate script** (`scripts/caretaker_check.sh`) exits immediately unless
+  `runtime/caretaker/enabled` exists (created by the enable-caretaker skill).
+  When enabled, it hands timing to `run_daily_job.sh` (job id `caretaker`,
+  due hour 3, `--interval-days 7`), which re-invokes it with `--fire` when a
+  check is due.
+- **The deterministic check** (`--fire`) looks for services in FATAL/BACKOFF,
+  fresh error output in `/var/log/supervisor/` since the last check, disk at
+  or above 85 percent, and new OOM-guard shedding. Findings are written to
+  `runtime/caretaker/findings.md` and the Caretaker agent is woken via
+  `run_task_agent.sh caretaker --template caretaker`; with no findings,
+  nothing runs until the next weekly check. The one exception: if the agent
+  has never introduced itself (no `runtime/caretaker/permissions.md`), it is
+  woken once regardless of findings.
 - **How it got there:** written to `/etc/cron.d/minds-caretaker` at image build
   by `scripts/build_workspace.sh`, guarded on the file's existence so re-runs
-  of that script never recreate it. Deleting the file is how the Caretaker is
-  switched off -- and it stays off.
-- **When it fires:** once a day at 3 AM local time when the container is up at
-  that moment; after a fully missed day, within the first minute the container
-  is up again, at any hour. Never at workspace creation.
-- **The first run:** at first boot the bootstrap seeds the Caretaker's stamp
-  (`/var/lib/minds/daily-stamps/caretaker`) with today's date, so the Caretaker
-  never spawns on creation day; its first run is the next day's 3 AM. The
-  seeding happens exactly once, tracked by a `caretaker.seeded` marker beside
-  the stamp -- so deleting the stamp to force a same-day run keeps working
-  even if the container reboots before the run fires. When the
-  user's timezone cannot be fetched at first boot, the bootstrap instead
-  adopts a fixed-offset `Etc/GMT*` zone that places the workspace's local
-  clock at 19:00 at setup, so the first 3 AM due hour lands about 8 hours
-  after setup; the real timezone replaces it once known.
+  of that script never recreate it. `rm runtime/caretaker/enabled` switches
+  the Caretaker off; deleting the cron file removes even the no-op tick.
+- **When the agent runs:** at most once a week, at 3 AM local when the
+  container is up (first minute back up after an overdue window otherwise),
+  and only with findings -- plus the one-time introduction shortly after the
+  user enables it.
 
 ## See, pause, or remove a job
 

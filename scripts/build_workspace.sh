@@ -62,12 +62,13 @@ uv sync --all-packages --frozen
 ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/tk
 ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/ticket
 
-# Register the daily Caretaker: a cron line that ticks every minute and hands
-# the schedule decision to scripts/run_daily_job.sh (due hour 3, i.e. 3 AM
-# local, with first-minute catch-up after a missed day at any hour). Guarded on
-# file existence because this script reruns on every Lima create. Deleting the
-# file is how the Caretaker is switched off.
+# Register the Caretaker's gate: a cron line that ticks every minute into
+# scripts/caretaker_check.sh, which is a no-op until the user enables the
+# feature (runtime/caretaker/enabled -- see the enable-caretaker skill) and
+# thereafter runs a deterministic weekly check that wakes the agent only when
+# it finds something. Guarded on file existence because this script reruns on
+# every Lima create.
 if [ ! -f /etc/cron.d/minds-caretaker ]; then
-    printf '%s\n' '* * * * *   root   /mngr/code/scripts/with_agent_env.sh /mngr/code/scripts/run_daily_job.sh caretaker 3 bash /mngr/code/scripts/run_task_agent.sh caretaker --template caretaker >> /var/log/supervisor/caretaker-job.log 2>&1' > /etc/cron.d/minds-caretaker
+    printf '%s\n' '* * * * *   root   /mngr/code/scripts/with_agent_env.sh bash /mngr/code/scripts/caretaker_check.sh >> /var/log/supervisor/caretaker-job.log 2>&1' > /etc/cron.d/minds-caretaker
     chmod 0644 /etc/cron.d/minds-caretaker
 fi

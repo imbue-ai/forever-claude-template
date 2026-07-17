@@ -22,7 +22,6 @@ from bootstrap.manager import (
     _build_create_chat_command,
     _configure_git_global,
     _ensure_host_claude_config_dir,
-    _fallback_timezone_for_unknown,
     _fetch_user_timezone,
     _format_env_file,
     _initialize_workspace_main_branch,
@@ -33,7 +32,6 @@ from bootstrap.manager import (
     _read_host_name,
     _read_main_agent_labels,
     _resolve_services_claude_config_dir,
-    _seed_caretaker_stamp,
     _write_agent_env_snapshot,
 )
 
@@ -769,64 +767,3 @@ def test_fetch_user_timezone_returns_empty_when_gateway_env_missing(
     monkeypatch.delenv("LATCHKEY_GATEWAY_PASSWORD", raising=False)
     monkeypatch.delenv("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE", raising=False)
     assert _fetch_user_timezone() == ""
-
-
-def test_fallback_timezone_places_local_clock_at_setup_hour() -> None:
-    """Every UTC hour maps to a real zone whose local time at setup is 19:xx."""
-    for hour in range(24):
-        now = datetime(2026, 7, 7, hour, 30, tzinfo=timezone.utc)
-        zone_name = _fallback_timezone_for_unknown(now)
-        local = now.astimezone(ZoneInfo(zone_name))
-        assert local.hour == 19, f"utc hour {hour} -> {zone_name} -> local {local.hour}"
-
-
-def test_seed_caretaker_stamp_writes_today_for_zone(tmp_path: Path) -> None:
-    """First boot writes today's local date so run_daily_job.sh skips the creation day."""
-    stamp = tmp_path / "stamps" / "caretaker"
-    # 01:30 UTC on the 8th is still the evening of the 7th in Etc/GMT+5 (UTC-5),
-    # so the stamp must carry the LOCAL date, not the UTC one.
-    now = datetime(2026, 7, 8, 1, 30, tzinfo=timezone.utc)
-    _seed_caretaker_stamp("Etc/GMT+5", stamp_path=stamp, now_utc=now)
-    assert stamp.read_text() == "2026-07-07\n"
-
-
-def test_seed_caretaker_stamp_uses_utc_when_zone_empty_or_bad(tmp_path: Path) -> None:
-    now = datetime(2026, 7, 8, 1, 30, tzinfo=timezone.utc)
-    for bad_zone in ("", "Not/AZone"):
-        stamp = (
-            tmp_path / f"stamps-{bad_zone or 'empty'}".replace("/", "_") / "caretaker"
-        )
-        _seed_caretaker_stamp(bad_zone, stamp_path=stamp, now_utc=now)
-        assert stamp.read_text() == "2026-07-08\n"
-
-
-def test_seed_caretaker_stamp_leaves_existing_stamp_alone(tmp_path: Path) -> None:
-    """Later boots must not touch the daily-job runner's own state."""
-    stamp = tmp_path / "caretaker"
-    stamp.write_text("2020-01-01\n")
-    _seed_caretaker_stamp("UTC", stamp_path=stamp)
-    assert stamp.read_text() == "2020-01-01\n"
-    # A pre-marker workspace gets the marker backfilled so later boots
-    # short-circuit on it rather than on the stamp's presence.
-    assert (tmp_path / "caretaker.seeded").exists()
-
-
-def test_seed_caretaker_stamp_writes_marker_on_first_seed(tmp_path: Path) -> None:
-    stamp = tmp_path / "stamps" / "caretaker"
-    _seed_caretaker_stamp("UTC", stamp_path=stamp)
-    assert (tmp_path / "stamps" / "caretaker.seeded").exists()
-
-
-def test_seed_caretaker_stamp_does_not_reseed_deleted_stamp(tmp_path: Path) -> None:
-    """A deliberately deleted stamp (forcing a run today) must survive a reboot.
-
-    Stamp absence is the operator's tool for scheduling a same-day run; the
-    one-time marker is what records 'this workspace was already seeded', so a
-    reboot between the deletion and the due hour cannot re-seed today's date
-    and silently cancel the forced run.
-    """
-    stamp = tmp_path / "stamps" / "caretaker"
-    _seed_caretaker_stamp("UTC", stamp_path=stamp)
-    stamp.unlink()
-    _seed_caretaker_stamp("UTC", stamp_path=stamp)
-    assert not stamp.exists()
