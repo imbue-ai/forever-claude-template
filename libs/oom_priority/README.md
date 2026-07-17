@@ -43,7 +43,7 @@ without inspecting the process tree:
 | a built-in supervisord service | launch | its `SERVICE_BANDS` value | `scripts/oom_tag_service.py <service>` (command prefix) |
 | a user-created supervisord service | launch | user service (above every built-in) | `scripts/oom_tag_service.py user` (command prefix) |
 | an agent's main process | launch | chat -> expendable chat band (560); worker or unidentifiable -> worker agent | `scripts/claude_oom_launch.py` |
-| an agent's subprocesses | each Bash tool call | agent subprocess (most expendable) | `scripts/claude_oom_tag_subprocess.py` (PreToolUse) |
+| an agent's subprocesses | each Bash tool call | agent subprocess (most expendable) | `scripts/claude_rewrite_bash_command.py` (PreToolUse; also sets the commit identity) |
 | a shared browser | launch | `SHARED_BROWSER` (1000, the ceiling) | inline `oom_score_adj` write in the `browser` program |
 | Chromium's own processes | on fleet events (launch, new page, navigation) | `[SHARED_BROWSER_FLOOR, SHARED_BROWSER]` (910-1000) | the browser service's re-tagging sweep (`browser.oom_retag`) -- see "The Chromium exception" below |
 
