@@ -50,8 +50,16 @@ To add, change, or remove a service, edit `supervisord.conf` and run
 The `deferred-install` program in `supervisord.conf` runs
 `scripts/deferred_install.sh`, which installs packages that are too heavy to
 bake into the Docker image but aren't required by any boot-time service.
-Currently it covers Playwright's Chromium browser + its apt system libraries
-(`uv run playwright install --with-deps chromium`).
+Currently it covers:
+
+- Chromium's apt system libraries (`uv run playwright install-deps chromium`
+  -- libs only, no browser download).
+- CloakBrowser, a from-source C++ (Blink/V8) stealth-patched Chromium fork,
+  fetched from a pinned GitHub release + SHA256-verified per-arch (Linux
+  x64/arm64), unpacked to `/opt/cloakbrowser/`. This is the one Chromium
+  binary in the image -- both the agentic browser fleet and any agent's own
+  direct Playwright calls (`chromium.launch(executable_path=...)`) use it;
+  Playwright's own managed-Chromium download is not installed.
 
 It is a one-shot supervisord program (`autorestart=false`, `startsecs=0`,
 `exitcodes=0`): supervisord starts it once on boot and leaves it stopped after a

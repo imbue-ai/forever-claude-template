@@ -415,7 +415,7 @@ def test_http_release_requires_ownership(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_http_new_browser_blocked_until_chromium_installed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BROWSER_SKIP_INSTALL_CHECK", raising=False)
-    monkeypatch.setattr(bsession, "_PLAYWRIGHT_MARKER", bsession.Path("/nonexistent/marker"))
+    monkeypatch.setattr(bsession, "_CLOAKBROWSER_MARKER", bsession.Path("/nonexistent/marker"))
     client = runner.application.test_client()
     resp = client.post("/browsers")
     assert resp.status_code == 503

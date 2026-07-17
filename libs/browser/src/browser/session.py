@@ -104,10 +104,16 @@ _SCREENCAST_MAX_HEIGHT = 800
 # tab feels snappier. Slightly more bandwidth than skipping frames.
 _SCREENCAST_EVERY_NTH_FRAME = 1
 
-# Deferred-install marker (see scripts/deferred_install.sh). Chromium installs
-# asynchronously on first container boot; launching a browser before it exists
-# fails, so callers gate on this. No Xvfb: CDP streaming/input are headless.
-_PLAYWRIGHT_MARKER = Path("/var/lib/minds/deferred-install/done.playwright")
+# Deferred-install marker (see scripts/deferred_install.sh). CloakBrowser
+# installs asynchronously on first container boot; launching a browser before
+# it exists fails, so callers gate on this. No Xvfb: CDP streaming/input are
+# headless.
+_CLOAKBROWSER_MARKER = Path("/var/lib/minds/deferred-install/done.cloakbrowser")
+
+# CloakBrowser's fixed install path (see scripts/deferred_install.sh's
+# _install_cloakbrowser). A stealth, C++-patched Chromium fork -- replaces
+# vanilla Chromium as the engine for every browser the fleet launches.
+_CLOAKBROWSER_EXECUTABLE = "/opt/cloakbrowser/chrome"
 
 # Default model. browser-use's own default LLM is ChatBrowserUse (its hosted
 # model), so to drive with the user's Anthropic key we pass ChatAnthropic
@@ -328,7 +334,7 @@ def deferred_install_ready() -> tuple[bool, str]:
     """Return ``(ready, reason)`` once Chromium is installed."""
     if os.environ.get("BROWSER_SKIP_INSTALL_CHECK") == "1":
         return True, "ready"  # host/CI testing without the deferred-install marker
-    if not _PLAYWRIGHT_MARKER.exists():
+    if not _CLOAKBROWSER_MARKER.exists():
         return False, "Chromium is still installing in this workspace; try again in a minute."
     return True, "ready"
 
@@ -541,7 +547,11 @@ class LiveBrowser(MutableModel):
         """
         self._playwright = playwright
         self._input_enabled.set()
-        chromium_path = playwright.chromium.executable_path
+        # Fixed CloakBrowser path, not playwright.chromium.executable_path --
+        # the fleet's engine is CloakBrowser, not Playwright's own managed
+        # Chromium (which vanilla Playwright calls elsewhere in this image
+        # still use). See _CLOAKBROWSER_EXECUTABLE.
+        chromium_path = _CLOAKBROWSER_EXECUTABLE
         profile_dir = _profile_dir(self.browser_id)
         profile_dir.mkdir(parents=True, exist_ok=True)
         _clear_stale_singleton(profile_dir)  # a prior hard kill may have orphaned a lock

@@ -8,12 +8,15 @@ agent, identified by its `MNGR_AGENT_ID`, or the human).
   thread-per-connection) that owns every browser. browser_use, Playwright (async),
   and the per-browser ownership state machine run on one background asyncio event
   loop, reached from the Flask threads through a single `run_coroutine_threadsafe`
-  bridge. Each browser is a headless Chromium driven by `browser_use.BrowserSession`, observed
-  over the same CDP endpoint to stream a live view (`Page.startScreencast` ->
-  base64 JPEG frames over a WebSocket) and inject human input. Each browser is
-  addressed by a random ~2-word english NAME (e.g. `alex-smith`), generated on
-  demand and never reused; the fleet starts empty and there is no default
-  browser.
+  bridge. Each browser is a headless CloakBrowser -- a from-source C++
+  (Blink/V8) stealth-patched Chromium fork at `/opt/cloakbrowser/chrome` (see
+  `scripts/deferred_install.sh`), not Playwright's own managed Chromium --
+  driven by `browser_use.BrowserSession` (`executable_path` pinned to that
+  fixed path), observed over the same CDP endpoint to stream a live view
+  (`Page.startScreencast` -> base64 JPEG frames over a WebSocket) and inject
+  human input. Each browser is addressed by a random ~2-word english NAME
+  (e.g. `alex-smith`), generated on demand and never reused; the fleet starts
+  empty and there is no default browser.
 - **Ownership** is one locked, compare-and-set state machine per browser. Agents
   never preempt each other -- a second agent waits in a FIFO queue
   (monitor-and-wait). The human can take control from the UI at any time, which

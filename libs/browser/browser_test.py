@@ -76,11 +76,11 @@ def test_deferred_install_ready_gates_on_marker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("BROWSER_SKIP_INSTALL_CHECK", raising=False)
-    play = tmp_path / "done.playwright"
-    monkeypatch.setattr(bsession, "_PLAYWRIGHT_MARKER", play)
+    marker = tmp_path / "done.cloakbrowser"
+    monkeypatch.setattr(bsession, "_CLOAKBROWSER_MARKER", marker)
     ready, _ = bsession.deferred_install_ready()
     assert ready is False
-    play.write_text("")
+    marker.write_text("")
     ready, reason = bsession.deferred_install_ready()
     assert ready is True
     assert reason == "ready"
