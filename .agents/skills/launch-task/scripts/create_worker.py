@@ -319,7 +319,10 @@ def launch(
     Pre-flight checks run first so a typo doesn't half-create a worker:
     ``runtime_dir`` and ``task_file`` existence (and any declared
     ``source_artifacts_dir``'s existence) return exit code 2 with a clean
-    message, since those are caller-supplied paths. Malformed task-file
+    message, since those are caller-supplied paths. So does a leftover file at
+    the task's ``finish_report_path`` -- a stale report from a previous run
+    would satisfy ``await`` instantly, so launch refuses until the caller has
+    confirmed it was handled and moved it aside. Malformed task-file
     frontmatter instead raises ``ValueError`` (full traceback) -- that's a bug
     in how the task file was composed, not a bad CLI argument.
 
@@ -348,6 +351,25 @@ def launch(
     if artifacts_dir is not None and not artifacts_dir.is_dir():
         print(
             f"create_worker: source_artifacts_dir is not a directory: {artifacts_dir}",
+            file=sys.stderr,
+        )
+        return 2
+    # A leftover report at ``finish_report_path`` would satisfy the next
+    # ``await`` instantly (it only polls for file existence), so the new
+    # worker's real result would never be read -- and the runtime-dir sync
+    # below would even copy the stale report into the new worker's worktree.
+    # Refuse to launch; the caller must confirm the old report was fully
+    # handled and move it aside before relaunching.
+    report_path_value = _read_frontmatter_field(task_file, "finish_report_path")
+    if report_path_value is not None and Path(report_path_value).exists():
+        consumed_dir = Path(report_path_value).parent / "consumed"
+        print(
+            f"create_worker: refusing to launch {name}: something already "
+            f"exists at the report path {report_path_value} (left over from a "
+            f"previous run; `await` would return it instantly instead of this "
+            f"worker's real report). Confirm it has been dealt with, move it "
+            f"aside (e.g. mkdir -p {consumed_dir} && mv {report_path_value} "
+            f"{consumed_dir}/), then relaunch.",
             file=sys.stderr,
         )
         return 2
@@ -551,6 +573,32 @@ def destroy(name: str, runner: Runner | None = None) -> None:
     runner.run(["mngr", "destroy", name, "--force"], check=True)
 
 
+def _archive_report(report_path: Path) -> None:
+    """Move a collected report out of ``finish_report_path`` into ``consumed/``.
+
+    ``launch``'s stale-report guard refuses to start while anything sits at
+    ``finish_report_path``, and ``destroy`` never touches this file (it lives in
+    the caller's runtime dir, not the worker's worktree), so a repeated
+    ``launch_sync`` on the same task file would be blocked by the report it just
+    collected. We move it aside rather than delete it -- the raw report is worth
+    keeping -- mirroring the interactive flow's ``consumed/`` archive and the
+    guard's own suggested remedy. The archive name is disambiguated by a numeric
+    suffix so successive runs each keep their own report (and nothing is
+    overwritten). A no-op if the file is already gone (e.g. a race with an
+    external cleanup).
+    """
+    if not report_path.exists():
+        return
+    consumed_dir = report_path.parent / "consumed"
+    consumed_dir.mkdir(parents=True, exist_ok=True)
+    target = consumed_dir / report_path.name
+    index = 1
+    while target.exists():
+        target = consumed_dir / f"{report_path.stem}.{index}{report_path.suffix}"
+        index += 1
+    report_path.replace(target)
+
+
 def _emit_run_result(
     payload: Mapping[str, object], stream: TextIO, result_path: Path | None
 ) -> None:
@@ -642,6 +690,13 @@ def launch_sync(
         return await_rc
 
     report = parse_report(buffer.getvalue())
+    # Consume the report now that its contents are captured (and about to be
+    # emitted below): ``launch`` refuses to start if anything sits at
+    # ``finish_report_path``, and ``destroy`` only removes the worker's
+    # agent/worktree -- not this report, which lives in the caller's runtime dir.
+    # Leaving it behind would trap the next ``launch_sync`` on the same task file
+    # (the fixed-path pattern services use).
+    _archive_report(report_path)
     if destroy_on_finish:
         destroy(name, runner)
     _emit_run_result(

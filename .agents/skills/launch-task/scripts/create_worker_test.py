@@ -275,6 +275,63 @@ def test_source_artifacts_dir_non_string_raises(tmp_path: Path) -> None:
     assert runner.calls == []
 
 
+def test_launch_refuses_when_stale_report_exists(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A leftover file at ``finish_report_path`` aborts before any mngr call.
+
+    ``await`` returns as soon as the report file exists, so launching over a
+    stale report would hand the caller the previous run's report instead of the
+    new worker's -- launch must force the caller to deal with it first.
+    """
+    runtime, task, _ = _make_layout(tmp_path)
+    report = runtime / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("---\ntype: status\nname: done\n---\n\nold run\n")
+    task.write_text(
+        f"---\nlead_agent: lead\nfinish_report_path: {report}\n---\n\nbody\n"
+    )
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        runner=runner,
+    )
+
+    assert rc == 2
+    assert runner.calls == []
+    err = capsys.readouterr().err
+    assert "report path" in err
+    assert str(report) in err
+
+
+def test_launch_proceeds_when_report_path_is_clear(tmp_path: Path) -> None:
+    """A declared ``finish_report_path`` with nothing at it launches normally."""
+    runtime, task, _ = _make_layout(tmp_path)
+    task.write_text(
+        f"---\nlead_agent: lead\nfinish_report_path: {runtime / 'reports' / 'report.md'}\n---\n\nbody\n"
+    )
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert [c.argv[:2] for c in runner.calls] == [
+        ["mngr", "create"],
+        ["mngr", "rsync"],
+        ["mngr", "message"],
+    ]
+
+
 def test_invalid_frontmatter_yaml_raises(tmp_path: Path) -> None:
     """A present frontmatter block with invalid YAML raises rather than being
     silently treated as 'no frontmatter' -- it would otherwise mask an
@@ -572,6 +629,16 @@ class _FakeClock:
 
 def _no_sleep(_seconds: float) -> None:
     return None
+
+
+def _write_report_on_sleep(report: Path, text: str):
+    """A sleeper that plays the worker: the report appears during the first
+    poll sleep (launch refuses a report that pre-exists the worker)."""
+
+    def _sleeper(_seconds: float) -> None:
+        report.write_text(text)
+
+    return _sleeper
 
 
 def _write_await_task(task_file: Path, report_path: Path) -> None:
@@ -874,7 +941,6 @@ def test_launch_sync_collects_report_and_destroys(tmp_path: Path) -> None:
     runtime, task, _ = _make_layout(tmp_path)
     report = runtime / "reports" / "report.md"
     report.parent.mkdir(parents=True)
-    report.write_text("---\ntype: status\nname: done\n---\n\nshipped it\n")
     _write_launch_sync_task(task, report)
     result_json = tmp_path / "result.json"
     runner = _RecordingRunner()
@@ -888,7 +954,11 @@ def test_launch_sync_collects_report_and_destroys(tmp_path: Path) -> None:
         timeout_seconds=1800,
         poll_interval_seconds=5,
         runner=runner,
-        sleeper=_no_sleep,
+        # The report lands only after launch (launch refuses a pre-existing
+        # one), so the "worker" writes it during the first await sleep.
+        sleeper=_write_report_on_sleep(
+            report, "---\ntype: status\nname: done\n---\n\nshipped it\n"
+        ),
         clock=lambda: 0.0,
         out=out,
         result_path=result_json,
@@ -910,11 +980,74 @@ def test_launch_sync_collects_report_and_destroys(tmp_path: Path) -> None:
     assert json.loads(out.getvalue()) == expected
 
 
+def test_launch_sync_consumes_report_so_a_repeated_call_is_not_blocked(
+    tmp_path: Path,
+) -> None:
+    # Regression: launch_sync calls launch(), whose stale-report guard refuses to
+    # launch when anything sits at finish_report_path. destroy() removes the
+    # worker's agent/worktree but NOT the report (it lives in the caller's runtime
+    # dir), so without cleanup the report launch_sync just collected would trap the
+    # next call. A non-interactive caller (a service) that calls launch_sync
+    # repeatedly with the same task file -- hence the same report path -- must not
+    # be blocked by its own previous report. So launch_sync moves the collected
+    # report aside into consumed/ (archived, not deleted) once it is collected.
+    runtime, task, _ = _make_layout(tmp_path)
+    report = runtime / "reports" / "report.md"
+    report.parent.mkdir(parents=True)
+    _write_launch_sync_task(task, report)
+    consumed = report.parent / "consumed"
+
+    def _run_once(runner: create_worker_mod.Runner) -> int:
+        return create_worker_mod.launch_sync(
+            name="demo-worker",
+            template="worker",
+            runtime_dir=runtime,
+            task_file=task,
+            timeout_seconds=1800,
+            poll_interval_seconds=5,
+            runner=runner,
+            sleeper=_write_report_on_sleep(
+                report, "---\ntype: status\nname: done\n---\n\nround\n"
+            ),
+            clock=lambda: 0.0,
+            out=io.StringIO(),
+        )
+
+    first = _RecordingRunner()
+    assert _run_once(first) == 0
+    # The collected report is cleared from the report path but preserved in
+    # consumed/, not deleted.
+    assert not report.exists()
+    assert (consumed / "report.md").read_text() == (
+        "---\ntype: status\nname: done\n---\n\nround\n"
+    )
+
+    # A second identical call re-creates the worker and returns 0 instead of
+    # aborting on the guard (exit 2, which would emit no `mngr create`).
+    second = _RecordingRunner()
+    assert _run_once(second) == 0
+    create_calls = [c.argv for c in second.calls if c.argv[:2] == ["mngr", "create"]]
+    assert create_calls == [
+        [
+            "mngr",
+            "create",
+            "demo-worker",
+            "-t",
+            "worker",
+            "--label",
+            "agent_created=true",
+        ]
+    ]
+    # The second run's report is archived under a disambiguated name -- the first
+    # archive is not overwritten, so both are retained.
+    assert not report.exists()
+    assert sorted(p.name for p in consumed.iterdir()) == ["report.1.md", "report.md"]
+
+
 def test_launch_sync_keep_agent_skips_destroy(tmp_path: Path) -> None:
     runtime, task, _ = _make_layout(tmp_path)
     report = runtime / "reports" / "report.md"
     report.parent.mkdir(parents=True)
-    report.write_text("---\ntype: status\nname: done\n---\n\nok\n")
     _write_launch_sync_task(task, report)
     runner = _RecordingRunner()
 
@@ -927,7 +1060,9 @@ def test_launch_sync_keep_agent_skips_destroy(tmp_path: Path) -> None:
         poll_interval_seconds=5,
         destroy_on_finish=False,
         runner=runner,
-        sleeper=_no_sleep,
+        sleeper=_write_report_on_sleep(
+            report, "---\ntype: status\nname: done\n---\n\nok\n"
+        ),
         clock=lambda: 0.0,
         out=io.StringIO(),
     )
@@ -1032,10 +1167,20 @@ def test_main_launch_sync_emits_result_json(tmp_path: Path) -> None:
     runtime, task, _ = _make_layout(tmp_path)
     report = runtime / "reports" / "report.md"
     report.parent.mkdir(parents=True)
-    report.write_text("---\ntype: status\nname: done\n---\n\ndone\n")
     _write_launch_sync_task(task, report)
     result_json = tmp_path / "result.json"
-    runner = _RecordingRunner()
+
+    # main() wires the real sleeper, so the "worker" writes its report as a
+    # side effect of receiving the task message -- await then finds it on its
+    # first existence check. (It cannot pre-exist: launch refuses that.)
+    class _WorkerRespondsRunner(_RecordingRunner):
+        def run(self, argv: Sequence[str], **kwargs):
+            result = super().run(argv, **kwargs)
+            if list(argv)[:2] == ["mngr", "message"]:
+                report.write_text("---\ntype: status\nname: done\n---\n\ndone\n")
+            return result
+
+    runner = _WorkerRespondsRunner()
 
     rc = create_worker_mod.main(
         [

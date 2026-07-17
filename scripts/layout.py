@@ -246,10 +246,10 @@ def _service_name_from_ref(ref: str) -> str:
 
     A service ref may carry a query (``service:browser?session=2``, used to
     address a specific browser in the fleet) or a path
-    (``service:web/health``). The registration check polls
+    (``service:system_interface/health``). The registration check polls
     ``applications.toml`` for the *service*, so we strip anything after the
     name -- the first ``?`` or ``/`` -- before looking it up. Plain
-    ``service:web`` is returned unchanged.
+    ``service:system_interface`` is returned unchanged.
     """
     remainder = ref.removeprefix("service:")
     for separator in ("?", "/"):
@@ -1465,7 +1465,7 @@ def main(argv: list[str] | None = None) -> int:
     p_open = subparsers.add_parser("open", help="Surface a service in the UI")
     p_open.add_argument(
         "target",
-        help="Service name, ref, or https:// URL (e.g. ``web``, ``service:web``, ``https://example.com``)",
+        help="Service name, ref, or https:// URL (e.g. ``browser``, ``service:browser``, ``https://example.com``)",
     )
     p_open.add_argument(
         "--new-group",

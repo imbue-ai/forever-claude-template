@@ -98,7 +98,7 @@ your reply in the user's voice and forward via `mngr message`:
 mngr message <WORKER_NAME> -m "<reply, in the user's voice>"
 ```
 
-To escalate, use the `send-user-message` skill on your own channel, wait for
+To escalate, ask the user, wait for
 the user's reply, then forward it via `mngr message`.
 
 After forwarding, consume the report so the next push can land a fresh

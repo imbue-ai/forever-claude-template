@@ -722,143 +722,6 @@ body {
   background: var(--color-accent-light);
 }
 
-/* ── New conversation page ── */
-.new-conversation {
-  background: var(--color-bg);
-}
-
-.new-conversation-title {
-  font-family: var(--font-family-heading);
-  color: var(--color-text-primary);
-}
-
-.new-conversation-input-box {
-  background: var(--color-bg-composer);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-composer);
-  box-shadow:
-    0 -4px 20px rgba(55, 53, 47, 0.06),
-    0 -1px 6px rgba(55, 53, 47, 0.04);
-  transition:
-    border-color 150ms,
-    box-shadow 200ms;
-}
-
-.new-conversation-input-box:focus-within {
-  border-color: var(--color-accent);
-  box-shadow:
-    0 -4px 24px rgba(47, 107, 79, 0.08),
-    0 -1px 8px rgba(47, 107, 79, 0.06);
-}
-
-.new-conversation-textbox {
-  font-family: var(--font-family-base);
-  font-size: 15px;
-}
-
-.new-conversation-textbox::placeholder {
-  color: var(--color-text-faint);
-}
-
-.new-conversation-send-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  color: #fff;
-  background: var(--color-accent);
-  border: none;
-  border-radius: 50%;
-  cursor: pointer;
-  transition:
-    background 120ms,
-    opacity 150ms,
-    visibility 150ms;
-  flex-shrink: 0;
-}
-
-.new-conversation-send-button:hover:not(:disabled) {
-  background: var(--color-accent-hover);
-}
-
-.system-prompt-toggle {
-  color: var(--color-text-secondary);
-}
-
-.system-prompt-toggle:hover {
-  color: var(--color-text-primary);
-}
-
-.system-prompt-textbox {
-  border-color: var(--color-border);
-  font-family: var(--font-family-base);
-}
-
-.system-prompt-textbox:focus {
-  border-color: var(--color-accent);
-}
-
-/* ── Tool selector ── */
-.tool-selector-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tool-selector-toggle {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  background: transparent;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  align-self: flex-start;
-  transition: color 120ms;
-}
-
-.tool-selector-toggle:hover {
-  color: var(--color-text-primary);
-}
-
-.tool-selector-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.tool-selector-option {
-  display: inline-flex;
-  align-items: center;
-  font-family: var(--font-family-mono);
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  background: var(--color-bg-sidebar);
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  padding: 4px 10px;
-  cursor: pointer;
-  transition:
-    background 120ms,
-    border-color 120ms,
-    color 120ms;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.tool-selector-option:hover {
-  border-color: var(--color-accent);
-  color: var(--color-text-primary);
-}
-
-.tool-selector-option--selected {
-  color: var(--color-accent);
-  font-weight: 500;
-  background: var(--color-accent-light);
-  border-color: var(--color-accent);
-}
-
 /* ── Markdown content styling ── */
 .markdown-content {
   line-height: 1.5;
@@ -2497,12 +2360,14 @@ body {
    the ungrouped block it sits above the timeline thread (opaque background +
    z-index) so the thread doesn't draw through the chip. The chip itself keeps
    its own collapsible styling; this wrapper only handles positioning and
-   masking the thread. */
+   masking the thread. The background is the pure-white transcript color
+   (--color-bg-chat), not the shell's off-white --color-bg, so the mask blends
+   into the transcript instead of showing as a band. */
 .pv-stophook {
   position: relative;
   z-index: 2;
   margin: 6px 0 14px 0;
-  background: var(--color-bg);
+  background: var(--color-bg-chat);
 }
 
 /* Ungrouped work/prose: real work the agent did with no step open (e.g.
@@ -2520,14 +2385,15 @@ body {
 }
 
 /* Agent permission request, lifted out of any open step so it is always
-   directly visible and breaks the timeline flow. Positioned like an ungrouped
-   run (opaque background + z-index) so the timeline thread doesn't draw through
-   it; the request block carries its own permission-request styling and button. */
+   directly visible and breaks the timeline flow. Lifted above the timeline
+   thread with z-index so the thread doesn't draw through it; the permission-request
+   card carries its own opaque surface, so it masks the thread on its own and this
+   wrapper needs no background of its own (a background here would paint the shell's
+   off-white --color-bg over the pure-white --color-bg-chat transcript). */
 .pv-permission {
   position: relative;
   z-index: 2;
   margin: 6px 0 14px 0;
-  background: var(--color-bg);
 }
 
 /* ─────────────────────────────────────────────────────────────────────

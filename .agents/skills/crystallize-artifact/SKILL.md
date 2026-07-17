@@ -49,7 +49,7 @@ any plausible skill shape, propose it and let them decide.
 the prior turn) **or when a live-half wrapper invoked this lead** after the user
 approved a sample/mock. In those cases go straight to Step 2.
 
-Otherwise send a one-line pre-gate question via `send-user-message`:
+Otherwise send a one-line pre-gate question to the user:
 
 > "I just did X and Y. Worth crystallizing into a reusable skill? (yes/no)"
 

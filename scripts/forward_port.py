@@ -5,8 +5,8 @@ Uses file locking to safely upsert or remove entries. Called by services
 on startup to declare the ports they expose.
 
 Usage:
-    python3 scripts/forward_port.py --name web --url http://localhost:8080
-    python3 scripts/forward_port.py --remove --name web
+    python3 scripts/forward_port.py --name terminal --url http://localhost:7681
+    python3 scripts/forward_port.py --remove --name terminal
 """
 
 import argparse
@@ -99,11 +99,11 @@ def main() -> None:
         description="Register or remove an application port"
     )
     parser.add_argument(
-        "--name", required=True, help="Application name (e.g. 'web', 'terminal')"
+        "--name", required=True, help="Application name (e.g. 'terminal', 'browser')"
     )
     parser.add_argument(
         "--url",
-        help="Full URL where the application is accessible (e.g. http://localhost:8080)",
+        help="Full URL where the application is accessible (e.g. http://localhost:7681)",
     )
     parser.add_argument(
         "--remove",

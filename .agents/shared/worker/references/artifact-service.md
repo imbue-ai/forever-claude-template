@@ -30,4 +30,4 @@ Service specifics:
 
 Beyond the live-service rules in `web-frontend-testing.md`: do not run `layout.py
 open` / `refresh` / `list` against the served tree, and do not touch
-`apps/system_interface` or `libs/web_server/`.
+`apps/system_interface`.

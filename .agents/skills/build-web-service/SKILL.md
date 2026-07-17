@@ -81,8 +81,8 @@ Adding a Python proxy in front of the third-party server adds a hop,
 costs an extra process, and complicates WebSocket and streaming
 behavior. Use the escape hatch instead.
 
-Do not extend `libs/web_server/` to add a new view. That lib runs the
-top-level workspace UI; new web views go in their own scaffolded lib
+Do not extend `apps/system_interface/` to add a new view. That app runs
+the top-level workspace UI; new web views go in their own scaffolded lib
 under `libs/<your-package>/` so they get an isolated tab and prefix.
 
 ## Pre-flight (both paths)
@@ -90,12 +90,12 @@ under `libs/<your-package>/` so they get an isolated tab and prefix.
 - **Pick a kebab-case service name.** Becomes the URL segment
   `/service/<name>/`. Short and descriptive (`news`, `docs-viewer`)
   beats clever. Avoid names already used in `supervisord.conf`
-  (`web`, `system_interface`, etc. are reserved by the scaffolder).
+  (`system_interface`, `browser`, etc. are reserved by the scaffolder).
 - **Pick a free port.** `ss -tln` lists what's bound. The scaffolder
-  picks the lowest free port at or above 8081 by parsing
+  picks the lowest free port at or above 8080 by parsing
   `supervisord.conf` and `runtime/applications.toml`; if you're choosing
-  manually, avoid `8000` (system_interface) and `8080` (the example
-  `web` service).
+  manually, avoid `8000` (system_interface) and `8081` (the browser
+  service).
 - **Bind to `127.0.0.1`** (not `0.0.0.0`). The forwarder reaches your
   app from inside the same container; binding to all interfaces is
   noise. The scaffolder does this. For the wrap-existing path, many
