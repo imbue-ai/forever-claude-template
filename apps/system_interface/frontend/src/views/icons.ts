@@ -75,6 +75,15 @@ export function stopIcon(size = 14): string {
   );
 }
 
+/** Solid "skip / fast-forward" glyph (two filled right-pointing triangles). */
+export function skipIcon(size = 12): string {
+  return (
+    `<svg xmlns="${XMLNS}" width="${size}" height="${size}" viewBox="0 0 24 24" ` +
+    `fill="currentColor" stroke="none" aria-hidden="true">` +
+    `<path d="M4 5l7 7-7 7V5z"/><path d="M13 5l7 7-7 7V5z"/></svg>`
+  );
+}
+
 /** Circular warning badge (outlined circle + exclamation). */
 export function warningIcon(size = 26): string {
   return (

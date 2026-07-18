@@ -55,6 +55,31 @@ export function isSkillExpansionUserMessage(content: string): boolean {
   return content.startsWith("Base directory for this skill:");
 }
 
+/** The slash commands the fast-retry Skip control sends (``/model``, ``/effort``)
+ *  to switch the agent to a quick, shallow model before re-asking the question.
+ *  The session parser normalizes Claude Code's expansion of a slash command back
+ *  to the typed ``/name args`` text (see ``_normalize_slash_command``), so these
+ *  arrive here as e.g. "/model haiku" / "/effort low". They are agent-control
+ *  chatter, not a conversational turn, so they are hidden from the chat. */
+const MODEL_OR_EFFORT_COMMAND_RE = /^\/(model|effort)\b/;
+
+/** True for a ``/model`` or ``/effort`` slash-command invocation (see
+ *  ``MODEL_OR_EFFORT_COMMAND_RE``). Hidden so the fast-retry control does not
+ *  clutter the chat with its model-switch chatter -- and, symmetrically, so a
+ *  user who types one of these control commands in the composer does not get a
+ *  bare command bubble either. */
+export function isModelOrEffortCommand(content: string): boolean {
+  return MODEL_OR_EFFORT_COMMAND_RE.test(content.trim());
+}
+
+/** True for the echoed output of a local slash command, which Claude Code records
+ *  as a ``user`` message wrapping the command's stdout, e.g.
+ *  "<local-command-stdout>Set model to Haiku 4.5 ...</local-command-stdout>".
+ *  It is command output, never a genuine user turn, so it is hidden. */
+export function isLocalCommandOutput(content: string): boolean {
+  return content.trimStart().startsWith("<local-command-stdout>");
+}
+
 export function isHiddenUserMessage(content: string): boolean {
   // The minds desktop client seeds every new agent with "/welcome" as its
   // initial message so the welcome skill can produce a friendly greeting.
@@ -74,6 +99,12 @@ export function isHiddenUserMessage(content: string): boolean {
   // tool-call block (see buildToolResultsWithSkillExpansions) so they
   // don't need to render inline as a separate chip.
   if (isSkillExpansionUserMessage(content)) {
+    return true;
+  }
+  // The fast-retry Skip control switches the model with /model + /effort before
+  // re-asking the question; hide those control commands and their stdout echoes
+  // so the chat shows only the re-asked question and its (fast) answer.
+  if (isModelOrEffortCommand(content) || isLocalCommandOutput(content)) {
     return true;
   }
   return false;

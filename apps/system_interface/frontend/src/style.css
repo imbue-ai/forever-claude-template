@@ -2444,6 +2444,48 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Elapsed-time hint + skip control, shown only once a turn has run past
+   SKIP_THRESHOLD_MS. They sit to the right of the activity label. */
+.agent-activity-indicator__elapsed {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+  opacity: 0.8;
+}
+
+.agent-activity-indicator__skip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: inherit;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition:
+    color 120ms,
+    background 120ms,
+    border-color 120ms;
+}
+
+.agent-activity-indicator__skip:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  /* Faint neutral wash -- theme-agnostic (reads on both light and dark) since
+     there is no defined surface-hover token in the palette. */
+  background: rgba(127, 127, 127, 0.12);
+  border-color: var(--color-text-secondary);
+}
+
+.agent-activity-indicator__skip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .claude-login-overlay {
   position: absolute;
   inset: 0;
