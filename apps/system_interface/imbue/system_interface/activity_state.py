@@ -104,6 +104,14 @@ def parse_iso_timestamp_to_epoch(timestamp: str | None) -> float | None:
 
 RUNNING_LIFECYCLE_STATES: frozenset[str] = frozenset({"RUNNING", "RUNNING_UNKNOWN_AGENT_TYPE"})
 
+# States in which the agent process is alive (present on this host), whether actively
+# looping (RUNNING) or paused between actions (WAITING). Used to decide whether an
+# in-flight tool call should read as TOOL_RUNNING: codex's async (unified) exec yields
+# and the agent's lifecycle drops to WAITING while a background command runs, so a live
+# tool must still show "Running" even when the agent is not RUNNING. STOPPED/DONE/REPLACED
+# (dead) agents are excluded, so a stale unmatched tool from a gone process reads IDLE.
+ALIVE_LIFECYCLE_STATES: frozenset[str] = RUNNING_LIFECYCLE_STATES | frozenset({"WAITING"})
+
 
 @pure
 def is_transcript_tail_stale(
@@ -136,43 +144,49 @@ def is_transcript_tail_stale(
 def derive_activity_state(
     *,
     is_agent_running: bool,
+    is_agent_alive: bool,
     has_pending_tool_use: bool,
     tail_event_at: float | None = None,
     process_started_at: float | None = None,
 ) -> ActivityState:
     """Derive an ``ActivityState`` from lifecycle state and transcript signals.
 
-    ``is_agent_running`` reflects the mngr lifecycle state: ``True`` when the
-    agent is in a running state (RUNNING, RUNNING_UNKNOWN_AGENT_TYPE), ``False``
-    otherwise (STOPPED, WAITING, REPLACED, DONE, etc.). A non-running agent is
-    always IDLE regardless of transcript contents, which prevents a STOPPED agent
-    from appearing as busy on stale transcript data.
+    Two lifecycle inputs, both from the mngr state:
+    - ``is_agent_running``: the agent is actively looping (RUNNING /
+      RUNNING_UNKNOWN_AGENT_TYPE) -- reasoning or generating a reply.
+    - ``is_agent_alive``: the agent process exists at all (RUNNING *or* WAITING),
+      i.e. not STOPPED/DONE/REPLACED.
+
+    The distinction matters because of codex's async (unified) exec: it launches a
+    command in the background, yields, and waits -- so while a long command runs the
+    agent's lifecycle drops to WAITING even though a tool is genuinely in flight. A
+    RUNNING-only gate would blank that to IDLE. So an in-flight tool reads as
+    TOOL_RUNNING for any *alive* agent, running or not; only STOPPED/DONE agents are
+    forced IDLE up front.
 
     ``tail_event_at`` and ``process_started_at`` feed :func:`is_transcript_tail_stale`
-    (see there): together they detect a tail left over from before the current
-    process started, which a running-but-idle agent would otherwise show as busy
-    indefinitely after a mid-turn restart.
+    (see there): they distinguish an in-flight tool from the *current* turn (fresh
+    tail -> TOOL_RUNNING) from an unmatched tool left over by a turn a prior process
+    abandoned mid-flight (stale tail -> IDLE), which would otherwise pin the indicator
+    busy forever after a restart.
 
     Priority:
-      0. agent not running -> IDLE.
+      0. agent not alive (STOPPED/DONE) -> IDLE.
       1. transcript tail predates the current process (stale) -> IDLE.
-      2. an unmatched ``tool_use`` -> TOOL_RUNNING.
-      3. otherwise (the agent is running, mid-turn) -> THINKING.
-
-    THINKING is the default "busy" state for any running agent not visibly running
-    a tool. We key it off the lifecycle rather than the transcript's last event on
-    purpose: an agent generating its reply -- or, for codex, emitting hidden
-    reasoning -- writes nothing user-visible to the transcript until the message
-    completes, so a last-event check would blank out to IDLE mid-turn (the "nothing"
-    gap). Tying it to the RUNNING lifecycle keeps the indicator alive across that
-    window. TOOL_RUNNING still wins when the transcript shows an in-flight tool call
-    (as Claude's does); codex does not persist its exec calls until they complete,
-    so codex tool work simply reads as THINKING rather than TOOL_RUNNING.
+      2. an unmatched tool call (a tool is in flight) -> TOOL_RUNNING -- fires even
+         when the agent is merely alive-and-WAITING (codex's backgrounded command).
+      3. agent running, no tool in flight -> THINKING (the default busy state,
+         covering reasoning / reply generation that writes nothing to the transcript
+         until it completes -- the "nothing" gap).
+      4. otherwise (alive but WAITING with no tool) -> IDLE -- the turn is done and
+         the agent is waiting for the user.
     """
-    if not is_agent_running:
+    if not is_agent_alive:
         return ActivityState.IDLE
     if is_transcript_tail_stale(tail_event_at=tail_event_at, process_started_at=process_started_at):
         return ActivityState.IDLE
     if has_pending_tool_use:
         return ActivityState.TOOL_RUNNING
-    return ActivityState.THINKING
+    if is_agent_running:
+        return ActivityState.THINKING
+    return ActivityState.IDLE

@@ -38,6 +38,7 @@ from imbue.mngr.primitives import AgentNameStyle
 from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.system_interface.activity_state import ActivityState
+from imbue.system_interface.activity_state import ALIVE_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
@@ -1279,6 +1280,7 @@ class AgentManager:
             tail_event_at = parse_iso_timestamp_to_epoch(self._last_event_timestamp_by_agent.get(agent_id))
             new_state = derive_activity_state(
                 is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
+                is_agent_alive=agent_state.state in ALIVE_LIFECYCLE_STATES,
                 has_pending_tool_use=has_pending_tool,
                 tail_event_at=tail_event_at,
                 process_started_at=process_started_at,

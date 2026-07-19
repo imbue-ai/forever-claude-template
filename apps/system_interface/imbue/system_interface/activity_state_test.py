@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 
 from imbue.system_interface.activity_state import ActivityState
-from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
+from imbue.system_interface.activity_state import ALIVE_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
 from imbue.system_interface.activity_state import is_transcript_tail_stale
@@ -83,18 +83,27 @@ def test_last_event_type(events: list[dict[str, Any]], expected: str | None) -> 
 
 
 @pytest.mark.parametrize(
-    "has_pending_tool_use, expected",
+    "is_agent_running, is_agent_alive, has_pending_tool_use, expected",
     [
-        pytest.param(True, ActivityState.TOOL_RUNNING, id="tool_running_when_unmatched_tool_use"),
-        pytest.param(False, ActivityState.THINKING, id="thinking_is_the_default_busy_state"),
+        pytest.param(True, True, True, ActivityState.TOOL_RUNNING, id="running_with_tool_is_tool_running"),
+        pytest.param(True, True, False, ActivityState.THINKING, id="running_no_tool_is_thinking"),
+        # Codex async exec: a backgrounded command runs while the lifecycle has
+        # dropped to WAITING (alive but not looping). An in-flight tool still reads
+        # as TOOL_RUNNING.
+        pytest.param(False, True, True, ActivityState.TOOL_RUNNING, id="waiting_with_tool_is_tool_running"),
+        # Alive + WAITING + no tool: the turn is done, waiting for the user.
+        pytest.param(False, True, False, ActivityState.IDLE, id="waiting_no_tool_is_idle"),
     ],
 )
 def test_derive_activity_state(
+    is_agent_running: bool,
+    is_agent_alive: bool,
     has_pending_tool_use: bool,
     expected: ActivityState,
 ) -> None:
     state = derive_activity_state(
-        is_agent_running=True,
+        is_agent_running=is_agent_running,
+        is_agent_alive=is_agent_alive,
         has_pending_tool_use=has_pending_tool_use,
     )
     assert state == expected
@@ -104,15 +113,15 @@ def test_derive_activity_state(
     "lifecycle_state",
     [
         pytest.param("STOPPED", id="stopped"),
-        pytest.param("WAITING", id="waiting"),
         pytest.param("REPLACED", id="replaced"),
         pytest.param("DONE", id="done"),
     ],
 )
-def test_derive_activity_state_non_running_agent_is_always_idle(lifecycle_state: str) -> None:
-    assert lifecycle_state not in RUNNING_LIFECYCLE_STATES
+def test_derive_activity_state_dead_agent_is_always_idle(lifecycle_state: str) -> None:
+    assert lifecycle_state not in ALIVE_LIFECYCLE_STATES
     state = derive_activity_state(
         is_agent_running=False,
+        is_agent_alive=False,
         has_pending_tool_use=True,
     )
     assert state == ActivityState.IDLE
@@ -183,6 +192,7 @@ def test_derive_activity_state_stale_tail_overrides_to_idle(has_pending_tool_use
     """
     state = derive_activity_state(
         is_agent_running=True,
+        is_agent_alive=True,
         has_pending_tool_use=has_pending_tool_use,
         tail_event_at=100.0,
         process_started_at=200.0,
@@ -194,6 +204,7 @@ def test_derive_activity_state_fresh_tail_still_reports_working() -> None:
     """A tail written after the current process started drives the normal state."""
     state = derive_activity_state(
         is_agent_running=True,
+        is_agent_alive=True,
         has_pending_tool_use=True,
         tail_event_at=300.0,
         process_started_at=200.0,
