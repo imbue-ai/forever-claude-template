@@ -1234,19 +1234,25 @@ class AgentManager:
             self._activity_state_by_agent.pop(agent_id, None)
 
     def _read_process_started_at(self, agent_id: str) -> float | None:
-        """Return the mtime of the agent's ``claude_process_started`` marker, or None.
+        """Return the mtime of the agent's process-start marker, or None.
 
-        mngr touches this marker on every startup/resume (a fresh, not-mid-turn
-        Claude process), so its mtime is the boundary the activity tracker
-        compares transcript timestamps against. Returns ``None`` when the marker
-        is absent (e.g. an agent that has not restarted since the marker was
-        introduced) so the staleness override simply does not fire.
+        mngr touches a restart-boundary marker on every startup/resume (a fresh,
+        not-mid-turn process): ``claude_process_started`` for Claude agents,
+        ``codex_process_started`` for Codex agents (both in the agent state dir).
+        Its mtime is the boundary the activity tracker compares transcript
+        timestamps against. An agent has exactly one; we take the newest present,
+        so this stays harness-agnostic. Returns ``None`` when neither exists (e.g.
+        an agent that has not restarted since the marker was introduced) so the
+        staleness override simply does not fire.
         """
-        marker = self._get_agent_state_dir(agent_id) / "claude_process_started"
-        try:
-            return marker.stat().st_mtime
-        except OSError:
-            return None
+        state_dir = self._get_agent_state_dir(agent_id)
+        mtimes: list[float] = []
+        for marker_name in ("claude_process_started", "codex_process_started"):
+            try:
+                mtimes.append((state_dir / marker_name).stat().st_mtime)
+            except OSError:
+                pass
+        return max(mtimes) if mtimes else None
 
     def _recompute_activity_state(self, agent_id: str, *, broadcast_on_change: bool) -> None:
         """Recompute activity state for ``agent_id`` from cached transcript signals.
