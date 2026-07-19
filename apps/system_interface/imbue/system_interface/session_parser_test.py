@@ -735,3 +735,37 @@ def test_tk_mentioned_in_quoted_arg_is_still_truncated() -> None:
     preview = events[0]["tool_calls"][0]["input_preview"]
     assert preview.endswith("...")
     assert len(preview) <= 203
+
+
+@pytest.mark.parametrize("line_type", ["assistant", "user"])
+def test_null_message_line_is_dropped_not_crashed(line_type: str) -> None:
+    """A line with a present-but-null ``message`` must be dropped, not raised on.
+
+    ``raw.get("message", {})`` returns ``None`` for a present-but-null key (the
+    default only applies to a *missing* key), and Claude Code does write lines
+    with ``"message": null``. Without the guard the parser raises AttributeError,
+    which kills the watcher thread and wedges the read path (the byte offset never
+    advances, so every poll re-reads and re-crashes the same line forever).
+    """
+    line = json.dumps({"type": line_type, "uuid": "u-null", "timestamp": "2026-01-01T00:00:00Z", "message": None})
+    assert parse_session_lines([line]) == []
+
+
+def test_non_dict_message_is_dropped_not_crashed() -> None:
+    """A ``message`` that is present but not an object (e.g. a bare string) is
+    likewise dropped rather than crashing the per-line parse."""
+    line = json.dumps(
+        {"type": "assistant", "uuid": "u-str", "timestamp": "2026-01-01T00:00:00Z", "message": "not an object"}
+    )
+    assert parse_session_lines([line]) == []
+
+
+def test_null_message_line_does_not_wedge_following_valid_lines() -> None:
+    """A null-message line in the middle of a batch is skipped without aborting
+    the run -- the valid user message after it is still parsed."""
+    lines = [
+        json.dumps({"type": "assistant", "uuid": "u-bad", "timestamp": "2026-01-01T00:00:00Z", "message": None}),
+        _make_user_line("u-good", "2026-01-01T00:00:01Z", "still here"),
+    ]
+    events = parse_session_lines(lines)
+    assert [e["content"] for e in events if e["type"] == "user_message"] == ["still here"]

@@ -318,7 +318,15 @@ def _parse_assistant_message(
     if event_id in existing_event_ids:
         return
 
-    message: dict[str, Any] = raw.get("message", {})
+    # ``raw.get("message", {})`` returns ``None`` for a present-but-null key (the
+    # default only applies to a *missing* key), and Claude Code does write lines
+    # with ``"message": null``. Without this guard the ``.get`` calls below raise
+    # AttributeError, which kills the watcher thread and wedges the read path (the
+    # byte offset never advances, so every poll re-reads and re-crashes the same
+    # line forever). A null message carries no usable content -> drop the line.
+    message = raw.get("message")
+    if not isinstance(message, dict):
+        return
 
     # Drop Claude Code's resume bookkeeping -- its own UI hides it, so do we.
     if _is_resume_no_response_reply(message):
@@ -408,7 +416,12 @@ def _parse_user_message(
     new_events: list[tuple[str, dict[str, Any]]],
     session_id: str | None = None,
 ) -> None:
-    message: dict[str, Any] = raw.get("message", {})
+    # See ``_parse_assistant_message``: a present-but-null ``message`` must be
+    # dropped, not crashed on (AttributeError here kills the watcher thread and
+    # wedges the read path).
+    message = raw.get("message")
+    if not isinstance(message, dict):
+        return
     content = message.get("content")
 
     tool_use_result = raw.get("toolUseResult")
