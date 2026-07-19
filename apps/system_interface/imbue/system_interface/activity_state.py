@@ -64,6 +64,38 @@ def has_unmatched_tool_use(events: Sequence[dict[str, Any]]) -> bool:
 
 
 @pure
+def pending_tool_call(events: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the most recent assistant tool call with no matching ``tool_result``,
+    as ``{tool_name, input_preview, is_codex}`` -- or ``None`` if none is in flight.
+
+    This is the caption counterpart to :func:`has_unmatched_tool_use`: that returns
+    *whether* a tool is in flight (drives the TOOL_RUNNING state); this returns
+    *which* one (drives the "Running <caption>" label). ``is_codex`` is read from the
+    containing assistant message's ``source`` (codex parser stamps ``codex/...``), so
+    the caption layer picks the right harness's verb paths without a separate lookup.
+    Walks from the end so the newest unmatched call wins.
+    """
+    resolved: set[str] = set()
+    for event in reversed(list(events)):
+        event_type = event.get("type")
+        if event_type == "tool_result":
+            tool_call_id = event.get("tool_call_id")
+            if tool_call_id:
+                resolved.add(tool_call_id)
+        elif event_type == "assistant_message":
+            for tool_call in reversed(list(event.get("tool_calls") or ())):
+                tool_call_id = tool_call.get("tool_call_id")
+                if tool_call_id and tool_call_id not in resolved:
+                    source = event.get("source")
+                    return {
+                        "tool_name": str(tool_call.get("tool_name") or ""),
+                        "input_preview": str(tool_call.get("input_preview") or ""),
+                        "is_codex": isinstance(source, str) and source.startswith("codex"),
+                    }
+    return None
+
+
+@pure
 def last_event_type(events: Sequence[dict[str, Any]]) -> str | None:
     """Return the ``type`` of the final transcript event, or ``None`` if empty."""
     if not events:

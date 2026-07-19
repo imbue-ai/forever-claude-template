@@ -101,6 +101,14 @@ class AgentStateItem(FrozenModel):
             "agent."
         ),
     )
+    activity_caption: str | None = Field(
+        default=None,
+        description=(
+            "User-facing caption for the TOOL_RUNNING state (e.g. 'Editing foo.py', "
+            "'Running code'), computed server-side from the tool in flight. None for "
+            "non-TOOL_RUNNING states or when no caption applies."
+        ),
+    )
 
 
 class ApplicationEntry(FrozenModel):

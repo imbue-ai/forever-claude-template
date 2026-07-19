@@ -287,6 +287,15 @@ export function getEffectiveActivityState(agentId: string): string | null {
 }
 
 /**
+ * The server-computed caption for an agent's TOOL_RUNNING state (e.g.
+ * "Editing foo.py"), or null. The label layer only uses it when the effective
+ * state is TOOL_RUNNING, so a stale caption during THINKING/IDLE is ignored.
+ */
+export function getActivityCaption(agentId: string): string | null {
+  return getAgentById(agentId)?.activity_caption ?? null;
+}
+
+/**
  * Safeguard against an optimistic "queued" bubble that can never reconcile,
  * driven by an agent's activity transition (see ``addAgentActivityListener``).
  *

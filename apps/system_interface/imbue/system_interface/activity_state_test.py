@@ -10,6 +10,44 @@ from imbue.system_interface.activity_state import is_transcript_tail_stale
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
+from imbue.system_interface.activity_state import pending_tool_call
+
+
+def _assistant_with_tool(call_id: str, tool_name: str, *, source: str = "claude/x") -> dict[str, Any]:
+    return {
+        "type": "assistant_message",
+        "source": source,
+        "tool_calls": [{"tool_call_id": call_id, "tool_name": tool_name, "input_preview": "{}"}],
+    }
+
+
+def _tool_result(call_id: str) -> dict[str, Any]:
+    return {"type": "tool_result", "tool_call_id": call_id}
+
+
+def test_pending_tool_call_returns_none_when_empty_or_all_matched() -> None:
+    assert pending_tool_call([]) is None
+    events = [_assistant_with_tool("c1", "Read"), _tool_result("c1")]
+    assert pending_tool_call(events) is None
+
+
+def test_pending_tool_call_returns_most_recent_unmatched() -> None:
+    events = [
+        _assistant_with_tool("c1", "Read"),
+        _tool_result("c1"),
+        _assistant_with_tool("c2", "Bash"),
+    ]
+    pending = pending_tool_call(events)
+    assert pending is not None
+    assert pending["tool_name"] == "Bash"
+    assert pending["is_codex"] is False
+
+
+def test_pending_tool_call_flags_codex_from_source() -> None:
+    events = [_assistant_with_tool("c1", "exec", source="codex/common_transcript")]
+    pending = pending_tool_call(events)
+    assert pending is not None
+    assert pending["is_codex"] is True
 
 
 def _assistant_with_tool_calls(*tool_call_ids: str) -> dict[str, Any]:

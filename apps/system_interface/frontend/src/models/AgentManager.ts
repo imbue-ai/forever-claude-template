@@ -20,6 +20,9 @@ export interface AgentState {
   // remote agents whose state directory is not present on this host,
   // proto-agents, non-Claude agent types).
   activity_state?: string | null;
+  // Server-computed caption for the TOOL_RUNNING state (e.g. "Editing foo.py",
+  // "Running code"); null for other states or when no caption applies.
+  activity_caption?: string | null;
 }
 
 export interface ApplicationEntry {

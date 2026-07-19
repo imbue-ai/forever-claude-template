@@ -40,11 +40,12 @@ from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import ALIVE_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
+from imbue.system_interface.activity_caption import caption_for_tool_call
 from imbue.system_interface.activity_state import derive_activity_state
-from imbue.system_interface.activity_state import has_unmatched_tool_use
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
+from imbue.system_interface.activity_state import pending_tool_call
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import MngrMessenger
 from imbue.system_interface.agent_discovery import discover_agents
@@ -346,9 +347,11 @@ class AgentManager:
     _host_dir: Path
     _activity_tracked_agents: set[str]
     _has_unmatched_tool_use_by_agent: dict[str, bool]
+    _pending_tool_call_by_agent: dict[str, dict[str, Any] | None]
     _last_event_type_by_agent: dict[str, str | None]
     _last_event_timestamp_by_agent: dict[str, str | None]
     _activity_state_by_agent: dict[str, ActivityState]
+    _activity_caption_by_agent: dict[str, str | None]
     # Assist chats whose tab we have already auto-opened (or that existed at
     # startup, seeded by ``_initial_discover`` so we never auto-open them). Lets
     # both discovery paths -- the per-agent delta and the full snapshot -- open
@@ -400,9 +403,11 @@ class AgentManager:
         manager._host_dir = get_host_dir()
         manager._activity_tracked_agents = set()
         manager._has_unmatched_tool_use_by_agent = {}
+        manager._pending_tool_call_by_agent = {}
         manager._last_event_type_by_agent = {}
         manager._last_event_timestamp_by_agent = {}
         manager._activity_state_by_agent = {}
+        manager._activity_caption_by_agent = {}
         manager._auto_opened_assist_ids = set()
         # Built last: its ``list_chat_agent_ids`` callback reads ``_agents`` /
         # ``_lock``, which are set above.
@@ -442,8 +447,10 @@ class AgentManager:
         with self._lock:
             self._activity_tracked_agents.clear()
             self._has_unmatched_tool_use_by_agent.clear()
+            self._pending_tool_call_by_agent.clear()
             self._last_event_type_by_agent.clear()
             self._activity_state_by_agent.clear()
+            self._activity_caption_by_agent.clear()
 
     @property
     def broadcaster(self) -> WebSocketBroadcaster:
@@ -578,6 +585,7 @@ class AgentManager:
                     "labels": a.labels,
                     "work_dir": a.work_dir,
                     "activity_state": a.activity_state,
+                    "activity_caption": a.activity_caption,
                 }
                 for a in self._agents.values()
             ]
@@ -1087,6 +1095,7 @@ class AgentManager:
                         labels=agent_state.labels,
                         work_dir=agent_state.work_dir,
                         activity_state=cached_state.value,
+                        activity_caption=self._activity_caption_by_agent.get(agent_id),
                     )
             self._agents = new_agents
             self._match_by_agent_id = new_matches
@@ -1230,6 +1239,8 @@ class AgentManager:
         with self._lock:
             self._activity_tracked_agents.discard(agent_id)
             self._has_unmatched_tool_use_by_agent.pop(agent_id, None)
+            self._pending_tool_call_by_agent.pop(agent_id, None)
+            self._activity_caption_by_agent.pop(agent_id, None)
             self._last_event_type_by_agent.pop(agent_id, None)
             self._last_event_timestamp_by_agent.pop(agent_id, None)
             self._activity_state_by_agent.pop(agent_id, None)
@@ -1285,10 +1296,27 @@ class AgentManager:
                 tail_event_at=tail_event_at,
                 process_started_at=process_started_at,
             )
+            # Caption only applies to TOOL_RUNNING, and only when we know which
+            # tool is in flight. Computed here (not the frontend) so the browser
+            # renders a ready string; harness is read off the pending call itself.
+            new_caption: str | None = None
+            if new_state == ActivityState.TOOL_RUNNING:
+                pending = self._pending_tool_call_by_agent.get(agent_id)
+                if pending is not None:
+                    new_caption = caption_for_tool_call(
+                        pending["tool_name"], pending["input_preview"], is_codex=pending["is_codex"]
+                    )
             old_state = self._activity_state_by_agent.get(agent_id)
-            if old_state == new_state and agent_state.activity_state == new_state.value:
+            old_caption = self._activity_caption_by_agent.get(agent_id)
+            if (
+                old_state == new_state
+                and old_caption == new_caption
+                and agent_state.activity_state == new_state.value
+                and agent_state.activity_caption == new_caption
+            ):
                 return
             self._activity_state_by_agent[agent_id] = new_state
+            self._activity_caption_by_agent[agent_id] = new_caption
             self._agents[agent_id] = AgentStateItem(
                 id=agent_state.id,
                 name=agent_state.name,
@@ -1296,6 +1324,7 @@ class AgentManager:
                 labels=agent_state.labels,
                 work_dir=agent_state.work_dir,
                 activity_state=new_state.value,
+                activity_caption=new_caption,
             )
 
         if broadcast_on_change:
@@ -1312,17 +1341,23 @@ class AgentManager:
         No-op for agents not being tracked for activity (e.g. remote agents, or
         stale callbacks for an agent that was just destroyed).
         """
-        new_pending = has_unmatched_tool_use(events)
+        new_pending_tool = pending_tool_call(events)
+        new_pending = new_pending_tool is not None
         new_last_type = last_event_type(events)
         new_last_timestamp = last_event_timestamp(events)
         with self._lock:
             if agent_id not in self._activity_tracked_agents:
                 return
             old_pending = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
+            old_pending_tool = self._pending_tool_call_by_agent.get(agent_id)
             old_last_type = self._last_event_type_by_agent.get(agent_id)
-            if old_pending == new_pending and old_last_type == new_last_type:
+            # Include the pending tool in the short-circuit: the caption changes when
+            # the in-flight tool changes even if the pending *bool* stays True (e.g.
+            # one tool completes and the next starts in the same batch).
+            if old_pending == new_pending and old_last_type == new_last_type and old_pending_tool == new_pending_tool:
                 return
             self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
+            self._pending_tool_call_by_agent[agent_id] = new_pending_tool
             self._last_event_type_by_agent[agent_id] = new_last_type
             # Refreshed alongside the type so the stale-tail check sees the
             # current tail's time. This sits under the same short-circuit above:
@@ -1352,9 +1387,11 @@ class AgentManager:
             if agent_id not in self._activity_tracked_agents:
                 return
             self._has_unmatched_tool_use_by_agent[agent_id] = False
+            self._pending_tool_call_by_agent[agent_id] = None
             self._last_event_type_by_agent[agent_id] = None
             self._last_event_timestamp_by_agent[agent_id] = None
             self._activity_state_by_agent[agent_id] = ActivityState.IDLE
+            self._activity_caption_by_agent[agent_id] = None
             agent_state = self._agents.get(agent_id)
             if agent_state is not None:
                 self._agents[agent_id] = AgentStateItem(
@@ -1364,6 +1401,7 @@ class AgentManager:
                     labels=agent_state.labels,
                     work_dir=agent_state.work_dir,
                     activity_state=ActivityState.IDLE.value,
+                    activity_caption=None,
                 )
         self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
