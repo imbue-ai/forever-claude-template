@@ -684,6 +684,34 @@ describe("audit regressions", () => {
     expect(sections[0].items.some((i) => i.kind === "chip")).toBe(true);
     expect(sections[0].trailing_reply.map((e) => e.event_id)).toEqual(["reply"]);
   });
+
+  // A browser-fleet nudge and a background task-notification are system messages
+  // that arrive on the user rail; they fold into the current turn as a chip (like
+  // a stop hook), NOT as a new turn boundary.
+  it("folds a browser-fleet nudge into the current section as a chip, not a new turn", () => {
+    const events = [
+      userMsg("t0", "go"),
+      assistantText("t1", "working on it", "a1"),
+      userMsg("t2", "<agentic-browser-fleet>Browser foo-1 was handed back to you.</agentic-browser-fleet>", "bf1"),
+      assistantText("t3", "resuming", "a2"),
+    ];
+    const sections = run(events);
+    // One section (the fleet nudge did NOT open a second), with a chip inside it.
+    expect(sections.length).toBe(1);
+    expect(sections[0].items.some((i) => i.kind === "chip" && i.event.event_id === "bf1")).toBe(true);
+  });
+
+  it("folds a <task-notification> line into the current section as a chip, not a new turn", () => {
+    const events = [
+      userMsg("t0", "go"),
+      assistantText("t1", "spawned a background task", "a1"),
+      userMsg("t2", "<task-notification>\n<status>completed</status>\n</task-notification>", "tn1"),
+      assistantText("t3", "handling the result", "a2"),
+    ];
+    const sections = run(events);
+    expect(sections.length).toBe(1);
+    expect(sections[0].items.some((i) => i.kind === "chip" && i.event.event_id === "tn1")).toBe(true);
+  });
 });
 
 describe("regular ticket transitions", () => {

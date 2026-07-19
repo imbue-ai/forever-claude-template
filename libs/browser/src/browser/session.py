@@ -206,6 +206,28 @@ def _repo_root() -> Path:
 # CLI prints the path and the agent reads the file; agent + daemon share the FS.
 _SCREENSHOT_DIR = Path(os.environ.get("BROWSER_SCREENSHOT_DIR", "runtime/browser-screenshots"))
 
+# Sentinel the fleet wraps its agent-facing nudges in before sending them via
+# `mngr message` (see `_message_agent`). These nudges land in the agent's
+# transcript as an ordinary user turn; without a marker the system_interface
+# transcript UI shows them as a bare user bubble, as if the human had typed
+# them. Wrapping lets that UI recognise the message and render it as a collapsed
+# system chip instead (like Stop-hook feedback).
+#
+# CROSS-LAYER CONTRACT: the reading side is the frontend's `BROWSER_FLEET_TAG` in
+# apps/system_interface/frontend/src/views/message-kinds.ts -- keep the tag in
+# sync. We wrap here in the fleet's OWN service (not in mngr, which is an
+# independent product with no stake in this display concern). The wrapper adds no
+# newlines, so a wrapped message types into the agent's pane identically to the
+# same text sent unwrapped.
+_SYSTEM_MESSAGE_TAG = "agentic-browser-fleet"
+
+
+def _wrap_system_message(text: str) -> str:
+    """Wrap an automated agent-facing nudge in the ``_SYSTEM_MESSAGE_TAG`` sentinel
+    (see its comment). Adds no newlines, so the wrapped text types into the agent's
+    pane identically to ``text`` sent unwrapped."""
+    return f"<{_SYSTEM_MESSAGE_TAG}>{text}</{_SYSTEM_MESSAGE_TAG}>"
+
 # Per-browser persistent Chromium profiles (cookies/logins/history) live here, on the
 # workspace volume under $MNGR_HOST_DIR -- Tier A durability: they survive stop/start
 # and restart of a single workspace (lost only on a permanent delete). They are NOT
@@ -1167,15 +1189,22 @@ class LiveBrowser(MutableModel):
     async def _message_agent(self, agent_id: str, agent_name: str | None, text: str) -> None:
         """Best-effort: message a queued agent via ``mngr message`` (the same path
         launch-task uses). Failures are logged, not raised -- the claim window / lifecycle
-        handling is the backstop if a message never lands."""
+        handling is the backstop if a message never lands.
+
+        These are automated, non-human nudges, so the text is wrapped in the
+        ``_SYSTEM_MESSAGE_TAG`` sentinel: the transcript UI recognises it and
+        renders a collapsed system chip instead of a bare user bubble. This is
+        display-only -- the agent still receives the message and resumes its turn
+        exactly as before."""
         target = agent_name or agent_id
+        wrapped = _wrap_system_message(text)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "mngr",
                 "message",
                 target,
                 "--message",
-                text,
+                wrapped,
                 # Run from the repo root so the `mngr` dev shim resolves this checkout
                 # (repo-relative paths assume cwd = repo root; don't rely on the
                 # daemon's inherited cwd).

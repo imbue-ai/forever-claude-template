@@ -62,7 +62,7 @@ import type { PermissionResolution } from "./message-classification";
 import {
   isNonBoundaryUserMessage,
   isPermissionRequestCall,
-  isStopHookFeedback,
+  isSystemChipUserMessage,
   parsePermissionResolution,
 } from "./message-classification";
 
@@ -440,12 +440,17 @@ export function buildSections(
         current = ensureSection(null, `section-after-${e.event_id}`);
         continue;
       }
-      if (isNonBoundaryUserMessage(e.content ?? "")) {
-        // Stop-hook feedback and the like: a chip inside the current section.
-        if (current !== null && isStopHookFeedback(e.content ?? "")) {
+      if (isNonBoundaryUserMessage(e.content ?? "", e.is_meta)) {
+        // Collapsed system chips -- Stop-hook feedback, browser-fleet nudges,
+        // background task-notifications -- fold into the current section as a
+        // chip rather than opening a new turn. (A chip only ever comes from an
+        // explicit detector, never from is_meta, so this check needs no is_meta.)
+        if (current !== null && isSystemChipUserMessage(e.content ?? "")) {
           current.chips.push({ event: e, after: current.entries.length - 1 });
         }
-        // Hidden non-boundary messages (skill expansions, /welcome) are dropped.
+        // The other non-boundary messages -- skill expansions, /welcome, and any
+        // is_meta framework injection (image note, resume marker, ...) -- render
+        // nowhere on the user rail, so they are dropped here.
         continue;
       }
       // Real user turn: close the prior section (carrying open steps) and open

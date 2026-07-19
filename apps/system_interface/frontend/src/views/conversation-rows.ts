@@ -92,7 +92,7 @@ function buildRows(
   const rows: RowDescriptor[] = [];
   for (const section of sections) {
     const userEvent = section.user_event;
-    if (userEvent !== null && !isHiddenUserMessage(userEvent.content || "")) {
+    if (userEvent !== null && !isHiddenUserMessage(userEvent.content || "", userEvent.is_meta)) {
       rows.push({
         key: userEvent.event_id,
         estimate: ESTIMATED_USER_HEIGHT_PX,
@@ -145,7 +145,7 @@ function buildRows(
         });
       } else if (item.kind === "chip") {
         const chipEvent = item.event;
-        if (!isHiddenUserMessage(chipEvent.content || "")) {
+        if (!isHiddenUserMessage(chipEvent.content || "", chipEvent.is_meta)) {
           rows.push({
             key: chipEvent.event_id,
             estimate: ESTIMATED_USER_HEIGHT_PX,

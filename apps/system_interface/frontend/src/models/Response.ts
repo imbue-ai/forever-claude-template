@@ -55,6 +55,12 @@ export interface UserMessageEvent extends BaseTranscriptEvent {
   type: "user_message";
   role: string;
   content: string;
+  // Claude Code's `isMeta`: a framework-injected, model-only message (the
+  // resume-continuation marker, the image coordinate note, MCP-resource dumps,
+  // hook context, etc.). The classifier hides these (UserMessageKind.Hidden)
+  // unless an explicit detector surfaces one, e.g. Stop-hook feedback, which is
+  // isMeta yet shown as a chip. Absent/false for a genuine human turn.
+  is_meta?: boolean;
 }
 
 /**

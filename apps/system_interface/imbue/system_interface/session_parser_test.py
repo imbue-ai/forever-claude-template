@@ -530,9 +530,7 @@ def test_agent_tool_result_prefers_structured_over_trailer() -> None:
             id="authentication-error-type",
         ),
         pytest.param("API Error: 401 Unauthorized", True, id="api-401"),
-        pytest.param(
-            "Invalid authentication credentials provided.", True, id="invalid-credentials"
-        ),
+        pytest.param("Invalid authentication credentials provided.", True, id="invalid-credentials"),
         pytest.param(
             "Your credit balance is too low to make this request.",
             True,
@@ -567,10 +565,11 @@ def test_user_message_with_array_content() -> None:
     assert events[0]["content"] == "Part one\nPart two"
 
 
-def test_resume_continuation_user_message_not_emitted() -> None:
-    """Claude Code's isMeta "Continue from where you left off." resume marker
-    must not surface as a user_message -- the user never typed it. Claude Code
-    injects it (plus a synthetic reply) to close an unfinished turn on resume.
+def test_resume_continuation_user_message_emitted_as_meta() -> None:
+    """Claude Code's "Continue from where you left off." resume marker is emitted
+    with ``is_meta`` set, rather than dropped by a bespoke matcher. It is one of
+    many ``isMeta`` framework injections; the frontend classifier hides them all
+    via that flag (the user never typed it, so it must not render).
     """
     line = json.dumps(
         {
@@ -584,7 +583,43 @@ def test_resume_continuation_user_message_not_emitted() -> None:
             },
         }
     )
-    assert parse_session_lines([line]) == []
+    events = parse_session_lines([line])
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["is_meta"] is True
+
+
+def test_image_metadata_note_emitted_as_meta() -> None:
+    """Claude Code's isMeta image coordinate note is emitted with ``is_meta`` set
+    so the frontend can hide it, instead of leaking through as a bare user bubble.
+    """
+    line = json.dumps(
+        {
+            "type": "user",
+            "uuid": "uuid-img",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "isMeta": True,
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "[Image: original 1800x2800, displayed at 1286x2000. Multiply coordinates by 1.40 to map to original image.]",
+                    }
+                ],
+            },
+        }
+    )
+    events = parse_session_lines([line])
+    assert len(events) == 1
+    assert events[0]["is_meta"] is True
+
+
+def test_genuine_user_message_has_no_is_meta() -> None:
+    """A real human turn carries no ``is_meta`` key, so the frontend shows it."""
+    events = parse_session_lines([_make_user_line("uuid-h", "2026-01-01T00:00:00Z", "hello there")])
+    assert len(events) == 1
+    assert "is_meta" not in events[0]
 
 
 def test_synthetic_model_assistant_message_not_emitted() -> None:
@@ -686,8 +721,7 @@ def test_tk_lifecycle_input_preview_is_not_truncated() -> None:
     Batched `S1=$(tk create ...)` forms and long `tk close <id> "<summary>"`
     calls both qualify; a long non-tk command is still truncated."""
     batched_create = "\n".join(
-        f'S{i}=$(tk create --step "Step number {i} with a fairly long descriptive title here")'
-        for i in range(1, 6)
+        f'S{i}=$(tk create --step "Step number {i} with a fairly long descriptive title here")' for i in range(1, 6)
     )
     long_close = 'tk close cod-step-abcd "' + ("a very detailed summary of the work " * 6).strip() + '"'
     long_non_tk = "echo " + ("y" * 400)

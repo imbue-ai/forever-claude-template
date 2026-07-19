@@ -5,23 +5,16 @@
 
 import m from "mithril";
 import { MarkdownContent } from "../markdown";
-import { parseMessageAttachments } from "../models/attachments";
-import type {
-  TranscriptEvent,
-  AssistantMessageEvent,
-  UserMessageEvent,
-  ToolResultEvent,
-  ToolCall,
-} from "../models/Response";
+import type { TranscriptEvent, AssistantMessageEvent, ToolResultEvent, ToolCall } from "../models/Response";
 import { openSubagentTab } from "./DockviewWorkspace";
 import type { PermissionResolution } from "./message-classification";
-import {
-  isCollapsibleUserMessage,
-  isHiddenUserMessage,
-  isPermissionRequestCall,
-  isSkillExpansionUserMessage,
-} from "./message-classification";
+import { isPermissionRequestCall, isSkillExpansionUserMessage } from "./message-classification";
 import { PermissionCard } from "./permission-card";
+
+// Per-kind user_message rendering lives in user-message-display.ts (the display
+// half of the classify/display split). Re-exported here so existing importers --
+// conversation-rows, ProgressBlock, PendingMessageView -- keep their import path.
+export { renderUserMessage, StableUserMessage } from "./user-message-display";
 
 /** Build a tool_call_id -> tool_result map, merging skill-expansion
  *  user_messages into the output of their preceding "Skill" tool call so
@@ -118,71 +111,6 @@ export function computeAuthErrorHiddenEventIds(events: TranscriptEvent[]): Set<s
   }
 
   return hidden;
-}
-
-export function StableUserMessage(): m.Component<{ event: UserMessageEvent }> {
-  let renderedEventId: string | null = null;
-  return {
-    onbeforeupdate(vnode) {
-      return vnode.attrs.event.event_id !== renderedEventId;
-    },
-    view(vnode) {
-      const event = vnode.attrs.event;
-      renderedEventId = event.event_id;
-      const content = event.content || "";
-      // The trailing "See attachment here: <markdown>" block is delivered to the
-      // agent and kept visible in the bubble, where it renders as markdown so its
-      // images show inline and other files as download links. Classification
-      // still runs on the text before the block (see below).
-      const { visibleText, attachmentBlock } = parseMessageAttachments(content);
-      const collapsible = isCollapsibleUserMessage(visibleText);
-
-      if (collapsible) {
-        return m("div", { class: "tool-call-block" }, [
-          m(
-            "div",
-            {
-              class: "tool-call-header",
-              onclick(e: Event) {
-                const block = (e.currentTarget as HTMLElement).parentElement;
-                if (block) {
-                  block.classList.toggle("tool-call-block--expanded");
-                }
-              },
-            },
-            [m("span", { class: "tool-call-chevron" }, "\u25B8"), m("span", collapsible.label)],
-          ),
-          m("div", { class: "tool-call-details" }, [
-            m("div", { class: "tool-call-input" }, [m("pre", m("code", visibleText))]),
-          ]),
-        ]);
-      }
-
-      const bubbleChildren: m.Children[] = [];
-      if (visibleText.length > 0) {
-        bubbleChildren.push(m("div", { class: "message-content whitespace-pre-wrap" }, visibleText));
-      }
-      if (attachmentBlock !== null) {
-        bubbleChildren.push(m(MarkdownContent, { content: attachmentBlock }));
-      }
-      return m("div", { class: "message-user-bubble" }, bubbleChildren);
-    },
-  };
-}
-
-export function renderUserMessage(event: UserMessageEvent): m.Vnode | null {
-  const content = event.content || "";
-  // Classify on the user-visible text so an appended attachment block never
-  // changes whether a message is hidden (e.g. "/welcome") or collapsible.
-  const { visibleText } = parseMessageAttachments(content);
-  if (isHiddenUserMessage(visibleText)) {
-    return null;
-  }
-  const collapsible = isCollapsibleUserMessage(visibleText);
-  const messageClass = collapsible ? "message message-system-collapsed" : "message message-user";
-  // id mirrors the assistant rows so the virtualized list can measure every
-  // rendered row's height by querying ``.message-list > [id]``.
-  return m("div", { id: event.event_id, class: messageClass, key: event.event_id }, [m(StableUserMessage, { event })]);
 }
 
 export function countResolvedToolResults(
