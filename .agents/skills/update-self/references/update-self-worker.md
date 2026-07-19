@@ -135,6 +135,16 @@ work, and you must do it for every changed `scripts/**`, `libs/**`, and
 4. **Bias toward "impacted" when uncertain**, and record in your report what
    you checked and how, so the lead sees the coverage instead of trusting an
    unstated search.
+5. **When you label a lib or skill "workspace-added," verify it -- do not infer
+   it from the directory.** "Not under `vendor/`" does **not** mean
+   workspace-added: most `libs/` and `.agents/skills/` entries are built-in
+   template code. A path is built-in if it exists at the target ref; check
+   before labeling: `git ls-tree -r --name-only "$TARGET_REF" -- libs/<name>`
+   (empty output = genuinely workspace-added). This matters because only
+   genuinely workspace-added code is un-validated-by-upstream -- mislabeling
+   built-in code as workspace-added misattributes pre-existing issues (a failing
+   test or lint error) as the user's when they are the upstream release's, and
+   the lead's approval message repeats the error.
 
 **Provisioning files always count as impacted -- and you best-effort apply them.**
 A change to `scripts/setup_system.sh`, `scripts/install_secret_scanners.sh`,
