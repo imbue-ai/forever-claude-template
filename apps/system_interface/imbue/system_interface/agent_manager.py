@@ -1276,12 +1276,10 @@ class AgentManager:
             if agent_state is None:
                 return
             has_pending_tool = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
-            cached_last_event_type = self._last_event_type_by_agent.get(agent_id)
             tail_event_at = parse_iso_timestamp_to_epoch(self._last_event_timestamp_by_agent.get(agent_id))
             new_state = derive_activity_state(
                 is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
                 has_pending_tool_use=has_pending_tool,
-                tail_event_type=cached_last_event_type,
                 tail_event_at=tail_event_at,
                 process_started_at=process_started_at,
             )
@@ -1337,14 +1335,13 @@ class AgentManager:
     def reset_activity_state(self, agent_id: str) -> None:
         """Force ``agent_id`` back to IDLE after an interrupt/restart.
 
-        Interrupting an agent restarts its Claude process. The restart abandons
-        the session transcript mid-turn -- the last recorded event is still an
-        unmatched ``tool_use`` or a ``tool_result`` -- so the transcript-derived
-        activity state stays pinned at TOOL_RUNNING / THINKING until the user
-        sends another message. The restart is a backend action that the
-        transcript never records, so the backend must reset the derived signals
-        explicitly: clearing the unmatched-tool-use flag and the cached last
-        event type makes :func:`derive_activity_state` settle on IDLE.
+        Interrupting an agent restarts its harness process, abandoning the session
+        transcript mid-turn (the last recorded event is still an unmatched
+        ``tool_use``). The restart is a backend action the transcript never records,
+        so the backend forces IDLE explicitly rather than waiting for the lifecycle
+        poll -- otherwise a still-RUNNING agent would keep reading as THINKING (the
+        default busy state). The transcript-derived signals are cleared too so the
+        next turn recomputes from a clean slate.
 
         No-op for agents not being tracked for activity (remote agents, or a
         callback racing with destruction).
@@ -1355,7 +1352,18 @@ class AgentManager:
             self._has_unmatched_tool_use_by_agent[agent_id] = False
             self._last_event_type_by_agent[agent_id] = None
             self._last_event_timestamp_by_agent[agent_id] = None
-        self._recompute_activity_state(agent_id, broadcast_on_change=True)
+            self._activity_state_by_agent[agent_id] = ActivityState.IDLE
+            agent_state = self._agents.get(agent_id)
+            if agent_state is not None:
+                self._agents[agent_id] = AgentStateItem(
+                    id=agent_state.id,
+                    name=agent_state.name,
+                    state=agent_state.state,
+                    labels=agent_state.labels,
+                    work_dir=agent_state.work_dir,
+                    activity_state=ActivityState.IDLE.value,
+                )
+        self._broadcaster.broadcast_agents_updated(self.get_agents_serialized())
 
     def _read_applications(self, toml_path: Path) -> None:
         """Read and parse runtime/applications.toml for the primary agent."""

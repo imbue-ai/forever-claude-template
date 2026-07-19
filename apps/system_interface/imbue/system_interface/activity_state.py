@@ -137,7 +137,6 @@ def derive_activity_state(
     *,
     is_agent_running: bool,
     has_pending_tool_use: bool,
-    tail_event_type: str | None,
     tail_event_at: float | None = None,
     process_started_at: float | None = None,
 ) -> ActivityState:
@@ -147,23 +146,28 @@ def derive_activity_state(
     agent is in a running state (RUNNING, RUNNING_UNKNOWN_AGENT_TYPE), ``False``
     otherwise (STOPPED, WAITING, REPLACED, DONE, etc.). A non-running agent is
     always IDLE regardless of transcript contents, which prevents a STOPPED agent
-    from appearing as "Thinking..." due to stale transcript data.
+    from appearing as busy on stale transcript data.
 
-    ``tail_event_type`` is the cached result of :func:`last_event_type` for the
-    agent's current transcript (named distinctly from the helper to avoid
-    shadowing it in this scope). ``tail_event_at`` and ``process_started_at`` feed
-    :func:`is_transcript_tail_stale` (see there): together they detect a tail left
-    over from before the current process started, which a running-but-idle agent
-    would otherwise show as "Thinking..." indefinitely after a mid-turn restart.
+    ``tail_event_at`` and ``process_started_at`` feed :func:`is_transcript_tail_stale`
+    (see there): together they detect a tail left over from before the current
+    process started, which a running-but-idle agent would otherwise show as busy
+    indefinitely after a mid-turn restart.
 
     Priority:
       0. agent not running -> IDLE.
       1. transcript tail predates the current process (stale) -> IDLE.
-      2. unmatched ``tool_use`` -> TOOL_RUNNING.
-      3. last transcript event is ``user_message`` or ``tool_result`` -> THINKING
-         (Claude has been handed input but hasn't replied yet).
-      4. otherwise (last event is ``assistant_message`` or transcript is empty)
-         -> IDLE.
+      2. an unmatched ``tool_use`` -> TOOL_RUNNING.
+      3. otherwise (the agent is running, mid-turn) -> THINKING.
+
+    THINKING is the default "busy" state for any running agent not visibly running
+    a tool. We key it off the lifecycle rather than the transcript's last event on
+    purpose: an agent generating its reply -- or, for codex, emitting hidden
+    reasoning -- writes nothing user-visible to the transcript until the message
+    completes, so a last-event check would blank out to IDLE mid-turn (the "nothing"
+    gap). Tying it to the RUNNING lifecycle keeps the indicator alive across that
+    window. TOOL_RUNNING still wins when the transcript shows an in-flight tool call
+    (as Claude's does); codex does not persist its exec calls until they complete,
+    so codex tool work simply reads as THINKING rather than TOOL_RUNNING.
     """
     if not is_agent_running:
         return ActivityState.IDLE
@@ -171,6 +175,4 @@ def derive_activity_state(
         return ActivityState.IDLE
     if has_pending_tool_use:
         return ActivityState.TOOL_RUNNING
-    if tail_event_type in ("user_message", "tool_result"):
-        return ActivityState.THINKING
-    return ActivityState.IDLE
+    return ActivityState.THINKING
