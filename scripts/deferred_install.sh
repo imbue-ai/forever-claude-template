@@ -66,35 +66,72 @@ _recover_interrupted_dpkg() {
     fi
 }
 
-_install_playwright() {
+# Fortress (tiliondev/fortress) stealth Chromium engine, replacing vanilla
+# Playwright-managed Chromium. x64 from the official release; arm64 has no
+# official release yet (tiliondev/fortress#28, open as of 2026-07-19) so this
+# points at a fork build in the meantime -- swap _FORTRESS_ARM64_URL/_SHA256
+# to the official tiliondev/fortress release once that PR merges.
+# Fork build: https://github.com/MT-GoCode/fortress/releases/tag/linux-arm64-151.0.7908.0
+# PR:         https://github.com/tiliondev/fortress/pull/28
+readonly _FORTRESS_X64_URL="https://github.com/tiliondev/fortress/releases/download/v151.0.7908.0/tilion-fortress-linux-x64.tar.gz"
+readonly _FORTRESS_X64_SHA256="243238b2b8a8b944b7ba2b63533d2b917da7d569dcb290ce96bf28151294b873"
+readonly _FORTRESS_ARM64_URL="https://github.com/MT-GoCode/fortress/releases/download/linux-arm64-151.0.7908.0/tilion-fortress-linux-arm64.tar.gz"
+readonly _FORTRESS_ARM64_SHA256="af83b768887161b22b1e06d0c0ba30b77ef10aec83ba68d59cbd333187f9cf78"
+readonly _FORTRESS_INSTALL_DIR="/opt/fortress"
+
+_install_fortress() {
     local marker
-    marker="$(_marker_for playwright)"
+    marker="$(_marker_for fortress)"
     if [ -f "$marker" ]; then
-        _log "playwright: marker present at $marker, skipping"
+        _log "fortress: marker present at $marker, skipping"
         return 0
     fi
-    # `playwright install --with-deps` shells out to apt; recover any
-    # interrupted dpkg state first so an install the bake interrupted can
-    # actually complete on retry.
+    # `install-deps` apt-installs the shared libs Chromium needs (libnss3,
+    # libgbm, etc.) -- Fortress is a Chromium build too, same requirement.
+    # Recover any interrupted dpkg state first so a bake-interrupted install
+    # can actually complete on retry.
     _recover_interrupted_dpkg
-    _log "playwright: installing chromium + apt system libs (this may take a few minutes)"
-    # `--with-deps` apt-installs the system libraries chromium needs.
-    # `uv run` uses the workspace venv (the playwright Python wheel is
-    # already installed via the root pyproject.toml's pin). Subshell so
-    # the cwd change does not leak to other `_install_<name>` functions.
-    if (cd "$REPO_ROOT" && uv run playwright install --with-deps chromium); then
-        touch "$marker"
-        _log "playwright: install complete, marker written to $marker"
-    else
-        _log "playwright: install FAILED; marker not written so the next boot retries"
+    _log "fortress: installing apt system libs"
+    if ! (cd "$REPO_ROOT" && uv run playwright install-deps chromium); then
+        _log "fortress: apt install FAILED; marker not written so the next boot retries"
         return 1
     fi
+
+    local url sha256
+    case "$(uname -m)" in
+        x86_64) url="$_FORTRESS_X64_URL"; sha256="$_FORTRESS_X64_SHA256" ;;
+        aarch64) url="$_FORTRESS_ARM64_URL"; sha256="$_FORTRESS_ARM64_SHA256" ;;
+        *) _log "fortress: unsupported architecture $(uname -m)"; return 1 ;;
+    esac
+    _log "fortress: downloading $url"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp_dir'" RETURN
+    local asset="$tmp_dir/fortress.tar.gz"
+    if ! curl -fsSL -o "$asset" "$url"; then
+        _log "fortress: download FAILED; marker not written so the next boot retries"
+        return 1
+    fi
+    if [ "$(sha256sum "$asset" | awk '{print $1}')" != "$sha256" ]; then
+        _log "fortress: SHA256 mismatch -- refusing to install"
+        return 1
+    fi
+    rm -rf "$_FORTRESS_INSTALL_DIR"
+    mkdir -p "$_FORTRESS_INSTALL_DIR"
+    if ! tar xzf "$asset" -C "$_FORTRESS_INSTALL_DIR"; then
+        _log "fortress: extract FAILED; marker not written so the next boot retries"
+        return 1
+    fi
+    chmod +x "$_FORTRESS_INSTALL_DIR/tilion-fortress/tilion"
+    touch "$marker"
+    _log "fortress: install complete (${_FORTRESS_INSTALL_DIR}/tilion-fortress/tilion), marker written to $marker"
 }
 
 main() {
     mkdir -p "$MARKER_DIR"
     local rc=0
-    _install_playwright || rc=$?
+    _install_fortress || rc=$?
     if [ "$rc" -eq 0 ]; then
         _log "all deferred installs complete"
     else
