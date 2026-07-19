@@ -135,7 +135,7 @@ Permission management, or any other commands other than `latchkey curl`, are not
 
 Latchkey currently offers varying levels of support for the
 following services: AWS, Calendly, Coolify, Discord, Dropbox, Figma, GitHub, GitLab,
-Gmail, Google Analytics, Google Calendar, Google Docs, Google Drive, Google Sheets,
+Gmail, Google Analytics, Google Calendar, Google Docs, Google Drive, Google Sheets, Google Slides,
 Linear, Mailchimp, Notion, Ramp, Sentry, Slack, Stripe, Telegram, Todoist, Umami, Yelp, Zoom, and more.
 
 ## Notion hack
