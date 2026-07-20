@@ -257,6 +257,7 @@ def _get_events(agent_id: str) -> Response:
         limit = _DEFAULT_TAIL_COUNT
 
     watcher = get_state().get_or_create_watcher(agent_info)
+    is_tail_read = False
     if before_event_id:
         # Page older: the `limit` events immediately before the cursor.
         events = watcher.get_backfill_events(before_event_id, limit=limit)
@@ -276,14 +277,36 @@ def _get_events(agent_id: str) -> Response:
         # Initial load: the newest `limit` events (the live tail). Bounded read
         # from the end; the client pages/jumps from here.
         events = watcher.get_tail_events(limit)
+        is_tail_read = True
 
     # `total` is the full transcript length and `offset` is the global index of the
     # first returned event. Together they place the loaded window in the whole
     # conversation, so the client sizes the scrollbar for the full length and
     # derives whether more history exists above (offset > 0) and below
     # (offset + len < total) -- no separate has_more flag needed.
-    total = watcher.get_total_event_count()
-    offset = watcher.get_event_offset(events[0]["event_id"]) if events else total
+    offset = watcher.get_event_offset(events[0]["event_id"]) if events else None
+    if is_tail_read and offset is not None and offset >= 0:
+        # Tail path only: the returned window IS the live tail by construction, so
+        # the transcript ends exactly at offset + len(events). Derive `total` from
+        # the window rather than sampling get_total_event_count() separately -- the
+        # two reads are not atomic, so a separately sampled total picks up events the
+        # agent wrote between the tail read and now (any active turn), or runs ahead
+        # of a window shortened by a body that failed to resolve. Either way it would
+        # report offset + len < total, which the client reads as phantom "newer
+        # history" (hasMoreAfter) at the live tail and then silently drops every live
+        # SSE event until a full reload -- the freeze this guards against. Deriving
+        # total from the window is internally consistent by construction and errs, if
+        # at all, only slightly low (hasMoreAfter=false, so append keeps working).
+        total = offset + len(events)
+    else:
+        # Cursor paths (before/after/offset) genuinely sit off the live tail, so the
+        # true count is required for hasMoreAfter to be correct there. The empty
+        # window and the rotated-first-event (offset == -1) cases also fall back to
+        # the real total: offset defaults to it when no events were returned, and a
+        # -1 offset is passed through unchanged rather than corrupting the total.
+        total = watcher.get_total_event_count()
+        if offset is None:
+            offset = total
     return _json_response({"events": events, "offset": offset, "total": total})
 
 

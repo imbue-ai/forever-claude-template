@@ -28,6 +28,7 @@ from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.oom_prioritizer import ChatOomPrioritizer
+from imbue.system_interface.session_watcher import AgentSessionWatcher
 from imbue.system_interface.server import _DEFAULT_TAIL_COUNT
 from imbue.system_interface.server import _build_destroy_command
 from imbue.system_interface.server import _handle_client_state_message
@@ -344,6 +345,127 @@ def test_get_events_caps_initial_load_to_tail(client: FlaskClient, tmp_path: Pat
         zero_limit = client.get("/api/agents/agent-123/events?limit=0")
         assert zero_limit.status_code == 200
         assert len(zero_limit.get_json()["events"]) == _DEFAULT_TAIL_COUNT
+
+
+class _ConcurrentAppendWatcher(AgentSessionWatcher):
+    """Watcher that appends to the session file *during* a tail read.
+
+    Reproduces the tail-total read race deterministically: overriding
+    ``get_tail_events`` to append ``pending_lines`` right after it computes the
+    tail is exactly the interleaving a mid-turn write causes -- the tail window is
+    fixed at the pre-write length, but the endpoint's follow-up offset/total reads
+    then observe the grown file. Appends only on the first tail read so a later
+    cursor request on the same watcher sees a stable, fully-grown transcript.
+    """
+
+    def __init__(
+        self, *args: Any, session_file: Path, pending_lines: list[str], **kwargs: Any
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._session_file = session_file
+        self._pending_lines = pending_lines
+        self._appended = False
+
+    def get_tail_events(self, limit: int, session_id: str | None = None) -> list[dict[str, Any]]:
+        events = super().get_tail_events(limit, session_id)
+        if not self._appended:
+            self._appended = True
+            with self._session_file.open("a") as f:
+                f.write("".join(self._pending_lines))
+        return events
+
+
+def _write_user_message_lines(start: int, count: int) -> list[str]:
+    """JSONL user-message lines Message{start}..Message{start+count-1}, one per line."""
+    return [
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": f"uuid-{i:03d}",
+                "timestamp": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
+                "message": {"role": "user", "content": f"Message {i}"},
+            }
+        )
+        + "\n"
+        for i in range(start, start + count)
+    ]
+
+
+def test_get_events_tail_total_consistent_under_concurrent_write(app: Flask, tmp_path: Path) -> None:
+    """The no-cursor tail response stays internally consistent when the agent
+    appends events between the tail read and the total read.
+
+    Before the fix the endpoint sampled ``get_total_event_count()`` separately, so
+    a mid-turn write made it report ``offset + len(events) < total`` -- which the
+    frontend reads as ``hasMoreAfter`` at the live tail and then silently drops
+    every live SSE event. The fix derives the tail total from the returned window,
+    so the response satisfies ``offset + len(events) == total`` (hasMoreAfter is
+    false) no matter what landed on disk between the reads. Cursor paths still
+    report the true, grown total.
+    """
+    agent_state_dir = tmp_path / "agent_state"
+    agent_state_dir.mkdir(parents=True)
+    claude_config_dir = tmp_path / "claude_config"
+    projects_dir = claude_config_dir / "projects" / "hash123"
+    projects_dir.mkdir(parents=True)
+
+    backlog_count = _DEFAULT_TAIL_COUNT + 10
+    appended_count = 15
+    session_id = "test-session-id"
+    session_file = projects_dir / f"{session_id}.jsonl"
+    session_file.write_text("".join(_write_user_message_lines(0, backlog_count)))
+    (agent_state_dir / "claude_session_id_history").write_text(f"{session_id}\n")
+
+    agent_id = "agent-123"
+    agent_info = AgentInfo(
+        id=agent_id,
+        name="test-agent",
+        state="RUNNING",
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+    )
+
+    # Inject the racing watcher directly so get_or_create_watcher returns it (it is
+    # already present) and never starts a background poll thread -- the interleaving
+    # is driven entirely, and deterministically, from the request thread.
+    racing_watcher = _ConcurrentAppendWatcher(
+        agent_id=agent_id,
+        agent_state_dir=agent_state_dir,
+        claude_config_dir=claude_config_dir,
+        on_events=lambda _agent_id, _events: None,
+        session_file=session_file,
+        pending_lines=_write_user_message_lines(backlog_count, appended_count),
+    )
+    state = state_of(app)
+    state.watchers[agent_id] = racing_watcher
+
+    with patch("imbue.system_interface.server._find_agent", return_value=agent_info):
+        response = app.test_client().get(f"/api/agents/{agent_id}/events")
+        assert response.status_code == 200
+        body = response.get_json()
+        events = body["events"]
+
+        # The tail window is the last _DEFAULT_TAIL_COUNT events of the backlog; the
+        # concurrent append does not shift its start.
+        assert len(events) == _DEFAULT_TAIL_COUNT
+        assert events[0]["content"] == f"Message {backlog_count - _DEFAULT_TAIL_COUNT}"
+        assert events[-1]["content"] == f"Message {backlog_count - 1}"
+
+        # The key invariant: the tail response is internally consistent, so the
+        # client never sees phantom newer history (hasMoreAfter) at the live tail.
+        assert body["offset"] == backlog_count - _DEFAULT_TAIL_COUNT
+        assert body["offset"] + len(events) == body["total"]
+        # The total is derived from the window, NOT the grown on-disk count -- the
+        # 15 concurrently-appended events are not reported as loadable-but-unloaded.
+        assert body["total"] == backlog_count
+
+        # A cursor path on the same (now fully grown) watcher still reports the true
+        # total: its window genuinely sits off the tail, so hasMoreAfter there is
+        # correct.
+        oldest_in_tail = events[0]["event_id"]
+        backfill = app.test_client().get(f"/api/agents/{agent_id}/events?before={oldest_in_tail}")
+        assert backfill.status_code == 200
+        assert backfill.get_json()["total"] == backlog_count + appended_count
 
 
 def test_send_message_success() -> None:
