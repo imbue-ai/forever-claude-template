@@ -86,7 +86,10 @@ On `type: gate`:
   `outline-approval` gates default to answer-yourself; only escalate if the
   worker has surfaced a *genuine process question* (a decision about user
   intent, scope, or domain that you cannot make from context). Most
-  outline gates do not contain such questions and should not be forwarded.
+  outline gates do not contain such questions and should not be forwarded. **One
+  exception: an outline that carries a cost/time estimate the user will incur (a
+  metered pipeline, a paid API) is a spend decision -- surface that estimate and
+  get their approval rather than auto-answering the gate.**
 - **Mix**: if a gate bundles an approval (escalate) with implementation
   sub-questions, pre-answer the sub-questions in the message you forward to the
   user so they do not have to weigh in on them.

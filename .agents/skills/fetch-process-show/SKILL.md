@@ -151,7 +151,12 @@ runtime on the small sample and report an extrapolation to the full set before
 scaling ("classifying 5 items took 12s and cost $0.013 -- extrapolated to 150
 items, ~$0.40 and ~6 min"). Only scale after a thumbs-up. Apply by default to any
 metered batch step, whether it comes up here or later in a surface -- don't
-pre-judge whether it's "long enough" to need this.
+pre-judge whether it's "long enough" to need this. When the work later
+crystallizes into a pipeline, make sure the worker included this cost/time
+estimate in its Gate 1 outline **and surface that estimate to the user** -- a
+metered pipeline is a spend the user is signing up for, so a crystallize run with
+a metered AI step should generally *not* have an auto-approved Gate 1; escalate
+it for their approval rather than answering the gate yourself.
 
 ## After confirmation: crystallize (background) and start surfaces (foreground)
 

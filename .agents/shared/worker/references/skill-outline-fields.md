@@ -27,6 +27,14 @@ The outline contains:
   invariant.
 - 2-3 evaluation scenarios you plan to hand-craft, plus any edge cases you chose
   not to handle (and why).
+- **A measured cost/time estimate, whenever a step costs money or takes
+  noticeable time** (a metered model call, a paid API, a slow batch). Do not
+  guess: run one real unit, measure its actual cost and wall-clock, and
+  extrapolate to a full run (`N x per-unit`, plus expected retries and any
+  per-call fees). This lets the user approve the run cost at the outline gate
+  rather than discovering it after the artifact is built. For a step that calls
+  Claude, the AI-specific measurement technique is in the `use-ai-integration`
+  skill.
 
 When the outline is for a change to an existing skill, it also states the
 decision -- update-in-place of `<existing-name>`, or a new sibling named
