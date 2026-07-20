@@ -81,13 +81,13 @@ manage-scheduled-tasks and check-app-errors skills.
 **Surfacing scheduled agents in the workspace.** An agent a scheduled job creates
 now opens as its own tab in the main chat window (without stealing focus), so a
 new run is never easy to miss. Surfacing is driven by a generic `highlight`
-label any agent can carry: bumping the label's value re-opens the tab if it was
-closed. It is driven entirely by one persisted signal -- the run you last
-acknowledged (by viewing or closing the tab) versus the run currently showing --
-so it is idempotent on reconnect: a run that fired while your laptop was asleep
-(e.g. an overnight Caretaker run) surfaces the moment the workspace's web UI
-reconnects, with no need to reopen anything. Closing the tab dismisses that run
-(it will not immediately reopen), and a genuinely newer run brings it back.
+label any agent can carry: when the label's value changes during the session,
+the tab re-opens if it was closed. A run that fired while your laptop was
+asleep (e.g. an overnight Caretaker run) surfaces the moment the workspace's
+web UI reconnects, because the pre-sleep key is still in memory and the fresh
+snapshot's key differs. Closing the tab dismisses that run (it will not
+immediately reopen), a genuinely newer run brings it back, and a page reload
+never resurrects tabs for runs that predate the page.
 The system interface reads each agent's labels straight from the discovery stream,
 so the Caretaker is reliably recognized and the hidden services agent stays hidden.
 
@@ -107,17 +107,3 @@ finished building while the laptop slept can no longer strand a tab on
 connection that dies while the window stays open and focused -- only a real
 concern for remote-host workspaces) remains a known follow-up.
 
-**Fixed: a fresh mind could deadlock on "No events yet" with no way to sign in.**
-When a workspace's first boot ran with no Claude credentials, claude sat at its
-interactive login screen and never signalled ready, so the bootstrap's
-`mngr create ... --message /welcome` timed out and exited nonzero after the agent
-was already registered. That single failure starved everything downstream: the
-transcript stayed empty, so the login modal -- which only opened in reaction to
-an auth-error transcript event -- could never appear; the welcome-resend had no
-recorded agent id to target; and every retry on later boots collided with the
-half-created agent's name and failed forever. The fix: the
-bootstrap now looks up an existing agent named after the host before creating
-(the same lookup-first shape scripts/run_schedule_agent.sh uses): a survivor from
-a partial create is adopted -- its id persisted for the welcome resend, the
-signal written -- instead of colliding. After sign-in, the existing
-auth-success resend delivers the welcome as designed.

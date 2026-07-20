@@ -251,55 +251,19 @@ const REMOTE_APPLY_SUPPRESS_MS = AUTOSAVE_DEBOUNCE_MS * 2 + 1000;
 const OPEN_TAB_SPLIT_FRACTION = 0.6;
 
 // --- Highlighted agent tabs (e.g. the weekly Caretaker) -----------------
-// An agent carrying a non-empty ``highlight`` label gets its own tab surfaced
-// automatically whenever it is not already open. The VALUE of the
-// ``highlight`` label is a key that mngr bumps whenever the agent has
-// something new to show (e.g. each Caretaker run); when that key changes we
-// re-open the tab if it is closed -- so a new run surfaces again, not only
-// the first.
-//
-// The whole decision derives from ONE persisted signal: the highlight key the
-// user last acknowledged (in localStorage), compared against the agent's current
-// key. There is deliberately NO in-memory "already surfaced this key" state --
-// that is what makes surfacing idempotent across a WebSocket reconnect, so a run
-// that appeared while the UI was disconnected (the Caretaker firing at 3 AM while
-// the laptop slept, with the page still loaded but the socket dead) still
-// surfaces on the first snapshot after the socket reconnects.
-const HIGHLIGHT_ACK_STORAGE_KEY = "si.highlightAck.v1";
-
-function loadStoredStringMap(key: string): Map<string, string> {
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const entries = Object.entries(parsed).filter(
-          (entry): entry is [string, string] => typeof entry[1] === "string",
-        );
-        return new Map(entries);
-      }
-    }
-  } catch {
-    // localStorage unavailable or corrupt -- degrade to in-memory only.
-  }
-  return new Map();
-}
-
-function persistStringMap(key: string, map: Map<string, string>): void {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(Object.fromEntries(map)));
-  } catch {
-    // In-memory only; nothing to persist.
-  }
-}
-
-// Persisted: agent id -> the highlight key the user last acknowledged by viewing
-// that tab. Surfacing is derived from this: a closed tab is re-opened iff the
-// agent's current highlight key differs from its acknowledged key. Storing the
-// *key* (not a mere
-// "seen" boolean) is what makes a new run surface again even after the user
-// has already opened (and closed) the tab once.
-const acknowledgedHighlightByAgent = loadStoredStringMap(HIGHLIGHT_ACK_STORAGE_KEY);
+// An agent carrying a non-empty ``highlight`` label gets its own tab opened
+// (as an inactive background tab) when the label's VALUE -- a key that mngr
+// bumps whenever the agent has something new to show, e.g. each Caretaker
+// run -- changes during this browser session. The first snapshot with agents
+// only records a baseline (no opens), so a page reload never resurrects tabs
+// for runs that happened before the page loaded. A dead-socket gap is NOT a
+// new session: the last-seen keys live in module state, so a run that fired
+// while the laptop slept surfaces on the first snapshot after the WebSocket
+// reconnects (see reconnectOnWake in AgentManager). Closing the tab is just
+// closing it -- the key was already recorded, so it stays closed until a
+// genuinely newer run bumps the key.
+let highlightBaselineRecorded = false;
+const lastHighlightKeyByAgent = new Map<string, string>();
 
 // In-memory: highlighted agents we have observed present at least once, so we can
 // detect when one is destroyed and close its now-dead tab. Scoped to highlighted
@@ -320,14 +284,6 @@ function isHighlightedAgent(agent: { labels?: Record<string, string> } | undefin
 // mngr bumps whenever the agent has something new to show.
 function highlightKey(agent: { labels?: Record<string, string> }): string {
   return agent.labels?.highlight ?? "";
-}
-
-// Record that the user acknowledged this agent's current highlight (by viewing
-// its tab), so it is not re-surfaced until the agent produces a newer one.
-function acknowledgeHighlight(agentId: string, key: string): void {
-  if (acknowledgedHighlightByAgent.get(agentId) === key) return;
-  acknowledgedHighlightByAgent.set(agentId, key);
-  persistStringMap(HIGHLIGHT_ACK_STORAGE_KEY, acknowledgedHighlightByAgent);
 }
 
 function createMithrilRenderer(
@@ -569,47 +525,13 @@ function createCustomTab(options: { id: string; name: string }): {
       // Close button -- on all tab types
       actions.appendChild(
         createTabActionButton("Close tab", "close", () => {
-          // Closing a highlighted tab counts as acknowledging its current run:
-          // the user has dismissed it, so it must not immediately re-open on the
-          // next snapshot. A genuinely newer run (new highlight key) surfaces it
-          // again. Only the explicit Close button acknowledges -- programmatic
-          // disposal (layout rebuild, reconnect) goes through dispose(), not here.
-          const closeAgentId = pp?.chatAgentId ?? pp?.agentId;
-          if (panelType === "chat" && closeAgentId && isHighlightedAgent(getAgentById(closeAgentId))) {
-            const agent = getAgentById(closeAgentId);
-            acknowledgeHighlight(closeAgentId, agent ? highlightKey(agent) : "");
-          }
           params.api.close();
         }),
       );
 
-      // Show/hide actions based on active state. A highlighted agent tab
-      // (e.g. the weekly Caretaker) is auto-opened for an unacknowledged
-      // run; viewing the tab acknowledges the current highlight so it is not
-      // re-opened for the same run after being closed. Highlight state is
-      // looked up at EVENT time, never captured at tab creation: a tab
-      // restored from the saved layout is created before the first
-      // agents_updated snapshot has arrived, so a creation-time
-      // getAgentById() lookup would come back empty and permanently
-      // misclassify the tab as non-highlighted.
-      const chatAgentForTab = pp?.chatAgentId ?? pp?.agentId;
-      const isChatTab = panelType === "chat" && !!chatAgentForTab;
-
-      // Record the user as having seen this agent's current highlight (they
-      // are viewing the tab). No-ops when the agent is not (yet) known or not
-      // highlighted.
-      function acknowledgeCurrentHighlight(agentId: string): void {
-        const agent = getAgentById(agentId);
-        if (agent && isHighlightedAgent(agent)) {
-          acknowledgeHighlight(agentId, highlightKey(agent));
-        }
-      }
-
+      // Show/hide actions based on active state.
       function handleActiveChange(isActive: boolean): void {
         actions.style.display = isActive ? "flex" : "none";
-        if (isActive && isChatTab && chatAgentForTab) {
-          acknowledgeCurrentHighlight(chatAgentForTab);
-        }
       }
       handleActiveChange(params.api.isActive);
       disposables.push(
@@ -1088,24 +1010,30 @@ function mainChatGroup(excludeAgentId: string): DockviewGroupPanel | null {
   return null;
 }
 
-/** Open a highlighted agent's tab (e.g. the Caretaker) whenever it has an
- *  unacknowledged highlight (its current ``highlight`` key differs from the key
- *  the user last acknowledged by viewing or dismissing the tab) and the tab is
- *  closed. Runs on every agents_updated snapshot, and the decision (see
- *  decideHighlightSurface) is purely a function of the persisted
- *  acknowledgement vs the current key -- no in-memory per-key gate -- so it is
- *  idempotent: a run that appeared while the socket was disconnected (the
- *  Caretaker firing overnight while the laptop slept) surfaces on the first
- *  snapshot after the socket reconnects, without needing a page reload.
- *  Auto-opened tabs are added inactive so they don't steal focus. */
+/** Open a highlighted agent's tab (e.g. the Caretaker) when its ``highlight``
+ *  key changes during this session and the tab is closed. Runs on every
+ *  agents_updated snapshot. The first snapshot that actually contains agents
+ *  only records the baseline keys -- so a page reload never re-opens tabs for
+ *  runs that predate the page -- while a run that fired during a dead-socket
+ *  gap (the Caretaker at 3 AM while the laptop slept) still surfaces: the
+ *  pre-sleep keys are in module state, and the post-reconnect snapshot's
+ *  bumped key differs. Auto-opened tabs are added inactive so they don't
+ *  steal focus. */
 function surfaceHighlightedAgents(): void {
   if (!dockview) return;
+  const agents = getAgents();
+  if (agents.length === 0) return;
+  const isBaselineSnapshot = !highlightBaselineRecorded;
+  highlightBaselineRecorded = true;
   const openChatIds = getOpenChatAgentIds();
-  for (const agent of getAgents()) {
+  for (const agent of agents) {
+    if (!isHighlightedAgent(agent)) continue;
+    const previousKey = lastHighlightKeyByAgent.get(agent.id);
+    lastHighlightKeyByAgent.set(agent.id, highlightKey(agent));
+    if (isBaselineSnapshot) continue;
     const decision = decideHighlightSurface({
-      isHighlighted: isHighlightedAgent(agent),
       currentKey: highlightKey(agent),
-      acknowledgedKey: acknowledgedHighlightByAgent.get(agent.id),
+      previousKey,
       isTabOpen: openChatIds.has(agent.id),
     });
     if (decision === "open") {
@@ -1985,10 +1913,10 @@ function applyLayoutContent(saved: SavedLayout | null): void {
     }
   }
   // The layout content is now applied; from here it is safe to auto-open
-  // tabs for highlighted agents (e.g. an unacknowledged Caretaker run).
-  // Runs on every mount -- including a switch to another named layout --
-  // which is correct because surfacing is idempotent: an already
-  // acknowledged run never re-opens, an unacknowledged one always does.
+  // tabs for highlighted agents (e.g. a new Caretaker run). Runs on every
+  // mount -- including a switch to another named layout -- which is safe
+  // because a tab only opens when the highlight key has changed since it
+  // was last seen this session.
   layoutLoaded = true;
   surfaceHighlightedAgents();
   updateEmptyState();

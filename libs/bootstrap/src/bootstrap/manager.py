@@ -31,10 +31,6 @@ SUPERVISOR_LOG_DIR = Path("/var/log/supervisor")
 
 RUNTIME_DIR = Path("runtime")
 
-# The Caretaker's state dir (run logs + permissions.md, written by the
-# caretaker skill) lives under runtime/ so it rides the runtime-backup branch.
-CARETAKER_DIR = RUNTIME_DIR / "caretaker"
-
 # Signal file gating exactly-once creation of the initial chat agent. Lives
 # under runtime/, which persists with the container volume (and is synced to
 # GitHub when the opt-in github-sync skill has been enabled).
@@ -298,54 +294,6 @@ def _persist_initial_chat_agent_id(agent_id: str) -> None:
     logger.info("Persisted initial chat agent id {} for welcome resend", agent_id)
 
 
-def _find_existing_chat_agent_id(host_name: str) -> str | None:
-    """Return the id of an existing agent named after the host, if exactly one exists.
-
-    The initial chat agent is named after its host, so on a clean first boot
-    no such agent exists and this returns None. But a previous boot's create
-    can fail *after* registering the agent -- e.g. the `--message /welcome`
-    delivery timed out because claude sat at its no-credentials login screen
-    and never signalled ready. The agent survives with no recorded id, and
-    re-running `mngr create` would fail with a name collision on every
-    subsequent boot, so the retry must adopt the survivor instead. Mirrors
-    the lookup-first shape of scripts/run_schedule_agent.sh, including --active,
-    so an archived leftover (or one on a dead host) is never adopted as the
-    welcome-resend target. Returns None on lookup failure or ambiguity,
-    keeping the caller on the plain create path.
-    """
-    result = subprocess.run(
-        [
-            "mngr",
-            "list",
-            "--active",
-            "--include",
-            f'name == "{host_name}"',
-            "--ids",
-            "--on-error",
-            "continue",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        logger.warning(
-            "Existing chat-agent lookup failed (rc={}): {}",
-            result.returncode,
-            result.stderr.strip(),
-        )
-        return None
-    agent_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(agent_ids) > 1:
-        logger.warning(
-            "Multiple agents named {}; skipping adopt: {}", host_name, agent_ids
-        )
-        return None
-    if not agent_ids:
-        return None
-    return agent_ids[0]
-
-
 def _create_initial_chat_agent(host_name: str, labels: dict[str, str]) -> bool:
     """Invoke `mngr create` for the initial chat agent; persist its id. Returns success."""
     cmd = _build_create_chat_command(host_name, labels)
@@ -483,23 +431,6 @@ def _maybe_create_initial_chat() -> None:
         logger.warning(
             "Could not resolve host_name; skipping initial chat agent create"
         )
-        return
-    existing_agent_id = _find_existing_chat_agent_id(host_name)
-    if existing_agent_id is not None:
-        # An earlier boot's create registered the agent but died before
-        # recording it (see _find_existing_chat_agent_id). Adopt it: persist
-        # its id -- the welcome-resend target -- and write the signal so we
-        # stop re-creating. The welcome itself arrives through the
-        # auth-success resend chokepoint once the user signs in
-        # (system_interface/welcome_resend.py); re-sending `/welcome` from
-        # here would race claude's login screen all over again.
-        logger.info(
-            "Adopting chat agent {} left by an earlier partial create",
-            existing_agent_id,
-        )
-        _persist_initial_chat_agent_id(existing_agent_id)
-        _touch_signal()
-        logger.info("Wrote signal file {}", INITIAL_CHAT_SIGNAL)
         return
     _initialize_workspace_main_branch()
     labels = _read_main_agent_labels()
@@ -671,18 +602,6 @@ def _exec_supervisord() -> None:
     os.execvp("supervisord", ["supervisord", "-n", "-c", str(SUPERVISORD_CONF)])
 
 
-def _ensure_caretaker_dir() -> None:
-    """Create runtime/caretaker/ (the Caretaker's run logs + permissions.md).
-
-    Best-effort: logs and returns rather than raising so a transient FS error
-    here does not block the supervisord launch.
-    """
-    try:
-        CARETAKER_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        logger.warning("Failed to create caretaker runtime dir: {}", e)
-
-
 def main() -> None:
     logger.info("Bootstrap starting: first-boot setup, then supervisord")
 
@@ -698,12 +617,6 @@ def main() -> None:
         _apply_container_timezone(tz_name)
 
     _bootstrap_init_chat_dir()
-
-    # Create runtime/caretaker/ (the Caretaker's state dir) after the runtime
-    # worktree is in place, so it rides the backup branch. The Caretaker itself
-    # runs as a daily job via scripts/run_daily_job.sh (see the
-    # /etc/cron.d/minds-caretaker line written by scripts/build_workspace.sh).
-    _ensure_caretaker_dir()
 
     # Make sure supervisord's log directory exists, then hand off: replace this
     # process with supervisord in the foreground. supervisord owns every

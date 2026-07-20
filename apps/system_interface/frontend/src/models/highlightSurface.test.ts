@@ -3,41 +3,22 @@ import { describe, expect, it } from "vitest";
 import { decideHighlightSurface } from "./highlightSurface";
 
 describe("decideHighlightSurface", () => {
-  it("opens a closed, unacknowledged highlighted tab (the reconnect case)", () => {
-    // The Caretaker is present in the very first snapshot after a WS reconnect,
-    // carrying a run key the user never acknowledged, tab closed. It must open --
-    // and because the decision reads only the persisted ack, it does so with no
-    // dependence on any in-session "already opened this key" state.
-    expect(
-      decideHighlightSurface({ isHighlighted: true, currentKey: "new", acknowledgedKey: "old", isTabOpen: false }),
-    ).toBe("open");
+  it("opens a closed tab when the key changes (a new run, e.g. after a wake reconnect)", () => {
+    // The pre-sleep key is in module state; the post-reconnect snapshot
+    // carries the overnight run's bumped key.
+    expect(decideHighlightSurface({ currentKey: "new", previousKey: "old", isTabOpen: false })).toBe("open");
   });
 
-  it("opens when the run has never been acknowledged at all", () => {
-    expect(
-      decideHighlightSurface({ isHighlighted: true, currentKey: "k", acknowledgedKey: undefined, isTabOpen: false }),
-    ).toBe("open");
+  it("opens for an agent that gained a highlight mid-session", () => {
+    expect(decideHighlightSurface({ currentKey: "k", previousKey: undefined, isTabOpen: false })).toBe("open");
   });
 
-  it("leaves an already-open tab alone even with an unacknowledged new key", () => {
-    // The tab is on screen; viewing it is how the run gets acknowledged.
-    expect(
-      decideHighlightSurface({ isHighlighted: true, currentKey: "new", acknowledgedKey: "old", isTabOpen: true }),
-    ).toBe("noop");
+  it("leaves an already-open tab alone when the key changes", () => {
+    expect(decideHighlightSurface({ currentKey: "new", previousKey: "old", isTabOpen: true })).toBe("noop");
   });
 
-  it("does nothing once the current run is acknowledged", () => {
-    expect(
-      decideHighlightSurface({ isHighlighted: true, currentKey: "k", acknowledgedKey: "k", isTabOpen: true }),
-    ).toBe("noop");
-    expect(
-      decideHighlightSurface({ isHighlighted: true, currentKey: "k", acknowledgedKey: "k", isTabOpen: false }),
-    ).toBe("noop");
-  });
-
-  it("ignores non-highlighted agents", () => {
-    expect(
-      decideHighlightSurface({ isHighlighted: false, currentKey: "", acknowledgedKey: undefined, isTabOpen: false }),
-    ).toBe("noop");
+  it("does nothing while the key is unchanged (a closed tab stays closed)", () => {
+    expect(decideHighlightSurface({ currentKey: "k", previousKey: "k", isTabOpen: false })).toBe("noop");
+    expect(decideHighlightSurface({ currentKey: "k", previousKey: "k", isTabOpen: true })).toBe("noop");
   });
 });
