@@ -1,0 +1,7 @@
+Fixed two host_backup defects surfaced by a bug report (a 17-day silent backup outage from an uncleared stale restic lock, plus `host-backup-now` hanging for non-primary agents):
+
+- Stale-lock recovery: a `restic backup` that fails because the repository is already locked (e.g. an exclusive lock left by a dead PID from a prior container incarnation) now runs `restic unlock` -- which removes only *stale* locks, never one a live process holds -- and retries once, instead of failing every tick indefinitely with no recovery.
+
+- Repeated-failure escalation: consecutive failed ticks are counted (reset on any success), and once the count reaches a threshold (3) each failing tick also emits a new `backup_repeatedly_failing` event and logs at error level, so a multi-day outage leaves a loud, durable signal instead of passing silently. The `restic_backup_failed` event now carries the current consecutive-failure count.
+
+- `host-backup-now` no longer hangs for a non-primary agent. The service writes its events under the *primary* agent's state dir (inherited via supervisord), so a launched sub-agent running `host-backup-now` used to tail its own state dir, never observe completion, and wait out the full 30-minute timeout even though the backup succeeded. The service now publishes its resolved events dir to a host-stable pointer (`$MNGR_HOST_DIR/host_backup/service_events_dir`), and `host-backup-now` reads that pointer (falling back to its own events dir when none exists yet, which is correct for the primary agent).

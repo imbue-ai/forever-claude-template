@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 
 from host_backup.capabilities import BackupCapabilities, SnapshotMethod
 from host_backup.config import BackupConfig
 from host_backup.runner import (
+    CONSECUTIVE_FAILURE_ALARM_THRESHOLD,
     _load_config_if_changed,
     _LoopState,
+    _run_restic_backup,
     _should_tick_now,
     _take_snapshot,
 )
+from host_backup.snapshot import SnapshotResult
 
 
 def _direct_capabilities() -> BackupCapabilities:
@@ -167,6 +171,147 @@ def test_take_snapshot_emits_snapshot_failed_event_on_failure(tmp_path: Path) ->
     assert failed_events[0]["tick_id"] == "tick-under-test"
     assert failed_events[0]["method"] == "OUTER_TRIGGER"
     assert failed_events[0]["error_message"]
+
+
+def _direct_snapshot() -> SnapshotResult:
+    return SnapshotResult(
+        method=SnapshotMethod.DIRECT,
+        snapshot_path="/mngr",
+        read_path=Path("/mngr"),
+        duration_seconds=0.0,
+    )
+
+
+def _completed(
+    returncode: int, *, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=["restic"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+class _ResticStub:
+    """Records restic backup/unlock calls and returns scripted results."""
+
+    def __init__(self, backup_results: list[subprocess.CompletedProcess[str]]) -> None:
+        self._backup_results = backup_results
+        self.backup_calls = 0
+        self.unlock_calls = 0
+
+    def backup(self, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        result = self._backup_results[self.backup_calls]
+        self.backup_calls += 1
+        return result
+
+    def unlock(self, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.unlock_calls += 1
+        return _completed(0)
+
+
+def _events_in(events_dir: Path | None) -> list[dict]:
+    assert events_dir is not None
+    return [
+        json.loads(line)
+        for line in (events_dir / "events.jsonl").read_text().splitlines()
+    ]
+
+
+def _run_backup_under_test(
+    tmp_path: Path,
+    stub: _ResticStub,
+    *,
+    initial_failures: int = 0,
+) -> tuple[_LoopState, bool]:
+    state = _LoopState(_direct_capabilities())
+    state.events_dir = tmp_path / "events"
+    state.current_tick_id = "tick-under-test"
+    state.consecutive_backup_failures = initial_failures
+    succeeded = _run_restic_backup(
+        state=state,
+        config=_build_config(),
+        snapshot=_direct_snapshot(),
+        env_overrides={},
+        backup_fn=stub.backup,
+        unlock_fn=stub.unlock,
+    )
+    return state, succeeded
+
+
+_LOCK_STDERR = (
+    "unable to create lock in backend: repository is already locked exclusively "
+    "by PID 1515556 on host by root"
+)
+
+
+def test_run_restic_backup_unlocks_and_retries_on_stale_lock(tmp_path: Path) -> None:
+    """A lock error triggers `restic unlock` and one retry; the retry's success wins."""
+    stub = _ResticStub(
+        [
+            _completed(1, stderr=_LOCK_STDERR),
+            _completed(0, stdout='{"message_type":"summary","snapshot_id":"snap1"}'),
+        ]
+    )
+    state, succeeded = _run_backup_under_test(tmp_path, stub, initial_failures=4)
+
+    assert succeeded is True
+    assert stub.backup_calls == 2
+    assert stub.unlock_calls == 1
+    assert state.consecutive_backup_failures == 0  # reset on success
+    succeeded_events = [
+        e
+        for e in _events_in(state.events_dir)
+        if e["type"] == "RESTIC_BACKUP_SUCCEEDED"
+    ]
+    assert len(succeeded_events) == 1
+    assert succeeded_events[0]["snapshot_id"] == "snap1"
+
+
+def test_run_restic_backup_does_not_unlock_on_unrelated_failure(tmp_path: Path) -> None:
+    """A non-lock failure is never retried and never runs unlock."""
+    stub = _ResticStub([_completed(1, stderr="network unreachable")])
+    state, succeeded = _run_backup_under_test(tmp_path, stub)
+
+    assert succeeded is False
+    assert stub.backup_calls == 1
+    assert stub.unlock_calls == 0
+    failed_events = [
+        e for e in _events_in(state.events_dir) if e["type"] == "RESTIC_BACKUP_FAILED"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0]["consecutive_failures"] == 1
+
+
+def test_run_restic_backup_emits_alarm_after_threshold(tmp_path: Path) -> None:
+    """Crossing the consecutive-failure threshold emits a durable escalation event."""
+    stub = _ResticStub([_completed(1, stderr="backend error")])
+    state, succeeded = _run_backup_under_test(
+        tmp_path, stub, initial_failures=CONSECUTIVE_FAILURE_ALARM_THRESHOLD - 1
+    )
+
+    assert succeeded is False
+    assert state.consecutive_backup_failures == CONSECUTIVE_FAILURE_ALARM_THRESHOLD
+    alarms = [
+        e
+        for e in _events_in(state.events_dir)
+        if e["type"] == "BACKUP_REPEATEDLY_FAILING"
+    ]
+    assert len(alarms) == 1
+    assert alarms[0]["consecutive_failures"] == CONSECUTIVE_FAILURE_ALARM_THRESHOLD
+    assert alarms[0]["threshold"] == CONSECUTIVE_FAILURE_ALARM_THRESHOLD
+
+
+def test_run_restic_backup_no_alarm_below_threshold(tmp_path: Path) -> None:
+    """A single failure records the count but does not raise the alarm."""
+    stub = _ResticStub([_completed(1, stderr="backend error")])
+    state, _ = _run_backup_under_test(tmp_path, stub)
+
+    assert state.consecutive_backup_failures == 1
+    alarms = [
+        e
+        for e in _events_in(state.events_dir)
+        if e["type"] == "BACKUP_REPEATEDLY_FAILING"
+    ]
+    assert alarms == []
 
 
 def test_load_config_if_changed_caches_until_mtime_moves(tmp_path: Path) -> None:

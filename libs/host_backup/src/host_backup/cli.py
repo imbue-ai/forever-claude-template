@@ -17,7 +17,7 @@ from pathlib import Path
 import click
 from loguru import logger
 
-from host_backup.config import BACKUP_TOML_PATH, get_events_dir
+from host_backup.config import BACKUP_TOML_PATH, resolve_service_events_dir
 from host_backup.events import BACKUP_EVENT_SOURCE, BackupEventType
 
 DEFAULT_TIMEOUT_SECONDS = 1800.0  # 30 minutes
@@ -34,10 +34,11 @@ _POLL_INTERVAL_SECONDS = 0.5
 )
 def backup_now_main(timeout_seconds: float) -> None:
     """Trigger an immediate host_backup tick and wait for it to complete."""
-    events_dir = get_events_dir()
+    events_dir = resolve_service_events_dir()
     if events_dir is None:
         logger.error(
-            "MNGR_AGENT_STATE_DIR is not set; cannot tail the backup event log"
+            "Cannot locate the host-backup events log: the service has published "
+            "no events-dir pointer and MNGR_AGENT_STATE_DIR is unset"
         )
         sys.exit(2)
     events_path = events_dir / "events.jsonl"

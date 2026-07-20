@@ -38,6 +38,7 @@ class BackupEventType(UpperCaseStrEnum):
     SNAPSHOT_DELETED = auto()
     RESTIC_BACKUP_SUCCEEDED = auto()
     RESTIC_BACKUP_FAILED = auto()
+    BACKUP_REPEATEDLY_FAILING = auto()
     FORGET_COMPLETED = auto()
     PRUNE_COMPLETED = auto()
     PRUNE_SKIPPED = auto()
@@ -134,6 +135,25 @@ class ResticBackupFailedEvent(BackupEvent):
     duration_seconds: float
     stdout: str
     stderr: str
+    consecutive_failures: int = Field(
+        default=0,
+        description="How many ticks in a row have now failed (1 on the first failure)",
+    )
+
+
+class BackupRepeatedlyFailingEvent(BackupEvent):
+    """Escalation alarm: backups have failed for several consecutive ticks.
+
+    Emitted once the consecutive-failure count reaches the alarm threshold and
+    on every failing tick thereafter, so a multi-day outage leaves a loud,
+    durable signal in the event stream instead of passing silently.
+    """
+
+    tick_id: str
+    consecutive_failures: int
+    threshold: int = Field(
+        description="The consecutive-failure count that triggers the alarm"
+    )
 
 
 class ForgetCompletedEvent(BackupEvent):

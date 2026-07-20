@@ -219,6 +219,59 @@ def get_events_dir() -> Path | None:
     return Path(state_dir) / "events" / "backup"
 
 
+def service_events_dir_pointer_path() -> Path | None:
+    """Host-stable path where the running service publishes its events dir.
+
+    The `host-backup` service inherits the *primary* agent's
+    `MNGR_AGENT_STATE_DIR`, so its events land under the primary agent's state
+    dir. A non-primary agent that runs `host-backup-now` cannot derive that
+    path from its own environment. Every agent on a host shares `MNGR_HOST_DIR`,
+    so the service records where it writes here for any caller to read back.
+    """
+    host_dir = os.environ.get("MNGR_HOST_DIR", "")
+    if not host_dir:
+        return None
+    return Path(host_dir) / "host_backup" / "service_events_dir"
+
+
+def publish_service_events_dir(events_dir: Path | None) -> None:
+    """Record the service's resolved events dir to the host-stable pointer.
+
+    Called once by the runner at startup. Best-effort: a missing `MNGR_HOST_DIR`
+    (or an unwritable host dir) just means `host-backup-now` falls back to its
+    own events dir, which is correct whenever the caller *is* the primary agent.
+    """
+    pointer = service_events_dir_pointer_path()
+    if pointer is None or events_dir is None:
+        return
+    try:
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(str(events_dir))
+    except OSError as e:
+        logger.warning(
+            "Could not publish host_backup events dir pointer at {}: {}", pointer, e
+        )
+
+
+def resolve_service_events_dir() -> Path | None:
+    """Resolve where the `host-backup` service writes its events.
+
+    Prefers the pointer the service published (correct even when the caller is a
+    non-primary agent whose own state dir differs). Falls back to this process's
+    own events dir when no pointer exists yet -- unchanged behaviour, and correct
+    when the caller is the primary agent.
+    """
+    pointer = service_events_dir_pointer_path()
+    if pointer is not None:
+        try:
+            recorded = pointer.read_text().strip()
+        except OSError:
+            recorded = ""
+        if recorded:
+            return Path(recorded)
+    return get_events_dir()
+
+
 # ---------------------------------------------------------------------------
 # Backwards-compatibility shims for pre-refactor bootstraps.
 #

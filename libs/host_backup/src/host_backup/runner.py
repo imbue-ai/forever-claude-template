@@ -4,11 +4,13 @@ Owns the main loop, config-reload state machine, and per-tick orchestration.
 The actual restic and snapshot mechanics live in `restic.py` and `snapshot.py`.
 """
 
+import subprocess
 import time
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Final
 from uuid import uuid4
 
 from loguru import logger
@@ -23,12 +25,17 @@ from host_backup.config import (
     load_backup_config,
     load_restic_env,
     missing_required_restic_keys,
+    publish_service_events_dir,
 )
 from host_backup.events import BackupEventType, make_event, write_event
 from host_backup.restic import backup as restic_backup
-from host_backup.restic import extract_snapshot_id_from_backup_output
+from host_backup.restic import (
+    extract_snapshot_id_from_backup_output,
+    is_repo_locked_error,
+)
 from host_backup.restic import forget as restic_forget
 from host_backup.restic import prune as restic_prune
+from host_backup.restic import unlock as restic_unlock
 from host_backup.snapshot import (
     SnapshotCleanupError,
     SnapshotError,
@@ -37,6 +44,15 @@ from host_backup.snapshot import (
 )
 
 LOG_FILE = Path("/tmp/host-backup.log")
+
+# Number of consecutive failed ticks after which the runner raises a prominent,
+# durable alarm so a silent multi-day backup outage cannot go unnoticed.
+CONSECUTIVE_FAILURE_ALARM_THRESHOLD: Final[int] = 3
+
+# The restic-call signatures the backup step depends on, injected so the
+# orchestration can be unit-tested without shelling out to restic.
+BackupFn = Callable[..., subprocess.CompletedProcess[str]]
+UnlockFn = Callable[..., subprocess.CompletedProcess[str]]
 
 
 def main() -> None:
@@ -49,6 +65,10 @@ def main() -> None:
 def _run_loop(capabilities: BackupCapabilities) -> None:
     """The actual loop. Extracted for testability."""
     state = _LoopState(capabilities)
+    # Publish where this service writes events so `host-backup-now` invoked by a
+    # non-primary agent can find it (the service runs under the primary agent's
+    # state dir; a non-primary caller cannot derive that path from its own env).
+    publish_service_events_dir(state.events_dir)
     logger.info(
         "Detected backup capabilities: method={} (read_path={}, trigger_dir={})",
         capabilities.method.value,
@@ -96,6 +116,9 @@ class _LoopState:
         # Per-tick id (reset every iteration); falls back to "no-tick" before the
         # first tick fires so the very first crash still has a correlation id.
         self.current_tick_id: str = "no-tick"
+        # Count of ticks that have failed back-to-back (reset to 0 on any
+        # successful backup); drives the repeated-failure escalation alarm.
+        self.consecutive_backup_failures: int = 0
 
 
 def _service_iteration(state: _LoopState) -> None:
@@ -359,18 +382,28 @@ def _run_restic_backup(
     config: BackupConfig,
     snapshot: SnapshotResult,
     env_overrides: Mapping[str, str],
+    backup_fn: BackupFn = restic_backup,
+    unlock_fn: UnlockFn = restic_unlock,
 ) -> bool:
-    """Run `restic backup` against the snapshot; emit success or failure event."""
+    """Run `restic backup` against the snapshot; emit success or failure event.
+
+    A backup blocked by a stale repository lock (a lock left by a dead PID from a
+    prior container incarnation) is recovered from automatically: `restic unlock`
+    clears the stale lock and the backup is retried once. Repeated failures bump
+    a consecutive-failure counter and, past a threshold, raise a durable alarm so
+    an outage cannot pass silently. `backup_fn`/`unlock_fn` are injected for tests.
+    """
     tag = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    start = time.monotonic()
-    result = restic_backup(
-        source_path=snapshot.read_path,
+    result, duration = _attempt_backup_with_unlock_retry(
+        snapshot=snapshot,
         excludes=config.excludes,
         tag=tag,
         env_overrides=env_overrides,
+        backup_fn=backup_fn,
+        unlock_fn=unlock_fn,
     )
-    duration = time.monotonic() - start
     if result.returncode != 0:
+        state.consecutive_backup_failures += 1
         write_event(
             state.events_dir,
             make_event(
@@ -381,12 +414,15 @@ def _run_restic_backup(
                 duration_seconds=duration,
                 stdout=result.stdout,
                 stderr=result.stderr,
+                consecutive_failures=state.consecutive_backup_failures,
             ),
         )
         logger.error(
             "restic backup failed (rc={}): {}", result.returncode, result.stderr.strip()
         )
+        _maybe_emit_repeated_failure_alarm(state)
         return False
+    state.consecutive_backup_failures = 0
     snapshot_id = extract_snapshot_id_from_backup_output(result.stdout)
     write_event(
         state.events_dir,
@@ -401,6 +437,71 @@ def _run_restic_backup(
         ),
     )
     return True
+
+
+def _attempt_backup_with_unlock_retry(
+    *,
+    snapshot: SnapshotResult,
+    excludes: tuple[str, ...],
+    tag: str,
+    env_overrides: Mapping[str, str],
+    backup_fn: BackupFn,
+    unlock_fn: UnlockFn,
+) -> tuple[subprocess.CompletedProcess[str], float]:
+    """Run the backup, clearing a stale lock and retrying once if one blocks it.
+
+    Returns (final restic result, total elapsed seconds). Only a lock error
+    triggers the unlock; any other failure is returned as-is for the caller to
+    record.
+    """
+    start = time.monotonic()
+    result = backup_fn(
+        source_path=snapshot.read_path,
+        excludes=excludes,
+        tag=tag,
+        env_overrides=env_overrides,
+    )
+    if result.returncode != 0 and is_repo_locked_error(result.stderr):
+        logger.warning(
+            "restic backup blocked by an existing repository lock; running "
+            "`restic unlock` to clear stale locks and retrying once"
+        )
+        unlock_result = unlock_fn(env_overrides=env_overrides)
+        if unlock_result.returncode != 0:
+            logger.warning(
+                "restic unlock failed (rc={}): {}",
+                unlock_result.returncode,
+                unlock_result.stderr.strip(),
+            )
+        else:
+            result = backup_fn(
+                source_path=snapshot.read_path,
+                excludes=excludes,
+                tag=tag,
+                env_overrides=env_overrides,
+            )
+    duration = time.monotonic() - start
+    return result, duration
+
+
+def _maybe_emit_repeated_failure_alarm(state: _LoopState) -> None:
+    """Raise a durable, prominent alarm once backups have failed N ticks running."""
+    if state.consecutive_backup_failures < CONSECUTIVE_FAILURE_ALARM_THRESHOLD:
+        return
+    logger.error(
+        "host_backup has failed {} consecutive ticks; no successful backup is "
+        "being taken -- investigate the restic.env / repository",
+        state.consecutive_backup_failures,
+    )
+    write_event(
+        state.events_dir,
+        make_event(
+            BackupEventType.BACKUP_REPEATEDLY_FAILING,
+            tick_id=state.current_tick_id,
+            consecutive_failures=state.consecutive_backup_failures,
+            threshold=CONSECUTIVE_FAILURE_ALARM_THRESHOLD,
+        ),
+    )
 
 
 def _run_forget(

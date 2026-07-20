@@ -20,11 +20,26 @@ _REPO_MISSING_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"repository does not exist", re.IGNORECASE),
     re.compile(r"does not appear to be a repository", re.IGNORECASE),
 )
+_REPO_LOCKED_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"repository is already locked", re.IGNORECASE),
+    re.compile(r"unable to create lock", re.IGNORECASE),
+)
 
 
 def is_repo_missing_error(stderr: str) -> bool:
     """Return True if `stderr` looks like a 'restic repo not initialized' error."""
     return any(p.search(stderr) for p in _REPO_MISSING_PATTERNS)
+
+
+def is_repo_locked_error(stderr: str) -> bool:
+    """Return True if `stderr` looks like a restic 'repository is locked' error.
+
+    A dead container incarnation can leave an exclusive lock behind whose owning
+    PID no longer exists; every subsequent tick then fails to acquire a lock.
+    Detecting this lets the runner clear the stale lock and retry rather than
+    wedging indefinitely.
+    """
+    return any(p.search(stderr) for p in _REPO_LOCKED_PATTERNS)
 
 
 def run_restic(
@@ -58,6 +73,18 @@ def probe_repo(
 def init_repo(env_overrides: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
     """`restic init` -- create the repo on the remote backend."""
     return run_restic(("init",), env_overrides=env_overrides, timeout_seconds=120.0)
+
+
+def unlock(env_overrides: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
+    """`restic unlock` -- remove *stale* locks only (never a live one).
+
+    Plain `unlock` (no `--remove-all`) removes a lock only when it is stale: it
+    is older than 30 minutes, or it was created on this same host by a process
+    that is no longer running. That is exactly the dead-PID lock a crashed or
+    replaced container leaves behind, so this safely clears a wedged repository
+    without disturbing a lock a concurrent restic process legitimately holds.
+    """
+    return run_restic(("unlock",), env_overrides=env_overrides, timeout_seconds=120.0)
 
 
 def backup(

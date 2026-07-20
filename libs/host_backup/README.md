@@ -68,6 +68,15 @@ an encrypted restic repo on cheaper object storage.
 - A hard `minimum_backup_gap_seconds` (default 60) gap is enforced between
   successive backup attempts, so a config that's being mutated constantly
   cannot spam restic / the error log.
+- Stale-lock recovery: a `restic backup` blocked by an existing repository
+  lock (e.g. an exclusive lock left by a dead PID from a prior container
+  incarnation) triggers `restic unlock` -- which removes only *stale* locks,
+  never one a live process holds -- and one retry. Without this, a single
+  stale lock would fail every tick indefinitely.
+- Repeated-failure escalation: consecutive failed ticks are counted (reset on
+  any success). Once the count reaches a threshold (3), each failing tick also
+  emits a `backup_repeatedly_failing` event and logs at error level, so a
+  multi-day outage leaves a loud, durable signal rather than passing silently.
 
 ## Reactive config reloading
 
@@ -85,6 +94,16 @@ your latest changes are guaranteed to be captured), bumps `backup.toml`'s
 mtime, then tails `events/backup/events.jsonl` for the next
 `restic_backup_succeeded` / `restic_backup_failed` event and prints it.
 
+The service writes its events under the *primary* agent's state dir (it
+inherits `MNGR_AGENT_STATE_DIR` from the bootstrap shell that started
+supervisord). A non-primary agent (e.g. a launched sub-agent) that runs
+`host-backup-now` would otherwise tail its *own* state dir and never see the
+completion event, so it would hang until `--timeout`. To avoid that, the
+service publishes its resolved events dir to a host-stable pointer at
+`$MNGR_HOST_DIR/host_backup/service_events_dir` on startup, and
+`host-backup-now` reads that pointer (falling back to its own events dir when
+no pointer exists yet, which is correct when the caller is the primary agent).
+
 ## Events
 
 Structured events at `$MNGR_AGENT_STATE_DIR/events/backup/events.jsonl`:
@@ -92,6 +111,7 @@ Structured events at `$MNGR_AGENT_STATE_DIR/events/backup/events.jsonl`:
 - `backup_started`, `snapshot_created`, `snapshot_deleted` (one per deleted
   snapshot -- `outer_trigger` may emit several per tick during keep-N pruning)
 - `restic_backup_succeeded`, `restic_backup_failed`
+- `backup_repeatedly_failing` (escalation alarm after N consecutive failures)
 - `forget_completed`, `prune_completed`, `prune_skipped`
 - `config_reloaded`
 - `tick_skipped_due_to_missing_secrets`, `tick_error`

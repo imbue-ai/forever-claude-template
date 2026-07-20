@@ -4,16 +4,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from host_backup.capabilities import SnapshotMethod
 from host_backup.config import (
     BackupConfig,
     SnapshotSettings,
+    get_events_dir,
     load_backup_config,
     load_restic_env,
     merge_snapshot_into_existing_toml,
     missing_required_restic_keys,
     parse_restic_env_file,
+    publish_service_events_dir,
     render_default_backup_toml,
+    resolve_service_events_dir,
     write_default_restic_env_template,
 )
 
@@ -208,3 +213,52 @@ def test_shim_render_default_backup_toml_is_comment_only(tmp_path: Path) -> None
     path = tmp_path / "backup.toml"
     path.write_text(rendered)
     assert load_backup_config(path) == BackupConfig()
+
+
+# --- service events-dir publish / resolve (host-backup-now discovery) ---
+
+
+def test_resolve_service_events_dir_prefers_published_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-primary caller resolves the service's dir via the host-stable pointer.
+
+    The service publishes under the *primary* agent's state dir; the caller here
+    has a different MNGR_AGENT_STATE_DIR, yet must still resolve the service's.
+    """
+    host_dir = tmp_path / "mngr"
+    primary_events = host_dir / "agents" / "primary" / "events" / "backup"
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
+
+    # The service (primary agent) publishes where it writes.
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(host_dir / "agents" / "primary"))
+    publish_service_events_dir(primary_events)
+
+    # A different (secondary) agent invokes host-backup-now.
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(host_dir / "agents" / "secondary"))
+    assert resolve_service_events_dir() == primary_events
+    # ... which is NOT the caller's own events dir.
+    assert resolve_service_events_dir() != get_events_dir()
+
+
+def test_resolve_service_events_dir_falls_back_to_own_dir_without_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no published pointer, resolution is the caller's own events dir."""
+    host_dir = tmp_path / "mngr"
+    state_dir = host_dir / "agents" / "primary"
+    monkeypatch.setenv("MNGR_HOST_DIR", str(host_dir))
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(state_dir))
+    assert resolve_service_events_dir() == state_dir / "events" / "backup"
+
+
+def test_publish_service_events_dir_is_noop_without_host_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without MNGR_HOST_DIR there is nowhere host-stable to publish; skip quietly."""
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.setenv("MNGR_AGENT_STATE_DIR", str(tmp_path / "state"))
+    # Must not raise.
+    publish_service_events_dir(tmp_path / "state" / "events" / "backup")
+    # And resolution falls back to the caller's own dir.
+    assert resolve_service_events_dir() == tmp_path / "state" / "events" / "backup"

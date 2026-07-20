@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from host_backup.restic import (
     extract_snapshot_id_from_backup_output,
+    is_repo_locked_error,
     is_repo_missing_error,
 )
 
@@ -18,6 +19,21 @@ def test_is_repo_missing_error_rejects_unrelated_failures() -> None:
     assert not is_repo_missing_error("network timeout")
     assert not is_repo_missing_error("permission denied")
     assert not is_repo_missing_error("")
+
+
+def test_is_repo_locked_error_matches_lock_messages() -> None:
+    # The exact stderr restic emits for a stale exclusive lock (dead PID).
+    assert is_repo_locked_error(
+        "unable to create lock in backend: repository is already locked "
+        "exclusively by PID 1515556 on 40e922efb0c9 by root (UID 0)"
+    )
+    assert is_repo_locked_error("repository is already locked by PID 42")
+
+
+def test_is_repo_locked_error_rejects_unrelated_failures() -> None:
+    assert not is_repo_locked_error("network timeout")
+    assert not is_repo_locked_error("repository does not exist")
+    assert not is_repo_locked_error("")
 
 
 def test_extract_snapshot_id_returns_summary_id() -> None:
