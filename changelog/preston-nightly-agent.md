@@ -117,12 +117,9 @@ was already registered. That single failure starved everything downstream: the
 transcript stayed empty, so the login modal -- which only opened in reaction to
 an auth-error transcript event -- could never appear; the welcome-resend had no
 recorded agent id to target; and every retry on later boots collided with the
-half-created agent's name and failed forever. Two changes unwind the deadlock.
-The bootstrap now looks up an existing agent named after the host before
-creating (the same lookup-first shape scripts/run_task_agent.sh uses): a
-survivor from a partial create is adopted -- its id persisted for the welcome
-resend, the signal written -- instead of colliding. And the chat panel now
-backstops the login modal: when a snapshot loads with zero events, it probes
-`GET /api/claude-auth/status` (previously unused) once per page load and opens
-the sign-in modal if logged out. After sign-in, the existing auth-success
-resend delivers the welcome as designed.
+half-created agent's name and failed forever. The fix: the
+bootstrap now looks up an existing agent named after the host before creating
+(the same lookup-first shape scripts/run_task_agent.sh uses): a survivor from
+a partial create is adopted -- its id persisted for the welcome resend, the
+signal written -- instead of colliding. After sign-in, the existing
+auth-success resend delivers the welcome as designed.
