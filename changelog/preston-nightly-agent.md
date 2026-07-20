@@ -34,7 +34,7 @@ about 635 lines -- for the catch-up behavior; the checker replaced it with
 about 50 lines of shell.)
 
 **Scheduled agent tasks and the Caretaker.** A scheduled job can wake an agent
-that runs a skill on a cadence, in its own chat tab. `scripts/run_task_agent.sh
+that runs a skill on a cadence, in its own chat tab. `scripts/run_schedule_agent.sh
 <skill>` spawns a single persistent agent for that skill; on each run mngr clears
 the agent's session and re-sends `/<skill>` so the skill runs fresh, with no memory
 of the previous run.
@@ -117,7 +117,7 @@ an auth-error transcript event -- could never appear; the welcome-resend had no
 recorded agent id to target; and every retry on later boots collided with the
 half-created agent's name and failed forever. The fix: the
 bootstrap now looks up an existing agent named after the host before creating
-(the same lookup-first shape scripts/run_task_agent.sh uses): a survivor from
+(the same lookup-first shape scripts/run_schedule_agent.sh uses): a survivor from
 a partial create is adopted -- its id persisted for the welcome resend, the
 signal written -- instead of colliding. After sign-in, the existing
 auth-success resend delivers the welcome as designed.

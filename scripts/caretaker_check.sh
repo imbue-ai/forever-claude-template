@@ -41,7 +41,7 @@ MARKER="$CARETAKER_DIR/last_check"
 if [ ! -f "$CARETAKER_DIR/permissions.md" ]; then
     log "first run: waking the agent to introduce itself"
     touch "$MARKER"
-    exec bash "$SCRIPT_DIR/run_task_agent.sh" caretaker --template caretaker
+    exec bash "$SCRIPT_DIR/run_schedule_agent.sh" caretaker --template caretaker
 fi
 
 FINDINGS=""
@@ -84,4 +84,4 @@ log "findings; waking the agent"
     printf '# What the weekly check found (%s)\n\n' "$(date +'%Y-%m-%d %H:%M %Z')"
     printf '%s' "$FINDINGS"
 } > "$CARETAKER_DIR/findings.md"
-exec bash "$SCRIPT_DIR/run_task_agent.sh" caretaker --template caretaker
+exec bash "$SCRIPT_DIR/run_schedule_agent.sh" caretaker --template caretaker

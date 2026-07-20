@@ -131,11 +131,11 @@ daily; `*/15 * * * *` = every 15 minutes; `0 0 1 * *` = midnight on the 1st.
 One quirk: `%` is special in cron commands (means newline) -- escape it as `\%`
 (e.g. `date +\%F`). Cron rescans `/etc/cron.d/` within a minute; no reload.
 
-## Set up an agent task (run a skill on a schedule)
+## Set up a schedule agent (run a skill on a schedule)
 
-A **task agent** is a scheduled job that, instead of running a plain script,
-wakes a dedicated agent to run one skill in its own chat tab. To add one -- say
-a morning news digest:
+A **schedule agent** is a scheduled job that, instead of running a plain
+script, wakes a dedicated agent to run one skill in its own chat tab. To add
+one -- say a morning news digest:
 
 1. **Write the skill** at `.agents/skills/<name>/SKILL.md` -- the instructions
    the agent follows on each run (see the existing skills for the shape).
@@ -145,19 +145,19 @@ a morning news digest:
    catch-up, in `/etc/cron.d/news`:
 
    ```
-   * * * * *   root   /mngr/code/scripts/with_agent_env.sh /mngr/code/scripts/run_daily_job.sh news 9 bash /mngr/code/scripts/run_task_agent.sh news >> /var/log/supervisor/news-job.log 2>&1
+   * * * * *   root   /mngr/code/scripts/with_agent_env.sh /mngr/code/scripts/run_daily_job.sh news 9 bash /mngr/code/scripts/run_schedule_agent.sh news >> /var/log/supervisor/news-job.log 2>&1
    ```
 
-That is all -- no new agent template is required. `scripts/run_task_agent.sh
-<skill>` creates a persistent singleton agent (labelled `task_agent=<skill>`),
+That is all -- no new agent template is required. `scripts/run_schedule_agent.sh
+<skill>` creates a persistent singleton agent (labelled `schedule_agent=<skill>`),
 keeps it alive across runs, and on each run clears its chat and re-sends
 `/<skill>`, so the skill runs fresh. The agent surfaces as a tab in the minds UI
 on each run (re-opening the tab if it was closed). Pass `--template <t>` only when you want a custom
-agent template; otherwise the generic `task_agent` template is used.
+agent template; otherwise the generic `schedule_agent` template is used.
 
 ## How the Caretaker is wired (the built-in example)
 
-The Caretaker is the task-agent pattern above with two extra gates in front:
+The Caretaker is the schedule-agent pattern above with two extra gates in front:
 it is **off by default**, and even when on, the agent only wakes when a
 deterministic check found something. Its entry is the single line in
 `/etc/cron.d/minds-caretaker`:
@@ -175,7 +175,7 @@ deterministic check found something. Its entry is the single line in
   fresh error output in `/var/log/supervisor/` since the last check, disk at
   or above 85 percent, and new OOM-guard shedding. Findings are written to
   `runtime/caretaker/findings.md` and the Caretaker agent is woken via
-  `run_task_agent.sh caretaker --template caretaker`; with no findings,
+  `run_schedule_agent.sh caretaker --template caretaker`; with no findings,
   nothing runs until the next weekly check. The one exception: if the agent
   has never introduced itself (no `runtime/caretaker/permissions.md`), it is
   woken once regardless of findings.

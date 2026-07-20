@@ -345,20 +345,20 @@ def test_discovered_agent_labels_come_from_discovery(agent_manager: AgentManager
     """An agent's labels are taken straight from its observe event.
 
     The observe stream carries each agent's current labels -- including the
-    ``highlight`` run-key that run_task_agent.sh bumps on each task-agent run
+    ``highlight`` run-key that run_schedule_agent.sh bumps on each schedule-agent run
     to re-surface its tab. The web UI keys its is_primary hiding and its
     tab surfacing off these, so they must pass straight through.
     """
     agent = _agent_details(
         "caretaker",
-        labels={"task_agent": "caretaker", "highlight": "1700000042", "workspace": "ws"},
+        labels={"schedule_agent": "caretaker", "highlight": "1700000042", "workspace": "ws"},
     )
 
     agent_manager._handle_observe_event(make_agent_state_event(agent))
 
     agents = agent_manager.get_agents()
     assert len(agents) == 1
-    assert agents[0].labels == {"task_agent": "caretaker", "highlight": "1700000042", "workspace": "ws"}
+    assert agents[0].labels == {"schedule_agent": "caretaker", "highlight": "1700000042", "workspace": "ws"}
 
 
 def test_discovered_agent_with_no_labels_has_empty_labels(

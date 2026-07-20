@@ -308,7 +308,7 @@ def _find_existing_chat_agent_id(host_name: str) -> str | None:
     and never signalled ready. The agent survives with no recorded id, and
     re-running `mngr create` would fail with a name collision on every
     subsequent boot, so the retry must adopt the survivor instead. Mirrors
-    the lookup-first shape of scripts/run_task_agent.sh, including --active,
+    the lookup-first shape of scripts/run_schedule_agent.sh, including --active,
     so an archived leftover (or one on a dead host) is never adopted as the
     welcome-resend target. Returns None on lookup failure or ambiguity,
     keeping the caller on the plain create path.
