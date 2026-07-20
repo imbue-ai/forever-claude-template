@@ -1,35 +1,18 @@
 #!/usr/bin/env bash
 #
-# caretaker_check.sh -- the Caretaker's deterministic gate. Cron ticks this
-# every minute; the Caretaker agent itself only ever runs when (a) the user
-# has enabled the feature, (b) the weekly schedule says a check is due, and
-# (c) this script actually found something worth telling them about -- or the
-# agent has never introduced itself.
-#
-# Two modes:
-#   (no args)  the cron entry point: exit unless enabled, then hand timing to
-#              run_daily_job.sh (due hour 3, every 7 days), which re-invokes
-#              this script with --fire when a check is due.
-#   --fire     run the deterministic checks; wake the agent only on findings
-#              (or for its one-time introduction), telling it what's up via
-#              runtime/caretaker/findings.md.
+# caretaker_check.sh -- the Caretaker's deterministic weekly check. The
+# Caretaker is off by default: no cron entry exists until the enable-caretaker
+# skill writes /etc/cron.d/minds-caretaker, whose every-minute tick runs
+# run_daily_job.sh (job id caretaker, due hour 3, --interval-days 7), which
+# execs this script when the weekly check is due. It wakes the Caretaker agent
+# only when it finds something worth telling the user about -- handing the
+# findings over via runtime/caretaker/findings.md -- or when the agent has
+# never introduced itself (no runtime/caretaker/permissions.md yet).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CARETAKER_DIR="$ROOT/runtime/caretaker"
-DUE_HOUR=3
-INTERVAL_DAYS=7
-
-if [ "${1:-}" != "--fire" ]; then
-    # Off by default: without the enable flag this is a no-op, and no stamp is
-    # written -- so enabling later starts fresh, with the introduction landing
-    # at the first due-hour tick after the enable (see the enable-caretaker
-    # skill, which also clears any stale stamp).
-    [ -f "$CARETAKER_DIR/enabled" ] || exit 0
-    exec bash "$SCRIPT_DIR/run_daily_job.sh" caretaker "$DUE_HOUR" --interval-days "$INTERVAL_DAYS" \
-        bash "$SCRIPT_DIR/caretaker_check.sh" --fire
-fi
 
 log() { printf '%s caretaker_check: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
@@ -75,7 +58,7 @@ fi
 
 touch "$MARKER"
 if [ -z "$FINDINGS" ]; then
-    log "all clear; next check in $INTERVAL_DAYS days"
+    log "all clear; nothing to report until the next check"
     exit 0
 fi
 

@@ -239,5 +239,6 @@ over.
 
 When a run wakes you and the permissions are still unanswered, report what the
 deterministic check found (no scan of your own, no fix) and gently re-offer.
-The user can switch you off entirely with `rm runtime/caretaker/enabled` (the
-disable-caretaker skill), and re-enable you later (the enable-caretaker skill).
+The user can switch you off entirely by removing your schedule entry,
+`rm /etc/cron.d/minds-caretaker` (the disable-caretaker skill), and re-enable
+you later (the enable-caretaker skill).

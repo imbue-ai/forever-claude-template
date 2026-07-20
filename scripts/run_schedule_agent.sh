@@ -21,9 +21,9 @@
 #                    passes its own tailored template (`caretaker`).
 #   --agent-name <n> Agent name shown in the UI (default: the skill name).
 #
-# Invoked by the weekly caretaker job (the /etc/cron.d/minds-caretaker line, via
-# scripts/caretaker_check.sh and scripts/run_daily_job.sh) or any other cron
-# entry, through
+# Invoked by the weekly caretaker job (the /etc/cron.d/minds-caretaker entry
+# the enable-caretaker skill creates, via scripts/run_daily_job.sh and
+# scripts/caretaker_check.sh) or any other cron entry, through
 # scripts/with_agent_env.sh so it runs from the repo root (/mngr/code) with the
 # services agent's environment (MNGR_HOST_DIR, MNGR_AGENT_ID, ... -- cron
 # scrubs the env otherwise).

@@ -157,33 +157,32 @@ agent template; otherwise the generic `schedule_agent` template is used.
 
 ## How the Caretaker is wired (the built-in example)
 
-The Caretaker is the schedule-agent pattern above with two extra gates in front:
-it is **off by default**, and even when on, the agent only wakes when a
-deterministic check found something. Its entry is the single line in
-`/etc/cron.d/minds-caretaker`:
+The Caretaker is the schedule-agent pattern above, **off by default**: no
+cron entry exists until the user enables it, and even when on, the agent only
+wakes when a deterministic check found something. Enabling (the
+enable-caretaker skill) writes the single line in
+`/etc/cron.d/minds-caretaker` -- an ordinary daily-job entry:
 
 ```
-* * * * *   root   /mngr/code/scripts/with_agent_env.sh bash /mngr/code/scripts/caretaker_check.sh >> /var/log/supervisor/caretaker-job.log 2>&1
+* * * * *   root   /mngr/code/scripts/with_agent_env.sh /mngr/code/scripts/run_daily_job.sh caretaker 3 --interval-days 7 bash /mngr/code/scripts/caretaker_check.sh >> /var/log/supervisor/caretaker-job.log 2>&1
 ```
 
-- **The gate script** (`scripts/caretaker_check.sh`) exits immediately unless
-  `runtime/caretaker/enabled` exists (created by the enable-caretaker skill).
-  When enabled, it hands timing to `run_daily_job.sh` (job id `caretaker`,
-  due hour 3, `--interval-days 7`), which re-invokes it with `--fire` when a
-  check is due.
-- **The deterministic check** (`--fire`) looks for services in FATAL/BACKOFF,
-  fresh error output in `/var/log/supervisor/` since the last check, disk at
-  or above 85 percent, and new OOM-guard shedding. Findings are written to
+- **Timing** is the standard due-checker: job id `caretaker`, due hour 3,
+  `--interval-days 7`, catch-up after downtime. When a check is due, the
+  checker execs `scripts/caretaker_check.sh`.
+- **The deterministic check** looks for services in FATAL/BACKOFF, fresh
+  error output in `/var/log/supervisor/` since the last check, disk at or
+  above 85 percent, and new OOM-guard shedding. Findings are written to
   `runtime/caretaker/findings.md` and the Caretaker agent is woken via
   `run_schedule_agent.sh caretaker --template caretaker`; with no findings,
   nothing runs until the next weekly check. The one exception: if the agent
   has never introduced itself (no `runtime/caretaker/permissions.md`), it is
   woken once regardless of findings.
-- **How it got there:** written to `/etc/cron.d/minds-caretaker` at image build
-  by `scripts/build_workspace.sh`, guarded on the file's existence so re-runs
-  of that script never recreate it. `rm runtime/caretaker/enabled` (the
-  disable-caretaker skill) switches the Caretaker off; deleting the cron file
-  removes even the no-op tick.
+- **On and off:** the cron entry IS the switch. The enable-caretaker skill
+  writes it (and clears any stale stamp so the introduction lands promptly);
+  `rm /etc/cron.d/minds-caretaker` (the disable-caretaker skill) removes it,
+  and nothing runs at all while disabled. The Caretaker's state under
+  `runtime/caretaker/` survives a disable for a later re-enable.
 - **When the agent runs:** at most once a week, at 3 AM local when the
   container is up (first minute back up after an overdue window otherwise),
   and only with findings -- plus the one-time introduction shortly after the
@@ -206,7 +205,8 @@ The complete map of the scheduling machinery, for edits and debugging:
 - `/etc/cron.d/` -- one drop-in file per job, both kinds: daily jobs are
   every-minute lines through `run_daily_job.sh`, precise jobs are ordinary
   schedule lines (cron rescans the directory within a minute).
-- `/etc/cron.d/minds-caretaker` -- the Caretaker's drop-in.
+- `/etc/cron.d/minds-caretaker` -- the Caretaker's drop-in (only exists
+  while the Caretaker is enabled; see enable-caretaker/disable-caretaker).
 - `/mngr/code/scripts/run_daily_job.sh` -- the daily-job due-checker (all of
   the daily-scheduling logic, about 50 lines).
 - `/var/lib/minds/daily-stamps/<job-id>` -- each daily job's last covered date

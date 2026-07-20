@@ -40,14 +40,14 @@ the agent's session and re-sends `/<skill>` so the skill runs fresh, with no mem
 of the previous run.
 A new scheduled agent (e.g. a morning news digest) needs only a skill plus a
 cron entry -- no new agent template. The weekly **Caretaker** is the built-in
-instance -- and it is **off by default, as a BETA feature**. Its cron entry
-(baked into `/etc/cron.d/minds-caretaker` at image build) ticks a
-deterministic gate, `scripts/caretaker_check.sh`, that is a no-op until the
-user enables the feature; the new **enable-caretaker** skill (used only when
-the user explicitly asks) explains the beta status, gets an explicit yes, and
-turns it on by creating `runtime/caretaker/enabled`. Once enabled, the agent
-introduces itself shortly afterwards, and from then on the gate runs a weekly
-deterministic check -- services in FATAL/BACKOFF, fresh error output in the
+instance -- and it is **off by default, as a BETA feature**: no cron entry
+exists until the user turns it on. The new **enable-caretaker** skill (used
+only when the user explicitly asks) explains the beta status, gets an
+explicit yes, and enables it by writing `/etc/cron.d/minds-caretaker` -- an
+ordinary daily-job entry whose weekly due-checker execs
+`scripts/caretaker_check.sh` when a check is due. Once enabled, the agent
+introduces itself shortly afterwards, and from then on each due check runs a
+deterministic scan -- services in FATAL/BACKOFF, fresh error output in the
 service logs since the last check, disk at or above 85 percent, new OOM-guard
 shedding -- and wakes the agent **only when it found something**, telling it
 what's up via `runtime/caretaker/findings.md`. When woken, the Caretaker
@@ -62,8 +62,8 @@ its own notes on disk, not the conversation. Your standing permissions live in
 a single plain-language `runtime/caretaker/permissions.md` that the Caretaker
 reads each run and rewrites when you change your mind, and that you can edit
 yourself any time. You stay in full control: the
-equally short **disable-caretaker** skill (`rm runtime/caretaker/enabled`)
-switches it off entirely.
+equally short **disable-caretaker** skill (`rm /etc/cron.d/minds-caretaker`)
+switches it off entirely -- while off, nothing runs at all.
 
 **Health-check skills and docs.** Adds a `check-app-errors` skill (survey
 `supervisorctl status`, scan `/var/log/supervisor/` for errors and tracebacks,

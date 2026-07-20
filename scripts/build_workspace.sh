@@ -61,14 +61,3 @@ uv sync --all-packages --frozen
 # /mngr/code is in place (on docker, after the first-boot seed).
 ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/tk
 ln -sf "$REPO_ROOT/vendor/tk/ticket" /usr/local/bin/ticket
-
-# Register the Caretaker's gate: a cron line that ticks every minute into
-# scripts/caretaker_check.sh, which is a no-op until the user enables the
-# feature (runtime/caretaker/enabled -- see the enable-caretaker skill) and
-# thereafter runs a deterministic weekly check that wakes the agent only when
-# it finds something. Guarded on file existence because this script reruns on
-# every Lima create.
-if [ ! -f /etc/cron.d/minds-caretaker ]; then
-    printf '%s\n' '* * * * *   root   /mngr/code/scripts/with_agent_env.sh bash /mngr/code/scripts/caretaker_check.sh >> /var/log/supervisor/caretaker-job.log 2>&1' > /etc/cron.d/minds-caretaker
-    chmod 0644 /etc/cron.d/minds-caretaker
-fi

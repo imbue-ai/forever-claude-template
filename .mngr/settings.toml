@@ -647,8 +647,9 @@ type = "claude"
 # it is a plain `claude` agent sharing the services agent's CLAUDE_CONFIG_DIR
 # via the inherited host env, but it is oriented by an appended system prompt
 # to run the `caretaker` skill. It is spawned (and re-woken) by the caretaker
-# job (/etc/cron.d/minds-caretaker -> scripts/caretaker_check.sh, off by
-# default, weekly and findings-gated when enabled) via
+# job (the /etc/cron.d/minds-caretaker entry the enable-caretaker skill
+# creates -- absent until then, weekly and findings-gated via
+# scripts/caretaker_check.sh once enabled) via
 # scripts/run_schedule_agent.sh, and is labelled schedule_agent=caretaker +
 # highlight=<run-key> so it can be found as a singleton and surfaced as a tab
 # in the minds UI.
