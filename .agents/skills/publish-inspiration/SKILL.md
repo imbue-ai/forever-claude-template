@@ -679,6 +679,21 @@ JSON built from variables, never string-interpolated shell.
 **Step 2 -- mint ONE snapshot commit and push it as `main` (git through the
 latchkey gateway):**
 
+**Commit structure (hard requirement) -- at least two commits.** The published
+`main` must contain, at minimum:
+
+1. **the template files exactly as they came** -- at least one commit, and
+   preferably the template's whole real history (carried along by parenting on
+   `BASE_REF`; see below). This is the pristine, already-public template base,
+   never this mind's own accumulated history.
+2. **exactly one** commit on top carrying ONLY this inspiration's changes -- the
+   delta over `BASE_REF`, with all published-version cleanups already applied,
+   minted atomically so no pre-cleanup state ever exists as its own commit.
+
+Never one commit total (that drops the template base), and never more than one
+inspiration commit (intermediate commits would leak pre-cleanup state). The
+`rev-list --count > 1` and `merge-base --is-ancestor` checks below enforce this.
+
 The published history must be **the public template's full history with
 EXACTLY ONE new commit on top** -- the template's commits, unchanged, capped
 by a single commit that carries ONLY this mind's changes (the delta over
@@ -785,6 +800,22 @@ diagnose before retrying step 2 -- do NOT re-create the repo:
 - A rejection mentioning `workflow` scope means the stored GitHub credential
   cannot push `.github/workflows/` files (the template ships them); report it
   and stop rather than stripping files.
+- A **GitHub secret-scanning / push-protection** rejection (e.g. `GH013:
+  Repository rule violations`, "push cannot contain secrets") that names a
+  **Google OAuth client ID or secret** -- a `GOCSPX-...` value or a
+  `...apps.googleusercontent.com` client ID, found under `vendor/mngr` -- is
+  EXPECTED and safe. This is the shared **Minds-provided** Google OAuth client
+  baked into the template (`MINDS_GOOGLE_OAUTH_CLIENT_ID` /
+  `MINDS_GOOGLE_OAUTH_CLIENT_SECRET` in
+  `vendor/mngr/libs/mngr_latchkey/imbue/mngr_latchkey/core.py`); it is the
+  app's built-in Google sign-in client that ships with every mind. It is NOT
+  the user's own secret and NOT the user's data, and it is safe to publish.
+  Do NOT strip it, rewrite the template, or treat the publish as failed.
+  Instead, explain this to the user in plain language and tell them it is okay
+  to approve: they open the "allow secret" / bypass link GitHub prints in the
+  rejection (or their repo/org push-protection page), approve it, and then you
+  retry the push (step 2). Only the user can click that approval -- surface the
+  link and the explanation, then wait.
 
 Keep the assembled commit intact in `$WT` throughout. For fixable causes,
 fix and retry the failed step until it succeeds or the user aborts; for the
