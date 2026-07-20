@@ -34,12 +34,15 @@ Event ids prefer codex's own stable identity (the assistant message ``id``, or a
 tool call's ``call_id``) so the watcher dedups codex 0.144.3's re-serialised
 duplicates (the same message written to the rollout more than once by the
 "paginated" / world_state persistence). Where codex gives no id (an ``event_msg``
-``user_message``), we fall back to the physical line index -- safe because those are
-not re-serialised, and the watcher reads in order and never reparses a single line.
+``user_message``), we synthesise one from its timestamp + text (see
+``_stable_user_event_id``) rather than the physical line index -- position-independent,
+so if a rollout is compressed and re-materialised (repointing the marker and forcing a
+re-read from byte 0) the same user bubble dedups instead of duplicating.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -118,6 +121,21 @@ def _assistant_event(timestamp: str, event_id: str, *, text: str, tool_calls: li
     }
 
 
+def _stable_user_event_id(timestamp: str, content: str) -> str:
+    """A content-derived, position-independent event id for a user bubble.
+
+    An ``event_msg`` ``user_message`` carries no codex id, so we synthesise one from
+    its ``timestamp`` + text. Unlike the physical line index, this is stable across a
+    re-read of the *same* message from a rotated/materialised rollout (codex compresses
+    finished rollouts to ``.zst`` then re-expands them, which can repoint the marker and
+    force the watcher to re-read from byte 0 -- a line-index id would change and the
+    bubble would duplicate). Two genuinely distinct sends never collide: identical text
+    at the same millisecond timestamp is not something a human can produce.
+    """
+    digest = hashlib.sha1(f"{timestamp}\x00{content}".encode("utf-8", "replace")).hexdigest()[:16]
+    return f"codex-user-{digest}"
+
+
 def _web_search_query(action: Any) -> str:
     """Pull the query from a ``web_search_call``'s ``action`` (Search variant:
     ``query``, or the first of ``queries``). Empty string when absent."""
@@ -162,7 +180,7 @@ def parse_codex_rollout_line(
         if payload_type == "user_message":
             text = payload.get("message")
             if isinstance(text, str) and text:
-                event_id = f"codex-{line_index}-user"
+                event_id = _stable_user_event_id(timestamp, text)
                 return [
                     {
                         "timestamp": timestamp,
