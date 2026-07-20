@@ -43,7 +43,7 @@
           },
           {
             "type": "command",
-            "command": "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_oom_tag_subprocess.py 2>/dev/null || true"
+            "command": "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_rewrite_bash_command.py 2>/dev/null || true"
           }
         ]
       }
