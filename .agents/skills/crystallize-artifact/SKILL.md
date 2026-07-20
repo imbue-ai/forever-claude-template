@@ -142,6 +142,15 @@ when invoked by `build-web-service`. Fill in the real `## What was done` and
 
 ## Step 4: Launch the worker
 
+**Commit any pending changes before you launch, and never harden inline.** The
+worker is created from your committed HEAD, so uncommitted changes never reach
+it -- and `create_worker.py launch` refuses a dirty tree outright. Commit your
+work first (the just-finished change is exactly what belongs on the branch);
+**commit, never stash** -- stashed work gets lost during multi-agent
+coordination. A dirty tree (even unrelated changes) is never a reason to do the
+hardening inline: commit, then dispatch. Hardening always runs in the background
+worker.
+
 ```bash
 uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name crystallize-$NAME \

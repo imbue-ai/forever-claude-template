@@ -138,6 +138,15 @@ the worker fails loudly if it is missing.
 
 ## Step 3: Launch the worker and poll
 
+**Commit any pending changes before you launch, and never harden inline.** The
+worker is created from your committed HEAD, so uncommitted changes never reach
+it -- and `create_worker.py launch` refuses a dirty tree outright. Commit your
+work first (the change being hardened is exactly what belongs on the branch);
+**commit, never stash** -- stashed work gets lost during multi-agent
+coordination. A dirty tree (even unrelated changes) is never a reason to do the
+hardening inline: commit, then dispatch. Hardening always runs in the background
+worker.
+
 ```bash
 uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name update-$TARGET \

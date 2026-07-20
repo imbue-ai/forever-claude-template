@@ -82,6 +82,11 @@ BODY_EOF
 the runtime-dir push, and the task message. Run it in the foreground so a
 failed launch surfaces immediately.
 
+**Commit any pending changes first.** The worker is created from your committed
+HEAD (`mngr create` refuses a dirty tree), so uncommitted work never reaches it.
+Commit -- never stash (stashed work gets lost during multi-agent coordination)
+-- then launch.
+
 ```bash
 uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name $NAME \

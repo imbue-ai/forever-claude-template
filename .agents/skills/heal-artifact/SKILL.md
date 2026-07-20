@@ -108,6 +108,14 @@ placeholders.
 
 ## Step 3: Launch the worker and poll
 
+**Commit any pending changes before you launch, and never harden inline.** The
+worker is created from your committed HEAD, so uncommitted changes never reach
+it -- and `create_worker.py launch` refuses a dirty tree outright. Commit your
+work first; **commit, never stash** -- stashed work gets lost during
+multi-agent coordination. A dirty tree (even unrelated changes) is never a
+reason to do the fix inline: commit, then dispatch. Healing always runs in the
+background worker.
+
 ```bash
 uv run .agents/skills/launch-task/scripts/create_worker.py launch \
     --name heal-$TARGET \

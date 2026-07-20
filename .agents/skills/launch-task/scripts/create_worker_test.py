@@ -105,6 +105,7 @@ def test_happy_path_no_artifacts(tmp_path: Path) -> None:
     assert rc == 0
     argvs = [c.argv for c in runner.calls]
     assert argvs == [
+        ["git", "status", "--porcelain"],
         [
             "mngr",
             "create",
@@ -326,10 +327,66 @@ def test_launch_proceeds_when_report_path_is_clear(tmp_path: Path) -> None:
 
     assert rc == 0
     assert [c.argv[:2] for c in runner.calls] == [
+        ["git", "status"],
         ["mngr", "create"],
         ["mngr", "rsync"],
         ["mngr", "message"],
     ]
+
+
+def test_launch_refuses_dirty_worktree(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dirty working tree aborts before any mngr call, with a commit-first
+    message that names stashing as the wrong move.
+
+    The worker branches from committed HEAD, so uncommitted changes never reach
+    it; ``mngr create`` also refuses a dirty tree. Catching it here turns an
+    opaque ``mngr create`` failure into an actionable one.
+    """
+    runtime, task, _ = _make_layout(tmp_path)
+    runner = _RecordingRunner()
+    runner.respond(("git", "status"), _StubResult(stdout=" M some_file.py\n"))
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        runner=runner,
+    )
+
+    assert rc == 2
+    # The clean check ran, and nothing was handed to mngr.
+    assert ["git", "status", "--porcelain"] in [c.argv for c in runner.calls]
+    assert not any(c.argv[:1] == ["mngr"] for c in runner.calls)
+    err = capsys.readouterr().err
+    assert "uncommitted changes" in err
+    assert "Commit" in err
+    assert "stash" in err
+
+
+def test_launch_proceeds_when_not_a_git_repo(tmp_path: Path) -> None:
+    """A non-zero ``git status`` (not a git repo / git unavailable) is treated as
+    'nothing to gate on' and launch proceeds -- mngr surfaces its own error later
+    if it needs a repo."""
+    runtime, task, _ = _make_layout(tmp_path)
+    runner = _RecordingRunner()
+    runner.respond(
+        ("git", "status"),
+        _StubResult(returncode=128, stderr="fatal: not a git repository"),
+    )
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert any(c.argv[:2] == ["mngr", "create"] for c in runner.calls)
 
 
 def test_invalid_frontmatter_yaml_raises(tmp_path: Path) -> None:
@@ -490,6 +547,7 @@ def test_common_transcript_flushed_before_message_send(tmp_path: Path) -> None:
     argvs = [c.argv for c in runner.calls]
     expected_script = str(state_dir / "commands" / "common_transcript.sh")
     assert argvs == [
+        ["git", "status", "--porcelain"],
         [
             "mngr",
             "create",
