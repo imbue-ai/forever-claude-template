@@ -30,6 +30,7 @@ from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.oom_prioritizer import ChatOomPrioritizer
 from imbue.system_interface.server import _DEFAULT_TAIL_COUNT
 from imbue.system_interface.server import _build_destroy_command
+from imbue.system_interface.server import _handle_client_state_message
 from imbue.system_interface.server import _stream_filtered_events
 from imbue.system_interface.server import create_application
 from imbue.system_interface.testing import RecordingMngrMessenger
@@ -368,9 +369,7 @@ def test_send_message_success() -> None:
     assert messenger.sent == [(agent_id, "hello")]
 
 
-def _manager_with_capturing_prioritizer(
-    writes: list[tuple[int, int]], pids: dict[str, int]
-) -> AgentManager:
+def _manager_with_capturing_prioritizer(writes: list[tuple[int, int]], pids: dict[str, int]) -> AgentManager:
     """An AgentManager whose OOM prioritizer captures its band writes.
 
     The prioritizer collaborator is swapped for one wired to a fake pid resolver
@@ -957,6 +956,54 @@ def _isolated_client_activity_events_path() -> Path:
         / "client_activity"
         / "events.jsonl"
     )
+
+
+def test_ws_client_connected_write_uses_connect_time_layout_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A WS connection writes client-activity to the dir captured at connect,
+    not whatever ``MNGR_HOST_DIR`` points at when the message is processed.
+
+    Guards against a cross-server leak: in tests several servers share one
+    process's env, so a lingering connection that re-resolved the events path
+    from live env at write time could append into a *different* server's
+    activity log (observed as a flaky failure in the layout ``context`` test,
+    which then saw a client it never created).
+    """
+    captured_layout_dir = tmp_path / "server_a" / "workspace_layout"
+    # After connect, pretend the process env has moved on to a different server.
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path / "server_b"))
+    monkeypatch.setenv("MNGR_AGENT_ID", "agent-b")
+
+    broadcaster = WebSocketBroadcaster()
+    client_queue = broadcaster.register()
+    try:
+        handled = _handle_client_state_message(
+            json.dumps(
+                {
+                    "type": "client_state",
+                    "client_id": "client-xyz",
+                    "active_layout": "desktop",
+                    "device_kind": "desktop",
+                }
+            ),
+            client_queue,
+            broadcaster,
+            layout_dir=captured_layout_dir,
+            is_first_report=True,
+        )
+    finally:
+        broadcaster.unregister(client_queue)
+
+    assert handled is True
+    # The event landed in the connect-time dir...
+    written = client_activity.read_client_activity_events(client_activity.get_events_path(captured_layout_dir))
+    assert [event["client_id"] for event in written] == ["client-xyz"]
+    # ...and nothing leaked into the (now-current) live-env server's location.
+    live_env_layout_dir = (
+        Path(os.environ["MNGR_HOST_DIR"]) / "agents" / os.environ["MNGR_AGENT_ID"] / "workspace_layout"
+    )
+    assert not client_activity.get_events_path(live_env_layout_dir).exists()
 
 
 def test_layout_broadcast_load_targets_recent_messager(app: Flask) -> None:

@@ -979,10 +979,18 @@ def _create_chat_agent() -> Response:
 def _ws_endpoint(websocket: Any) -> None:
     """Unified WebSocket for agent state and application updates."""
     state = get_state()
+    # Resolve the primary agent's layout dir once, at connect, and bind it to
+    # this connection for the lifetime of the loop. The resolver reads
+    # process-global env (MNGR_HOST_DIR / MNGR_AGENT_ID); capturing it here
+    # keeps every write this connection makes pointed at *this* server's
+    # workspace even if that env is later mutated (which only happens in tests,
+    # where several servers share one process -- a stray late write from a
+    # lingering connection would otherwise land in another server's log).
     _run_ws_broadcast_loop(
         websocket=websocket,
         agent_manager=state.agent_manager,
         ws_broadcaster=state.broadcaster,
+        layout_dir=_primary_agent_layout_dir(),
     )
 
 
@@ -990,6 +998,7 @@ def _handle_client_state_message(
     raw_message: str,
     client_queue: "queue.Queue[str | None]",
     ws_broadcaster: WebSocketBroadcaster,
+    layout_dir: Path | None,
     is_first_report: bool,
 ) -> bool:
     """Process one incoming WebSocket message; returns True for a ``client_state``.
@@ -1017,7 +1026,6 @@ def _handle_client_state_message(
     if not client_id or not active_layout:
         return False
     ws_broadcaster.set_client_info(client_queue, client_id, active_layout, device_kind)
-    layout_dir = _primary_agent_layout_dir()
     if layout_dir is not None:
         workspace_layouts.set_last_active_slug(layout_dir, active_layout)
         events_path = client_activity.get_events_path(layout_dir)
@@ -1038,6 +1046,7 @@ def _run_ws_broadcast_loop(
     websocket: Any,
     agent_manager: AgentManager,
     ws_broadcaster: WebSocketBroadcaster,
+    layout_dir: Path | None,
 ) -> None:
     """Stream broadcaster messages to ``websocket`` until the client disconnects.
 
@@ -1082,7 +1091,11 @@ def _run_ws_broadcast_loop(
             incoming = websocket.receive(timeout=0)
             while incoming is not None:
                 if _handle_client_state_message(
-                    str(incoming), client_queue, ws_broadcaster, is_first_report=not is_client_registered
+                    str(incoming),
+                    client_queue,
+                    ws_broadcaster,
+                    layout_dir=layout_dir,
+                    is_first_report=not is_client_registered,
                 ):
                     is_client_registered = True
                 incoming = websocket.receive(timeout=0)
