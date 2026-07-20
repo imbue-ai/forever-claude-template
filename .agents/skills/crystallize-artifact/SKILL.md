@@ -163,6 +163,7 @@ Reports surface as task notifications; handle them when they arrive.
 ```bash
 # Run with Bash run_in_background: true.
 uv run .agents/skills/launch-task/scripts/create_worker.py await \
+    --name crystallize-$NAME \
     --task-file runtime/harden/crystallize-$NAME/task.md \
     --timeout 90m
 ```
