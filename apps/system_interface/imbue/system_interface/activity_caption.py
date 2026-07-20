@@ -82,6 +82,11 @@ _CODE_MODE_VERB_BY_FN: dict[str, str] = {
     "web_search": "Searching the web",
     "apply_patch": "Editing",
     "view_image": "Viewing image",
+    "update_plan": "Planning",
+    "write_stdin": "Typing into terminal",
+    "request_user_input": "Asking",
+    "imagegen": "Generating image",
+    "read_mcp_resource": "Reading resource",
 }
 
 
@@ -98,6 +103,9 @@ def _code_mode_target(fn: str, js: str) -> str | None:
     if fn == "view_image":
         match = re.search(r'path\s*:\s*"([^"]*)"', js)
         return _basename(match.group(1)) if match else None
+    if fn == "write_stdin":
+        match = re.search(r'chars\s*:\s*"([^"]*)"', js)
+        return _shorten(match.group(1)) if match else None
     return None
 
 
@@ -107,6 +115,12 @@ def _code_mode_caption(js: str) -> str:
     if match is None:
         return _CODEX_CODE_EXEC_LABEL
     fn = match.group(1)
+    if fn.startswith(_CODEX_SPAWN_TOOL_PREFIX):
+        return "Delegating to sub-agent…"
+    if fn.startswith(_MCP_PREFIX):
+        mcp_label = _label_for_mcp(fn)
+        if mcp_label is not None:
+            return mcp_label
     verb = _CODE_MODE_VERB_BY_FN.get(fn)
     target = _code_mode_target(fn, js)
     if verb is not None and target is not None:

@@ -47,12 +47,39 @@ def test_claude_caption(tool_name: str, input_preview: str, expected: str) -> No
 @pytest.mark.parametrize(
     "tool_name, input_preview, expected",
     [
-        # code-mode exec is a JS program -> fixed label, never parsed.
+        # code-mode exec: parse the tools.<fn> out of the JS and caption THAT.
         pytest.param(
             "exec",
             'const r = await tools.exec_command({cmd:"sleep 20"}); text(r.output);',
-            "Running code",
-            id="codex_code_mode_exec",
+            "Running sleep 20",
+            id="codex_code_mode_exec_command",
+        ),
+        pytest.param(
+            "exec",
+            'const r = await tools.web__run({search_query:[{q:"Tokyo"}]}); text(r)',
+            'Searching the web "Tokyo"',
+            id="codex_code_mode_web_run",
+        ),
+        pytest.param(
+            "exec",
+            'await tools.apply_patch("*** Begin Patch\\n*** Update File: src/main.py\\n")',
+            "Editing main.py",
+            id="codex_code_mode_apply_patch",
+        ),
+        pytest.param(
+            "exec", "await tools.update_plan({plan:[]})", "Planning…", id="codex_code_mode_update_plan"
+        ),
+        pytest.param(
+            "exec", "await tools.spawn_agent({task:'x'})", "Delegating to sub-agent…", id="codex_code_mode_spawn"
+        ),
+        pytest.param(
+            "exec", "await tools.mcp__srv__do_thing({})", "Running do thing", id="codex_code_mode_mcp"
+        ),
+        # No tools.<fn> in the JS -> the fixed fallback.
+        pytest.param("exec", "const x = 1 + 1;", "Running code", id="codex_code_mode_no_tool_call"),
+        # Unknown tools.<fn> -> humanized.
+        pytest.param(
+            "exec", "await tools.get_context_remaining({})", "Running get context remaining", id="codex_code_mode_unknown_fn"
         ),
         pytest.param("exec_command", '{"cmd":"pytest -q"}', "Running pytest -q", id="codex_exec_command"),
         pytest.param("shell_command", '{"command":"ls -la"}', "Running ls -la", id="codex_shell_command"),
