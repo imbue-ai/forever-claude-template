@@ -123,6 +123,43 @@ re-derive new fields with no refetch, and what lets surfaces show the raw record
 or link out to its source. Retain whatever a consumer needs to render the record
 faithfully later.
 
+## Bound disk growth -- evict what the artifact no longer needs
+
+This is an always-applies invariant, not a creation-time step. It holds
+**whenever** the artifact persists anything across runs -- when you first build
+it, and equally when an `update` teaches a previously stateless skill or service
+to fetch or store, or enlarges a store it already had. The persist-and-preserve
+contracts above tell you to write records durably and incrementally. Left
+unqualified, that turns any artifact you run more than once -- a recurring
+pipeline, a service that polls on a schedule, anything that appends results, raw
+payloads, logs, caches, or fixtures -- into an ever-growing store that
+eventually fills the disk. The harden pass is where you give every growing store
+a **bounded retention policy**; an artifact that can only accrete and never
+evicts is not hardened, no matter how well-tested its happy path is.
+
+- **Find every store the artifact writes to and decide, explicitly, what bounds
+  each one.** Persisted results, raw-payload archives, on-disk caches, log
+  files, generated fixtures, temp/scratch directories -- for each, pick a bound
+  (a max age, a max count, a max total size, or "keep only the latest N runs")
+  and enforce it as part of the artifact's own flow, not as a chore you hope
+  someone remembers.
+- **Evict as part of the same run that writes.** Prune on write (or on a step
+  the run always reaches) so the bound holds without a separate cleanup process.
+  A retention policy that depends on out-of-band manual cleanup is not a bound.
+- **Reconcile eviction with preserve-and-surface, don't skip it.** These pull in
+  opposite directions on purpose: keep the raw source records long enough to
+  re-derive and surface them, but cap how far back that retention goes. When a
+  record ages out, evict the derived data and its raw payload together so a
+  surface never points at a source that has been pruned out from under it.
+- **Prefer existing rotation/TTL machinery over hand-rolled deletion.** Use log
+  rotation, a store's built-in TTL/size cap, or the repo's existing retention
+  helpers before writing your own prune loop -- and never delete by a fragile
+  heuristic (glob-and-`rm`) that could take out data the artifact still needs.
+- **Cover the bound with a test.** Assert that after writing past the limit the
+  store holds only what the policy allows and that the oldest entries are gone --
+  the eviction path is exactly the kind of behavior that silently rots if
+  nothing exercises it.
+
 ## If you need to give up
 
 If you cannot reach a tested, clean state (a dependency you cannot resolve, an
