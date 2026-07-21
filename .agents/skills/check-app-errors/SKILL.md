@@ -82,5 +82,5 @@ rather than a re-scan.
   them as transient: capture anything you need to keep elsewhere.
 - Logs rotate (`<name>-stderr.log.1`, `.2`, ...). If a recent error is not in the
   live file, check the rotated backups.
-- To restart a crashed service after a fix, see the `edit-services` skill
+- To restart a crashed service after a fix, see the `update-service` skill
   (`supervisorctl restart <name>`).
