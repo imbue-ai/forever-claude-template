@@ -477,6 +477,22 @@ class TimezoneFetchError(Exception):
     """The timezone endpoint answered with an unusable payload."""
 
 
+def _parse_timezone_response(body: bytes) -> str:
+    """Parse the timezone endpoint's body into an IANA name, or "" for unknown.
+
+    A well-formed ``{"timezone": ""}`` is the desktop client's documented
+    answer when the user's timezone cannot be determined -- a valid response,
+    returned as "" so callers fall back to UTC without treating it as a
+    failure. Raises ValueError for a non-JSON or non-UTF-8 body and
+    TimezoneFetchError for a well-formed body of the wrong shape.
+    """
+    payload = json.loads(body.decode("utf-8"))
+    timezone_name = payload.get("timezone") if isinstance(payload, dict) else None
+    if not isinstance(timezone_name, str):
+        raise TimezoneFetchError(f"unexpected timezone payload: {payload!r}")
+    return timezone_name
+
+
 # The gateway's reverse tunnel may not be up yet this early in boot, and there
 # is no readiness event to wait on -- hence the small bounded retry.
 @retry(
@@ -490,14 +506,12 @@ def _request_timezone(request: urllib.request.Request) -> str:
 
     OSError covers URLError/HTTPError (refused, 403/503, timeout); ValueError
     covers a non-JSON or non-UTF-8 body; TimezoneFetchError an unexpected
-    payload shape.
+    payload shape. A well-formed "unknown" answer is returned as "" without
+    retrying -- the server's answer will not change within the retry window.
     """
     with urllib.request.urlopen(request, timeout=5) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    timezone_name = payload.get("timezone") if isinstance(payload, dict) else None
-    if not isinstance(timezone_name, str) or not timezone_name:
-        raise TimezoneFetchError(f"unexpected timezone payload: {payload!r}")
-    return timezone_name
+        body = response.read()
+    return _parse_timezone_response(body)
 
 
 def _fetch_user_timezone() -> str:
@@ -507,8 +521,9 @@ def _fetch_user_timezone() -> str:
     the gateway env vars mngr injects into the agent environment. Timezone-at-
     boot: the caller points /etc/localtime + /etc/timezone at the result so
     cron schedules run in the user's local time. Returns "" on any failure
-    (missing env, refused connection, non-200, malformed body) so the caller
-    can fall back to UTC.
+    (missing env, refused connection, non-200, malformed body) -- and when the
+    desktop client itself does not know the timezone -- so the caller can fall
+    back to UTC.
     """
     gateway = os.environ.get("LATCHKEY_GATEWAY", "")
     password = os.environ.get("LATCHKEY_GATEWAY_PASSWORD", "")
@@ -524,7 +539,7 @@ def _fetch_user_timezone() -> str:
         },
     )
     try:
-        return _request_timezone(request)
+        timezone_name = _request_timezone(request)
     except (OSError, ValueError, TimezoneFetchError) as e:
         logger.warning(
             "Could not fetch the user timezone from the gateway ({}); "
@@ -532,6 +547,9 @@ def _fetch_user_timezone() -> str:
             e,
         )
         return ""
+    if not timezone_name:
+        logger.debug("Desktop client does not know the user timezone; container stays on UTC")
+    return timezone_name
 
 
 def _apply_container_timezone(

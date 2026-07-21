@@ -15,6 +15,7 @@ from mngr_cli_contract.contract import assert_mngr_argv_valid
 
 from bootstrap.manager import (
     INITIAL_CHAT_AGENT_ID_FILENAME,
+    TimezoneFetchError,
     _apply_container_timezone,
     _build_create_chat_command,
     _configure_git_global,
@@ -25,6 +26,7 @@ from bootstrap.manager import (
     _maybe_create_initial_chat,
     _parse_created_agent_id,
     _parse_env_file,
+    _parse_timezone_response,
     _persist_initial_chat_agent_id,
     _read_host_name,
     _read_main_agent_labels,
@@ -645,3 +647,36 @@ def test_fetch_user_timezone_returns_empty_when_gateway_env_missing(
     monkeypatch.delenv("LATCHKEY_GATEWAY_PASSWORD", raising=False)
     monkeypatch.delenv("LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE", raising=False)
     assert _fetch_user_timezone() == ""
+
+
+# --- _parse_timezone_response ---
+
+
+def test_parse_timezone_response_returns_the_zone_name() -> None:
+    assert _parse_timezone_response(b'{"timezone": "America/New_York"}') == "America/New_York"
+
+
+def test_parse_timezone_response_accepts_the_documented_unknown_answer() -> None:
+    """{"timezone": ""} is the desktop client's valid "unknown" answer -- it must
+    come back as "" (fall back to UTC), not raise (which would be retried)."""
+    assert _parse_timezone_response(b'{"timezone": ""}') == ""
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"[]",
+        b'"America/New_York"',
+        b"{}",
+        b'{"timezone": null}',
+        b'{"timezone": 42}',
+    ],
+)
+def test_parse_timezone_response_rejects_wrong_shapes(body: bytes) -> None:
+    with pytest.raises(TimezoneFetchError):
+        _parse_timezone_response(body)
+
+
+def test_parse_timezone_response_rejects_a_non_json_body() -> None:
+    with pytest.raises(ValueError):
+        _parse_timezone_response(b"<html>bad gateway</html>")
