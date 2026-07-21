@@ -351,6 +351,24 @@ def test_cli_seeds_the_creation_line_before_recording_a_publish(tmp_path: Path) 
     assert "### people-crm  --  github.com/preston/people-crm" in text
 
 
+def test_cli_names_the_template_version_the_creation_snapshot_can_reach(
+    tmp_path: Path,
+) -> None:
+    # The real topology: the `minds-v*` tag is on the TEMPLATE commit, and
+    # bootstrap's `Initial workspace commit` marker sits on top of it untagged.
+    # The creation line must still name the version -- a tag-points-at lookup
+    # would find nothing here and silently degrade to the unnamed fallback.
+    _init_bare_repo(tmp_path)
+    _git(tmp_path, "commit", "--allow-empty", "-q", "-m", "template release")
+    _git(tmp_path, "tag", "minds-v0.3.6")
+    _git(tmp_path, "commit", "--allow-empty", "-q", "-m", "Initial workspace commit")
+    _git(tmp_path, "commit", "--allow-empty", "-q", "-m", "app work")
+
+    assert version_history.main(["--repo-root", str(tmp_path), "seed-workspace"]) == 0
+    text = (tmp_path / version_history.DEFAULT_FILENAME).read_text(encoding="utf-8")
+    assert "created from minds-v0.3.6" in text
+
+
 def test_cli_add_workspace_is_idempotent(tmp_path: Path) -> None:
     _init_repo(tmp_path)
     argv = [

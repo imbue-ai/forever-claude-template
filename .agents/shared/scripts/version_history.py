@@ -341,6 +341,19 @@ def _git(args: Sequence[str], repo_root: Path) -> str:
     return result.stdout.strip()
 
 
+def _git_optional(args: Sequence[str], repo_root: Path) -> str | None:
+    """`_git` for a query whose "no answer" is a non-zero exit, not an error.
+
+    Only for lookups where absence is a normal outcome (e.g. `git describe` in a
+    repo with no matching tag). Everything that must succeed goes through
+    :func:`_git` so a broken repo surfaces instead of being swallowed.
+    """
+    try:
+        return _git(args, repo_root)
+    except subprocess.CalledProcessError:
+        return None
+
+
 def _first_parent_commits(repo_root: Path) -> list[Commit]:
     output = _git(["log", "--first-parent", "--format=%H %s", "HEAD"], repo_root)
     commits: list[Commit] = []
@@ -381,12 +394,18 @@ def _commit_date(repo_root: Path, ref: str) -> str:
 
 
 def _template_version_at(repo_root: Path, ref: str) -> str | None:
-    """The `minds-v*` tag pointing at `ref`, if the repo has one locally."""
-    tags = _git(["tag", "--points-at", ref, "--list", "minds-v*"], repo_root)
-    candidates = [tag.strip() for tag in tags.splitlines() if tag.strip()]
-    if not candidates:
-        return None
-    return sorted(candidates)[-1]
+    """The nearest `minds-v*` tag REACHABLE FROM `ref`, if the repo has one.
+
+    Reachable, not pointing-at: no tag ever sits on a creation snapshot. The
+    `Initial workspace commit` marker is an `--allow-empty` commit bootstrap
+    writes ON TOP of the cloned template commit, and an `update-self:` marker is
+    a merge commit -- in both cases the `minds-v*` tag is on an ancestor. A
+    pointing-at lookup would therefore always come up empty and every creation
+    line would degrade to the unnamed fallback.
+    """
+    return _git_optional(
+        ["describe", "--tags", "--abbrev=0", "--match", "minds-v*", ref], repo_root
+    )
 
 
 # --- CLI --------------------------------------------------------------------
@@ -430,9 +449,9 @@ def _seed(
     """Return the text with the "created from" line seeded, or ``None`` if present.
 
     The date and the template version are resolved from the creation commit
-    itself (its commit date; a `minds-v*` tag pointing at it) rather than from
-    the caller's clock, so seeding late -- the first time any skill writes to
-    the ledger -- still records when the workspace was actually created.
+    itself (its commit date; the nearest `minds-v*` tag it can reach) rather than
+    from the caller's clock, so seeding late -- the first time any skill writes
+    to the ledger -- still records when the workspace was actually created.
     """
     if has_created_from_line(text):
         return None
@@ -548,8 +567,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     seed_parser.add_argument(
         "--template-version",
         default=None,
-        help="Template version created from (default: a minds-v* tag on the "
-        "creation snapshot, else unnamed).",
+        help="Template version created from (default: the nearest minds-v* tag "
+        "reachable from the creation snapshot, else unnamed).",
     )
     seed_parser.add_argument(
         "--date",
