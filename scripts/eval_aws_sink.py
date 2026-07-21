@@ -1,11 +1,11 @@
-"""S3 sink for the eval worker.
+"""R2 (S3-compatible) sink for the eval worker.
 
 Self-contained: all credentials come from the slotted scripts/test_case_metadata.json (aws_access_key_id /
-aws_secret_access_key / restic_repository / restic_password), NOT from minds' backup provisioning
-(which does not reliably land a restic.env inside a Modal sandbox). We drive restic ourselves:
+aws_secret_access_key / s3_endpoint / restic_repository / restic_password), NOT from minds' backup
+provisioning (which does not reliably land a restic.env inside a Modal sandbox). We drive restic ourselves:
 
 - restic snapshots of /mngr, tagged post_message_<k>, at the turns we choose.
-- plain S3 objects (state.json, transcript) via boto3, same creds, into the case's S3 prefix.
+- plain objects (state.json, transcript) via boto3 against the R2 endpoint, same creds, into the case's prefix.
 """
 
 from __future__ import annotations
@@ -46,7 +46,8 @@ class AwsSink:
         self._config = config
         self._bucket = config["s3_bucket"]
         self._prefix = str(config["s3_prefix"]).rstrip("/")
-        self._region = config.get("aws_region", "us-east-1")
+        self._region = config.get("aws_region") or "auto"
+        self._endpoint = config.get("s3_endpoint", "")
         self._key = config.get("aws_access_key_id", "")
         self._secret = config.get("aws_secret_access_key", "")
         self._repo = config.get("restic_repository", "")
@@ -55,6 +56,7 @@ class AwsSink:
 
         self._s3 = boto3.client(
             "s3",
+            endpoint_url=self._endpoint or None,
             aws_access_key_id=self._key,
             aws_secret_access_key=self._secret,
             region_name=self._region,
