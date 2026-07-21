@@ -147,8 +147,11 @@ main() {
   id="$(printf '%s\n' "$ids" | head -n 1)"
 
   # Bump the highlight key so the minds UI re-surfaces the tab for this new
-  # run if the user had closed it.
-  uv run mngr label "$id" -l "highlight=$(date +%s)" 2>/dev/null || true
+  # run if the user had closed it. Best-effort: a failed bump must not stop
+  # the run itself, but it does mean the tab will not re-surface, so log it.
+  if ! uv run mngr label "$id" -l "highlight=$(date +%s)"; then
+    log "warning: could not bump the highlight key for ${id}; the tab may not re-surface for this run"
+  fi
 
   # Clear the rendered chat so this run starts from an empty conversation.
   log "clearing schedule agent ${id} for a fresh run"
