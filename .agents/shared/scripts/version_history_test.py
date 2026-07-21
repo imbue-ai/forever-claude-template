@@ -12,6 +12,8 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
+import pytest
+
 _MODULE_PATH = Path(__file__).with_name("version_history.py")
 _spec = importlib.util.spec_from_file_location("version_history", _MODULE_PATH)
 assert _spec is not None and _spec.loader is not None
@@ -386,6 +388,50 @@ def test_cli_add_workspace_is_idempotent(tmp_path: Path) -> None:
     assert version_history.main(argv) == 0
     text = (tmp_path / version_history.DEFAULT_FILENAME).read_text(encoding="utf-8")
     assert text.count("updated to minds-v0.3.8") == 1
+
+
+def test_cli_accepts_repo_root_after_the_subcommand(tmp_path: Path) -> None:
+    # The shared flags default to argparse.SUPPRESS precisely so either
+    # position works; every other test passes them first, so cover the other.
+    _init_repo(tmp_path)
+    assert (
+        version_history.main(
+            [
+                "add-workspace",
+                "--template-version",
+                "minds-v0.3.8",
+                "--sha",
+                "HEAD",
+                "--repo-root",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    ledger = tmp_path / version_history.DEFAULT_FILENAME
+    assert ledger.is_file(), "the ledger went somewhere other than --repo-root"
+    assert "updated to minds-v0.3.8" in ledger.read_text(encoding="utf-8")
+
+
+def test_cli_resolve_base_ref_prints_the_marker_and_keeps_printing_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _init_repo(tmp_path)
+    _git(tmp_path, "commit", "--allow-empty", "-q", "-m", "update-self: merge upstream")
+    merge = _git(tmp_path, "rev-parse", "HEAD")
+
+    def _resolved() -> str:
+        assert (
+            version_history.main(["--repo-root", str(tmp_path), "resolve-base-ref"]) == 0
+        )
+        return capsys.readouterr().out.strip()
+
+    assert _resolved() == merge
+    # Commits landing on top do not move the answer -- update-self's landing
+    # step passes this sha to `add-workspace` and then commits the ledger, so a
+    # re-run has to resolve to the same merge for the append to stay a no-op.
+    _git(tmp_path, "commit", "--allow-empty", "-q", "-m", "version history: updated")
+    assert _resolved() == merge
 
 
 def test_shipped_ledger_matches_the_template() -> None:
