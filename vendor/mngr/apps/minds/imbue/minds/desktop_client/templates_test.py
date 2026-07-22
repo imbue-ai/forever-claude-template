@@ -34,6 +34,7 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_N
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
+from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -260,26 +261,6 @@ def test_render_create_form_shows_preset_cards() -> None:
     assert "Advanced Configuration" in html
 
 
-def test_render_create_form_landing_fallback_wires_self_heal_sse() -> None:
-    # The landing fallback (create form shown at "/" when no workspace is known)
-    # subscribes to the chrome SSE and navigates to "/" once a workspace appears,
-    # so a user stranded here by a cold-start discovery race is not trapped.
-    html = render_create_form(is_landing_fallback=True)
-    assert "/_chrome/events" in html
-    assert "EventSource" in html
-    assert "workspaceNowExists" in html
-    assert "window.location = '/'" in html
-
-
-def test_render_create_form_explicit_page_omits_self_heal_sse() -> None:
-    # The explicit /create page (the default, is_landing_fallback False) must not
-    # wire the self-heal SSE, so a deliberate "create another workspace" flow is
-    # never bounced away by the user's existing workspaces.
-    html = render_create_form()
-    assert "/_chrome/events" not in html
-    assert "workspaceNowExists" not in html
-
-
 def test_render_create_form_opens_signin_modal_via_overlay_relay() -> None:
     # Choosing Imbue Cloud while signed out opens the sign-in modal in the
     # desktop client's shared overlay layer (so it covers the title bar), not an
@@ -345,12 +326,10 @@ def test_render_create_form_selects_specified_launch_mode() -> None:
     assert 'value="LIMA" selected' not in html
 
 
-def test_render_create_form_has_no_ai_provider_field() -> None:
-    # AI provider selection moved into the workspace's own sign-in modal;
-    # the create form must not offer it (or an API-key input) anymore.
+def test_render_create_form_contains_ai_provider_options() -> None:
     html = render_create_form()
-    assert "ai_provider" not in html
-    assert "anthropic_api_key" not in html
+    for provider in AIProvider:
+        assert f'value="{provider.value}"' in html
 
 
 def test_render_create_form_contains_docker_runtime_options() -> None:
@@ -374,11 +353,19 @@ def test_render_create_form_selects_specified_docker_runtime() -> None:
     assert f'value="{non_default.value}" selected' in html
 
 
-def test_render_create_form_local_preset_selects_lima() -> None:
+def test_render_create_form_defaults_ai_provider_to_imbue_cloud() -> None:
+    # The remote preset is the default, so the AI provider starts on IMBUE_CLOUD
+    # rather than the local SUBSCRIPTION default.
+    html = render_create_form()
+    assert 'value="SUBSCRIPTION" selected' not in html
+
+
+def test_render_create_form_local_preset_selects_lima_and_subscription() -> None:
     # Selecting the local preset (e.g. a re-render of a LIMA submission) keeps
-    # the compute provider on the local LIMA default.
+    # the compute / AI providers on the local LIMA / SUBSCRIPTION defaults.
     html = render_create_form(selected_preset="local")
     assert 'value="LIMA" selected' in html
+    assert 'value="SUBSCRIPTION" selected' in html
     assert 'aria-checked="true"' in _preset_card_tag(html, "local")
 
 

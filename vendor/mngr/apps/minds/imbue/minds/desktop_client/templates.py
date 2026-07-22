@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
+from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
@@ -440,34 +441,34 @@ def render_create_form(
     branch: str = "",
     host_name: str = "",
     launch_mode: LaunchMode | None = None,
+    ai_provider: AIProvider | None = None,
     docker_runtime: DockerRuntime | None = None,
     backup_provider: BackupProvider | None = None,
     backup_api_key_env: str = "",
     accounts: Sequence[object] | None = None,
     default_account_id: str = "",
+    anthropic_api_key: str = "",
     error_message: str = "",
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
     selected_preset: str | None = None,
     start_advanced: bool = False,
     color: str = DEFAULT_WORKSPACE_COLOR,
-    is_landing_fallback: bool = False,
 ) -> str:
     """Render the agent creation form page.
 
     The page has two views over one form. The simple view offers two compute
     presets -- ``remote`` (Imbue Cloud) and ``local`` (directly on this
     computer) -- as selectable cards; the advanced view exposes the compute /
-    backup providers, region, and repository / branch inputs directly.
+    AI / backup providers, region, and repository / branch inputs directly.
     The advanced selects are always what gets POSTed; the preset cards just
-    pre-fill them. There is no AI-provider choice: workspaces boot
-    unauthenticated and the in-workspace sign-in modal is the sole Claude
-    auth surface.
+    pre-fill them.
 
-    The compute provider (``launch_mode``) and backup provider follow the
-    selected preset so the highlighted card matches what a plain submit
-    would create: the ``remote`` preset maps to ``IMBUE_CLOUD`` for both,
-    the ``local`` preset to ``LIMA`` / ``CONFIGURE_LATER``.
+    The compute provider (``launch_mode``), AI provider, and backup provider
+    follow the selected preset so the highlighted card matches what a plain
+    submit would create: the ``remote`` preset maps to ``IMBUE_CLOUD`` for all
+    three, the ``local`` preset to ``LIMA`` / ``SUBSCRIPTION`` /
+    ``CONFIGURE_LATER``.
 
     ``selected_preset`` picks which preset card starts selected. When ``None``
     it defaults to ``remote`` on a fresh form (regardless of whether an account
@@ -486,15 +487,6 @@ def render_create_form(
     palette entry); ``color`` is the ``#rrggbb`` hex carried in the hidden
     ``color`` input the form POSTs, defaulting to ``DEFAULT_WORKSPACE_COLOR`` so
     callers that don't care about color (e.g. some tests) can omit it.
-
-    ``is_landing_fallback`` marks this form as the landing fallback rendered at
-    ``/`` when no workspace exists (as opposed to the explicit ``/create``
-    page). When True the page wires a chrome-SSE subscription that navigates to
-    ``/`` once a workspace appears, so a user who was shown the create form on a
-    cold-start race (discovery hadn't re-surfaced their workspace yet) is taken
-    to their workspace list instead of being trapped. It is left False on the
-    explicit ``/create`` page so a deliberate "create another workspace" flow is
-    never bounced away by the user's existing workspaces.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
@@ -514,6 +506,11 @@ def render_create_form(
     effective_launch_mode = (
         launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if is_remote_preset else LaunchMode.LIMA)
     )
+    effective_ai_provider = (
+        ai_provider
+        if ai_provider is not None
+        else (AIProvider.IMBUE_CLOUD if is_remote_preset else AIProvider.SUBSCRIPTION)
+    )
     # The Docker container-runtime select defaults to the platform-appropriate
     # value (runc on macOS, runsc on Linux). Only consumed when the compute
     # provider is Docker; the form hides it otherwise.
@@ -530,6 +527,8 @@ def render_create_form(
         host_name=host_name,
         launch_modes=list(LaunchMode),
         selected_launch_mode=effective_launch_mode.value,
+        ai_providers=list(AIProvider),
+        selected_ai_provider=effective_ai_provider.value,
         docker_runtimes=list(DockerRuntime),
         selected_docker_runtime=effective_docker_runtime.value,
         backup_providers=list(BackupProvider),
@@ -537,6 +536,7 @@ def render_create_form(
         backup_api_key_env=backup_api_key_env,
         accounts=accounts or [],
         default_account_id=default_account_id,
+        anthropic_api_key=anthropic_api_key,
         error_message=error_message,
         region_options_by_launch_mode={
             key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
@@ -545,7 +545,6 @@ def render_create_form(
         selected_preset=effective_preset,
         start_advanced=start_advanced,
         color=color,
-        is_landing_fallback=is_landing_fallback,
     )
 
 
@@ -553,6 +552,7 @@ _STATUS_TEXT_DEFAULT: Final[dict[str, str]] = {
     "INITIALIZING": "Starting...",
     "CLONING_REPO": "Cloning repository...",
     "CHECKING_OUT_BRANCH": "Checking out branch...",
+    "PROVISIONING_AI": "Provisioning AI access...",
     "CREATING_WORKSPACE": "Creating workspace...",
     "WAITING_FOR_READY": "Waiting for workspace to be ready...",
     "DONE": "Done. Redirecting...",
@@ -565,6 +565,7 @@ _STATUS_TEXT_IMBUE_CLOUD: Final[dict[str, str]] = {
     "INITIALIZING": "Starting...",
     "CLONING_REPO": "Connecting to host...",
     "CHECKING_OUT_BRANCH": "Checking out branch...",
+    "PROVISIONING_AI": "Provisioning AI access...",
     "CREATING_WORKSPACE": "Setting up agent...",
     "WAITING_FOR_READY": "Waiting for workspace to be ready...",
     "DONE": "Done. Redirecting...",
@@ -1693,23 +1694,6 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
-    )
-
-
-@pure
-def render_ai_keys_page(
-    workspace_host_id: str,
-    workspace_display_name: str,
-    account_email: str,
-    error_message: str,
-) -> str:
-    """Render the workspace AI-key mint page (see pages/AiKeys.jinja)."""
-    return CATALOG.render(
-        "pages.AiKeys",
-        workspace_host_id=workspace_host_id,
-        workspace_display_name=workspace_display_name,
-        account_email=account_email,
-        error_message=error_message,
     )
 
 

@@ -474,13 +474,7 @@ def _has_test_files(project_dir: Path) -> bool:
 
 
 def _find_tracked_gitignored_files() -> list[str]:
-    """Return tracked files that match .gitignore patterns.
-
-    Files that are deleted in the working tree are excluded: they are on their
-    way out of the repo, and offload sandboxes reconstruct branch state as a
-    base commit plus an unstaged diff, which would otherwise flag files that a
-    commit deletes at the same time as gitignoring their path.
-    """
+    """Return tracked files that match .gitignore patterns."""
     tracked = subprocess.run(
         ["git", "ls-files"],
         capture_output=True,
@@ -488,10 +482,9 @@ def _find_tracked_gitignored_files() -> list[str]:
         check=True,
         cwd=_REPO_ROOT,
     )
-    present = [line for line in tracked.stdout.splitlines() if line.strip() and (_REPO_ROOT / line).exists()]
     ignored = subprocess.run(
         ["git", "check-ignore", "--no-index", "--stdin"],
-        input="\n".join(present) + "\n",
+        input=tracked.stdout,
         capture_output=True,
         text=True,
         cwd=_REPO_ROOT,

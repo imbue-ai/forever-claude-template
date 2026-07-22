@@ -8,9 +8,9 @@ renders through the desktop client's subdomain proxy.
 Two callers consume this module:
 
 - ``apps/minds/test_snapshot_resume.py`` -- the pytest test
-  (``test_create_workspace_and_sign_in_via_modal_then_chat_via_electron``)
-  wraps :func:`create_workspace_via_electron` and always cleans up the
-  resulting mngr agent in its ``finally``.
+  (``test_create_apikey_workspace_and_chat_via_electron``) wraps
+  :func:`create_workspace_via_electron` and always cleans up the resulting
+  mngr agent in its ``finally``.
 - ``scripts/snapshot_minds_e2e_state.py`` -- the Modal-snapshot script
   calls the same function but deliberately *does not* destroy the agent,
   because the whole point of the snapshot is to capture a sandbox in
@@ -618,6 +618,7 @@ def _drive_create_flow(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
+    anthropic_api_key: str | None = None,
 ) -> None:
     """Drive the create form to a ready workspace on an attached page.
 
@@ -625,14 +626,19 @@ def _drive_create_flow(
     test failure (not a wedged-launch flake) and propagates to fail the test.
 
     ``launch_mode`` selects the compute provider in the create form (DOCKER,
-    LIMA, AWS, ...). ``account_label`` optionally selects an imbue_cloud account
+    LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
     (by visible option text) before submitting. ``region`` selects the machine
     region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
     form for those modes and ignored (the row is hidden) for others.
 
-    There is no AI-provider or API-key field: workspaces boot unauthenticated
-    and sign in through the workspace's own Claude sign-in modal afterwards.
+    ``anthropic_api_key`` selects the manual ``API_KEY`` AI-provider option and
+    types the supplied key into the revealed ``#anthropic_api_key`` field (the
+    agent then talks to the official Anthropic API directly, no LiteLLM proxy).
+    Mutually exclusive with ``account_label`` (the manual key needs no account).
     """
+    assert anthropic_api_key is None or account_label is None, (
+        "anthropic_api_key (API_KEY mode) and account_label are mutually exclusive"
+    )
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
 
@@ -640,11 +646,11 @@ def _drive_create_flow(
     page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
     page.wait_for_selector("#create-form", state="attached", timeout=10_000)
 
-    # The form defaults to the "Imbue Cloud" preset (cloud compute / backup)
+    # The form defaults to the "Imbue Cloud" preset (cloud compute / AI / backup)
     # for everyone, including signed-out users. Submitting with a cloud provider
     # but no account opens the sign-in modal instead of creating. When this run
-    # has no account, pick the "local" preset card first so the backup provider
-    # is the non-cloud set (the compute mode is overridden below);
+    # has no account, pick the "local" preset card first so the AI / backup
+    # providers are the non-cloud set (the compute mode is overridden below);
     # account-based modes pass ``account_label`` and keep the cloud defaults.
     if account_label is None:
         page.click('[data-preset="local"]')
@@ -660,7 +666,7 @@ def _drive_create_flow(
 
     _ensure_field_value(page, "#host_name", workspace_name)
     _ensure_field_value(page, "#git_url", str(default_workspace_template_path))
-    # Optionally select an imbue_cloud account (by visible label) before
+    # Optionally select an AI-provider account (by visible label) before
     # picking the compute mode -- some modes/tiers require a real account.
     if account_label is not None:
         page.select_option("#account_id", label=account_label)
@@ -674,6 +680,20 @@ def _drive_create_flow(
     if region is not None:
         page.wait_for_selector("#region:visible", timeout=5_000)
         page.select_option("#region", region)
+
+    # Manual-key path: switch the AI provider to API_KEY (which un-hides the
+    # key field via the form's change handler) and type the key. Done after the
+    # launch_mode/account handling so an earlier change event can't re-hide the
+    # key row from under us.
+    if anthropic_api_key is not None:
+        page.select_option("#ai_provider", "API_KEY")
+        page.wait_for_selector("#anthropic_api_key:visible", timeout=5_000)
+        page.fill("#anthropic_api_key", anthropic_api_key)
+        resolved_ai_provider = page.input_value("#ai_provider")
+        if resolved_ai_provider != "API_KEY":
+            raise WorkspaceCreationFailedError(
+                f"Create form did not settle on API_KEY AI provider (got {resolved_ai_provider!r})"
+            )
 
     logger.info("Submitting create form")
     page.click("#create-submit")
@@ -723,6 +743,7 @@ def _attempt_create_workspace_via_electron(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
+    anthropic_api_key: str | None = None,
     on_workspace_ready: Callable[[Page], None] | None = None,
 ) -> None:
     """One Electron launch + CDP attach + create-flow drive.
@@ -765,6 +786,7 @@ def _attempt_create_workspace_via_electron(
                     launch_mode=launch_mode,
                     account_label=account_label,
                     region=region,
+                    anthropic_api_key=anthropic_api_key,
                 )
                 if on_workspace_ready is not None:
                     on_workspace_ready(page)
@@ -842,16 +864,19 @@ def create_workspace_via_electron(
     launch_mode: str = "DOCKER",
     account_label: str | None = None,
     region: str | None = None,
+    anthropic_api_key: str | None = None,
     on_workspace_ready: Callable[[Page], None] | None = None,
 ) -> None:
     """Drive Electron to create a workspace from ``default_workspace_template_path``.
 
     ``launch_mode`` selects the compute provider in the create form (DOCKER,
-    LIMA, AWS, ...). ``account_label`` optionally selects an imbue_cloud account
+    LIMA, AWS, ...). ``account_label`` optionally selects an AI-provider account
     (by visible option text) before submitting. ``region`` selects the machine
     region for region-aware modes (aws/vultr/imbue_cloud); it is required by the
     form for those modes and ignored (the row is hidden) for others.
 
+    ``anthropic_api_key`` selects the manual ``API_KEY`` AI provider and types
+    the key into the create form (mutually exclusive with ``account_label``).
     ``on_workspace_ready`` is called with the attached content page once the
     workspace has rendered, before teardown -- e.g. to send a chat message and
     await the reply on the same Electron session.
@@ -890,6 +915,7 @@ def create_workspace_via_electron(
                 launch_mode=launch_mode,
                 account_label=account_label,
                 region=region,
+                anthropic_api_key=anthropic_api_key,
                 on_workspace_ready=on_workspace_ready,
             )
             return
@@ -967,13 +993,11 @@ def _pick_chrome_page(browser: Browser, timeout_seconds: int) -> Page:
 def drive_create_docker_imbue_workspace(
     page: Page, default_workspace_template_path: Path, workspace_name: str
 ) -> None:
-    """Fill + submit the create form for a local-Docker workspace with an Imbue account.
+    """Fill + submit the create form for a local-Docker workspace with Imbue-Cloud AI.
 
-    Local Docker compute keeps the workspace on this machine; the selected
-    account only associates the workspace for compute/backups -- the create
-    flow injects no AI credentials, so a chat reply relies on the operator's
-    synced Claude subscription credentials keeping the workspace
-    authenticated. Backups are deferred to keep create fast.
+    Local Docker compute keeps the workspace on this machine; Imbue-Cloud AI
+    gives the agent working credentials (via the activated env's account) so it
+    can answer the chat message. Backups are deferred to keep create fast.
     """
     backend_origin = _backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
@@ -989,9 +1013,10 @@ def drive_create_docker_imbue_workspace(
     _ensure_field_value(page, "#host_name", workspace_name)
     _ensure_field_value(page, "#git_url", str(default_workspace_template_path))
 
-    # An account must be selected for Imbue-Cloud compute/backup. The form
-    # pre-selects the env's default account; if it is empty, pick the first
-    # real account (we reset compute to DOCKER below).
+    # An account must be selected for Imbue-Cloud AI. The form pre-selects the
+    # env's default account; if it is empty, pick the first real account (which
+    # fires onAccountChange, forcing every provider to IMBUE_CLOUD -- we reset
+    # compute to DOCKER below).
     account_value = page.input_value("#account_id")
     if not account_value:
         option_values = page.eval_on_selector_all(
@@ -1002,18 +1027,20 @@ def drive_create_docker_imbue_workspace(
         logger.info("No default account selected; choosing {!r}", option_values[0])
         page.select_option("#account_id", option_values[0])
 
-    # Order matters: set backup first, compute (DOCKER) last so it wins.
+    # Order matters: set AI + backup first, compute (DOCKER) last so it wins.
+    page.select_option("#ai_provider", "IMBUE_CLOUD")
     page.select_option("#backup_provider", "CONFIGURE_LATER")
     page.select_option("#launch_mode", "DOCKER")
 
     resolved = {
         "account": page.input_value("#account_id"),
         "launch_mode": page.input_value("#launch_mode"),
+        "ai_provider": page.input_value("#ai_provider"),
         "backup_provider": page.input_value("#backup_provider"),
     }
     logger.info("Create form resolved to: {}", resolved)
-    if resolved["launch_mode"] != "DOCKER" or not resolved["account"]:
-        raise WorkspaceFlowError(f"Create form did not settle on Docker+account: {resolved}")
+    if resolved["launch_mode"] != "DOCKER" or resolved["ai_provider"] != "IMBUE_CLOUD" or not resolved["account"]:
+        raise WorkspaceFlowError(f"Create form did not settle on Docker+ImbueCloud+account: {resolved}")
 
     _flow_screenshot(page, "01-create-form-filled")
     logger.info("Submitting create form")

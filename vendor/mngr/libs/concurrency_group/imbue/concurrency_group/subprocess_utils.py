@@ -162,18 +162,6 @@ class OutputGatherer:
 
 
 def _shutdown_popen(process: subprocess.Popen[bytes], shutdown_timeout_sec: float, reason: str) -> int | None:
-    # A shutdown request routinely races with the process's own exit (e.g. a
-    # single-use worker whose parent reaps it right after reading its result),
-    # so an already-exited process is reaped quietly -- logging a SIGTERM there
-    # would misread routine cleanup as a forced kill.
-    already_exited_code = process.poll()
-    if already_exited_code is not None:
-        logger.debug(
-            "Reaped subprocess (pid {}) which had already exited with code {}",
-            process.pid,
-            already_exited_code,
-        )
-        return already_exited_code
     # ``reason`` distinguishes the two ways this is reached -- a per-command
     # timeout vs. an externally requested shutdown -- because the two look
     # identical from here otherwise and the old "due to signal" wording led
@@ -182,7 +170,7 @@ def _shutdown_popen(process: subprocess.Popen[bytes], shutdown_timeout_sec: floa
     # used by callers that pass secrets in argv (e.g. ``--password``), so we
     # log only the pid.
     with log_span(
-        "Stopping subprocess (pid {}) with SIGTERM because {}",
+        "Terminating subprocess (pid {}) with SIGTERM because {}",
         process.pid,
         reason,
     ):
@@ -294,7 +282,7 @@ def run_local_command_modern_version(
             if _is_timeout(timeout_time):
                 shutdown_reason = f"it exceeded its {timeout:.0f}s timeout"
             else:
-                shutdown_reason = "the parent requested cleanup (shutdown_event was set)"
+                shutdown_reason = "a shutdown was requested (shutdown_event was set)"
             exit_code = _shutdown_popen(process, shutdown_timeout_sec, shutdown_reason)
 
         stdout, stderr = gatherer.get_output()
