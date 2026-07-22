@@ -230,7 +230,11 @@ type = "main"
 # added by its skill). The old git_auth_setup window is gone (the git config
 # it performed now runs inside bootstrap), and terminal is a supervisord
 # service rather than its own window.
-extra_window = ["bootstrap='uv run bootstrap'"]
+# --offline first: the baked image venv + uv cache cover a normal boot, so
+# first boot never blocks on the network (in some environments containers
+# have broken DNS and uv's index checks hang for minutes). Falls back to an
+# online run for genuinely missing packages (e.g. agent-modified pyproject).
+extra_window = ["bootstrap='uv run --offline bootstrap || uv run bootstrap'"]
 # Write a sane default tmux config on every minds host. tuple-typed
 # `extra_provision_command` stacks across templates (see
 # `apply_create_template` in vendor/mngr/.../common_opts.py), so the
