@@ -61,6 +61,7 @@ from imbue.system_interface.models import AttachmentError
 from imbue.system_interface.models import AttachmentUploadResponse
 from imbue.system_interface.models import CreateAgentResponse
 from imbue.system_interface.models import CreateChatRequest
+from imbue.system_interface.models import CreateCodexRequest
 from imbue.system_interface.models import CreateWorktreeRequest
 from imbue.system_interface.models import DestroyAgentResponse
 from imbue.system_interface.models import ErrorResponse
@@ -976,6 +977,20 @@ def _create_chat_agent() -> Response:
         return _json_response(error.model_dump(), status_code=400)
 
 
+def _create_codex_agent() -> Response:
+    """Create a new codex chat agent in the primary agent's work directory."""
+    agent_manager: AgentManager = get_state().agent_manager
+    body = request.get_json()
+
+    try:
+        create_request = CreateCodexRequest(**body)
+        agent_id = agent_manager.create_codex_agent(create_request.name)
+        return _json_response(CreateAgentResponse(agent_id=agent_id).model_dump(), status_code=201)
+    except (AgentCreationError, OSError, ValueError) as e:
+        error = ErrorResponse(detail=str(e))
+        return _json_response(error.model_dump(), status_code=400)
+
+
 def _ws_endpoint(websocket: Any) -> None:
     """Unified WebSocket for agent state and application updates."""
     state = get_state()
@@ -1506,6 +1521,7 @@ def create_application(state: SystemInterfaceState) -> Flask:
     application.add_url_rule("/api/agents", view_func=_list_agents_endpoint, methods=["GET"])
     application.add_url_rule("/api/agents/create-worktree", view_func=_create_worktree_agent, methods=["POST"])
     application.add_url_rule("/api/agents/create-chat", view_func=_create_chat_agent, methods=["POST"])
+    application.add_url_rule("/api/agents/create-codex", view_func=_create_codex_agent, methods=["POST"])
     application.add_url_rule("/api/random-name", view_func=_random_name_endpoint, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/events", view_func=_get_events, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/stream", view_func=_stream_events, methods=["GET"])

@@ -19,6 +19,7 @@ provision_skip_if_done setup_system
 : "${CLOUDFLARED_VERSION:=2026.3.0}"
 : "${UV_VERSION:=0.11.7}"
 : "${CLAUDE_CODE_VERSION:=2.1.207}"
+: "${CODEX_VERSION:=0.144.3}"
 : "${MODAL_VERSION:=1.4.2}"
 : "${NODE_MAJOR:=20}"
 : "${LATCHKEY_VERSION:=2.21.0}"
@@ -106,6 +107,11 @@ test -x /root/.local/bin/claude
 curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
 apt-get install -y nodejs
 rm -rf /var/lib/apt/lists/*
+
+# Codex CLI (pinned; npm-installed, needs Node.js above). Keep in sync with
+# agent_types.codex.version in .mngr/settings.toml.
+npm install -g "@openai/codex@${CODEX_VERSION}"
+command -v codex >/dev/null
 
 # Pre-seed github.com SSH host keys so git operations don't block on interactive
 # host-key confirmation. Idempotent: only added when absent.

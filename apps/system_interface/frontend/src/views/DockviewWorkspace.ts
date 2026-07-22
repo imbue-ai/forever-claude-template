@@ -170,6 +170,7 @@ interface PanelParams {
 
 // Modal state
 let showNewChatModal = false;
+let showNewCodexModal = false;
 let showNewAgentModal = false;
 let showNewBrowserModal = false;
 // When a background create POST fails, the New-browser modal is re-opened
@@ -761,6 +762,17 @@ function buildDropdownItems(
     action: () => {
       newTabTargetGroup = targetGroup ?? null;
       showNewChatModal = true;
+      m.redraw();
+    },
+  });
+
+  // New codex agent -- a chat agent running the codex harness (mngr template
+  // chat_codex) in the primary's work_dir, alongside the claude chat above.
+  items.push({
+    label: "New Codex Agent",
+    action: () => {
+      newTabTargetGroup = targetGroup ?? null;
+      showNewCodexModal = true;
       m.redraw();
     },
   });
@@ -2844,6 +2856,22 @@ export const DockviewWorkspace: m.Component = {
               },
               onCancel() {
                 showNewChatModal = false;
+                newTabTargetGroup = null;
+              },
+            })
+          : null,
+
+        showNewCodexModal
+          ? m(CreateAgentModal, {
+              mode: "codex",
+              onCreated(newAgentId: string, newAgentName: string) {
+                showNewCodexModal = false;
+                const targetGroup = newTabTargetGroup;
+                newTabTargetGroup = null;
+                focusOrCreateChatPanel(newAgentId, newAgentName, targetGroup);
+              },
+              onCancel() {
+                showNewCodexModal = false;
                 newTabTargetGroup = null;
               },
             })

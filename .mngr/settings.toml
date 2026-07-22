@@ -140,6 +140,45 @@ parent_type = "claude"
 # one; verified live.)
 command = "python3 ${MNGR_AGENT_WORK_DIR:-.}/scripts/claude_oom_launch.py"
 
+# the "codex" agent type -- OpenAI Codex CLI as a peer harness to claude. It is
+# its own base type (registered by the vendored imbue-mngr-codex plugin via
+# `mngr plugin add` in scripts/build_workspace.sh), so no parent_type. Auto-approve
+# + auto-dismiss so the container agent runs unattended, matching
+# agent_types.claude's posture (auto_allow_permissions sets codex
+# approval_policy="never"). The codex binary is baked into the image
+# (scripts/setup_system.sh, CODEX_VERSION), so check_installation is off -- do not
+# reinstall/verify at provision.
+#
+# model / effort are the lateral of agent_types.claude's opus[1m] + effortLevel="high".
+# gpt-5.6-sol is the account's default slug (so no ChatGPT-account slug rejection),
+# pinned for reproducibility. model_reasoning_effort="medium": Opus-high and Sol-medium
+# are each their vendor's balanced *default* (both with tiers of headroom above), and
+# Sol is unusually capable at lower effort -- so medium is the honest match for
+# opus-high, and avoids xhigh's latency / rate-limit blowout. Bump to "high" only if
+# this agent routinely takes on unusually hard, long-horizon work.
+#
+# sandbox_mode = danger-full-access disables codex's own OS sandbox. On Linux codex
+# sandboxes exec via bubblewrap, but the bundled bwrap cannot set up its network
+# namespace inside the Modal/gVisor agent container (every exec fails with
+# `bwrap: loopback: Failed RTM_NEWADDR: No child process`). The container is already
+# the isolation boundary -- same reason agent_types.claude runs
+# --dangerously-skip-permissions -- so codex's nested sandbox is both redundant and
+# broken here. Turning it off lets exec actually run.
+[agent_types.codex]
+auto_dismiss_dialogs = true
+auto_allow_permissions = true
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+sandbox_mode = "danger-full-access"
+check_installation = false
+
+# Disable codex's built-in memory system. It is off by default, but pin it off so it never
+# writes to $CODEX_HOME/memories/ -- a per-agent, non-runtime-backed silo that would compete
+# with the shared runtime/memory/ we use. (features.memories is the master switch; false wins
+# regardless of any [memories] settings.)
+[agent_types.codex.config_overrides.features]
+memories = false
+
 # --- Provider configurations ---
 
 # all disabled for now, since we don't want the agents to be able to launch mngr agents anywhere except within their own containers
@@ -641,6 +680,13 @@ post_host_create_command__extend = ["/usr/local/bin/default-workspace-template-s
 # Chat template: minimal agent for additional chat sessions in the same work directory
 [create_templates.chat]
 type = "claude"
+
+# Codex chat template: a codex agent in the same work directory (parallels
+# create_templates.chat, which is claude). Spawn from the CLI with
+# `mngr create <name> chat_codex`; the system-interface "New Codex Agent" UI
+# will target this template once wired.
+[create_templates.chat_codex]
+type = "codex"
 
 # Worktree template: agent in a new git worktree, no services by default --
 # creates its own as needed. Uses the plain `claude` type (not `main`), so

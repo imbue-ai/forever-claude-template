@@ -134,6 +134,13 @@ class CreateChatRequest(FrozenModel):
     name: str = Field(description="Name for the new chat agent")
 
 
+class CreateCodexRequest(FrozenModel):
+    """Request body for creating a codex chat agent (same shape as chat: runs in
+    the primary agent's work dir, just a different harness template)."""
+
+    name: str = Field(description="Name for the new codex agent")
+
+
 class CreateAgentResponse(FrozenModel):
     """Response from agent creation endpoints."""
 

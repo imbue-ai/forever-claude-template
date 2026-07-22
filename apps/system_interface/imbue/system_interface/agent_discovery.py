@@ -47,6 +47,11 @@ class AgentInfo(FrozenModel):
     id: str = Field(description="The agent's unique identifier")
     name: str = Field(description="The agent's human-readable name")
     state: str = Field(description="The agent's lifecycle state (e.g. RUNNING, STOPPED)")
+    type: str = Field(
+        default="claude",
+        description="Harness/agent type (e.g. 'claude', 'codex'). Selects the transcript watcher. "
+        "Defaults to 'claude' for back-compat with call sites that do not yet thread it through.",
+    )
     agent_state_dir: Path = Field(description="Path to the agent's state directory on the local host")
     claude_config_dir: Path = Field(description="Path to the Claude config directory for this agent")
     labels: dict[str, str] = Field(default_factory=dict, description="Agent labels")
@@ -162,6 +167,7 @@ def discover_agents(
                 id=agent_id,
                 name=agent_name,
                 state=state,
+                type=str(agent_details.type),
                 agent_state_dir=agent_state_dir,
                 claude_config_dir=claude_config_dir,
                 labels=dict(agent_details.labels),

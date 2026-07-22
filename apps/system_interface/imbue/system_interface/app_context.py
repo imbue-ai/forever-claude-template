@@ -11,12 +11,34 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.claude_auth import ClaudeAuthService
+from imbue.system_interface.codex_session_watcher import CodexSessionWatcher
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.session_watcher import AgentSessionWatcher
 from imbue.system_interface.welcome_resend import WelcomeResender
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
+
+# A per-agent transcript watcher is one of two harness-specific implementations
+# with the same public read/callback API: the claude JSONL watcher or the codex
+# common-transcript watcher. The registry and the server treat them
+# interchangeably through this union.
+AnySessionWatcher = AgentSessionWatcher | CodexSessionWatcher
+
+
+def _is_codex_agent(agent_info: AgentInfo) -> bool:
+    """True if this agent should be watched by the codex (common-transcript) watcher.
+
+    Prefers the harness ``type`` surfaced on ``AgentInfo`` (populated on the
+    discovery path). Falls back to a filesystem probe for the by-id path, where the
+    type currently defaults to ``claude``: mngr_codex provisions a CODEX_HOME at
+    ``<agent_state_dir>/plugin/codex/home`` for every codex agent, a directory a
+    claude agent never has.
+    """
+    if agent_info.type == "codex":
+        return True
+    return (agent_info.agent_state_dir / "plugin" / "codex" / "home").is_dir()
+
 
 # Key under which the single SystemInterfaceState is stored on ``app.config`` so
 # handlers can fetch it via ``get_state()`` without depending on FastAPI-style
@@ -51,7 +73,7 @@ class SystemInterfaceState(MutableModel):
     welcome_resender: WelcomeResender
     http_client: httpx.Client
     latchkey_http_client: httpx.Client
-    watchers: dict[str, AgentSessionWatcher] = {}
+    watchers: dict[str, AnySessionWatcher] = {}
     latchkey_catalog_cache: dict[str, Any] = {}
 
     _watchers_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -73,8 +95,12 @@ class SystemInterfaceState(MutableModel):
         """Serializes concurrent latchkey catalog fetches across request threads."""
         return self._latchkey_lock
 
-    def get_or_create_watcher(self, agent_info: AgentInfo) -> AgentSessionWatcher:
+    def get_or_create_watcher(self, agent_info: AgentInfo) -> AnySessionWatcher:
         """Get the existing session watcher for an agent, or create and start one.
+
+        Picks the codex common-transcript watcher for codex agents and the claude
+        JSONL watcher otherwise; both expose the same read/callback API, so the rest
+        of this method (and the server) is harness-agnostic.
 
         Guarded by a lock so two concurrent request threads cannot both build a
         watcher for the same agent under the threaded server.
@@ -90,7 +116,7 @@ class SystemInterfaceState(MutableModel):
             # callback self-contained: it cannot KeyError if the dict entry has
             # since been removed, and does not depend on the entry already
             # existing before the first event fires.
-            watcher_holder: list[AgentSessionWatcher] = []
+            watcher_holder: list[AnySessionWatcher] = []
 
             def on_events(agent_id: str, events: list[dict[str, Any]]) -> None:
                 # IGNORE: session events are persisted in JSONL and recoverable
@@ -104,12 +130,20 @@ class SystemInterfaceState(MutableModel):
                 # read the last event's type.
                 self.agent_manager.update_session_events(agent_id, watcher_holder[0].get_all_events())
 
-            watcher = AgentSessionWatcher(
-                agent_id=agent_info.id,
-                agent_state_dir=agent_info.agent_state_dir,
-                claude_config_dir=agent_info.claude_config_dir,
-                on_events=on_events,
-            )
+            watcher: AnySessionWatcher
+            if _is_codex_agent(agent_info):
+                watcher = CodexSessionWatcher(
+                    agent_id=agent_info.id,
+                    agent_state_dir=agent_info.agent_state_dir,
+                    on_events=on_events,
+                )
+            else:
+                watcher = AgentSessionWatcher(
+                    agent_id=agent_info.id,
+                    agent_state_dir=agent_info.agent_state_dir,
+                    claude_config_dir=agent_info.claude_config_dir,
+                    on_events=on_events,
+                )
             watcher_holder.append(watcher)
             self.watchers[agent_info.id] = watcher
             watcher.start()

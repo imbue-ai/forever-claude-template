@@ -11,6 +11,7 @@ dependencies = [
     "imbue-common",
     "imbue-mngr",
     "imbue-mngr-claude",
+    "imbue-mngr-codex",
     "oom-priority",
     "pexpect>=4.9",
     "pluggy>=1.5",
