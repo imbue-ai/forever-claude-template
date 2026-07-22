@@ -11,8 +11,8 @@ consumes -- the same shape ``claude_session_parser`` emits for claude -- so the
 transport (SSE), the frontend, and the activity tracker need no codex-specific
 branches. It is the codex analogue of ``claude_session_parser``.
 
-Sourcing rule (confirmed against codex ``policy.rs`` + real rollouts, see
-blueprint/codex-rich-transcript): ``response_item`` lines are the canonical
+Sourcing rule (confirmed against codex ``policy.rs`` + real rollouts):
+``response_item`` lines are the canonical
 conversation state; ``event_msg`` lines are a derived live-display stream. We build
 the body from ``response_item`` -- **except** two things taken from ``event_msg``:
 (1) user bubbles, from ``user_message`` (the clean human-typed prompt); and (2) the
@@ -61,14 +61,14 @@ _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
 
-def _join_content_text(content: Any, want_type: str) -> str:
-    """Join the ``text`` of ``content`` blocks whose ``type`` is ``want_type``."""
+def _join_output_text(content: Any) -> str:
+    """Join the ``text`` of ``content`` blocks whose ``type`` is ``output_text``."""
     if not isinstance(content, list):
         return ""
     return "".join(
         block.get("text", "")
         for block in content
-        if isinstance(block, dict) and block.get("type") == want_type and block.get("text")
+        if isinstance(block, dict) and block.get("type") == "output_text" and block.get("text")
     )
 
 
@@ -232,7 +232,7 @@ def parse_codex_rollout_line(
                 _assistant_event(
                     timestamp,
                     event_id,
-                    text=_join_content_text(payload.get("content"), "output_text"),
+                    text=_join_output_text(payload.get("content")),
                     tool_calls=[],
                 )
             ]

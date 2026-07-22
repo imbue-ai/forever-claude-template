@@ -29,14 +29,10 @@ AnySessionWatcher = AgentSessionWatcher | CodexSessionWatcher
 def _is_codex_agent(agent_info: AgentInfo) -> bool:
     """True if this agent should be watched by the codex (common-transcript) watcher.
 
-    Prefers the harness ``type`` surfaced on ``AgentInfo`` (populated on the
-    discovery path). Falls back to a filesystem probe for the by-id path, where the
-    type currently defaults to ``claude``: mngr_codex provisions a CODEX_HOME at
-    ``<agent_state_dir>/plugin/codex/home`` for every codex agent, a directory a
-    claude agent never has.
+    mngr_codex provisions a CODEX_HOME at ``<agent_state_dir>/plugin/codex/home``
+    for every codex agent -- a directory a claude agent never has -- so its presence
+    is a reliable harness probe.
     """
-    if agent_info.type == "codex":
-        return True
     return (agent_info.agent_state_dir / "plugin" / "codex" / "home").is_dir()
 
 
