@@ -1,0 +1,266 @@
+"""Enforce that a PR adds one changelog entry per project it touches.
+
+This is the changelog gate. It runs on a real checkout (a local clone or the
+GitHub Actions runner) -- the only place a real base ref exists. Its single
+input is the set of files this PR changed relative to its base; that diff is
+computed here, where the base ref is present, and the gate refuses to run (loud
+non-zero exit) rather than pass vacuously when it cannot establish a base
+distinct from HEAD.
+
+A "project" is a directory under ``libs/`` or ``apps/`` containing a
+``pyproject.toml``, the synthetic ``agents`` bucket that owns the ``.agents``
+tree (skills and shared agent config), or the synthetic top-level ``dev`` bucket
+that owns root-level files (scripts/, .github/, top-level docs, build tooling).
+Each project holds its per-PR entries in ``<project_dir>/changelog/`` (the
+``agents`` bucket's entries live in ``.agents/changelog/``); a PR that touches a
+project must add ``<project_dir>/changelog/<branch>.md`` (slashes in the branch
+name replaced with dashes).
+
+The gate is pure stdlib so it can run without ``uv sync``. Run it from the repo
+root::
+
+    python scripts/check_changelog_entries.py
+
+Exit codes:
+    0  -- ok (entries present, or nothing to check: not a PR branch / no
+          project files changed)
+    1  -- one or more touched projects are missing their entry file
+    2  -- cannot establish a usable diff base (misconfiguration); never a
+          silent pass
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+DEV_PROJECT = "dev"
+AGENTS_PROJECT = "agents"
+AGENTS_DIR = ".agents"
+
+
+def project_for_path(rel_path: Path | str, repo_root: Path) -> str:
+    """Return the project that owns ``rel_path`` (a repo-relative path).
+
+    A ``libs/<name>/...`` or ``apps/<name>/...`` path resolves to ``<name>``
+    when that directory contains a ``pyproject.toml``. Anything under
+    ``.agents/`` (skills and shared agent config) resolves to the synthetic
+    ``agents`` bucket. Everything else falls back to ``dev``. The
+    ``pyproject.toml`` check guards against a path like ``libs/garbage/...`` (not
+    an actual project) being treated as a real project.
+    """
+    parts = Path(rel_path).parts
+    if len(parts) >= 2 and parts[0] in ("libs", "apps"):
+        candidate = repo_root / parts[0] / parts[1]
+        if (candidate / "pyproject.toml").exists():
+            return parts[1]
+    if parts and parts[0] == AGENTS_DIR:
+        return AGENTS_PROJECT
+    return DEV_PROJECT
+
+
+def project_entries_dir(project: str, repo_root: Path) -> Path:
+    """Return the ``<project_dir>/changelog/`` directory for per-PR entry files."""
+    if project == DEV_PROJECT:
+        return repo_root / DEV_PROJECT / "changelog"
+    if project == AGENTS_PROJECT:
+        return repo_root / AGENTS_DIR / "changelog"
+    libs = repo_root / "libs" / project
+    if libs.is_dir():
+        return libs / "changelog"
+    apps = repo_root / "apps" / project
+    if apps.is_dir():
+        return apps / "changelog"
+    raise ValueError(f"Unknown project: {project!r}")
+
+
+def all_known_projects(repo_root: Path) -> set[str]:
+    """Return every known project name, including the synthetic buckets.
+
+    A project is every ``libs/<name>`` and ``apps/<name>`` that contains a
+    ``pyproject.toml``, plus the synthetic ``dev`` and ``agents`` buckets.
+    """
+    names: set[str] = {DEV_PROJECT, AGENTS_PROJECT}
+    for parent_name in ("libs", "apps"):
+        parent = repo_root / parent_name
+        if not parent.is_dir():
+            continue
+        for child in parent.iterdir():
+            if child.is_dir() and (child / "pyproject.toml").exists():
+                names.add(child.name)
+    return names
+
+
+def detect_branch(repo_root: Path) -> str | None:
+    """Return the PR branch name, or ``None`` if it can't be determined.
+
+    GitHub Actions ``GITHUB_HEAD_REF`` (PR source branch) first, then
+    ``GITHUB_REF_NAME`` (push target), then local git.
+    """
+    for env_var in ("GITHUB_HEAD_REF", "GITHUB_REF_NAME"):
+        branch = os.environ.get(env_var, "")
+        if branch:
+            return branch
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    return None
+
+
+def _rev_parse(ref: str, repo_root: Path) -> str | None:
+    """Return the commit SHA ``ref`` resolves to, or ``None`` if it doesn't."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    sha = result.stdout.strip()
+    return sha if result.returncode == 0 and sha else None
+
+
+def resolve_diff_base(repo_root: Path) -> str:
+    """Return a git ref to diff the PR branch against.
+
+    Tries ``origin/$GITHUB_BASE_REF``, ``$GITHUB_BASE_REF``, ``origin/main``,
+    then ``main``, and returns the first that resolves to a commit *distinct
+    from HEAD*. A base equal to HEAD yields an empty diff and a vacuous pass
+    (the exact bug this gate exists to prevent), so such candidates are
+    rejected. Raises ``RuntimeError`` if none qualify -- the caller turns that
+    into a loud non-zero exit, never a pass.
+    """
+    head = _rev_parse("HEAD", repo_root)
+    candidates: list[str] = []
+    base_ref = os.environ.get("GITHUB_BASE_REF", "")
+    if base_ref:
+        candidates.extend([f"origin/{base_ref}", base_ref])
+    candidates.extend(["origin/main", "main"])
+
+    saw_head_collision = False
+    for ref in candidates:
+        sha = _rev_parse(ref, repo_root)
+        if sha is None:
+            continue
+        if sha == head:
+            saw_head_collision = True
+            continue
+        return ref
+
+    detail = (
+        " The only candidates that resolved point at HEAD itself, which would "
+        "produce an empty diff and silently pass. Fetch the real base branch "
+        "(e.g. `git fetch origin main`) before running this check."
+        if saw_head_collision
+        else " Fetch the base branch (e.g. `git fetch origin main`) and re-run."
+    )
+    raise RuntimeError(
+        "Cannot resolve a diff base distinct from HEAD: tried "
+        + ", ".join(candidates)
+        + "."
+        + detail
+    )
+
+
+def changed_files_against_base(base: str, repo_root: Path) -> list[str]:
+    """Return the repo-relative paths this branch changes vs. ``base``.
+
+    Uses ``git diff --name-only <base>...HEAD`` (three-dot / merge-base form).
+    Raises ``RuntimeError`` if ``git diff`` itself fails.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{base}...HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git diff failed against {base} (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def projects_requiring_entry(changed_files: list[str], repo_root: Path) -> set[str]:
+    """Return the set of projects this PR must produce a changelog entry for.
+
+    A project is "touched" iff the PR changes any file under it. Files that are
+    themselves changelog artifacts are intentionally *not* excluded -- adding an
+    entry file inherently satisfies the requirement.
+    """
+    known = all_known_projects(repo_root)
+    touched: set[str] = set()
+    for rel_path in changed_files:
+        project = project_for_path(rel_path, repo_root)
+        if project in known:
+            touched.add(project)
+    return touched
+
+
+def find_missing_entries(branch: str, touched: set[str], repo_root: Path) -> list[str]:
+    """Return the repo-relative entry paths that are missing for ``touched``."""
+    sanitized = branch.replace("/", "-")
+    missing: list[str] = []
+    for project in sorted(touched):
+        entry_path = project_entries_dir(project, repo_root) / f"{sanitized}.md"
+        if not entry_path.exists():
+            missing.append(str(entry_path.relative_to(repo_root)))
+    return missing
+
+
+def main(repo_root: Path = _REPO_ROOT) -> int:
+    branch = detect_branch(repo_root)
+    if not branch or branch == "main":
+        print(
+            "changelog gate: not a PR branch (branch is empty or 'main'); nothing to check."
+        )
+        return 0
+
+    try:
+        diff_base = resolve_diff_base(repo_root)
+    except RuntimeError as exc:
+        print(f"changelog gate ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    changed_files = changed_files_against_base(diff_base, repo_root)
+    touched = projects_requiring_entry(changed_files, repo_root)
+    missing = find_missing_entries(branch, touched, repo_root)
+
+    if not missing:
+        print(
+            f"changelog gate: ok. Branch '{branch}' touches {sorted(touched)} "
+            f"(diff base '{diff_base}'); all required entries present."
+        )
+        return 0
+
+    print(
+        f"changelog gate FAILED: missing changelog entries for branch '{branch}' "
+        f"(diff base '{diff_base}', via git diff --name-only {diff_base}...HEAD). "
+        f"This PR touches project(s) {sorted(touched)}; each needs its own entry file.\n"
+        f"Create:\n" + "\n".join(f"  - {p}" for p in missing) + "\n"
+        f"Each file should briefly describe the user-visible changes in this PR that "
+        f"pertain to that project. The synthetic '{DEV_PROJECT}' project covers "
+        f"root-level files (scripts/, .github/, top-level docs, build tooling); the "
+        f"synthetic '{AGENTS_PROJECT}' project covers the '{AGENTS_DIR}' tree (skills "
+        f"and shared agent config).\n"
+        f"\n"
+        f"If you believe this PR makes NO actual changes to one of the listed "
+        f"projects, do NOT add a placebo entry: a stale or misconfigured diff base "
+        f"('{diff_base}') can make unrelated files from main appear changed. The fix "
+        f"is to correct the diff base, not to add entries for projects you did not touch.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

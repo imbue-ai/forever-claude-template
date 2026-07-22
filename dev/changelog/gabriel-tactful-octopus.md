@@ -1,0 +1,3 @@
+Added a CI changelog gate. `scripts/check_changelog_entries.py` diffs a PR against its base and fails it unless each touched project has a per-PR entry at `<project_dir>/changelog/<branch>.md`. A project is a `libs/`/`apps/` directory with a `pyproject.toml`, the synthetic `agents` bucket for the `.agents` tree (skills and shared agent config, entries under `.agents/changelog/`), or the synthetic `dev` bucket for other root-level files.
+
+The gate is opt-in: the `check-changelog` CI job only runs when the repository variable `ENFORCE_CHANGELOG` is set to `true`, so downstream repos that publish a workspace inherit the workflow but not the failure.
