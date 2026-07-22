@@ -6,6 +6,8 @@ user-bubble / turn-abort sourcing, and the self-contained web-search expansion.
 
 from __future__ import annotations
 
+from typing import Any
+
 from imbue.system_interface.codex_session_parser import parse_codex_rollout_line
 
 
@@ -33,8 +35,10 @@ def test_user_bubble_id_differs_for_distinct_sends() -> None:
     a = parse_codex_rollout_line(_user_line("yes"), 1, {})[0]["event_id"]
     b = parse_codex_rollout_line(_user_line("no"), 2, {})[0]["event_id"]
     c = parse_codex_rollout_line(_user_line("yes", timestamp="2026-07-19T10:00:05.000Z"), 3, {})[0]["event_id"]
-    assert a != b  # different text
-    assert a != c  # same text, different timestamp
+    # different text
+    assert a != b
+    # same text, different timestamp
+    assert a != c
 
 
 def test_empty_user_message_is_skipped() -> None:
@@ -91,7 +95,8 @@ def test_web_search_expands_to_matched_call_and_result() -> None:
     assert call["tool_calls"][0]["tool_name"] == "web_search"
     assert call["tool_calls"][0]["tool_call_id"] == "ws_1"
     assert result["type"] == "tool_result"
-    assert result["tool_call_id"] == "ws_1"  # matches the call -> not stuck
+    # matches the call -> not stuck
+    assert result["tool_call_id"] == "ws_1"
     assert result["output"] == "python asyncio"
 
 
@@ -112,10 +117,12 @@ def test_function_call_and_output_link_by_call_id() -> None:
     out = parse_codex_rollout_line(out_line, 2, name_map)[0]
     assert call["tool_calls"][0]["tool_call_id"] == "c1"
     assert out["tool_call_id"] == "c1"
-    assert out["tool_name"] == "shell"  # recovered from the cross-line map
+    # recovered from the cross-line map
+    assert out["tool_name"] == "shell"
 
 
 def test_non_conversation_lines_are_dropped() -> None:
     assert parse_codex_rollout_line({"timestamp": "t", "type": "session_meta", "payload": {"type": "x"}}, 0, {}) == []
     assert parse_codex_rollout_line({"timestamp": "t", "type": "turn_context", "payload": {}}, 0, {}) == []
-    assert parse_codex_rollout_line({"type": "event_msg", "payload": "not-a-dict"}, 0, {}) == []  # type: ignore[dict-item]
+    non_dict_payload: dict[str, Any] = {"type": "event_msg", "payload": "not-a-dict"}
+    assert parse_codex_rollout_line(non_dict_payload, 0, {}) == []

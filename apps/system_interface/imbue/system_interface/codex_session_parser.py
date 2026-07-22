@@ -84,6 +84,9 @@ def _stringify_output(output: Any) -> str:
                 parts.append(str(item.get("text") or item.get("output") or ""))
             elif isinstance(item, str):
                 parts.append(item)
+            else:
+                # other item shapes carry no text
+                continue
         text = "".join(parts)
     else:
         text = "" if output is None else str(output)
@@ -114,10 +117,13 @@ def _assistant_event(timestamp: str, event_id: str, *, text: str, tool_calls: li
         "model": _UNKNOWN_MODEL,
         "text": text,
         "tool_calls": tool_calls,
-        "stop_reason": None,  # deferred (derive from task_complete later)
-        "usage": None,  # deferred (token_count -> Phase 2)
+        # deferred (derive from task_complete later)
+        "stop_reason": None,
+        # deferred (token_count -> Phase 2)
+        "usage": None,
         "message_uuid": event_id,
-        "is_auth_error": False,  # deferred (codex auth errors live in logs_2.sqlite)
+        # deferred (codex auth errors live in logs_2.sqlite)
+        "is_auth_error": False,
     }
 
 
@@ -212,7 +218,8 @@ def parse_codex_rollout_line(
         return []
 
     if outer != "response_item":
-        return []  # session_meta, turn_context -> drop
+        # session_meta, turn_context -> drop
+        return []
 
     # --- response_item: assistant messages + tool calls/results + hosted web search ---
     if payload_type == "message":

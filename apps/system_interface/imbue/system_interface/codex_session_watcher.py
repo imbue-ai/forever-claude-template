@@ -168,7 +168,8 @@ class CodexSessionWatcher:
             self._wake_event.clear()
             if self._stop_event.is_set():
                 break
-            self._maybe_start_observer()  # retry until the transcript dir exists
+            # retry until the transcript dir exists
+            self._maybe_start_observer()
             self._emit(self._consume_new_lines())
 
     def _emit(self, events: list[dict[str, Any]]) -> None:
@@ -180,7 +181,8 @@ class CodexSessionWatcher:
         try:
             raw = self._marker_path.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
-            return None  # no marker yet (agent hasn't taken a turn) -- normal
+            # no marker yet (agent hasn't taken a turn) -- normal
+            return None
         return Path(raw) if raw else None
 
     def _consume_new_lines(self) -> list[dict[str, Any]]:
@@ -205,7 +207,8 @@ class CodexSessionWatcher:
             try:
                 size = target.stat().st_size
             except OSError:
-                return []  # marker points at a not-yet-created file; retry next cycle
+                # marker points at a not-yet-created file; retry next cycle
+                return []
 
             # Codex rollouts are append-only; a shrink is unexpected. Re-read from the
             # start -- id-based dedup drops the re-emitted assistant/tool events.
