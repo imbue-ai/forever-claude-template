@@ -336,15 +336,16 @@ target_path = "/mngr/code/"
 idle_mode = "disabled"
 # Enable the (default-disabled) modal provider for this create, and set the
 # minds-facing sizing + timeouts HERE rather than in the mngr_modal provider
-# defaults: 2 CPU / 4 GB (matching the lima/docker convention) and a 3h sandbox
-# timeout (eval runs are short-lived and self-terminate). The sandbox timeout
-# (10710) plus the provider's 90s shutdown buffer lands at 10800s (3h), well
-# under Modal's 86400s (24h) hard cap.
+# defaults: 2 CPU / 4 GB (matching the lima/docker convention) and a ~24h sandbox
+# timeout. The sandbox timeout (86310) plus the provider's 90s shutdown buffer
+# lands at 86400s (24h), Modal's hard cap. Eval workers instead stack the
+# `modal_eval` overlay below for a shorter timeout, leaving this global template
+# untouched.
 setting__extend = [
     "providers.modal.is_enabled=true",
     "providers.modal.default_cpu=2.0",
     "providers.modal.default_memory=4.0",
-    "providers.modal.default_sandbox_timeout=10710",
+    "providers.modal.default_sandbox_timeout=86310",
     "providers.modal.default_idle_timeout=86400",
 ]
 # Same forwarding as the docker/lima templates so the agent inherits its creds.
@@ -356,6 +357,16 @@ extra_provision_command__extend = [
     "bash /mngr/code/scripts/install_dependencies.sh",
     "bash /mngr/code/scripts/build_workspace.sh",
 ]
+
+# Short-timeout overlay for eval-worker Modal sandboxes. Always stacked on top of
+# `modal` (`--template modal --template modal_eval`), mirroring how `docker_runsc`
+# overlays `docker`: it reuses the entire `modal` body and only shortens the sandbox
+# timeout to 3h (10710 + the provider's 90s shutdown buffer = 10800s), since eval runs
+# are short-lived and self-terminate at their per-case budget. The eval harness selects
+# it via the MINDS_MODAL_EXTRA_TEMPLATE env var on the eval box; normal Modal creates
+# use plain `modal` (24h). Keeping it separate leaves the global `modal` template alone.
+[create_templates.modal_eval]
+setting__extend = ["providers.modal.default_sandbox_timeout=10710"]
 
 # template for vultr VPS provider (cloud mode)
 [create_templates.vultr]

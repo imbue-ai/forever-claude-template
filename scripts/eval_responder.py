@@ -43,9 +43,7 @@ def _load_config() -> dict | None:
 def _resolve_message(prompt: str, agent_id: str, config: dict) -> str:
     """A literal prompt is sent as-is; DECIDE_FROM_PERSONA is role-played from the transcript so far."""
     if prompt == DECIDE_SENTINEL:
-        return eval_decider.decide_next_message(
-            agent_id, config.get("persona", ""), config.get("anthropic_api_key", "")
-        )
+        return eval_decider.decide_next_message(agent_id, config.get("persona", ""))
     return prompt
 
 

@@ -2,13 +2,14 @@
 
 Given the conversation so far (from the local system_interface) and the case persona, ask the
 Anthropic API for the single next casual thing the client would say -- one short sentence or a few
-words -- and return it. Pure stdlib (urllib); the key is slotted into scripts/test_case_metadata.json
-by the harness (config["anthropic_api_key"]).
+words -- and return it. Pure stdlib (urllib); the Anthropic key comes from ANTHROPIC_API_KEY in the
+workspace env (forwarded by the template's pass_host_env), the same key the agent runs on.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import urllib.request
 
 import eval_wait_watcher as watcher
@@ -46,11 +47,13 @@ def _prompt(persona: str, conversation: str) -> str:
     ).format(who=who, conversation=conversation)
 
 
-def decide_next_message(agent_id: str, persona: str, api_key: str) -> str:
+def decide_next_message(agent_id: str, persona: str) -> str:
     """Ask the API for the client's next casual line. Falls back to 'Sounds good.' on any error, so a
-    flaky API call never stalls the eval."""
+    flaky API call never stalls the eval. The key is read from ANTHROPIC_API_KEY in the workspace env
+    (forwarded by the template's pass_host_env -- the same key the agent already uses)."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        print("[eval] no anthropic_api_key in config -- sending '{}'".format(_FALLBACK), flush=True)
+        print("[eval] no ANTHROPIC_API_KEY in env -- sending '{}'".format(_FALLBACK), flush=True)
         return _FALLBACK
     try:
         conversation = _render_conversation(watcher.fetch_all_events(agent_id))

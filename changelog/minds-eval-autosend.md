@@ -7,3 +7,5 @@ Each prompt entry is either a literal string (sent to the agent verbatim) or the
 The sink now writes to Cloudflare R2 (S3-compatible) rather than AWS S3: the boto3 client uses the `s3_endpoint` from the case metadata (restic already reaches R2 via the endpoint baked into `restic_repository`), and region defaults to `auto`. Credentials are still the scoped key from the slotted metadata file.
 
 Renamed the eval worker's `eval_aws_sink.py` / `AwsSink` to `eval_sink.py` / `EvalSink` -- results go to R2 (S3-compatible), so the AWS-specific naming no longer fit.
+
+Reverted the global `[create_templates.modal]` sandbox timeout to 24h (86310s) and added a `[create_templates.modal_eval]` overlay (3h) that eval workers stack on top -- so eval-specific timeouts no longer alter the shared Modal template. The role-play decider now reads `ANTHROPIC_API_KEY` from the workspace env (forwarded by the template's `pass_host_env`) instead of from the slotted `test_case_metadata.json`.
