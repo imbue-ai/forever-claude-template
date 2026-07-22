@@ -650,9 +650,9 @@ type = "claude"
 # job (the /etc/cron.d/minds-caretaker entry the enable-caretaker skill
 # creates -- absent until then, weekly and findings-gated via
 # scripts/caretaker_check.sh once enabled) via
-# scripts/run_schedule_agent.sh, and is labelled schedule_agent=caretaker +
-# highlight=<run-key> so it can be found as a singleton and surfaced as a tab
-# in the minds UI.
+# scripts/run_schedule_agent.sh, and is labelled schedule_agent=caretaker so
+# it can be found as a singleton (the runner opens its chat tab via
+# scripts/layout.py).
 [create_templates.caretaker]
 type = "claude"
 env = ["MNGR_AGENT_ROLE=caretaker"]
@@ -663,8 +663,8 @@ agent_args = [
 
 # Schedule-agent template: the reusable base for any skill run on a cadence
 # (the Caretaker above is a tailored instance). scripts/run_schedule_agent.sh
-# <skill> spawns one of these per skill, labels it schedule_agent=<skill> +
-# highlight, and messages it `/<skill>` on every run -- so a new scheduled
+# <skill> spawns one of these per skill, labels it schedule_agent=<skill>,
+# and messages it `/<skill>` on every run -- so a new scheduled
 # agent (e.g. a morning news digest) needs only a skill plus a cron entry, no
 # new template. It is a plain `claude` agent oriented, by an appended system
 # prompt, to run whatever skill the slash-command it receives names.

@@ -151,8 +151,8 @@ one -- say a morning news digest:
 That is all -- no new agent template is required. `scripts/run_schedule_agent.sh
 <skill>` creates a persistent singleton agent (labelled `schedule_agent=<skill>`),
 keeps it alive across runs, and on each run clears its chat and re-sends
-`/<skill>`, so the skill runs fresh. The agent surfaces as a tab in the minds UI
-on each run (re-opening the tab if it was closed). Pass `--template <t>` only when you want a custom
+`/<skill>`, so the skill runs fresh, and its chat tab is opened via
+`scripts/layout.py` (best-effort). Pass `--template <t>` only when you want a custom
 agent template; otherwise the generic `schedule_agent` template is used.
 
 ## How the Caretaker is wired (the built-in example)

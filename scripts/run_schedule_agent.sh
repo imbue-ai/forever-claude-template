@@ -32,9 +32,8 @@
 #   - No agent yet (first run ever) -> create the persistent agent whose first
 #     message is `/<skill>`. A brand-new agent starts from an empty chat, so a
 #     self-detecting skill (like caretaker) can deliver a first-run welcome.
-#   - Agent already exists -> bump its run key (so the minds UI re-surfaces
-#     the tab if the user had closed it), send `/clear` to start a
-#     fresh session, then send `/<skill>` to run again with a clean context.
+#   - Agent already exists -> send `/clear` to start a fresh session, then
+#     send `/<skill>` to run again with a clean context.
 #
 # `/clear` starts a new session, so the skill re-runs with no memory of the
 # previous run -- it re-detects first-run state, re-reads its own files, etc.
@@ -125,7 +124,6 @@ create_schedule_agent() {
     --no-connect \
     --format json \
     --label "schedule_agent=${SKILL}" \
-    --label "highlight=$(date +%s)" \
     "${label_args[@]}" \
     --message "$RUN_MESSAGE"
 }
@@ -146,13 +144,6 @@ main() {
   # more than one exists.
   id="$(printf '%s\n' "$ids" | head -n 1)"
 
-  # Bump the highlight key so the minds UI re-surfaces the tab for this new
-  # run if the user had closed it. Best-effort: a failed bump must not stop
-  # the run itself, but it does mean the tab will not re-surface, so log it.
-  if ! uv run mngr label "$id" -l "highlight=$(date +%s)"; then
-    log "warning: could not bump the highlight key for ${id}; the tab may not re-surface for this run"
-  fi
-
   # Clear the rendered chat so this run starts from an empty conversation.
   log "clearing schedule agent ${id} for a fresh run"
   uv run mngr message "$id" --start --message "/clear"
@@ -166,3 +157,7 @@ main() {
 }
 
 main
+# Surface the agent's chat tab the same way agents open panels themselves
+# (scripts/layout.py -> workspace_server layout op). Best-effort: with no
+# browser connected there is nothing to open, and the run itself is done.
+python3 "$(dirname "${BASH_SOURCE[0]}")/layout.py" open "chat:${AGENT_NAME}" >/dev/null 2>&1 || true

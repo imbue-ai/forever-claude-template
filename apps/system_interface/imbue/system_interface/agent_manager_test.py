@@ -341,39 +341,6 @@ def test_agent_state_event_adds_agent(agent_manager: AgentManager, broadcaster: 
     assert msg["type"] == "agents_updated"
 
 
-def test_discovered_agent_labels_come_from_discovery(agent_manager: AgentManager) -> None:
-    """An agent's labels are taken straight from its observe event.
-
-    The observe stream carries each agent's current labels -- including the
-    ``highlight`` run-key that run_schedule_agent.sh bumps on each schedule-agent run
-    to re-surface its tab. The web UI keys its is_primary hiding and its
-    tab surfacing off these, so they must pass straight through.
-    """
-    agent = _agent_details(
-        "caretaker",
-        labels={"schedule_agent": "caretaker", "highlight": "1700000042", "workspace": "ws"},
-    )
-
-    agent_manager._handle_observe_event(make_agent_state_event(agent))
-
-    agents = agent_manager.get_agents()
-    assert len(agents) == 1
-    assert agents[0].labels == {"schedule_agent": "caretaker", "highlight": "1700000042", "workspace": "ws"}
-
-
-def test_discovered_agent_with_no_labels_has_empty_labels(
-    agent_manager: AgentManager,
-) -> None:
-    """An agent whose observe event carries no labels gets empty labels (no error)."""
-    agent = _agent_details("remote-agent")
-
-    agent_manager._handle_observe_event(make_agent_state_event(agent))
-
-    agents = agent_manager.get_agents()
-    assert len(agents) == 1
-    assert agents[0].labels == {}
-
-
 def _layout_ops(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [message for message in messages if message.get("type") == "layout_op"]
 

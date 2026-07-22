@@ -78,19 +78,8 @@ env wrapper, the timezone check, the Caretaker wiring) lives in the
 manage-scheduled-tasks skill; CLAUDE.md gains just one sentence pointing at the
 manage-scheduled-tasks and check-app-errors skills.
 
-**Surfacing scheduled agents in the workspace.** An agent a scheduled job creates
-now opens as its own tab in the main chat window (without stealing focus), so a
-new run is never easy to miss. Surfacing is driven by a generic `highlight`
-label any agent can carry: when the label's value changes during the session,
-the tab re-opens if it was closed. A run that fired while your laptop was
-asleep (e.g. an overnight Caretaker run) surfaces the moment the workspace's
-web UI reconnects, because the pre-sleep key is still in memory and the fresh
-snapshot's key differs. Closing the tab dismisses that run (it will not
-immediately reopen), a genuinely newer run brings it back, and a page reload
-never resurrects tabs for runs that predate the page.
-The system interface reads each agent's labels straight from the discovery stream,
-so the Caretaker is reliably recognized and the hidden services agent stays hidden.
-
-**Reconnecting on wake** (the dead-socket-after-sleep fix that the overnight
-surfacing above relies on) ships separately in PR #302.
+**Surfacing scheduled agents in the workspace** needs no UI changes at all:
+after each run, `scripts/run_schedule_agent.sh` opens the agent's chat tab with
+one best-effort call to the existing `scripts/layout.py open` mechanism -- the
+same way agents themselves open panels.
 

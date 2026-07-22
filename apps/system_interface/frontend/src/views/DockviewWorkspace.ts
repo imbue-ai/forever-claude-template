@@ -64,7 +64,6 @@ import {
   getStoredLayoutSlug,
   setActiveLayoutSlug,
 } from "../models/ClientIdentity";
-import { decideHighlightSurface } from "../models/highlightSurface";
 import {
   autosaveLayout,
   chooseInitialLayout,
@@ -219,10 +218,6 @@ let _layoutOpListener: LayoutOpListener | null = null;
 let _layoutSyncListener: LayoutSyncListener | null = null;
 let _terminalSessionListener: TerminalSessionListener | null = null;
 let initialized = false;
-// Set true once loadLayout() has restored the saved layout, so the
-// agents_updated listener never auto-opens an auto-created tab before the saved
-// layout (which may already contain that tab) has been applied.
-let layoutLoaded = false;
 
 // ---------- Named-layout state ----------
 
@@ -249,42 +244,6 @@ const REMOTE_APPLY_SUPPRESS_MS = AUTOSAVE_DEBOUNCE_MS * 2 + 1000;
 // takes when it splits alongside the primary agent's chat. Picked so the
 // just-built view dominates while the chat stays legible.
 const OPEN_TAB_SPLIT_FRACTION = 0.6;
-
-// --- Highlighted agent tabs (e.g. the weekly Caretaker) -----------------
-// An agent carrying a non-empty ``highlight`` label gets its own tab opened
-// (as an inactive background tab) when the label's VALUE -- a key that mngr
-// bumps whenever the agent has something new to show, e.g. each Caretaker
-// run -- changes during this browser session. The first snapshot with agents
-// only records a baseline (no opens), so a page reload never resurrects tabs
-// for runs that happened before the page loaded. A dead-socket gap is NOT a
-// new session: the last-seen keys live in module state, so a run that fired
-// while the laptop slept surfaces on the first snapshot after the WebSocket
-// reconnects. Closing the tab is just
-// closing it -- the key was already recorded, so it stays closed until a
-// genuinely newer run bumps the key.
-let highlightBaselineRecorded = false;
-const lastHighlightKeyByAgent = new Map<string, string>();
-
-// In-memory: highlighted agents we have observed present at least once, so we can
-// detect when one is destroyed and close its now-dead tab. Scoped to highlighted
-// agents so a transient snapshot that briefly omits one of the user's own agents
-// can never close their chat.
-const knownHighlightAgentIds = new Set<string>();
-
-// True for an agent that should get an auto-surfaced tab: any agent
-// carrying a non-empty ``highlight`` label. Generalized from the Caretaker-only
-// ``auto_created`` / ``caretaker`` labels, so anything can opt a tab into the
-// highlight behavior.
-function isHighlightedAgent(agent: { labels?: Record<string, string> } | undefined): boolean {
-  const value = agent?.labels?.highlight;
-  return value !== undefined && value !== "";
-}
-
-// The agent's current highlight key: the value of its ``highlight`` label, which
-// mngr bumps whenever the agent has something new to show.
-function highlightKey(agent: { labels?: Record<string, string> }): string {
-  return agent.labels?.highlight ?? "";
-}
 
 function createMithrilRenderer(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -529,14 +488,14 @@ function createCustomTab(options: { id: string; name: string }): {
         }),
       );
 
-      // Show/hide actions based on active state.
-      function handleActiveChange(isActive: boolean): void {
+      // Show/hide actions based on active state
+      function updateActionsVisibility(isActive: boolean): void {
         actions.style.display = isActive ? "flex" : "none";
       }
-      handleActiveChange(params.api.isActive);
+      updateActionsVisibility(params.api.isActive);
       disposables.push(
         params.api.onDidActiveChange((event) => {
-          handleActiveChange(event.isActive);
+          updateActionsVisibility(event.isActive);
         }),
       );
     },
@@ -970,12 +929,7 @@ function focusOrCreateChatPanel(
   addChatPanel(chatAgentId, chatAgentName, targetGroup);
 }
 
-function addChatPanel(
-  chatAgentId: string,
-  chatAgentName: string,
-  targetGroup?: DockviewGroupPanel | null,
-  options?: { inactive?: boolean },
-): void {
+function addChatPanel(chatAgentId: string, chatAgentName: string, targetGroup?: DockviewGroupPanel | null): void {
   if (!dockview) return;
   const panelId = chatPanelId(chatAgentId);
   const params: PanelParams = { panelType: "chat", agentId: chatAgentId, chatAgentId };
@@ -986,101 +940,8 @@ function addChatPanel(
     title: chatAgentName,
     params,
     renderer: "always",
-    // Auto-opened tabs (the Caretaker) are added inactive so they appear as a
-    // new background tab without stealing the user's focus.
-    ...(options?.inactive ? { inactive: true } : {}),
     ...placementForGroup(targetGroup),
   });
-}
-
-/** The dockview group holding the workspace's main chat -- the first open chat
- *  tab (the initial bootstrap chat), ignoring ``excludeAgentId``. Highlighted
- *  tabs (the Caretaker) are tabbed into this group so they appear in the main
- *  window alongside the initial chat, instead of landing in whichever group
- *  happens to be active (or a fresh split). Returns null when no other chat tab
- *  is open, so the caller falls back to default placement. */
-function mainChatGroup(excludeAgentId: string): DockviewGroupPanel | null {
-  if (!dockview) return null;
-  for (const panel of dockview.panels) {
-    const pp = panelParams.get(panel.id);
-    if (pp?.panelType !== "chat") continue;
-    if ((pp.chatAgentId ?? pp.agentId) === excludeAgentId) continue;
-    return panel.api.group ?? null;
-  }
-  return null;
-}
-
-/** Open a highlighted agent's tab (e.g. the Caretaker) when its ``highlight``
- *  key changes during this session and the tab is closed. Runs on every
- *  agents_updated snapshot. The first snapshot that actually contains agents
- *  only records the baseline keys -- so a page reload never re-opens tabs for
- *  runs that predate the page -- while a run that fired during a dead-socket
- *  gap (the Caretaker at 3 AM while the laptop slept) still surfaces: the
- *  pre-sleep keys are in module state, and the post-reconnect snapshot's
- *  bumped key differs. Auto-opened tabs are added inactive so they don't
- *  steal focus. */
-function surfaceHighlightedAgents(): void {
-  if (!dockview) return;
-  const agents = getAgents();
-  if (agents.length === 0) return;
-  const isBaselineSnapshot = !highlightBaselineRecorded;
-  highlightBaselineRecorded = true;
-  const openChatIds = getOpenChatAgentIds();
-  for (const agent of agents) {
-    if (!isHighlightedAgent(agent)) continue;
-    const previousKey = lastHighlightKeyByAgent.get(agent.id);
-    lastHighlightKeyByAgent.set(agent.id, highlightKey(agent));
-    if (isBaselineSnapshot) continue;
-    const decision = decideHighlightSurface({
-      currentKey: highlightKey(agent),
-      previousKey,
-      isTabOpen: openChatIds.has(agent.id),
-    });
-    if (decision === "open") {
-      // Tabbed into the main chat group (where the initial chat lives) so it shows
-      // up in the main window, not a separate/active split.
-      addChatPanel(agent.id, agent.name, mainChatGroup(agent.id), { inactive: true });
-    }
-  }
-}
-
-/** Close any chat tab(s) pointing at ``agentId``. Used to drop a dead tab whose
- *  agent has been destroyed. */
-function closeChatTabsForAgent(agentId: string): void {
-  if (!dockview) return;
-  for (const panel of dockview.panels.slice()) {
-    const pp = panelParams.get(panel.id);
-    if (pp?.panelType !== "chat") continue;
-    if ((pp.chatAgentId ?? pp.agentId) === agentId) {
-      dockview.removePanel(panel);
-    }
-  }
-}
-
-/** Close the dead tab of a highlighted agent once it disappears (is destroyed).
- *  Today's Caretaker is persistent so this rarely fires, but a highlighted agent
- *  that is removed should not leave a dead tab behind. Scoped to highlighted
- *  agents we have actually seen present, so a user's own chat tab is never at
- *  risk from a transient snapshot. */
-function pruneDestroyedHighlightTabs(): void {
-  if (!dockview) return;
-  const agents = getAgents();
-  // An empty snapshot carries no destruction information (e.g. a backend that
-  // just restarted and has not finished discovery yet), so treat it as unknown
-  // rather than "everything was destroyed" -- mirroring the guard in
-  // surfaceHighlightedAgents. Otherwise a transient empty snapshot would close
-  // every known highlighted tab and, with its key already recorded, leave it
-  // closed for good.
-  if (agents.length === 0) return;
-  const present = new Set(agents.map((agent) => agent.id));
-  for (const agent of agents) {
-    if (isHighlightedAgent(agent)) knownHighlightAgentIds.add(agent.id);
-  }
-  for (const agentId of [...knownHighlightAgentIds]) {
-    if (present.has(agentId)) continue;
-    closeChatTabsForAgent(agentId);
-    knownHighlightAgentIds.delete(agentId);
-  }
 }
 
 /**
@@ -1920,13 +1781,6 @@ function applyLayoutContent(saved: SavedLayout | null): void {
       awaitingInitialChat = true;
     }
   }
-  // The layout content is now applied; from here it is safe to auto-open
-  // tabs for highlighted agents (e.g. a new Caretaker run). Runs on every
-  // mount -- including a switch to another named layout -- which is safe
-  // because a tab only opens when the highlight key has changed since it
-  // was last seen this session.
-  layoutLoaded = true;
-  surfaceHighlightedAgents();
   updateEmptyState();
 }
 
@@ -2836,10 +2690,6 @@ function initializeDockview(parentElement: HTMLElement): void {
     if (awaitingInitialChat && openInitialChatTab()) {
       awaitingInitialChat = false;
       updateEmptyState();
-    }
-    if (layoutLoaded) {
-      pruneDestroyedHighlightTabs();
-      surfaceHighlightedAgents();
     }
   };
   addAgentsUpdatedListener(agentsUpdatedListener);
