@@ -41,7 +41,7 @@ _RESTIC_EXCLUDES = (
 )
 
 
-class AwsSink:
+class EvalSink:
     def __init__(self, config: dict):
         self._config = config
         self._bucket = config["s3_bucket"]

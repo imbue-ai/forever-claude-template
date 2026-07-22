@@ -1,6 +1,6 @@
 """Eval worker (supervisord one-shot). Drives a multi-turn conversation from the case's `prompts`
-array, snapshots /mngr to S3 per turn (restic), and uploads the transcript at the end -- so a
-launched run completes on its own and everything is retrievable from S3 without the launching
+array, snapshots /mngr to R2 per turn (restic), and uploads the transcript at the end -- so a
+launched run completes on its own and everything is retrievable from R2 without the launching
 machine staying on.
 
 Eval mode is gated on scripts/test_case_metadata.json; absent -> immediate no-op (normal workspaces).
@@ -78,11 +78,11 @@ def main() -> None:
         print("[eval] already finished (marker present) -- exiting", flush=True)
         return
 
-    from eval_aws_sink import AwsSink
+    from eval_sink import EvalSink
 
-    # Creds come from test_case_metadata.json (see eval_aws_sink); we drive restic ourselves. backup_provider is
+    # Creds come from test_case_metadata.json (see eval_sink); we drive restic ourselves. backup_provider is
     # configure_later, so host-backup is already idle -- nothing to stop.
-    sink = AwsSink(config)
+    sink = EvalSink(config)
 
     deadline = sink.deadline
     agent_id = watcher.resolve_chat_agent_id(deadline)

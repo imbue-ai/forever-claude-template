@@ -5,3 +5,5 @@ The worker drives a multi-turn conversation from the case's `prompts` array (one
 Each prompt entry is either a literal string (sent to the agent verbatim) or the sentinel `DECIDE_FROM_PERSONA`, which makes the worker role-play the client: it feeds the transcript-so-far plus the case persona to the Anthropic API and sends back a short casual reply (falls back to "Sounds good." if the call fails, so a flaky API never stalls the run). All credentials (AWS, restic, and the Anthropic key for the role-play) come from the slotted metadata file.
 
 The sink now writes to Cloudflare R2 (S3-compatible) rather than AWS S3: the boto3 client uses the `s3_endpoint` from the case metadata (restic already reaches R2 via the endpoint baked into `restic_repository`), and region defaults to `auto`. Credentials are still the scoped key from the slotted metadata file.
+
+Renamed the eval worker's `eval_aws_sink.py` / `AwsSink` to `eval_sink.py` / `EvalSink` -- results go to R2 (S3-compatible), so the AWS-specific naming no longer fit.
