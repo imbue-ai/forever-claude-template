@@ -132,7 +132,7 @@ class SystemInterfaceState(MutableModel):
 
             watcher: AnySessionWatcher
             if _is_codex_agent(agent_info):
-                watcher = CodexSessionWatcher(
+                watcher = CodexSessionWatcher.build(
                     agent_id=agent_info.id,
                     agent_state_dir=agent_info.agent_state_dir,
                     on_events=on_events,

@@ -68,12 +68,33 @@ _SESSIONS_RELATIVE = Path("plugin") / "codex" / "home" / "sessions"
 class CodexSessionWatcher:
     """Watches a codex agent's raw rollout file and emits parsed UI events."""
 
-    def __init__(
-        self,
+    # Instance attributes declared at class level so a `build()` classmethod (no
+    # __init__) can assign them while the type checker still resolves every access.
+    _agent_id: str
+    _marker_path: Path
+    _sessions_dir: Path
+    _on_events: Callable[[str, list[dict[str, Any]]], None]
+    _lock: threading.Lock
+    _events: list[dict[str, Any]]
+    _event_index: dict[str, int]
+    _current_path: Path | None
+    _byte_offset: int
+    _partial: str
+    _line_index: int
+    _tool_name_by_call_id: dict[str, str]
+    _stop_event: threading.Event
+    _wake_event: threading.Event
+    _thread: threading.Thread | None
+    _observer: Any
+
+    @classmethod
+    def build(
+        cls,
         agent_id: str,
         agent_state_dir: Path,
         on_events: Callable[[str, list[dict[str, Any]]], None],
-    ) -> None:
+    ) -> "CodexSessionWatcher":
+        self = cls.__new__(cls)
         self._agent_id = agent_id
         # Marker file holding the active rollout's absolute path (rewritten each turn,
         # so it follows rotation), and the sessions dir we watchdog.
@@ -87,12 +108,12 @@ class CodexSessionWatcher:
         # follows.
         self._lock = threading.Lock()
         # Adapted UI events, in append (chronological) order.
-        self._events: list[dict[str, Any]] = []
+        self._events = []
         # event_id -> index into _events, for O(1) offset lookup + dedup.
-        self._event_index: dict[str, int] = {}
+        self._event_index = {}
         # The rollout file currently being tailed (resolved from the marker); None
         # until the first turn writes the marker. Rotation = marker points elsewhere.
-        self._current_path: Path | None = None
+        self._current_path = None
         # Bytes of _current_path already consumed; reset only on rotation / re-read.
         self._byte_offset = 0
         # A trailing partial line (no newline yet) carried to the next read.
@@ -106,15 +127,16 @@ class CodexSessionWatcher:
         # call_id -> tool_name, so a function_call_output can recover its tool name
         # from the earlier function_call. Persists across files (a resume re-serialises
         # the calls, but keeping the map is harmless and covers output-only cases).
-        self._tool_name_by_call_id: dict[str, str] = {}
+        self._tool_name_by_call_id = {}
 
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._thread = None
         # Watchdog observer on the transcript dir, so an append wakes the loop
         # immediately instead of waiting out the poll interval. Started lazily once
         # the dir exists (see _maybe_start_observer).
-        self._observer: Any = None
+        self._observer = None
+        return self
 
     def start(self) -> None:
         """Start tailing the transcript in a background thread."""
