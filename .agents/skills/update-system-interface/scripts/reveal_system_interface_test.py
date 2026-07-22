@@ -437,10 +437,19 @@ _SERVE_UP = (sys.executable, str(reveal_mod._SHARED_SERVE_SCRIPT), "up")
 _SERVE_DOWN = (sys.executable, str(reveal_mod._SHARED_SERVE_SCRIPT), "down")
 
 
-def _make_work_dir(tmp_path: Path) -> Path:
-    """A stand-in for a worker's work_dir: a folder with an apps/system_interface."""
+def _make_work_dir(tmp_path: Path, *, built: bool = True) -> Path:
+    """A stand-in for a worker's work_dir: a folder with an apps/system_interface.
+
+    ``built`` seeds the frontend build output the backend serves, modelling a
+    worker that produced a bundle; pass ``built=False`` for a worker that reported
+    done without building it -- the case the preview must refuse.
+    """
     work_dir = tmp_path / "worker"
     (work_dir / reveal_mod.APP_DIR).mkdir(parents=True)
+    if built:
+        static_index = work_dir / reveal_mod.FRONTEND_BUILD_INDEX
+        static_index.parent.mkdir(parents=True, exist_ok=True)
+        static_index.write_text("<!doctype html><html></html>")
     return work_dir
 
 
@@ -487,6 +496,21 @@ def test_preview_rejects_a_work_dir_without_the_app(tmp_path: Path) -> None:
 
     assert code == 1
     assert not runner.argvs_starting(*_SERVE_UP)
+
+
+def test_preview_refuses_a_work_dir_without_a_frontend_build(tmp_path: Path) -> None:
+    # A worker that reported done without building its frontend leaves no bundle;
+    # the preview must fail loudly (non-zero, no boot) rather than serve the
+    # backend's "Frontend not built" placeholder as if it were the real UI. It does
+    # not build for the worker -- fixing the worker is the point.
+    work_dir = _make_work_dir(tmp_path, built=False)
+    runner = _RecordingRunner()
+
+    code = reveal_mod.preview(_SLUG, str(work_dir), tmp_path, runner=runner)
+
+    assert code == 1
+    assert not runner.argvs_starting(*_SERVE_UP)
+    assert not runner.ran("npm", "run", "build")  # the preview never builds
 
 
 def _make_preview_state(repo_root: Path, slug: str) -> None:
