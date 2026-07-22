@@ -108,6 +108,7 @@
 (function () {
   "use strict";
   const app = document.getElementById("app");
+  const stage = document.getElementById("stage");
   const canvas = document.getElementById("screen");
   const ctx = canvas.getContext("2d");
   const placeholder = document.getElementById("placeholder");
@@ -325,6 +326,18 @@
 
   function sendCast(obj) { if (castWs && castWs.readyState === 1) castWs.send(JSON.stringify(obj)); }
 
+  // Report our pane size so the server grows the browser to fill it (it clamps to
+  // [1280x800 .. 1920x1080] and ignores this while an agent drives). Debounced -- a
+  // drag fires a burst and each server resize re-attaches the screencast.
+  let resizeTimer = null;
+  function reportSize() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      sendCast({ type: "resize", width: Math.round(stage.clientWidth), height: Math.round(stage.clientHeight) });
+    }, 150);
+  }
+  new ResizeObserver(reportSize).observe(stage);
+
   // --- coordinate scaling: canvas CSS px -> frame device px ---
   function scaled(e) {
     const r = canvas.getBoundingClientRect();
@@ -407,6 +420,7 @@
   function connect(id) {
     browserId = id;
     castWs = new WebSocket(wsUrl("browsers/" + id + "/cast"));
+    castWs.onopen = () => reportSize();  // send our pane size once the socket is live
     castWs.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
       if (m.type === "crashed") showCrashed();

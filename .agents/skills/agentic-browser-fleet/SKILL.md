@@ -168,7 +168,7 @@ Every browser has exactly one controller; every command's output names the owner
   - You switch to a different browser for the rest of the task -> release the one you're leaving.
   - Driving several at once -> keep them until fully done, then release each.
   - If you forget, an idle lease auto-frees after ~90s; if a later command says you no longer hold it, just acquire it again.
-- **The human always wins.** If a human takes control, your next command comes back with status `busy_human`/`lost_control` (exit 2). You lost control: **stop, tell the user the human took the wheel, and end your turn.** Do not retry, poll, or `--reclaim` on your own. You're queued to resume first; you'll be messaged when they hand it back. On resume, **re-run `state <name>` first** (the page changed), then continue. Resume early only on an explicit "keep going": `acquire <name> --reclaim`, then `state <name>`.
+- **The human always wins.** If a human takes control, your next command comes back with status `busy_human`/`lost_control` (exit 2). You lost control: **stop, tell the user the human took the wheel, and end your turn.** Do not retry, poll, or `--reclaim` on your own. You're queued to resume first; you'll be messaged when they hand it back. On resume, **re-run `state <name>` first** (the page changed -- and the view may have been resized while they held it, reflowing the layout, so treat every element number as stale), then continue. Resume early only on an explicit "keep going": `acquire <name> --reclaim`, then `state <name>`.
 - **Agents never preempt each other.** A browser another agent holds returns (exit 3):
 
   ```text
