@@ -28,10 +28,19 @@ export interface ModelSettings {
 const settingsByAgent = new Map<string, ModelSettings>();
 const inFlightFetch = new Set<string>();
 
-// Claude Code writes the `/model` / `/fast` change to settings.json a beat after
-// it accepts the command, so re-read shortly after posting to pick up the real
-// persisted state (model label, fast-mode support, fast-mode value).
-const RECONCILE_DELAY_MS = 600;
+// Claude Code persists a `/model` / `/fast` change to settings.json only after it
+// processes the command -- near-instant when idle, but delayed when it is
+// mid-turn (the command queues). So after posting, poll until settings.json
+// reflects the change rather than reading once (a single early read would show
+// the stale value and revert the optimistic pick). Give up after the window and
+// accept whatever is on disk -- if the change never landed (e.g. an org-gated
+// `/fast on` was refused), the true state is the honest thing to show.
+const RECONCILE_POLL_INTERVAL_MS = 700;
+const RECONCILE_MAX_ATTEMPTS = 8;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Bare alias of a model string, matching the backend's `base_alias`
  *  (`opus[1m]` -> `opus`), so a stored `opus` or `opus[1m]` both map to the
@@ -54,30 +63,56 @@ export function getSelectedOption(agentId: string): ModelOption | null {
   return settings.options.find((option) => baseAlias(option.id) === currentAlias) ?? null;
 }
 
+async function requestModelSettings(agentId: string): Promise<ModelSettings | null> {
+  try {
+    return await m.request<ModelSettings>({
+      method: "GET",
+      url: apiUrl("/api/agents/:agentId/model-settings"),
+      params: { agentId },
+    });
+  } catch (error) {
+    console.warn(`Failed to load model settings for agent ${agentId}`, error);
+    return null;
+  }
+}
+
 export async function fetchModelSettings(agentId: string): Promise<void> {
   if (inFlightFetch.has(agentId)) {
     return;
   }
   inFlightFetch.add(agentId);
   try {
-    const settings = await m.request<ModelSettings>({
-      method: "GET",
-      url: apiUrl("/api/agents/:agentId/model-settings"),
-      params: { agentId },
-    });
-    settingsByAgent.set(agentId, settings);
-    m.redraw();
-  } catch (error) {
-    console.warn(`Failed to load model settings for agent ${agentId}`, error);
+    const settings = await requestModelSettings(agentId);
+    if (settings !== null) {
+      settingsByAgent.set(agentId, settings);
+      m.redraw();
+    }
   } finally {
     inFlightFetch.delete(agentId);
   }
 }
 
-function scheduleReconcile(agentId: string): void {
-  setTimeout(() => {
-    fetchModelSettings(agentId);
-  }, RECONCILE_DELAY_MS);
+/** Poll settings.json until `isSettled` holds (the change landed), then commit
+ *  the real state; give up after the window and commit whatever is on disk. The
+ *  optimistic value stays displayed until then -- an unsettled read never
+ *  overwrites it, so the picker doesn't flip back to the stale value mid-apply. */
+async function reconcileAfterChange(agentId: string, isSettled: (settings: ModelSettings) => boolean): Promise<void> {
+  let latest: ModelSettings | null = null;
+  for (let attempt = 0; attempt < RECONCILE_MAX_ATTEMPTS; attempt++) {
+    await sleep(RECONCILE_POLL_INTERVAL_MS);
+    latest = await requestModelSettings(agentId);
+    if (latest !== null && isSettled(latest)) {
+      settingsByAgent.set(agentId, latest);
+      m.redraw();
+      return;
+    }
+  }
+  // Window elapsed without settling -- show the true on-disk state (the change
+  // may have been refused, e.g. an org-gated fast mode).
+  if (latest !== null) {
+    settingsByAgent.set(agentId, latest);
+    m.redraw();
+  }
 }
 
 export async function setModel(agentId: string, modelId: string): Promise<void> {
@@ -102,7 +137,7 @@ export async function setModel(agentId: string, modelId: string): Promise<void> 
     params: { agentId },
     body: { model: modelId },
   });
-  scheduleReconcile(agentId);
+  await reconcileAfterChange(agentId, (settings) => baseAlias(settings.model) === baseAlias(modelId));
 }
 
 export async function setFastMode(agentId: string, enabled: boolean): Promise<void> {
@@ -117,5 +152,5 @@ export async function setFastMode(agentId: string, enabled: boolean): Promise<vo
     params: { agentId },
     body: { enabled },
   });
-  scheduleReconcile(agentId);
+  await reconcileAfterChange(agentId, (settings) => settings.fast_mode === enabled);
 }
