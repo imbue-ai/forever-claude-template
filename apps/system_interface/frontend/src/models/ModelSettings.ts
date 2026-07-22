@@ -28,6 +28,22 @@ export interface ModelSettings {
 const settingsByAgent = new Map<string, ModelSettings>();
 const inFlightFetch = new Set<string>();
 
+// Monotonic per-agent counter bumped on each model/fast change. A reconcile (or a
+// POST-failure refresh) only commits its result while its generation is still the
+// latest, so a newer change supersedes an older one's in-flight poll instead of
+// letting a stale read flip the picker back.
+const changeGeneration = new Map<string, number>();
+
+function nextGeneration(agentId: string): number {
+  const generation = (changeGeneration.get(agentId) ?? 0) + 1;
+  changeGeneration.set(agentId, generation);
+  return generation;
+}
+
+function isCurrentGeneration(agentId: string, generation: number): boolean {
+  return changeGeneration.get(agentId) === generation;
+}
+
 // Claude Code persists a `/model` / `/fast` change to settings.json only after it
 // processes the command -- near-instant when idle, but delayed when it is
 // mid-turn (the command queues). So after posting, poll until settings.json
@@ -92,30 +108,60 @@ export async function fetchModelSettings(agentId: string): Promise<void> {
   }
 }
 
+/** Commit `settings` as the agent's true state, but only if `generation` is still
+ *  the latest change -- a newer change's reconcile owns the display otherwise. */
+function commitIfCurrent(agentId: string, generation: number, settings: ModelSettings): void {
+  if (isCurrentGeneration(agentId, generation)) {
+    settingsByAgent.set(agentId, settings);
+    m.redraw();
+  }
+}
+
 /** Poll settings.json until `isSettled` holds (the change landed), then commit
  *  the real state; give up after the window and commit whatever is on disk. The
  *  optimistic value stays displayed until then -- an unsettled read never
- *  overwrites it, so the picker doesn't flip back to the stale value mid-apply. */
-async function reconcileAfterChange(agentId: string, isSettled: (settings: ModelSettings) => boolean): Promise<void> {
+ *  overwrites it, so the picker doesn't flip back to the stale value mid-apply.
+ *  A superseding change (newer generation) abandons this loop. */
+async function reconcileAfterChange(
+  agentId: string,
+  generation: number,
+  isSettled: (settings: ModelSettings) => boolean,
+): Promise<void> {
   let latest: ModelSettings | null = null;
   for (let attempt = 0; attempt < RECONCILE_MAX_ATTEMPTS; attempt++) {
     await sleep(RECONCILE_POLL_INTERVAL_MS);
+    if (!isCurrentGeneration(agentId, generation)) {
+      return;
+    }
     latest = await requestModelSettings(agentId);
+    if (!isCurrentGeneration(agentId, generation)) {
+      return;
+    }
     if (latest !== null && isSettled(latest)) {
-      settingsByAgent.set(agentId, latest);
-      m.redraw();
+      commitIfCurrent(agentId, generation, latest);
       return;
     }
   }
   // Window elapsed without settling -- show the true on-disk state (the change
   // may have been refused, e.g. an org-gated fast mode).
   if (latest !== null) {
-    settingsByAgent.set(agentId, latest);
-    m.redraw();
+    commitIfCurrent(agentId, generation, latest);
+  }
+}
+
+/** After a change POST fails (e.g. the backend returns 500 because the agent is
+ *  stopped/restarting and could not receive the command), the optimistic value is
+ *  a lie -- the change never landed. Restore the true on-disk state so the picker
+ *  stops showing a selection the agent never received. */
+async function restoreTrueState(agentId: string, generation: number): Promise<void> {
+  const settings = await requestModelSettings(agentId);
+  if (settings !== null) {
+    commitIfCurrent(agentId, generation, settings);
   }
 }
 
 export async function setModel(agentId: string, modelId: string): Promise<void> {
+  const generation = nextGeneration(agentId);
   const current = settingsByAgent.get(agentId);
   if (current) {
     // Optimistic: reflect the pick immediately so the picker feels responsive.
@@ -131,26 +177,39 @@ export async function setModel(agentId: string, modelId: string): Promise<void> 
     });
     m.redraw();
   }
-  await m.request({
-    method: "POST",
-    url: apiUrl("/api/agents/:agentId/model"),
-    params: { agentId },
-    body: { model: modelId },
-  });
-  await reconcileAfterChange(agentId, (settings) => baseAlias(settings.model) === baseAlias(modelId));
+  try {
+    await m.request({
+      method: "POST",
+      url: apiUrl("/api/agents/:agentId/model"),
+      params: { agentId },
+      body: { model: modelId },
+    });
+  } catch (error) {
+    console.warn(`Failed to set model for agent ${agentId}`, error);
+    await restoreTrueState(agentId, generation);
+    return;
+  }
+  await reconcileAfterChange(agentId, generation, (settings) => baseAlias(settings.model) === baseAlias(modelId));
 }
 
 export async function setFastMode(agentId: string, enabled: boolean): Promise<void> {
+  const generation = nextGeneration(agentId);
   const current = settingsByAgent.get(agentId);
   if (current) {
     settingsByAgent.set(agentId, { ...current, fast_mode: enabled });
     m.redraw();
   }
-  await m.request({
-    method: "POST",
-    url: apiUrl("/api/agents/:agentId/fast"),
-    params: { agentId },
-    body: { enabled },
-  });
-  await reconcileAfterChange(agentId, (settings) => settings.fast_mode === enabled);
+  try {
+    await m.request({
+      method: "POST",
+      url: apiUrl("/api/agents/:agentId/fast"),
+      params: { agentId },
+      body: { enabled },
+    });
+  } catch (error) {
+    console.warn(`Failed to set fast mode for agent ${agentId}`, error);
+    await restoreTrueState(agentId, generation);
+    return;
+  }
+  await reconcileAfterChange(agentId, generation, (settings) => settings.fast_mode === enabled);
 }
