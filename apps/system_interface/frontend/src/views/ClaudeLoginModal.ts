@@ -55,7 +55,14 @@ interface SetupTokenPollResponse {
   status?: ClaudeAuthStatus | null;
 }
 
-type Mode = "select_provider" | "api_key_form" | "imbue_form" | "awaiting_setup_token" | "verifying" | "success" | "error";
+type Mode =
+  | "select_provider"
+  | "api_key_form"
+  | "imbue_form"
+  | "awaiting_setup_token"
+  | "verifying"
+  | "success"
+  | "error";
 
 // How often the modal asks the backend whether `claude setup-token` has
 // minted the token yet while the awaiting screen is up.
@@ -149,15 +156,22 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   }
 
   function loadCurrentStatus(): void {
-    void m
-      .request<ClaudeAuthStatus>({ method: "GET", url: apiUrl("/api/claude-auth/status") })
+    // The header line is progressive enhancement; any failure (including a
+    // synchronous one from environments without a DOM, e.g. unit tests)
+    // just leaves it blank.
+    let statusRequest: Promise<ClaudeAuthStatus>;
+    try {
+      statusRequest = m.request<ClaudeAuthStatus>({ method: "GET", url: apiUrl("/api/claude-auth/status") });
+    } catch {
+      currentStatus = null;
+      return;
+    }
+    void statusRequest
       .then((status) => {
         currentStatus = status;
         m.redraw();
       })
       .catch(() => {
-        // The header line is progressive enhancement; a failed status
-        // check just leaves it blank.
         currentStatus = null;
       });
   }
@@ -467,7 +481,10 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
                 [
                   m("span.claude-login-alt-text", [
                     m("span.claude-login-alt-name", "Sign in with Imbue"),
-                    m("span.claude-login-alt-desc", "Use an Imbue account to pay per token, no Claude account needed."),
+                    m(
+                      "span.claude-login-alt-desc",
+                      "Use an Imbue account to pay per token, no Claude account needed.",
+                    ),
                   ]),
                   m("span.claude-login-alt-go", m.trust(icon("chevron-right", { size: 18 }))),
                 ],
@@ -617,10 +634,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
       ]),
       m("div.claude-login-step", [
         m("div.claude-login-step-label", [m("span.claude-login-step-num", "2"), "Approve in the browser"]),
-        m("div.claude-login-waiting", [
-          m.trust(loginSpinnerIcon()),
-          m("span", "Waiting for your approval..."),
-        ]),
+        m("div.claude-login-waiting", [m.trust(loginSpinnerIcon()), m("span", "Waiting for your approval...")]),
       ]),
       // Paste-code fallback: some sign-in flows show a CODE#STATE string
       // instead of completing on their own.

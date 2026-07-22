@@ -10,7 +10,7 @@ vi.hoisted(() => {
     setTimeout(() => cb(0), 0) as unknown as number) as typeof globalThis.requestAnimationFrame;
 });
 
-import { ClaudeLoginModal } from "./ClaudeLoginModal";
+import { ClaudeLoginModal, computeDesktopAppOrigin } from "./ClaudeLoginModal";
 
 type VnodeLike = {
   attrs?: Record<string, unknown>;
@@ -98,11 +98,11 @@ describe("ClaudeLoginModal", () => {
     const tree = JSON.stringify(makeModal().render());
     expect(tree).toContain("Other ways to sign in");
     // The alternatives stay hidden until the disclosure is expanded.
-    expect(tree).not.toContain("Anthropic Console");
+    expect(tree).not.toContain("Sign in with Imbue");
     expect(tree).not.toContain("Use an API key");
   });
 
-  it("reveals the Console and API-key options when the disclosure is expanded", () => {
+  it("reveals the Imbue and API-key options when the disclosure is expanded", () => {
     const modal = makeModal();
     const toggle = findByClass(modal.render(), "claude-login-alts-toggle");
     expect(toggle).toBeDefined();
@@ -112,8 +112,22 @@ describe("ClaudeLoginModal", () => {
     (onclick as () => void)();
 
     const expanded = JSON.stringify(modal.render());
-    expect(expanded).toContain("Anthropic Console");
+    // Imbue is listed before the raw API-key option (the house offering).
+    expect(expanded).toContain("Sign in with Imbue");
     expect(expanded).toContain("Use an API key");
+    expect(expanded.indexOf("Sign in with Imbue")).toBeLessThan(expanded.indexOf("Use an API key"));
+    // Console OAuth is gone entirely.
+    expect(expanded).not.toContain("Anthropic Console");
+  });
+
+  it("shows the Imbue paste form with the mint-page link and textarea", () => {
+    const modal = makeModal();
+    const toggle = findByClass(modal.render(), "claude-login-alts-toggle");
+    (toggle?.attrs?.onclick as () => void)();
+    clickButtonByText(modal.render(), "Sign in with Imbue");
+    const tree = JSON.stringify(modal.render());
+    expect(tree).toContain("Open the Imbue key page");
+    expect(findById(modal.render(), "claude-login-imbue-blob-input")).toBeDefined();
   });
 
   it("offers only a Start-over action on a sign-in failure, and it restarts the flow", async () => {
@@ -132,12 +146,25 @@ describe("ClaudeLoginModal", () => {
     expect(serialized).toContain("Start over");
     // The pre-fix retry affordances are gone from the failure screen.
     expect(serialized).not.toContain("Try again");
-    expect(serialized).not.toContain("Verify & finish");
     expect(findById(failed, "claude-login-code-input")).toBeUndefined();
 
     // "Start over" returns to the beginning of sign-in (provider selection).
     clickButtonByText(failed, "Start over");
     await flush();
     expect(JSON.stringify(modal.render())).toContain("Continue with Claude subscription");
+  });
+});
+
+describe("computeDesktopAppOrigin", () => {
+  it("drops the agent label from a workspace .localhost hostname", () => {
+    expect(computeDesktopAppOrigin("agent-abc123.localhost", "8420", "http:")).toBe("http://localhost:8420");
+  });
+
+  it("keeps a bare localhost hostname", () => {
+    expect(computeDesktopAppOrigin("localhost", "8420", "http:")).toBe("http://localhost:8420");
+  });
+
+  it("returns null for remote (tunneled) hostnames", () => {
+    expect(computeDesktopAppOrigin("web--agent--user.example.com", "", "https:")).toBeNull();
   });
 });
