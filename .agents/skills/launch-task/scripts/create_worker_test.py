@@ -126,6 +126,47 @@ def test_happy_path_no_artifacts(tmp_path: Path) -> None:
     ]
 
 
+def test_branch_passthrough_checks_out_existing_branch(tmp_path: Path) -> None:
+    """A ``branch`` arg appends ``--branch <spec>`` to ``mngr create`` so the
+    worker checks out that existing branch instead of branching from HEAD. The
+    emitted argv must also stay valid against the live mngr CLI."""
+    runtime, task, _ = _make_layout(tmp_path)
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="subskill-worker",
+        runtime_dir=runtime,
+        task_file=task,
+        runner=runner,
+        branch="mngr/update-my-slug",
+    )
+
+    assert rc == 0
+    create_argv = next(c.argv for c in runner.calls if c.argv[:2] == ["mngr", "create"])
+    assert create_argv[-2:] == ["--branch", "mngr/update-my-slug"]
+    assert_mngr_argv_valid(create_argv)
+
+
+def test_no_branch_omits_the_flag(tmp_path: Path) -> None:
+    """The default (no ``branch``) leaves ``mngr create`` untouched -- no
+    ``--branch`` flag, so mngr applies its own default (mngr/<name> from HEAD)."""
+    runtime, task, _ = _make_layout(tmp_path)
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        runner=runner,
+    )
+
+    assert rc == 0
+    create_argv = next(c.argv for c in runner.calls if c.argv[:2] == ["mngr", "create"])
+    assert "--branch" not in create_argv
+
+
 def test_source_artifacts_dir_synced_after_runtime(tmp_path: Path) -> None:
     """A frontmatter ``source_artifacts_dir`` is synced right after the runtime dir."""
     runtime, task, artifacts = _make_layout(tmp_path)

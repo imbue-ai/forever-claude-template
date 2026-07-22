@@ -435,6 +435,7 @@ def test_restore_tree_removes_adds_and_checks_out_the_rest() -> None:
 _SLUG = "demo-change"
 _SERVE_UP = (sys.executable, str(reveal_mod._SHARED_SERVE_SCRIPT), "up")
 _SERVE_DOWN = (sys.executable, str(reveal_mod._SHARED_SERVE_SCRIPT), "down")
+_SERVE_REFRESH = (sys.executable, str(reveal_mod._SHARED_SERVE_SCRIPT), "refresh")
 
 
 def _make_work_dir(tmp_path: Path) -> Path:
@@ -531,6 +532,39 @@ def test_preview_propagates_a_shared_script_failure(tmp_path: Path) -> None:
 
     code = reveal_mod.preview(_SLUG, str(work_dir), tmp_path, runner=runner)
 
+    assert code == 1
+
+
+def test_preview_refresh_delegates_to_the_shared_script(tmp_path: Path) -> None:
+    runner = _RecordingRunner()
+
+    code = reveal_mod.preview_refresh(_SLUG, tmp_path, runner=runner)
+
+    assert code == 0
+    refresh_calls = runner.argvs_starting(*_SERVE_REFRESH)
+    assert len(refresh_calls) == 1
+    # Refreshes the same instance name the preview created for this slug; it never
+    # rebuilds or re-registers anything here (the shared script bounces the port).
+    assert _flag(refresh_calls[0], "--name") == reveal_mod._preview_instance_name(_SLUG)
+    assert not runner.ran("npm", "run", "build")
+
+
+def test_preview_refresh_propagates_a_shared_script_failure(tmp_path: Path) -> None:
+    runner = _RecordingRunner()
+    runner.respond(_SERVE_REFRESH, _Result(returncode=1))
+
+    code = reveal_mod.preview_refresh(_SLUG, tmp_path, runner=runner)
+
+    assert code == 1
+
+
+def test_main_routes_preview_refresh_through_the_shared_script(tmp_path: Path) -> None:
+    # End-to-end wiring: main() -> preview_refresh() spawns a *real* subprocess of
+    # the shared script. No instance exists, so the shared ``refresh`` reports
+    # "nothing to refresh" (exit 1) -- which proves the routing reached it.
+    code = reveal_mod.main(
+        ["preview-refresh", "--slug", _SLUG, "--repo-root", str(tmp_path)]
+    )
     assert code == 1
 
 

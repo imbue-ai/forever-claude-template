@@ -45,14 +45,34 @@ specifics, but the shape below holds for all of them.
    abandoning the user's core ask? If yes (your own code, a trivial transform),
    it does not belong in this pass. If no, validate it now. Fail fast here.
 
-5. **Put a cheap, real, prototype artifact in front of the user.** Produce the
-   smallest *real* artifact that lets the user judge the shape and loop on it:
+5. **Put a cheap, real, demonstrative artifact in front of the user.** Produce
+   the smallest *real* artifact that lets the user judge the shape and loop on it:
    present, take feedback, present an updated artifact that *visibly applies* the
-   feedback. Keep this phase
-   throwaway -- no production scripts, services, tests, or commits yet; producing
-   the artifact by hand, in-context, is fine, as long as the *output* is real.
-   Loop until the user **explicitly confirms** the shape is right. That
-   confirmation is the gate to everything below.
+   feedback. The purpose of this artifact is **fast feedback** -- getting the
+   shape in front of the user in seconds -- not merely avoiding a broken surface;
+   keep it cheap and disposable. Loop until the user **explicitly confirms** the
+   shape is right. That confirmation is the gate to everything below.
+
+   Two demonstrative-artifact types, chosen by **wiring-cost vs. restart-cost**:
+
+   - *Type 1 -- janky real edit:* rough or hardcoded, but in the *real* code and
+     shown through the *real* surface. Faithful, and it flows straight into the
+     real implementation. Prefer it when real context is needed to convince, when
+     integration is cheap, or when the rough version should simply become the real
+     thing.
+   - *Type 2 -- detached prototype:* a separate throwaway (a hand-built HTML mock,
+     a fake UI). Cheapest and fastest, no real wiring, discarded after. Prefer it
+     for the fastest look-and-feel loop, or for comparing directions when a fake
+     conveys the idea and real wiring is costly -- but it may *not convince* when
+     real rendering matters.
+
+   Keep this phase **throwaway either way: no commits on the served branch and no
+   production state** (no production scripts, services, or tests). Producing a
+   Type 2 artifact by hand, in-context, is fine as long as its *output* is real.
+   Committing a Type 1 edit on an *isolated throwaway branch* is also fine -- a
+   worktree-based live loop depends on exactly those commits; what matters is that
+   nothing reaches the served branch or production state until the shape is
+   confirmed.
 
 6. **Hard gate: nothing hardened before confirmation.** Do not crystallize, write
    thorough tests, run review gates, or build production state on an unconfirmed

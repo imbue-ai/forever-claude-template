@@ -56,7 +56,12 @@ The non-deterministic part -- opening the tab and gating on the user's judgment
 Usage:
     python3 reveal_system_interface.py reveal --rollback-to <pre-merge-sha> [--repo-root PATH]
     python3 reveal_system_interface.py preview --slug <name> --work-dir <worker-work-dir> [--repo-root PATH]
+    python3 reveal_system_interface.py preview-refresh --slug <name> [--repo-root PATH]
     python3 reveal_system_interface.py unpreview --slug <name> [--repo-root PATH]
+
+The ``preview-refresh`` subcommand re-boots the preview's inner app on its
+existing port (for a backend round in the live editing loop) so an edit/rebuild
+is picked up in place, without disturbing the wrapper frame or the user's tab.
 
 Environment:
     MINDS_WORKSPACE_SERVER_URL  Base URL of the live workspace server
@@ -767,6 +772,36 @@ def preview(slug: str, work_dir: str, repo_root: Path, *, runner: Runner) -> int
     return int(getattr(result, "returncode", 0))
 
 
+def preview_refresh(slug: str, repo_root: Path, *, runner: Runner) -> int:
+    """Re-boot the preview's inner app on its existing port via the shared script.
+
+    Thin adapter over ``serve_isolated_instance.py refresh``. Used during the live
+    editing loop for a **backend** round: after the lead rebuilds/edits the code
+    in its worktree (which the inner app runs from), this bounces just the inner
+    app process on the same port so the new backend is picked up -- leaving the
+    wrapper frame, the service registration, and the user's tab untouched. A
+    frontend-only round needs no process bounce (the inner app serves the rebuilt
+    ``static/`` bundle straight from disk); the lead just rebuilds and reloads the
+    tab's iframe with ``layout.py refresh si-preview``. Either way the lead
+    reloads the iframe itself afterward -- this never touches the tab. Returns the
+    shared script's exit code (0 healthy; 1 if there is nothing to refresh or the
+    rebooted app did not come up)."""
+    result = runner.run(
+        [
+            sys.executable,
+            str(_SHARED_SERVE_SCRIPT),
+            "refresh",
+            "--name",
+            _preview_instance_name(slug),
+            "--repo-root",
+            str(repo_root),
+        ],
+        cwd=str(repo_root),
+        check=False,
+    )
+    return int(getattr(result, "returncode", 0))
+
+
 def unpreview(slug: str, repo_root: Path, *, runner: Runner) -> int:
     """Tear down the preview for ``slug`` via the shared script. Idempotent: a
     missing instance is a no-op success, so this is safe on reject, after a
@@ -833,6 +868,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _add_repo_root_arg(preview_parser)
 
+    preview_refresh_parser = subparsers.add_parser(
+        "preview-refresh",
+        help="Re-boot the preview's inner app on its existing port to pick up a "
+        "backend edit/rebuild, without touching the wrapper or the user's tab.",
+    )
+    preview_refresh_parser.add_argument(
+        "--slug", required=True, help="The slug passed to 'preview'."
+    )
+    _add_repo_root_arg(preview_refresh_parser)
+
     unpreview_parser = subparsers.add_parser(
         "unpreview",
         help="Tear down a preview (kill the server, deregister the service). Idempotent.",
@@ -860,6 +905,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repo_root,
                 runner=Runner(),
             )
+        if args.command == "preview-refresh":
+            return preview_refresh(args.slug, repo_root, runner=Runner())
         if args.command == "unpreview":
             return unpreview(args.slug, repo_root, runner=Runner())
         parser.error(f"unknown command: {args.command}")

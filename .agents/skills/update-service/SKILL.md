@@ -23,9 +23,10 @@ If you're doing something *other* than editing an existing service:
 
 - **Creating a new web view** -> `build-web-service`.
 - **Changing the workspace UI itself** (`apps/system_interface` -- the
-  dockview shell, chat panels, progress view) -> `update-system-interface`
-  (it never edits the served tree directly; it previews in isolation and
-  reveals only when known-good).
+  dockview shell, chat panels, progress view) -> `update-system-interface`,
+  this flow's system-interface specialization: it runs the same live loop, but
+  against an isolated worktree (never the served tree), with the preview tab as
+  the user's view, and reveals only when known-good.
 - **Rearranging tabs** (split/move/focus/rename/close) -> `manage-layout`.
 
 ## Match the flow to the scope of the change
@@ -45,13 +46,22 @@ the request is -- it changes what you do *before* touching code:
   they **explicitly confirm** the shape, and only then build the real thing
   to a usable state. Never build heavy against an unconfirmed shape.
 
-  When a hand mock won't convince -- a redesign, or a data-touching change --
-  boot the *actually changed* service as a labeled preview tab beside the
-  live one via the shared `serve_isolated_instance.py` script (invocation
-  under "Protect the user's data while you verify"; it's the same preview
-  mechanism the system-interface flow uses). Keep the lighter hand mock for
-  quick look-and-feel loops. Either way, *reading* the live store to render a
-  preview is fine; never let a preview or verification *write* to it.
+  This is the demonstrative-artifact choice from
+  [`interactive-delivery.md`](../../shared/references/interactive-delivery.md)
+  phase 5, in service terms. A lighter **hand mock** (Type 2 -- a detached
+  throwaway) is fastest for quick look-and-feel loops. When it won't convince --
+  a redesign, or a data-touching change -- boot the *actually changed* service as
+  a labeled preview tab beside the live one (Type 1 -- the real edit shown
+  through the real surface) via the shared `serve_isolated_instance.py` script
+  (invocation under "Protect the user's data while you verify"; it's the same
+  preview mechanism the system-interface flow uses). Either way, *reading* the
+  live store to render a preview is fine; never let a preview or verification
+  *write* to it.
+
+  **Does this change warrant a preview at all?** Use judgment: a change to a
+  surface the user perceives usually does; a behavior-only change behind an
+  unchanged surface often does not (a tab refresh after go-live suffices). Don't
+  stand up a preview tab for a change nobody needs to look at.
 
   A new view or capability bolted onto an existing service is its own
   delivery with its own feedback gate (interactive-delivery phase 8):
@@ -299,7 +309,7 @@ exactly as `build-web-service`'s Step 5 gates on the working site.)
 - **The service errored or produced a wrong result and you worked around
   it** -> invoke `heal-artifact` (artifact = service) at turn-end instead.
 - **The workspace UI (`apps/system_interface`)** -> `update-system-interface`
-  owns its own preview-before-merge and safe-reveal go-live; use it rather
+  owns its own live preview loop and safe-reveal go-live; use it rather
   than this flow.
 
 `update-artifact` and `heal-artifact` also stand on their own as turn-end

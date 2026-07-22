@@ -7,8 +7,10 @@ This is the shared substrate under two service flows:
   (``DATA_DIR`` pointed at a scratch dir) so an edit can be exercised -- writes,
   deletes, migrations -- without ever touching the user's live store. The agent
   reaches the instance directly on its loopback port.
-- ``update-system-interface`` boots the worker's already-built work_dir as a
-  *preview* the user clicks around before a change is merged.
+- ``update-system-interface`` boots an already-built work_dir (the lead's editing
+  worktree during its live loop, or a worker's work_dir for a final pre-merge
+  check) as a *preview* the user clicks around, and ``refresh``-es it in place as
+  the lead edits.
 
 Both are the same motion: launch the service on a free port, with environment
 overrides that isolate its writable state, wait until it is healthy, and
@@ -45,7 +47,12 @@ Usage:
         [--service-name <name>] \\
         [--preview-service-name <name> --preview-title <label>] \\
         [--repo-root PATH] -- <launch argv...>
+    python3 serve_isolated_instance.py refresh --name <slug> [--repo-root PATH]
     python3 serve_isolated_instance.py down --name <slug> [--repo-root PATH]
+
+``refresh`` re-boots the inner server (only) on its existing port so a rebuild or
+edit is picked up in place -- the port, the wrapper frame, the service
+registrations, and the user's tab all stay put.
 
 Exit codes:
     0  Success (instance is up and healthy / torn down).
@@ -93,6 +100,11 @@ _WRAPPER_SCRIPT_PATH = Path(__file__).resolve().parent / WRAPPER_SCRIPT
 _HEALTH_ATTEMPTS = 60
 _HEALTH_INTERVAL_SECONDS = 1.0
 
+# When ``refresh`` reboots the inner server, how long to wait for the old process
+# to exit (and release its listening socket) before rebinding the same port.
+_STOP_ATTEMPTS = 30
+_STOP_INTERVAL_SECONDS = 0.5
+
 
 class InstanceError(Exception):
     """A throwaway instance failed to boot (avoids raising built-in exceptions)."""
@@ -118,6 +130,23 @@ class Runner:
             os.killpg(pid, sig)
         except ProcessLookupError:
             pass
+
+    def process_group_alive(self, pid: int) -> bool:
+        """Whether the process group led by ``pid`` still exists.
+
+        Used by ``refresh`` to wait for a just-killed inner server to actually
+        exit before rebinding its port: a live listening socket cannot be
+        rebound (even with SO_REUSEADDR), so we must not respawn until the old
+        process is gone. Signal 0 probes existence without delivering a signal.
+        """
+        try:
+            os.killpg(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # The group exists but is not ours to signal -- still "alive".
+            return True
 
 
 class HttpClient:
@@ -185,6 +214,43 @@ def wait_healthy(
         if index < attempts - 1:
             sleeper(interval)
     return False
+
+
+def _wait_process_gone(
+    runner: Runner,
+    pid: int,
+    attempts: int,
+    interval: float,
+    sleeper: Callable[[float], None],
+) -> bool:
+    """Poll until the process group led by ``pid`` is gone, up to ``attempts``."""
+    for index in range(attempts):
+        if not runner.process_group_alive(pid):
+            return True
+        if index < attempts - 1:
+            sleeper(interval)
+    return False
+
+
+def _inner_env(
+    port_env: str,
+    port: int,
+    host_env: str | None,
+    env_overrides: dict[str, str] | None,
+    unset_env: Sequence[str],
+) -> dict[str, str]:
+    """Build the child environment for the inner server: the ambient env with the
+    isolating overrides applied and the chosen port injected. Shared by ``up``
+    (fresh boot) and ``refresh`` (re-boot on the same port)."""
+    env = dict(os.environ)
+    for key in unset_env:
+        env.pop(key, None)
+    for key, value in (env_overrides or {}).items():
+        env[key] = value
+    env[port_env] = str(port)
+    if host_env is not None:
+        env[host_env] = "127.0.0.1"
+    return env
 
 
 def parse_env_assignments(assignments: Sequence[str]) -> dict[str, str]:
@@ -289,7 +355,9 @@ def up(
         sys.stderr.write(f"up: --cwd {cwd} is not a directory.\n")
         return 1
     preview_requested = preview_title is not None or preview_service_name is not None
-    if preview_requested and not (preview_title and preview_service_name and service_name):
+    if preview_requested and not (
+        preview_title and preview_service_name and service_name
+    ):
         sys.stderr.write(
             "up: a preview needs --service-name, --preview-service-name, and "
             "--preview-title together.\n"
@@ -311,14 +379,7 @@ def up(
     try:
         # 1. Boot the service on a free port, with the isolating env overrides.
         inner_port = find_free_port()
-        env = dict(os.environ)
-        for key in unset_env:
-            env.pop(key, None)
-        for key, value in (env_overrides or {}).items():
-            env[key] = value
-        env[port_env] = str(inner_port)
-        if host_env is not None:
-            env[host_env] = "127.0.0.1"
+        env = _inner_env(port_env, inner_port, host_env, env_overrides, unset_env)
         pids.append(
             spawner.spawn_detached(
                 list(command),
@@ -404,6 +465,21 @@ def up(
             "services": services,
             "inner_log": str(inner_log_path),
             "wrapper_log": str(wrapper_log_path) if preview_requested else None,
+            # The recipe to re-boot the inner server (pids[0]) on the same port,
+            # so ``refresh`` can replay it without re-passing any of it. The inner
+            # server is always the first spawn, so pids[0] is the one refresh
+            # cycles; the wrapper (pids[1], if any) is left running.
+            "inner": {
+                "command": list(command),
+                "cwd": str(cwd),
+                "port": inner_port,
+                "port_env": port_env,
+                "host_env": host_env,
+                "env_overrides": dict(env_overrides or {}),
+                "unset_env": list(unset_env),
+                "health_path": health_path,
+                "log": str(inner_log_path),
+            },
         }
         _state_path(repo_root, name).write_text(json.dumps(state, indent=2))
     except (InstanceError, OSError) as exc:
@@ -456,6 +532,110 @@ def down(name: str, repo_root: Path, *, runner: Runner) -> int:
     _teardown(repo_root, runner, pids=pids, services=services)
     shutil.rmtree(_state_dir(repo_root, name), ignore_errors=True)
     sys.stderr.write(f"instance for '{name}' torn down.\n")
+    return 0
+
+
+def refresh(
+    name: str,
+    repo_root: Path,
+    *,
+    runner: Runner,
+    http: HttpClient,
+    spawner: Spawner,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> int:
+    """Re-boot the inner server of instance ``name`` on its existing port.
+
+    This is the in-place update motion: the caller has rebuilt/edited the code the
+    inner server runs from, and wants the live instance to pick it up *without*
+    changing its port, tearing down the wrapper, or moving the user's tab. We stop
+    the inner server (``pids[0]``), wait for it to release its port, relaunch the
+    exact command recorded at ``up`` time on the same port, and re-probe health.
+    The wrapper (``pids[1]``, if any) and both service registrations are left
+    untouched -- since the port is unchanged, they keep routing to the new
+    process. The caller reloads the tab's iframe itself (this never touches it).
+
+    Returns 0 once the rebooted inner server is healthy; 1 if there is no
+    refreshable instance, the old server would not exit, or the new one did not
+    come up (in which case the preview tab shows an error until the underlying
+    build is fixed and refresh is retried -- but nothing else was disturbed).
+    """
+    state_path = _state_path(repo_root, name)
+    if not state_path.exists():
+        sys.stderr.write(
+            f"no active instance for '{name}'; nothing to refresh (run `up` first).\n"
+        )
+        return 1
+    try:
+        state = json.loads(state_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        sys.stderr.write(f"error: could not read instance state {state_path}: {exc}\n")
+        return 1
+    inner = state.get("inner")
+    pids = list(state.get("pids") or [])
+    if not inner or not pids:
+        sys.stderr.write(
+            f"instance '{name}' has no recorded inner-boot recipe; cannot refresh "
+            "(tear it down and re-create it with `up`).\n"
+        )
+        return 1
+
+    old_pid = int(pids[0])
+    port = int(inner["port"])
+    # 1. Stop the old inner server and wait for it to release the port. A live
+    #    listening socket cannot be rebound, so we must not respawn until it is
+    #    gone -- otherwise the new process fails to bind.
+    runner.kill_process_group(old_pid)
+    if not _wait_process_gone(
+        runner, old_pid, _STOP_ATTEMPTS, _STOP_INTERVAL_SECONDS, sleeper
+    ):
+        sys.stderr.write(
+            f"refresh: inner server pid {old_pid} did not exit in time; its port "
+            f"{port} may still be held. Aborting rather than risk a bind clash.\n"
+        )
+        return 1
+
+    # 2. Relaunch the recorded inner command on the SAME port.
+    env = _inner_env(
+        inner["port_env"],
+        port,
+        inner.get("host_env"),
+        inner.get("env_overrides") or {},
+        inner.get("unset_env") or [],
+    )
+    try:
+        new_pid = spawner.spawn_detached(
+            list(inner["command"]),
+            cwd=inner["cwd"],
+            env=env,
+            log_path=inner["log"],
+        )
+    except OSError as exc:
+        sys.stderr.write(f"refresh: failed to relaunch the inner server: {exc}\n")
+        return 1
+    # Record the new pid *before* the health wait so ``down`` can still kill it
+    # even if it never becomes healthy (no leaked server).
+    pids[0] = new_pid
+    state["pids"] = pids
+    state_path.write_text(json.dumps(state, indent=2))
+
+    if not wait_healthy(
+        http,
+        f"http://127.0.0.1:{port}{inner['health_path']}",
+        _HEALTH_ATTEMPTS,
+        _HEALTH_INTERVAL_SECONDS,
+        sleeper,
+    ):
+        sys.stderr.write(
+            f"refresh: inner server did not become healthy on port {port} after "
+            f"reboot (see {inner['log']}). The preview tab will show an error until "
+            "the underlying build boots; fix it and refresh again.\n"
+        )
+        return 1
+    sys.stderr.write(
+        f"refresh: inner server for '{name}' rebooted on port {port}; reload the "
+        "tab to see the current build.\n"
+    )
     return 0
 
 
@@ -548,10 +728,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Tear down an instance (kill the server(s), deregister service(s)). "
         "Idempotent.",
     )
-    down_parser.add_argument(
+    down_parser.add_argument("--name", required=True, help="The name passed to 'up'.")
+    _add_repo_root_arg(down_parser)
+
+    refresh_parser = subparsers.add_parser(
+        "refresh",
+        help="Re-boot the inner server on its existing port (to pick up a rebuild "
+        "/ edit) without changing the port, wrapper, or the user's tab.",
+    )
+    refresh_parser.add_argument(
         "--name", required=True, help="The name passed to 'up'."
     )
-    _add_repo_root_arg(down_parser)
+    _add_repo_root_arg(refresh_parser)
 
     args = parser.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
@@ -585,6 +773,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.command == "down":
         return down(args.name, repo_root, runner=Runner())
+    if args.command == "refresh":
+        return refresh(
+            args.name,
+            repo_root,
+            runner=Runner(),
+            http=HttpClient(),
+            spawner=Spawner(),
+        )
     parser.error(f"unknown command: {args.command}")
     return 1
 

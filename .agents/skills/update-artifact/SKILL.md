@@ -47,8 +47,9 @@ exploratory work is NOT an update candidate.
 worker looks (`artifact-<artifact>.md`) and the **go-live** strategy (Step 4):
 skill → cross-reference sweep is part of the edit, nothing else; service →
 refresh the tab; system-interface → the `update-system-interface` wrapper owns a
-preview-before-merge and a `safe-reveal` go-live and calls into this flow for
-the orchestration core only (see that skill).
+lead-driven live preview loop and a `safe-reveal` go-live, and calls into this
+flow for the orchestration core only -- creating its worker at approval on the
+branch the lead already built up (see that skill).
 
 ## Conventions
 
@@ -187,8 +188,10 @@ Then merge `mngr/update-$TARGET` and go live by artifact:
 - **service**: refresh the tab (`python3 scripts/layout.py refresh
   <service-name>`).
 - **system-interface**: do **not** merge or reveal here -- the
-  `update-system-interface` wrapper drives preview-before-merge and the
-  `safe-reveal` go-live. (That wrapper uses this flow for Steps 1-3 only.)
+  `update-system-interface` wrapper drives the live preview loop and the
+  `safe-reveal` go-live. (That wrapper uses this flow for Steps 1-3 only, and
+  launches the worker with a `--branch` passthrough onto the branch the lead
+  already built up.)
 
 Then close the ticket:
 
