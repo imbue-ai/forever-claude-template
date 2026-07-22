@@ -157,7 +157,3 @@ main() {
 }
 
 main
-# Surface the agent's chat tab the same way agents open panels themselves
-# (scripts/layout.py -> workspace_server layout op). Best-effort: with no
-# browser connected there is nothing to open, and the run itself is done.
-python3 "$(dirname "${BASH_SOURCE[0]}")/layout.py" open "chat:${AGENT_NAME}" >/dev/null 2>&1 || true

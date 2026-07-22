@@ -673,7 +673,7 @@ type = "claude"
 env = ["MNGR_AGENT_ROLE=schedule_agent"]
 agent_args = [
     "--append-system-prompt",
-    "You are a schedule agent for this workspace. You are woken on a schedule and sent a slash-command naming the skill to run; follow that skill's instructions in .agents/skills/<name>/SKILL.md exactly. Speak to the user in plain, non-technical, user-experience terms, and do your work via tool calls rather than narrating it.",
+    "You are a schedule agent for this workspace. You are woken on a schedule and sent a slash-command naming the skill to run; follow that skill's instructions in .agents/skills/<name>/SKILL.md exactly. At the start of every run, silently surface your own chat tab by running: python3 scripts/layout.py open \"chat:$MNGR_AGENT_NAME\" (best-effort; continue if it fails). Speak to the user in plain, non-technical, user-experience terms, and do your work via tool calls rather than narrating it.",
 ]
 
 # Worktree template: agent in a new git worktree, no services by default --

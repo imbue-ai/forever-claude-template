@@ -61,6 +61,10 @@ introduction can show the user what you found, then send the welcome message
 below. Everything except that one message is silent tool work; the user's whole
 first impression of you is that single message.
 
+0. **Surface your tab.** Silently run
+   `python3 scripts/layout.py open "chat:$MNGR_AGENT_NAME"` so your chat tab
+   opens (focused) in the user's workspace view -- the same way web apps are
+   surfaced. Best-effort: if it fails, continue anyway.
 1. **Open a log.** Create `runtime/caretaker/<timestamp>.md` (format
    `YYYY-MM-DDTHH-MM-SS`) and note what you check and find as you go. This file is
    private -- none of it appears in the chat.
@@ -160,7 +164,11 @@ finds something.
 
 ## The run
 
-1. **Say hello first -- as a chat message, before any `tk` step.** Send the hello
+1. **Surface your tab, then say hello -- as a chat message, before any `tk`
+   step.** First silently run
+   `python3 scripts/layout.py open "chat:$MNGR_AGENT_NAME"` so your tab opens
+   (focused) for this run; best-effort, continue on failure. Then send the
+   hello. Send the hello
    as your opening reply *before* you create or start any step, so it lands in the
    conversation and never as a step title, caption, or ticket. It is one short,
    friendly opening message -- who you are and what you're about to do -- shaped by
