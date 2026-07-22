@@ -170,6 +170,14 @@ enable-caretaker skill) writes the single line in
 - **Timing** is the standard due-checker: job id `caretaker`, due hour 3,
   `--interval-days 7`, catch-up after downtime. When a check is due, the
   checker execs `scripts/caretaker_check.sh`.
+- **The gateway gate:** the woken agent's Claude API traffic goes through the
+  latchkey gateway (`$LATCHKEY_GATEWAY`, a reverse tunnel to the minds desktop
+  app on the user's machine), which is gone whenever the app is closed. So
+  before anything else the check verifies the gateway answers HTTP at all (any
+  response counts, even 401/404; only connection refused/timeout -- or an
+  unset `LATCHKEY_GATEWAY` -- means down). If it is unreachable, the check
+  clears the caretaker daily-job stamp and exits, so the every-minute tick
+  retries and the check runs the first minute the app is open again.
 - **The deterministic check** looks for services in FATAL/BACKOFF, fresh
   error output in `/var/log/supervisor/` since the last check, disk at or
   above 85 percent, and new OOM-guard shedding. Findings are written to

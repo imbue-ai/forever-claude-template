@@ -8,6 +8,14 @@
 # only when it finds something worth telling the user about -- handing the
 # findings over via runtime/caretaker/findings.md -- or when the agent has
 # never introduced itself (no runtime/caretaker/permissions.md yet).
+#
+# Before doing anything it verifies the latchkey gateway is reachable: the
+# woken agent's only route to the Claude API is $LATCHKEY_GATEWAY, a reverse
+# tunnel to a gateway inside the minds desktop app, gone whenever the app is
+# closed. Waking the agent then would just die with connection errors -- with
+# the weekly stamp already written, so nothing would retry for a week. Instead
+# the check clears its daily-job stamp and exits, so the every-minute tick
+# retries until the app is open again.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,6 +26,17 @@ log() { printf '%s caretaker_check: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*";
 
 mkdir -p "$CARETAKER_DIR"
 MARKER="$CARETAKER_DIR/last_check"
+
+# Gateway gate: any HTTP response (even 401/404) proves the tunnel to the
+# desktop app is up -- only connection refused/timeout (or an unset
+# LATCHKEY_GATEWAY) means it is down. When down, clear the daily-job stamp
+# run_daily_job.sh wrote before exec'ing us, making the check due again on the
+# next tick; it re-runs (and re-defers, once a minute) until the app is open.
+if [ -z "${LATCHKEY_GATEWAY:-}" ] || ! curl -s -o /dev/null --max-time 5 "$LATCHKEY_GATEWAY"; then
+    rm -f "${MINDS_DAILY_STAMP_DIR:-/var/lib/minds/daily-stamps}/caretaker"
+    log "gateway unreachable (minds app closed?); deferring the check"
+    exit 0
+fi
 
 # One-time introduction: the agent has never met the user (no permissions file
 # yet), so wake it regardless of findings.
