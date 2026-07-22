@@ -23,6 +23,28 @@ mngr create my-workspace main -t local \
 - `vendor/mngr/` - A vendored, mutable copy of mngr. Note that making changes here *will* affect the behavior of the `mngr` command
 - `vendor/tk/` - A vendored copy of the [tk](https://github.com/wedow/ticket) ticket tracker. The `ticket` script (also callable as `tk`) manages tickets stored as markdown. We point `TICKETS_DIR` at `runtime/tickets/` (set in `.mngr/settings.toml`'s `host_env`) so tickets live alongside the rest of `runtime/` (and are covered by the opt-in GitHub sync when the `github-sync` skill has enabled it).
 
+## Running on OpenHost
+
+This branch is directly installable as an [OpenHost](https://github.com/imbue-openhost/openhost)
+app ("minds"): the container is a single workspace host serving the system_interface web UI, with
+Claude Code agents in tmux managed by in-container mngr (local provider). The OpenHost router
+terminates TLS and auth; there is no desktop app, VM layer, or Cloudflare tunnel, and exactly one
+mind per app install.
+
+- `openhost.toml` — the app manifest. Routes the app port to system_interface and consumes two
+  cross-app services: the [bifrost LLM gateway](https://github.com/imbue-openhost/openhost-bifrost-llm-gateway)
+  (`ANTHROPIC_BASE_URL` points at its `/anthropic` drop-in through the router service proxy) and
+  [openhost-latchkey](https://github.com/imbue-openhost/openhost-latchkey) (third-party API calls
+  with the owner's credentials injected; see the rewritten `latchkey` skill).
+- `scripts/openhost_entrypoint.sh` — replaces the desktop client + outer mngr provisioning:
+  symlinks `/mngr` onto `OPENHOST_APP_DATA_DIR`, seeds and git-inits the workspace on first boot,
+  writes the host env (service URLs, app token, `IS_SANDBOX=1` and the other per-host vars the
+  create templates only apply to new hosts), creates the `system-services` agent, restarts it on
+  warm boots, and tails supervisor logs as PID 1.
+- `tests/openhost/` — end-to-end harness tests (own uv project): they deploy this app through a
+  real local OpenHost router under podman, with the real openhost-latchkey app as provider.
+  Run with `cd tests/openhost && uv run pytest`. Requires podman and network.
+
 ## Create templates
 
 - `worker` - For sub-agents created via the launch-task skill (includes code review)

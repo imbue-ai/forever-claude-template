@@ -1,0 +1,34 @@
+[app]
+name = "minds"
+version = "0.1.0"
+description = "Persistent autonomous AI agent workspace"
+
+[runtime.container]
+image = "Dockerfile"
+port = 8000
+
+[resources]
+memory_mb = 4096
+cpu_cores = 2.0
+
+[data]
+app_data = true
+
+# LLM access: Claude Code inside the workspace points ANTHROPIC_BASE_URL at
+# this service's /anthropic drop-in prefix through the router.
+[[services.v2.consumes]]
+service = "github.com/imbue-openhost/openhost-bifrost-llm-gateway/services/openai-compat"
+shortname = "llm"
+version = ">=0.1.0"
+grants = ["full_access"]
+
+# Third-party API access with owner credentials injected by latchkey.
+# Baseline grant covers service listing; per-service grants are acquired at
+# runtime via the latchkey app's consent flow (grant_url).
+[[services.v2.consumes]]
+service = "github.com/imbue-openhost/openhost-latchkey/services/latchkey"
+shortname = "latchkey"
+version = ">=0.1.0"
+grants = [
+    {scope = "latchkey-meta", permissions = ["services-read"]},
+]

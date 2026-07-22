@@ -101,6 +101,11 @@ RUN bash /mngr/code/scripts/build_workspace.sh
 # atomically relocates it onto the volume.
 RUN mv /mngr/code /docker_build_code
 
+# WORKDIR must leave /mngr/code or later layers silently recreate it as an
+# empty dir, which blocks the OpenHost entrypoint's /mngr symlink onto the
+# app-data dir.
+WORKDIR /
+
 # Install the first-boot seed script at a stable image-layer path. It
 # has to live OUTSIDE /mngr/ (the volume mount path) so the runtime
 # mount does not shadow it, and OUTSIDE /docker_build_code (which the
@@ -120,3 +125,14 @@ RUN mv /mngr/code /docker_build_code
 # is checked out without exec bits.
 COPY scripts/default_workspace_template_seed.sh /usr/local/bin/default-workspace-template-seed
 RUN chmod +x /usr/local/bin/default-workspace-template-seed
+
+# OpenHost entrypoint: replaces the desktop client + outer mngr provisioning
+# (state onto OPENHOST_APP_DATA_DIR, first-boot seed + agent create, warm-boot
+# restart, supervisor logs to stdout). Harmless under other providers, which
+# override the container command.
+COPY scripts/openhost_entrypoint.sh /usr/local/bin/openhost-minds-entrypoint
+# The boot placeholder must be runnable before the first-boot seed puts the
+# workspace at /mngr/code, so it ships at an image-layer path too.
+COPY scripts/openhost_boot_placeholder.py /usr/local/bin/openhost-boot-placeholder
+RUN chmod +x /usr/local/bin/openhost-minds-entrypoint /usr/local/bin/openhost-boot-placeholder
+ENTRYPOINT ["tini", "--", "/usr/local/bin/openhost-minds-entrypoint"]

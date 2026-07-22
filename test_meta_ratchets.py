@@ -223,21 +223,32 @@ def test_gitignore_patterns_use_double_star() -> None:
     )
 
 
-def test_dockerignore_is_symlink_to_gitignore() -> None:
-    """Ensure .dockerignore is a symlink resolving to .gitignore.
+def test_dockerignore_covers_gitignore() -> None:
+    """Ensure .dockerignore contains every active .gitignore pattern.
 
-    Pair-test for test_gitignore_patterns_use_double_star: keeping
-    .dockerignore as a symlink means there is exactly one ignore file to
-    maintain. Docker reads the symlink target, so as long as the patterns
-    are valid in both formats (enforced by the **/-prefix rule), the
-    Docker build context excludes the same files git does.
+    Pair-test for test_gitignore_patterns_use_double_star. Upstream keeps
+    .dockerignore as a symlink to .gitignore; the OpenHost branch needs a
+    real file so the image build can also exclude docker-only paths (.git,
+    the harness test project) that must NOT be gitignored. To keep the two
+    from drifting, the real file must remain a superset: verbatim .gitignore
+    content plus a clearly-marked docker-only section.
     """
     dockerignore = _REPO_ROOT / ".dockerignore"
-    assert dockerignore.is_symlink(), (
-        f"{dockerignore} must be a symlink to .gitignore "
-        "(see test_gitignore_patterns_use_double_star)"
+    assert not dockerignore.is_symlink(), (
+        f"{dockerignore} should be a real file on the OpenHost branch "
+        "(gitignore content + docker-only excludes)"
     )
-    target = dockerignore.readlink()
-    assert str(target) == ".gitignore", (
-        f"{dockerignore} symlink target is {target!r}, expected '.gitignore'"
+    docker_patterns = {
+        line.strip()
+        for line in dockerignore.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    missing = [
+        stripped
+        for lineno, line in enumerate((_REPO_ROOT / ".gitignore").read_text().splitlines(), 1)
+        if (stripped := line.strip()) and not stripped.startswith("#") and stripped not in docker_patterns
+    ]
+    assert len(missing) == 0, (
+        ".dockerignore must contain every active .gitignore pattern "
+        "(it is .gitignore + docker-only excludes); missing:\n" + "\n".join(missing)
     )
