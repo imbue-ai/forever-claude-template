@@ -116,7 +116,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
             type: "button",
             class: "model-selector-trigger",
             disabled: settings === null,
-            title: "Select model",
+            "data-tooltip": "Select model",
             onclick: (event: MouseEvent) => {
               event.stopPropagation();
               isModelDropdownOpen = !isModelDropdownOpen;
@@ -173,7 +173,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
             {
               type: "button",
               class: `fast-toggle${settings.fast_mode ? " fast-toggle--on" : ""}`,
-              title: settings.fast_mode ? "Disable fast mode" : "Enable fast mode",
+              "data-tooltip": settings.fast_mode ? "Disable fast mode" : "Enable fast mode",
               "aria-label": settings.fast_mode ? "Disable fast mode" : "Enable fast mode",
               "aria-pressed": settings.fast_mode ? "true" : "false",
               onclick: () => setFastMode(agentId, !settings.fast_mode),
@@ -441,7 +441,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                 {
                   type: "button",
                   class: "message-input-attach-button",
-                  title: "Attach files",
+                  "data-tooltip": "Attach files",
                   "aria-label": "Attach files",
                   onclick: openFilePicker,
                 },
@@ -452,7 +452,8 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                     "button",
                     {
                       class: "message-input-stop-button",
-                      title: "Interrupt current turn",
+                      "data-tooltip": "Interrupt",
+                      "aria-label": "Interrupt",
                       onclick: handleInterrupt,
                     },
                     m.trust(stopIcon(14)),
@@ -463,6 +464,8 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                     "button",
                     {
                       class: "message-input-send-button",
+                      "data-tooltip": "Send message",
+                      "aria-label": "Send message",
                       onclick: handleSend,
                     },
                     m.trust(icon("send", { size: 16, strokeWidth: 2.5 })),

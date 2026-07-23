@@ -333,6 +333,46 @@ body {
   flex-shrink: 0;
 }
 
+/* Hover tooltips for the composer toolbar controls (model picker, fast-mode
+   toggle, attach, interrupt, send). Uses the shared CSS-tooltip pattern -- a
+   `::after` bubble fed by `data-tooltip` -- rather than native `title`, which is
+   unreliable in the desktop webview (see .pending-message-interrupt). The
+   toolbar sits at the composer's bottom, so the bubble points upward. */
+.message-input-toolbar [data-tooltip] {
+  position: relative;
+}
+
+.message-input-toolbar [data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  width: max-content;
+  max-width: 240px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--color-text-primary);
+  color: #fff;
+  font-family: var(--font-family-base);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.message-input-toolbar [data-tooltip]:hover::after,
+.message-input-toolbar [data-tooltip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
 .message-input-send-button {
   display: inline-flex;
   align-items: center;
