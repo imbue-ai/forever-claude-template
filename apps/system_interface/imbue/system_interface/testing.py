@@ -23,6 +23,7 @@ from contextlib import closing
 from contextlib import contextmanager
 
 import httpx
+import pexpect
 import simple_websocket
 from flask import Flask
 
@@ -113,22 +114,30 @@ class FakeFinishedProcess:
 
 
 class FakePexpectProcess:
-    """Scripted stand-in for a `pexpect.spawn` in the setup-token flow.
+    """Scripted stand-in for a `pexpect.spawn` in the PTY auth flows.
 
     `expect_script` is a sequence of `(return_index, output_chunk)` pairs:
     each `expect()` call consumes the next entry (the final entry repeats
     once the script is exhausted), returns `return_index`, and exposes
     `output_chunk` through `before`/`after` the way pexpect does after a
     match (index 0: chunk in `after`) or a non-match (chunk in `before`).
-    Callers can then script the URL-print, poll-pending (TIMEOUT), and
-    token-print stages of `claude setup-token` deterministically.
+    The return indexes are positions in the pattern list the production
+    code passes to `expect`, so a test scripting e.g. the token pump must
+    use that pump's pattern order.
+
+    `read_nonblocking` (used by the production drain loop after a trigger
+    match) yields `drain_chunks` one call at a time and then raises
+    `pexpect.EOF`, so drains terminate immediately instead of spinning
+    against their wall-clock deadline.
     """
 
-    def __init__(self, expect_script: Sequence[tuple[int, str]]) -> None:
+    def __init__(self, expect_script: Sequence[tuple[int, str]], drain_chunks: Sequence[str] = ()) -> None:
         assert expect_script, "expect_script must have at least one entry"
         self._script = list(expect_script)
         self._call_idx = 0
+        self._drain_chunks = list(drain_chunks)
         self.sendline_calls: list[str] = []
+        self.send_calls: list[str] = []
         self.terminate_calls = 0
         self.close_calls = 0
         self.timeout: float | None = None
@@ -147,8 +156,16 @@ class FakePexpectProcess:
             self.after = ""
         return return_index
 
+    def read_nonblocking(self, size: int = 65536, timeout: float | None = None) -> str:
+        if self._drain_chunks:
+            return self._drain_chunks.pop(0)
+        raise pexpect.EOF("fake stream exhausted")
+
     def sendline(self, s: str) -> None:
         self.sendline_calls.append(s)
+
+    def send(self, s: str) -> None:
+        self.send_calls.append(s)
 
     def isalive(self) -> bool:
         return True

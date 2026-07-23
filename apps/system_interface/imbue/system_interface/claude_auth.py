@@ -147,13 +147,13 @@ _OAUTH_ERROR_REGEX = re.compile(r"OAuth error")
 # detect completion of the credentials-based browser sign-ins.
 _LOGIN_SUCCESS_REGEX = re.compile(r"Login successful")
 _LOGIN_FAILED_LINE_REGEX = re.compile(r"Login failed: ?([^\r\n]*)")
-# The CLI's Ink input treats a rapid burst of characters ending in a newline
-# as pasted *content* -- the newline lands in the field instead of acting as
-# the Enter keypress -- so the code and Enter must be sent as two separate
-# writes with a pause in between (same pattern mngr uses to type into claude
-# TUIs). Verified against the live CLI: `sendline` leaves the code sitting in
-# the field forever; send + pause + CR submits it.
-_SETUP_TOKEN_CODE_ENTER_DELAY_SECONDS: Final = 0.6
+# The CLI's Ink input treats a rapid burst of characters as a paste; Enter
+# must arrive as its own later keystroke or it lands in the field as
+# content. The burst is over once the input echo goes quiet for
+# _CODE_ECHO_QUIET_SECONDS (deadline-capped so a silent PTY cannot stall
+# the submit).
+_CODE_ECHO_QUIET_SECONDS: Final = 0.3
+_CODE_ECHO_DEADLINE_SECONDS: Final = 3.0
 # Real setup tokens are ~110 characters. A much shorter extraction is a
 # wrapped fragment, not the token -- keep waiting rather than storing it.
 _MIN_SETUP_TOKEN_LENGTH: Final = 60
@@ -670,6 +670,28 @@ def _extract_setup_token(raw_output: str) -> str | None:
     return token
 
 
+def _drain_pty_stream_until_quiet(
+    process: Any, consumed: str, quiet_seconds: float, deadline_seconds: float
+) -> str:
+    """Read PTY output until no chunk arrives for `quiet_seconds`.
+
+    Used to detect the end of the CLI's paste-echo burst before sending
+    Enter as its own keystroke. EOF and the overall deadline both end the
+    wait; everything read is appended to `consumed` so the session output
+    stays complete.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        try:
+            chunk = process.read_nonblocking(size=65536, timeout=quiet_seconds)
+        except pexpect.TIMEOUT:
+            return consumed
+        except pexpect.EOF:
+            return consumed
+        consumed = consumed + (chunk or "")
+    return consumed
+
+
 def _drain_pty_stream(process: Any, consumed: str, is_complete: Callable[[str], bool]) -> str:
     """Keep reading PTY output until `is_complete(consumed)` or a deadline.
 
@@ -805,18 +827,18 @@ class ClaudeAuthService(MutableModel):
             )
         except ProcessSetupError as e:
             logger.warning("claude auth status failed to launch: {}", e)
-            return self._with_derived_mode(AuthStatus(logged_in=False), managed_env)
+            return self._with_derived_mode(AuthStatus(logged_in=False), combined_extra)
 
         stdout = result.stdout.strip() if isinstance(result.stdout, str) else ""
         if not stdout:
-            return self._with_derived_mode(AuthStatus(logged_in=False), managed_env)
+            return self._with_derived_mode(AuthStatus(logged_in=False), combined_extra)
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError as e:
             raise ClaudeAuthError(f"claude auth status returned non-JSON output: {stdout!r}") from e
         if not isinstance(payload, dict):
             raise ClaudeAuthError(f"claude auth status returned non-object JSON: {payload!r}")
-        return self._with_derived_mode(_parse_status_payload(payload), managed_env)
+        return self._with_derived_mode(_parse_status_payload(payload), combined_extra)
 
     def _read_managed_env_tolerant(self) -> dict[str, str]:
         """Read the managed settings env, tolerating an unset CLAUDE_CONFIG_DIR.
@@ -947,7 +969,7 @@ class ClaudeAuthService(MutableModel):
     def start_background_apply(
         self,
         managed_env: Mapping[str, str],
-        on_complete: Callable[[], None] | None,
+        on_complete: Callable[[], object] | None,
         reason: RestartReason,
     ) -> None:
         """Write new managed credentials and restart agents on a background thread.
@@ -978,7 +1000,7 @@ class ClaudeAuthService(MutableModel):
             self._restart_thread = thread
             thread.start()
 
-    def _run_apply_in_background(self, managed_env: dict[str, str], on_complete: Callable[[], None] | None) -> None:
+    def _run_apply_in_background(self, managed_env: dict[str, str], on_complete: Callable[[], object] | None) -> None:
         # Thread entry point: this is the top-level handler for the apply
         # thread, so any escaping exception is caught, logged, and surfaced
         # to the frontend through the FAILED progress phase instead of
@@ -997,7 +1019,7 @@ class ClaudeAuthService(MutableModel):
             logger.error("Background credential apply failed: {}: {}", type(e).__name__, e)
             self._set_restart_progress(RestartPhase.FAILED, None, str(e))
 
-    def submit_credentials(self, pasted_text: str, on_restart_complete: Callable[[], None] | None) -> AuthStatus:
+    def submit_credentials(self, pasted_text: str, on_restart_complete: Callable[[], object] | None) -> AuthStatus:
         """Parse pasted credentials, write the settings env block, start the restart.
 
         The single chokepoint for the API-key field, the Imbue blob
@@ -1147,7 +1169,7 @@ class ClaudeAuthService(MutableModel):
             raise ClaudeAuthError("claude setup-token exited without printing a token")
         return None
 
-    def _complete_setup_token_locked(self, token: str, on_restart_complete: Callable[[], None] | None) -> AuthStatus:
+    def _complete_setup_token_locked(self, token: str, on_restart_complete: Callable[[], object] | None) -> AuthStatus:
         """Hand the minted token to the background apply, drop the session."""
         self._drop_current_session_locked()
         managed_env = {CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR: token}
@@ -1155,7 +1177,7 @@ class ClaudeAuthService(MutableModel):
         return self.get_auth_status(extra_env=managed_env)
 
     def poll_setup_token(
-        self, session_id: str, on_restart_complete: Callable[[], None] | None
+        self, session_id: str, on_restart_complete: Callable[[], object] | None
     ) -> AuthFlowPollResult:
         """Check whether the in-flight setup-token subprocess minted the token yet.
 
@@ -1180,7 +1202,7 @@ class ClaudeAuthService(MutableModel):
         return AuthFlowPollResult(is_complete=True, status=status)
 
     def submit_setup_token_code(
-        self, session_id: str, code: str, on_restart_complete: Callable[[], None] | None
+        self, session_id: str, code: str, on_restart_complete: Callable[[], object] | None
     ) -> AuthStatus:
         """Send the user's pasted `CODE#STATE` to the live setup-token subprocess.
 
@@ -1210,15 +1232,23 @@ class ClaudeAuthService(MutableModel):
         return status
 
     def _send_code_locked(self, process: Any, code: str) -> None:
-        """Type a `CODE#STATE` paste into the live PTY, then a deferred Enter.
+        """Type a `CODE#STATE` paste into the live PTY, then a separate Enter.
 
         Two separate writes: the CLI's paste heuristic swallows a newline
         arriving in the same burst as the code (it becomes field content,
-        not a submit), so Enter goes as its own deferred keystroke.
+        not a submit). Completion of the burst is observable -- the input
+        field echoes the paste as render output -- so Enter is sent once
+        the echo stream goes quiet (with a deadline backstop) rather than
+        after a fixed sleep.
         """
         try:
             process.send(code)
-            time.sleep(_SETUP_TOKEN_CODE_ENTER_DELAY_SECONDS)
+            self._current_setup_token_output = _drain_pty_stream_until_quiet(
+                process,
+                self._current_setup_token_output,
+                _CODE_ECHO_QUIET_SECONDS,
+                _CODE_ECHO_DEADLINE_SECONDS,
+            )
             process.send("\r")
         except pexpect.ExceptionPexpect as e:
             self._drop_current_session_locked()
@@ -1266,7 +1296,7 @@ class ClaudeAuthService(MutableModel):
         return False
 
     def _complete_oauth_login_locked(
-        self, provider: OAuthProvider, on_restart_complete: Callable[[], None] | None
+        self, provider: OAuthProvider, on_restart_complete: Callable[[], object] | None
     ) -> AuthStatus:
         """Apply a finished browser sign-in: fast path or switch-restart.
 
@@ -1293,7 +1323,7 @@ class ClaudeAuthService(MutableModel):
         return self.get_auth_status()
 
     def poll_oauth_login(
-        self, session_id: str, on_restart_complete: Callable[[], None] | None
+        self, session_id: str, on_restart_complete: Callable[[], object] | None
     ) -> AuthFlowPollResult:
         """Check whether the in-flight `claude auth login` finished on its own.
 
@@ -1319,7 +1349,7 @@ class ClaudeAuthService(MutableModel):
         return AuthFlowPollResult(is_complete=True, status=status)
 
     def submit_oauth_login_code(
-        self, session_id: str, code: str, on_restart_complete: Callable[[], None] | None
+        self, session_id: str, code: str, on_restart_complete: Callable[[], object] | None
     ) -> AuthStatus:
         """Send the user's pasted `CODE#STATE` to the live `claude auth login`."""
         with self._setup_token_lock:

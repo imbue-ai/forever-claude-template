@@ -1,10 +1,11 @@
 """HTTP endpoint handlers for `/api/claude-auth/*`.
 
 Kept in a separate module from server.py so server.py doesn't grow with
-the modal-specific logic. Every successful auth path hands
-`_restart_completion_callback` to the service's background agent restart,
-so the welcome-resend check runs exactly once per successful login --
-after the restarted chat agent is back up.
+the modal-specific logic. Every successful auth path hands the welcome
+resender's `check_and_resend_welcome` to the service as the completion
+hook, so the welcome-resend check runs exactly once per successful login
+-- after the restarted chat agent is back up (or inline on the no-restart
+subscription fast path).
 
 The `ClaudeAuthService` (which holds the in-flight setup-token subprocess)
 and the `WelcomeResender` are created once in `create_application` and
@@ -17,7 +18,6 @@ calls.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 
 from flask import Flask
 from flask import Response
@@ -60,20 +60,6 @@ def _error_response(detail: str, status_code: int = 400) -> Response:
     return _json_response(ErrorResponse(detail=detail).model_dump(), status_code=status_code)
 
 
-def _restart_completion_callback(welcome_resender: WelcomeResender) -> Callable[[], None]:
-    """Build the on-complete hook for the background agent restart.
-
-    Runs the welcome-resend check once the restarted chat agent is back up
-    (it cannot run at submit time anymore: the restart is asynchronous and
-    the agent is still down when the submit response returns).
-    `check_and_resend_welcome` is itself failure-tolerant, and the restart
-    thread's top-level handler catches anything it raises.
-    """
-
-    def run_welcome_resend() -> None:
-        welcome_resender.check_and_resend_welcome()
-
-    return run_welcome_resend
 
 
 def get_status() -> Response:
@@ -114,7 +100,7 @@ def poll_setup_token() -> Response:
     except (ValueError, TypeError) as e:
         return _error_response(f"Invalid request body: {e}")
     try:
-        result = service.poll_setup_token(body.session_id, _restart_completion_callback(welcome_resender))
+        result = service.poll_setup_token(body.session_id, welcome_resender.check_and_resend_welcome)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=400)
     if not result.is_complete or result.status is None:
@@ -135,7 +121,7 @@ def submit_setup_token_code() -> Response:
         return _error_response(f"Invalid request body: {e}")
     try:
         status = service.submit_setup_token_code(
-            body.session_id, body.code, _restart_completion_callback(welcome_resender)
+            body.session_id, body.code, welcome_resender.check_and_resend_welcome
         )
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=400)
@@ -161,7 +147,7 @@ def submit_credentials() -> Response:
         return _error_response("credentials must be a non-empty string")
     try:
         status = service.submit_credentials(
-            body.credentials.get_secret_value(), _restart_completion_callback(welcome_resender)
+            body.credentials.get_secret_value(), welcome_resender.check_and_resend_welcome
         )
     except claude_auth.CredentialPasteError as e:
         return _error_response(str(e), status_code=400)
@@ -205,7 +191,7 @@ def poll_oauth_login() -> Response:
     except (ValueError, TypeError) as e:
         return _error_response(f"Invalid request body: {e}")
     try:
-        result = service.poll_oauth_login(body.session_id, _restart_completion_callback(welcome_resender))
+        result = service.poll_oauth_login(body.session_id, welcome_resender.check_and_resend_welcome)
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=400)
     if not result.is_complete or result.status is None:
@@ -226,7 +212,7 @@ def submit_oauth_login_code() -> Response:
         return _error_response(f"Invalid request body: {e}")
     try:
         status = service.submit_oauth_login_code(
-            body.session_id, body.code, _restart_completion_callback(welcome_resender)
+            body.session_id, body.code, welcome_resender.check_and_resend_welcome
         )
     except claude_auth.ClaudeAuthError as e:
         return _error_response(str(e), status_code=400)

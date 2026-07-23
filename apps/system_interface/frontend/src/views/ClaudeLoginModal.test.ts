@@ -112,12 +112,15 @@ describe("ClaudeLoginModal", () => {
     (onclick as () => void)();
 
     const expanded = JSON.stringify(modal.render());
-    // Imbue is listed before the raw API-key option (the house offering).
+    // Fixed ordering: Imbue (the house offering), then API key, then the
+    // demoted long-lived-token flow, then Console.
     expect(expanded).toContain("Sign in with Imbue");
     expect(expanded).toContain("Use an API key");
+    expect(expanded).toContain("Get a long-lived token");
+    expect(expanded).toContain("Anthropic Console (API billing)");
     expect(expanded.indexOf("Sign in with Imbue")).toBeLessThan(expanded.indexOf("Use an API key"));
-    // Console OAuth is gone entirely.
-    expect(expanded).not.toContain("Anthropic Console");
+    expect(expanded.indexOf("Use an API key")).toBeLessThan(expanded.indexOf("Get a long-lived token"));
+    expect(expanded.indexOf("Get a long-lived token")).toBeLessThan(expanded.indexOf("Anthropic Console"));
   });
 
   it("shows the Imbue paste form with the mint-page link and textarea", () => {

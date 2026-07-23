@@ -14,11 +14,11 @@ test reads the developer's real shared Claude settings.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
 from mngr_cli_contract.contract import assert_mngr_argv_valid
-from pydantic import SecretStr
 
 from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
 from imbue.system_interface import claude_auth
@@ -26,7 +26,7 @@ from imbue.system_interface.testing import FakeFinishedProcess
 from imbue.system_interface.testing import FakePexpectProcess
 
 _FAKE_URL = "https://claude.com/cai/oauth/authorize?code=true&state=abc"
-_FAKE_TOKEN = "sk-ant-oat01-FAKE_token-123"
+_FAKE_TOKEN = "sk-ant-oat01-" + "FAKETOKEN0" * 9 + "12345"
 
 
 @pytest.fixture
@@ -347,118 +347,122 @@ def _build_restart_recording_service(
     return claude_auth.ClaudeAuthService(command_runner=_runner)
 
 
-def test_restart_stops_live_agents_then_starts_then_messages_previously_running(
+def test_restart_issues_one_fused_batched_call_per_behavior_group(
     isolated_claude_config: Path,
 ) -> None:
     """The full restart contract in one pass.
 
-    STOPPED agents are untouched; RUNNING and WAITING agents are stopped
-    (all of them) before any is started; only the previously-RUNNING ones
-    are messaged afterwards, with the auth-aware continue message.
+    STOPPED agents are untouched; previously-RUNNING agents (chats and
+    workers alike) restart in ONE fused call that delivers the auth-aware
+    continue message via mngr's resume machinery; previously-WAITING
+    agents restart in a second fused call with --no-resume. Nothing
+    outside the settings env is touched (no .claude.json writes).
     """
     command_log: list[tuple[str, ...]] = []
     service = _build_restart_recording_service(command_log)
     restarted = service.restart_all_claude_agents()
     assert restarted == ["chat-1", "worker-1", "chat-2"]
     mngr_calls = [cmd for cmd in command_log if cmd[0] == "mngr" and cmd[1] != "list"]
-    assert [cmd[:2] + (cmd[-1],) for cmd in mngr_calls[:3]] == [
-        ("mngr", "stop", "chat-1"),
-        ("mngr", "stop", "worker-1"),
-        ("mngr", "stop", "chat-2"),
+    assert mngr_calls == [
+        (
+            "mngr",
+            "start",
+            "--restart",
+            "--resume-message",
+            claude_auth.RESTART_CONTINUE_MESSAGE,
+            "chat-1",
+            "worker-1",
+        ),
+        ("mngr", "start", "--restart", "--no-resume", "chat-2"),
     ]
-    assert [cmd[:3] + (cmd[3],) for cmd in mngr_calls[3:6]] == [
-        ("mngr", "start", "--no-resume", "chat-1"),
-        ("mngr", "start", "--no-resume", "worker-1"),
-        ("mngr", "start", "--no-resume", "chat-2"),
-    ]
-    message_calls = mngr_calls[6:]
-    assert [cmd[2] for cmd in message_calls] == ["chat-1", "worker-1"]
-    assert all(cmd[1] == "message" for cmd in message_calls)
-    assert all(claude_auth.RESTART_CONTINUE_MESSAGE in cmd for cmd in message_calls)
-    # "old-chat" (STOPPED) must appear in no stop/start/message call.
-    assert all("old-chat" not in cmd for cmd in mngr_calls)
+    assert not (isolated_claude_config / ".claude.json").exists()
 
 
-def test_restart_prepares_config_between_stop_and_start(isolated_claude_config: Path) -> None:
-    """The shared .claude.json prep must land while every agent is stopped."""
-    events: list[str] = []
-    config_path = isolated_claude_config / ".claude.json"
-
+def test_restart_raises_when_start_fails(isolated_claude_config: Path) -> None:
     def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
         if cmd[1] == "list":
             return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
-        if cmd[1] in ("stop", "start"):
-            events.append(f"{cmd[1]}:{'prepped' if config_path.exists() else 'unprepped'}")
-        return FakeFinishedProcess(returncode=0, stdout='{"loggedIn": true}')
-
-    service = claude_auth.ClaudeAuthService(command_runner=_runner)
-    service.restart_all_claude_agents()
-    stop_events = [event for event in events if event.startswith("stop")]
-    start_events = [event for event in events if event.startswith("start")]
-    assert all(event == "stop:unprepped" for event in stop_events)
-    assert all(event == "start:prepped" for event in start_events)
-
-
-def test_restart_tolerates_message_delivery_failure(isolated_claude_config: Path) -> None:
-    """A continue-message failure must not fail the (already successful) auth flow."""
-
-    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
-        if cmd[1] == "list":
-            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
-        if cmd[1] == "message":
-            return FakeFinishedProcess(returncode=1, stderr="delivery failed")
+        if cmd[1] == "start":
+            return FakeFinishedProcess(returncode=1, stderr="start broke")
         return FakeFinishedProcess(returncode=0)
 
     service = claude_auth.ClaudeAuthService(command_runner=_runner)
-    restarted = service.restart_all_claude_agents()
-    assert restarted == ["chat-1", "worker-1", "chat-2"]
-
-
-def test_restart_raises_when_stop_fails(isolated_claude_config: Path) -> None:
-    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
-        if cmd[1] == "list":
-            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
-        if cmd[1] == "stop":
-            return FakeFinishedProcess(returncode=1, stderr="stop broke")
-        return FakeFinishedProcess(returncode=0)
-
-    service = claude_auth.ClaudeAuthService(command_runner=_runner)
-    with pytest.raises(claude_auth.ClaudeAuthError, match="mngr stop"):
+    with pytest.raises(claude_auth.ClaudeAuthError, match="mngr start"):
         service.restart_all_claude_agents()
-
-
-def test_approve_api_key_in_claude_config_appends_suffix(isolated_claude_config: Path) -> None:
-    config_path = isolated_claude_config / ".claude.json"
-    config_path.write_text(json.dumps({"customApiKeyResponses": {"approved": ["oldsuffix"]}}))
-    claude_auth._approve_api_key_in_claude_config(config_path, SecretStr("sk-ant-api03-" + "x" * 30))
-    config = json.loads(config_path.read_text())
-    assert "oldsuffix" in config["customApiKeyResponses"]["approved"]
-    assert ("x" * 20) in config["customApiKeyResponses"]["approved"]
 
 
 # ----- submit_credentials -----
 
 
-def test_submit_credentials_writes_settings_and_restarts(isolated_claude_config: Path) -> None:
+def _wait_for_background_apply(service: claude_auth.ClaudeAuthService) -> claude_auth.RestartProgress:
+    """Join the background apply thread and return its final progress."""
+    thread = service._restart_thread
+    assert thread is not None, "no background apply was started"
+    thread.join(timeout=10)
+    assert not thread.is_alive(), "background apply did not finish in time"
+    progress = service.current_restart_progress()
+    assert progress is not None
+    return progress
+
+
+def test_submit_credentials_writes_settings_and_restarts_in_background(isolated_claude_config: Path) -> None:
     command_log: list[tuple[str, ...]] = []
     service = _build_restart_recording_service(command_log)
-    status = service.submit_credentials("ANTHROPIC_API_KEY=sk-ant-fresh")
+    completions: list[str] = []
+    status = service.submit_credentials("ANTHROPIC_API_KEY=sk-ant-fresh", lambda: completions.append("done"))
+    # The submit returns immediately with the apply's initial progress.
+    assert status.restart_phase == claude_auth.RestartPhase.RESTARTING.value
+    assert status.restart_reason == claude_auth.RestartReason.CREDENTIALS_SAVED.value
+    assert status.auth_mode is claude_auth.AuthMode.API_KEY
+    progress = _wait_for_background_apply(service)
+    assert progress.phase is claude_auth.RestartPhase.DONE
     settings = json.loads((isolated_claude_config / "settings.json").read_text())
     assert settings["env"] == {"ANTHROPIC_API_KEY": "sk-ant-fresh"}
-    assert status.auth_mode is claude_auth.AuthMode.API_KEY
-    assert any(cmd[1] == "stop" for cmd in command_log)
-    assert any(cmd[1] == "start" for cmd in command_log)
-    # The freshly written key was pre-approved in .claude.json so restarted
-    # agents don't block on the custom-key challenge.
-    config = json.loads((isolated_claude_config / ".claude.json").read_text())
-    assert "sk-ant-fresh"[-20:] in config["customApiKeyResponses"]["approved"]
+    assert any(cmd[1] == "start" and "--restart" in cmd for cmd in command_log)
+    # The on-complete hook (welcome resend) ran after the restart finished,
+    # and nothing outside the settings env was touched.
+    assert completions == ["done"]
+    assert not (isolated_claude_config / ".claude.json").exists()
+
+
+def test_submit_credentials_reports_failed_phase_when_restart_fails(isolated_claude_config: Path) -> None:
+    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        if cmd[1] == "list":
+            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
+        if cmd[1] == "start":
+            return FakeFinishedProcess(returncode=1, stderr="start broke")
+        return FakeFinishedProcess(returncode=0, stdout='{"loggedIn": true}')
+
+    service = claude_auth.ClaudeAuthService(command_runner=_runner)
+    service.submit_credentials("ANTHROPIC_API_KEY=sk-ant-fresh", None)
+    progress = _wait_for_background_apply(service)
+    assert progress.phase is claude_auth.RestartPhase.FAILED
+    assert progress.error is not None and "mngr start" in progress.error
+
+
+def test_submit_credentials_rejects_second_change_while_apply_is_running(isolated_claude_config: Path) -> None:
+    release_start = threading.Event()
+
+    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        if cmd[1] == "list":
+            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
+        if cmd[1] == "start":
+            release_start.wait(timeout=10)
+        return FakeFinishedProcess(returncode=0, stdout='{"loggedIn": true}')
+
+    service = claude_auth.ClaudeAuthService(command_runner=_runner)
+    service.submit_credentials("ANTHROPIC_API_KEY=sk-ant-first", None)
+    with pytest.raises(claude_auth.ClaudeAuthError, match="still in progress"):
+        service.submit_credentials("ANTHROPIC_API_KEY=sk-ant-second", None)
+    release_start.set()
+    _wait_for_background_apply(service)
 
 
 def test_submit_credentials_rejects_bad_paste_without_touching_anything(isolated_claude_config: Path) -> None:
     command_log: list[tuple[str, ...]] = []
     service = _build_restart_recording_service(command_log)
     with pytest.raises(claude_auth.CredentialPasteError):
-        service.submit_credentials("NOT_A_MANAGED_KEY=x")
+        service.submit_credentials("NOT_A_MANAGED_KEY=x", None)
     assert not (isolated_claude_config / "settings.json").exists()
     assert command_log == []
 
@@ -500,8 +504,9 @@ def test_start_setup_token_raises_on_timeout_waiting_for_url() -> None:
 def test_poll_setup_token_pending_then_completes(isolated_claude_config: Path) -> None:
     """The normal browser-approval flow: pending polls, then the token appears.
 
-    Completion writes the token into the settings env block and restarts
-    the claude agents before returning the final status.
+    Completion writes the token into the settings env block and hands the
+    agent restart to the background apply. Pump pattern order: token=0,
+    OAuth-error=1, EOF=2, TIMEOUT=3.
     """
     command_log: list[tuple[str, ...]] = []
 
@@ -514,44 +519,54 @@ def test_poll_setup_token_pending_then_completes(isolated_claude_config: Path) -
     fake_process = FakePexpectProcess(
         [
             (0, _FAKE_URL),
-            (2, ""),
-            (0, f"Your OAuth token (valid for 1 year):\n{_FAKE_TOKEN}\n"),
+            (3, ""),
+            (0, f"Your OAuth token (valid for 1 year):\r\n{_FAKE_TOKEN}\r\nStore this token securely.\r\n"),
         ]
     )
     service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
     start = service.start_setup_token()
 
-    pending = service.poll_setup_token(start.session_id)
+    pending = service.poll_setup_token(start.session_id, None)
     assert pending.is_complete is False
     assert command_log == []
 
-    complete = service.poll_setup_token(start.session_id)
+    complete = service.poll_setup_token(start.session_id, None)
     assert complete.is_complete is True
     assert complete.status is not None
     assert complete.status.auth_mode is claude_auth.AuthMode.SUBSCRIPTION
+    progress = _wait_for_background_apply(service)
+    assert progress.phase is claude_auth.RestartPhase.DONE
     settings = json.loads((isolated_claude_config / "settings.json").read_text())
     assert settings["env"] == {"CLAUDE_CODE_OAUTH_TOKEN": _FAKE_TOKEN}
-    assert any(cmd[1] == "stop" for cmd in command_log)
+    assert any(cmd[0] == "mngr" and cmd[1] == "start" for cmd in command_log)
     # The session is consumed: a further poll must reject the id.
     with pytest.raises(claude_auth.ClaudeAuthError, match="No active setup-token session"):
-        service.poll_setup_token(start.session_id)
+        service.poll_setup_token(start.session_id, None)
 
 
 def test_poll_setup_token_raises_when_subprocess_dies_without_token() -> None:
-    fake_process = FakePexpectProcess([(0, _FAKE_URL), (1, "some crash output")])
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (2, "some crash output")])
     service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_a, **_k: fake_process)
     start = service.start_setup_token()
     with pytest.raises(claude_auth.ClaudeAuthError, match="exited without printing a token"):
-        service.poll_setup_token(start.session_id)
+        service.poll_setup_token(start.session_id, None)
     # The dead session was dropped, so a retry poll reports no session.
     with pytest.raises(claude_auth.ClaudeAuthError, match="No active setup-token session"):
-        service.poll_setup_token(start.session_id)
+        service.poll_setup_token(start.session_id, None)
+
+
+def test_poll_setup_token_fails_fast_on_oauth_error() -> None:
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (1, "OAuth error: Request failed with status code 400")])
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_a, **_k: fake_process)
+    start = service.start_setup_token()
+    with pytest.raises(claude_auth.ClaudeAuthError, match="OAuth error"):
+        service.poll_setup_token(start.session_id, None)
 
 
 def test_poll_setup_token_rejects_unknown_session() -> None:
     service = claude_auth.ClaudeAuthService()
     with pytest.raises(claude_auth.ClaudeAuthError, match="No active setup-token session"):
-        service.poll_setup_token("bogus")
+        service.poll_setup_token("bogus", None)
 
 
 def test_submit_setup_token_code_drives_subprocess_and_completes(isolated_claude_config: Path) -> None:
@@ -563,12 +578,16 @@ def test_submit_setup_token_code_drives_subprocess_and_completes(isolated_claude
             return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
         return FakeFinishedProcess(returncode=0, stdout='{"loggedIn": true, "authMethod": "oauth_token"}')
 
-    fake_process = FakePexpectProcess([(0, _FAKE_URL), (0, f"token:\n{_FAKE_TOKEN}\n")])
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (0, f"token:\r\n{_FAKE_TOKEN}\r\nDone.\r\n")])
     service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
     start = service.start_setup_token()
-    status = service.submit_setup_token_code(start.session_id, "FAKE#CODE")
-    assert fake_process.sendline_calls == ["FAKE#CODE"]
+    status = service.submit_setup_token_code(start.session_id, "FAKE#CODE", None)
+    # The code is typed and Enter delivered as its own deferred keystroke
+    # (a single sendline would be swallowed by the CLI's paste heuristic).
+    assert fake_process.send_calls == ["FAKE#CODE", "\r"]
     assert status.auth_mode is claude_auth.AuthMode.SUBSCRIPTION
+    progress = _wait_for_background_apply(service)
+    assert progress.phase is claude_auth.RestartPhase.DONE
     settings = json.loads((isolated_claude_config / "settings.json").read_text())
     assert settings["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == _FAKE_TOKEN
 
@@ -576,29 +595,237 @@ def test_submit_setup_token_code_drives_subprocess_and_completes(isolated_claude
 def test_submit_setup_token_code_rejects_unknown_session() -> None:
     service = claude_auth.ClaudeAuthService()
     with pytest.raises(claude_auth.ClaudeAuthError, match="No active setup-token session"):
-        service.submit_setup_token_code("bogus", "fake#code")
+        service.submit_setup_token_code("bogus", "fake#code", None)
 
 
-def test_abort_setup_token_clears_session() -> None:
+def test_abort_auth_flow_clears_session() -> None:
     fake_process = FakePexpectProcess([(0, _FAKE_URL)])
     service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_a, **_k: fake_process)
     start = service.start_setup_token()
-    service.abort_setup_token()
+    service.abort_auth_flow()
     assert fake_process.terminate_calls >= 1
     with pytest.raises(claude_auth.ClaudeAuthError, match="No active setup-token session"):
-        service.poll_setup_token(start.session_id)
+        service.poll_setup_token(start.session_id, None)
+
+
+# ----- browser sign-in (claude auth login) flow -----
+# Oauth pump pattern order: success=0, failed=1, OAuth-error=2, EOF=3, TIMEOUT=4.
+
+
+def test_start_oauth_login_spawns_provider_flag_and_extracts_url() -> None:
+    spawn_args: list[tuple[str, list[str]]] = []
+
+    def _spawner(executable: str, args: list[str], _timeout: float) -> FakePexpectProcess:
+        spawn_args.append((executable, args))
+        return FakePexpectProcess([(0, _FAKE_URL)])
+
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=_spawner)
+    result = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
+    assert result.oauth_url == _FAKE_URL
+    assert spawn_args == [("claude", ["auth", "login", "--claudeai"])]
+
+    service.abort_auth_flow()
+    service_console = claude_auth.ClaudeAuthService(pexpect_spawner=_spawner)
+    service_console.start_oauth_login(claude_auth.OAuthProvider.CONSOLE)
+    assert spawn_args[-1] == ("claude", ["auth", "login", "--console"])
+
+
+def test_oauth_login_fast_path_completes_without_restart(isolated_claude_config: Path) -> None:
+    """Subscription sign-in with an empty managed env: the credential is
+    stored by the CLI and re-read live, so nothing restarts and the
+    welcome hook runs inline."""
+    command_log: list[tuple[str, ...]] = []
+
+    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        command_log.append(tuple(cmd))
+        if cmd[1] == "list":
+            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
+        return FakeFinishedProcess(
+            returncode=0,
+            stdout='{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "Max", "email": "x@y.com"}',
+        )
+
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (4, ""), (0, "Login successful.\r\n")])
+    service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
+    start = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
+
+    pending = service.poll_oauth_login(start.session_id, None)
+    assert pending.is_complete is False
+
+    completions: list[str] = []
+    complete = service.poll_oauth_login(start.session_id, lambda: completions.append("welcome"))
+    assert complete.is_complete is True
+    assert complete.status is not None
+    assert complete.status.auth_mode is claude_auth.AuthMode.SUBSCRIPTION
+    assert complete.status.email == "x@y.com"
+    assert complete.status.restart_phase is None
+    assert completions == ["welcome"]
+    assert all(cmd[0] != "mngr" or cmd[1] == "list" for cmd in command_log)
+    assert not (isolated_claude_config / "settings.json").exists()
+
+
+def test_oauth_login_with_managed_keys_clears_them_and_restarts(isolated_claude_config: Path) -> None:
+    """The switching case: active managed keys outrank the fresh credential,
+    so they are cleared and the agents restarted in the background."""
+    claude_auth.write_managed_auth_env({"ANTHROPIC_API_KEY": "sk-ant-old"})
+    command_log: list[tuple[str, ...]] = []
+
+    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        command_log.append(tuple(cmd))
+        if cmd[1] == "list":
+            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
+        return FakeFinishedProcess(
+            returncode=0, stdout='{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "Max"}'
+        )
+
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (0, "Login successful.\r\n")])
+    service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
+    start = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
+    complete = service.poll_oauth_login(start.session_id, None)
+    assert complete.is_complete is True
+    assert complete.status is not None
+    assert complete.status.restart_reason == claude_auth.RestartReason.SUBSCRIPTION_SWITCH.value
+    progress = _wait_for_background_apply(service)
+    assert progress.phase is claude_auth.RestartPhase.DONE
+    settings = json.loads((isolated_claude_config / "settings.json").read_text())
+    assert settings.get("env", {}) == {}
+    assert any(cmd[0] == "mngr" and cmd[1] == "start" for cmd in command_log)
+
+
+def test_oauth_login_console_always_restarts(isolated_claude_config: Path) -> None:
+    """Console's key lands in .claude.json (cached at claude start), so it
+    takes the restart path even with an empty managed env."""
+
+    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        if cmd[1] == "list":
+            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
+        return FakeFinishedProcess(returncode=0, stdout='{"loggedIn": true, "authMethod": "claude.ai"}')
+
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (0, "Login successful.\r\n")])
+    service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
+    start = service.start_oauth_login(claude_auth.OAuthProvider.CONSOLE)
+    complete = service.poll_oauth_login(start.session_id, None)
+    assert complete.is_complete is True
+    assert complete.status is not None
+    assert complete.status.restart_reason == claude_auth.RestartReason.CONSOLE_SWITCH.value
+    progress = _wait_for_background_apply(service)
+    assert progress.phase is claude_auth.RestartPhase.DONE
+
+
+def test_oauth_login_surfaces_login_failed_detail() -> None:
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (1, "Login failed: token exchange rejected\r\n")])
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_a, **_k: fake_process)
+    start = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
+    with pytest.raises(claude_auth.ClaudeAuthError, match="token exchange rejected"):
+        service.poll_oauth_login(start.session_id, None)
+
+
+def test_submit_oauth_login_code_completes_fast_path(isolated_claude_config: Path) -> None:
+    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        if cmd[1] == "list":
+            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
+        return FakeFinishedProcess(
+            returncode=0, stdout='{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "Pro"}'
+        )
+
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (0, "Login successful.\r\n")])
+    service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
+    start = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
+    status = service.submit_oauth_login_code(start.session_id, "FAKE#CODE", None)
+    assert fake_process.send_calls == ["FAKE#CODE", "\r"]
+    assert status.auth_mode is claude_auth.AuthMode.SUBSCRIPTION
+    assert status.restart_phase is None
+
+
+def test_oauth_and_setup_token_sessions_do_not_cross_match() -> None:
+    fake_process = FakePexpectProcess([(0, _FAKE_URL)])
+    service = claude_auth.ClaudeAuthService(pexpect_spawner=lambda *_a, **_k: fake_process)
+    start = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
+    with pytest.raises(claude_auth.ClaudeAuthError, match="No active setup-token session"):
+        service.poll_setup_token(start.session_id, None)
+
+
+# ----- credentials-based mode folding -----
+
+
+def test_status_folds_subscription_mode_from_credentials_when_env_empty(isolated_claude_config: Path) -> None:
+    def _runner(_cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        return FakeFinishedProcess(
+            stdout='{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "Max", "email": "x@y.com"}'
+        )
+
+    service = claude_auth.ClaudeAuthService(command_runner=_runner)
+    status = service.get_auth_status()
+    assert status.auth_mode is claude_auth.AuthMode.SUBSCRIPTION
+
+
+def test_status_folds_console_mode_when_claude_ai_without_subscription(isolated_claude_config: Path) -> None:
+    def _runner(_cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        return FakeFinishedProcess(stdout='{"loggedIn": true, "authMethod": "claude.ai"}')
+
+    service = claude_auth.ClaudeAuthService(command_runner=_runner)
+    status = service.get_auth_status()
+    assert status.auth_mode is claude_auth.AuthMode.CONSOLE
+
+
+def test_status_managed_env_outranks_credentials_fold(isolated_claude_config: Path) -> None:
+    (isolated_claude_config / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_API_KEY": "sk-ant-key"}}))
+
+    def _runner(_cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        return FakeFinishedProcess(
+            stdout='{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "Max"}'
+        )
+
+    service = claude_auth.ClaudeAuthService(command_runner=_runner)
+    assert service.get_auth_status().auth_mode is claude_auth.AuthMode.API_KEY
 
 
 # ----- token/URL extraction -----
 
 
 def test_extract_setup_token_from_ansi_wrapped_output() -> None:
-    raw = f"\x1b[1m Your OAuth token (valid for 1 year):\x1b[22m\n \x1b[32m{_FAKE_TOKEN}\x1b[39m\n"
+    raw = f"\x1b[1m Your OAuth token (valid for 1 year):\x1b[22m\r\n \x1b[32m{_FAKE_TOKEN}\x1b[39m\r\n"
     assert claude_auth._extract_setup_token(raw) == _FAKE_TOKEN
+
+
+def test_extract_setup_token_reassembles_width_wrapped_rows() -> None:
+    """A ~108-char token hard-wraps at the 80-column PTY; the screen replay
+    must join the physically adjacent rows exactly."""
+    raw = f"Your OAuth token (valid for 1 year):\r\n{_FAKE_TOKEN[:80]}\r\n{_FAKE_TOKEN[80:]}\r\nStore this token securely.\r\n"
+    assert claude_auth._extract_setup_token(raw) == _FAKE_TOKEN
+
+
+def test_extract_setup_token_ignores_stale_frame_under_first_row() -> None:
+    """Regression: a mid-render frame can show the token's first row over the
+    PREVIOUS frame's content; the fully drawn later frame must win (the old
+    extractor stored an 80-column stump here)."""
+    frame_end = "\x1b[?2026l"
+    raw = (
+        "\x1b[2J\x1b[1;1H" + _FAKE_TOKEN[:80] + "\x1b[2;1H" + "esponse_type=code&redirect_uri=stale" + frame_end
+        + "\x1b[2;1H\x1b[K" + _FAKE_TOKEN[80:] + "\x1b[3;1H\x1b[KStore this token securely." + frame_end
+    )
+    assert claude_auth._extract_setup_token(raw) == _FAKE_TOKEN
+
+
+def test_extract_setup_token_survives_screen_clear_at_exit() -> None:
+    raw = f"token:\r\n{_FAKE_TOKEN[:80]}\r\n{_FAKE_TOKEN[80:]}\r\nDone.\r\n\x1b[?2026l\x1b[2J\x1b[1;1H\x1b[?2026l"
+    assert claude_auth._extract_setup_token(raw) == _FAKE_TOKEN
+
+
+def test_extract_setup_token_refuses_short_fragments() -> None:
+    assert claude_auth._extract_setup_token("sk-ant-oat01-tooshort\r\nDone.\r\n") is None
 
 
 def test_extract_setup_token_returns_none_without_token() -> None:
     assert claude_auth._extract_setup_token("Opening browser to sign in...") is None
+
+
+def test_extract_oauth_url_prefers_osc8_hyperlink_target_over_garbled_label() -> None:
+    """The CLI's visible wrapped label render is garbled; the OSC 8 target
+    (id-parameterized, BEL-terminated) carries the intact URL."""
+    full_url = _FAKE_URL + "&redirect_uri=https%3A%2F%2Fx&state=S123"
+    raw = f"\x1b]8;id=1abc;{full_url}\x07\x1b[38;5;246m{full_url[:80]}\x1b[39m\x1b]8;;\x07"
+    assert claude_auth._extract_oauth_url(raw) == full_url
 
 
 def test_extract_oauth_url_returns_none_when_no_url_present() -> None:
@@ -615,13 +842,11 @@ def test_list_argv_accepted_by_live_cli() -> None:
     assert_mngr_argv_valid(claude_auth._build_list_command())
 
 
-def test_stop_argv_accepted_by_live_cli() -> None:
-    assert_mngr_argv_valid(claude_auth._build_stop_command("some-agent"))
+def test_restart_with_message_argv_accepted_by_live_cli() -> None:
+    assert_mngr_argv_valid(
+        claude_auth._build_restart_with_message_command(["agent-a", "agent-b"], "please continue")
+    )
 
 
-def test_start_argv_accepted_by_live_cli() -> None:
-    assert_mngr_argv_valid(claude_auth._build_start_command("some-agent"))
-
-
-def test_message_argv_accepted_by_live_cli() -> None:
-    assert_mngr_argv_valid(claude_auth._build_message_command("some-agent", "please continue"))
+def test_restart_no_resume_argv_accepted_by_live_cli() -> None:
+    assert_mngr_argv_valid(claude_auth._build_restart_no_resume_command(["agent-a"]))

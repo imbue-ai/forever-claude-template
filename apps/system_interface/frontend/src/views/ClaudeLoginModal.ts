@@ -280,22 +280,24 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
 
   async function startSetupToken(): Promise<void> {
     activeFlow = "setup_token";
-    await startAuthFlowSession({ url: apiUrl("/api/claude-auth/setup-token/start"), body: undefined });
+    await startAuthFlowSession("/api/claude-auth/setup-token/start", undefined);
   }
 
   async function startOauthLogin(provider: "claudeai" | "console"): Promise<void> {
     activeFlow = provider;
-    await startAuthFlowSession({ url: apiUrl("/api/claude-auth/oauth/start"), body: { provider } });
+    await startAuthFlowSession("/api/claude-auth/oauth/start", { provider });
   }
 
-  async function startAuthFlowSession(request: { url: string; body: object | undefined }): Promise<void> {
+  async function startAuthFlowSession(path: string, body: object | undefined): Promise<void> {
     clearError();
     startVerifying("Starting sign-in...", "Preparing your sign-in.");
     try {
+      // apiUrl is resolved inside the try: it can throw synchronously in a
+      // DOM-less environment, and any failure must land on the error screen.
       const response = await m.request<SetupTokenStartResponse>({
         method: "POST",
-        url: request.url,
-        body: request.body,
+        url: apiUrl(path),
+        body,
       });
       sessionId = response.session_id;
       oauthUrl = response.oauth_url;
@@ -612,10 +614,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
                 [
                   m("span.claude-login-alt-text", [
                     m("span.claude-login-alt-name", "Get a long-lived token"),
-                    m(
-                      "span.claude-login-alt-desc",
-                      "Mint a 1-year subscription token (restarts this mind's agents).",
-                    ),
+                    m("span.claude-login-alt-desc", "Mint a 1-year subscription token (restarts this mind's agents)."),
                   ]),
                   m("span.claude-login-alt-go", m.trust(icon("chevron-right", { size: 18 }))),
                 ],
@@ -807,49 +806,49 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
       activeFlow !== "setup_token"
         ? null
         : m("div.claude-login-subtle", [
-        tokenPasteExpanded
-          ? m("div.claude-login-subtle-body", [
-              m("input.claude-login-input.claude-login-input--mono", {
-                id: "claude-login-token-input",
-                type: "password",
-                placeholder: "sk-ant-oat01-...",
-                value: directToken,
-                spellcheck: false,
-                autocomplete: "off",
-                oninput: (event: InputEvent) => {
-                  directToken = (event.target as HTMLInputElement).value;
-                },
-                onkeydown: (event: KeyboardEvent) => {
-                  if (event.key === "Enter" && directToken.trim()) {
-                    event.preventDefault();
-                    submitDirectToken();
-                  }
-                },
-              }),
-              m(
-                "button.claude-login-button.claude-login-button--primary",
-                {
-                  type: "button",
-                  disabled: !directToken.trim(),
-                  onclick: () => {
-                    submitDirectToken();
+            tokenPasteExpanded
+              ? m("div.claude-login-subtle-body", [
+                  m("input.claude-login-input.claude-login-input--mono", {
+                    id: "claude-login-token-input",
+                    type: "password",
+                    placeholder: "sk-ant-oat01-...",
+                    value: directToken,
+                    spellcheck: false,
+                    autocomplete: "off",
+                    oninput: (event: InputEvent) => {
+                      directToken = (event.target as HTMLInputElement).value;
+                    },
+                    onkeydown: (event: KeyboardEvent) => {
+                      if (event.key === "Enter" && directToken.trim()) {
+                        event.preventDefault();
+                        submitDirectToken();
+                      }
+                    },
+                  }),
+                  m(
+                    "button.claude-login-button.claude-login-button--primary",
+                    {
+                      type: "button",
+                      disabled: !directToken.trim(),
+                      onclick: () => {
+                        submitDirectToken();
+                      },
+                    },
+                    "Use token",
+                  ),
+                ])
+              : m(
+                  "button.claude-login-subtle-toggle",
+                  {
+                    type: "button",
+                    onclick: () => {
+                      tokenPasteExpanded = true;
+                      m.redraw();
+                    },
                   },
-                },
-                "Use token",
-              ),
-            ])
-          : m(
-              "button.claude-login-subtle-toggle",
-              {
-                type: "button",
-                onclick: () => {
-                  tokenPasteExpanded = true;
-                  m.redraw();
-                },
-              },
-              "Already have a token? Paste it instead",
-            ),
-      ]),
+                  "Already have a token? Paste it instead",
+                ),
+          ]),
     ];
   }
 
