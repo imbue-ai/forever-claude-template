@@ -82,6 +82,20 @@ export function labelForActivityState(
   return null;
 }
 
+function renderStrip(label: string, state: string | null | undefined): m.Vnode {
+  return m("div.agent-activity-indicator", { "data-state": state, role: "status", "aria-live": "polite" }, [
+    m("span.agent-activity-indicator__dot"),
+    m("span.agent-activity-indicator__label", label),
+  ]);
+}
+
+// Minimum time a codex "Running X" caption stays up. Codex's code-mode tool calls
+// often finish (or yield) in a fraction of a second, so TOOL_RUNNING flickers past.
+// We hold the caption for this long ONLY while the agent is still working (THINKING)
+// -- the turn ending (IDLE) clears it immediately, so the indicator never lingers
+// past when it should go away.
+const CODEX_TOOL_CAPTION_MIN_MS = 700;
+
 interface ActivityIndicatorAttrs {
   agentId: string;
   events: TranscriptEvent[];
@@ -89,15 +103,51 @@ interface ActivityIndicatorAttrs {
 }
 
 export function ActivityIndicator(): m.Component<ActivityIndicatorAttrs> {
+  // Per-mounted-panel (i.e. per-agent) debounce state for the codex tool caption.
+  let heldToolCaption: string | null = null;
+  let heldUntil = 0;
+  let releaseTimer: number | null = null;
+
+  const cancelRelease = (): void => {
+    if (releaseTimer !== null) {
+      window.clearTimeout(releaseTimer);
+      releaseTimer = null;
+    }
+  };
+
   return {
     view(vnode) {
-      const state = getEffectiveActivityState(vnode.attrs.agentId);
-      const label = labelForActivityState(state, vnode.attrs.events, vnode.attrs.harness);
+      const { agentId, events, harness } = vnode.attrs;
+      const state = getEffectiveActivityState(agentId);
+      const label = labelForActivityState(state, events, harness);
+
+      if (harness === "codex") {
+        const now = Date.now();
+        if (state === "TOOL_RUNNING" && label !== null) {
+          // Active tool -> (re)start the hold window; cancel any pending release.
+          cancelRelease();
+          heldToolCaption = label;
+          heldUntil = now + CODEX_TOOL_CAPTION_MIN_MS;
+        } else if (state === "THINKING" && heldToolCaption !== null && now < heldUntil) {
+          // Still working, but the tool cleared fast -- keep the caption up briefly so
+          // it doesn't flash, then release. Schedule a redraw at the release point.
+          if (releaseTimer === null) {
+            releaseTimer = window.setTimeout(() => {
+              releaseTimer = null;
+              heldToolCaption = null;
+              m.redraw();
+            }, heldUntil - now);
+          }
+          return renderStrip(heldToolCaption, "TOOL_RUNNING");
+        } else {
+          // IDLE / null (turn ended), window expired, or nothing held -> release now.
+          cancelRelease();
+          heldToolCaption = null;
+        }
+      }
+
       if (label === null) return null;
-      return m("div.agent-activity-indicator", { "data-state": state, role: "status", "aria-live": "polite" }, [
-        m("span.agent-activity-indicator__dot"),
-        m("span.agent-activity-indicator__label", label),
-      ]);
+      return renderStrip(label, state);
     },
   };
 }

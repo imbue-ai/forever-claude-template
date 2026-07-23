@@ -6,6 +6,9 @@ import threading
 import traceback
 from collections.abc import Callable
 from collections.abc import Iterator
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -353,8 +356,40 @@ def _stream_events(agent_id: str) -> Response:
     return _sse_response(_stream_filtered_events(agent_id, event_queues, event_queue, watcher.is_main_session_event))
 
 
+# How long the send endpoint waits synchronously for delivery before returning a
+# fast accepted-for-delivery 202. Chosen below the ingress proxy's request timeout
+# so a slow cold codex resume can never hang the request past it.
+_SEND_SYNC_BUDGET_SECONDS = 20.0
+
+# Background delivery pool: a slow cold-start send runs here so it can outlive its
+# HTTP request (the 202 case) without blocking it. Futures capture any delivery
+# exception, so we never need a broad ``except`` on the request thread.
+_SEND_EXECUTOR = ThreadPoolExecutor(thread_name_prefix="send")
+
+
+def _log_send_failure(done: "Future[bool]") -> None:
+    """done-callback: log a send that failed after we already returned (the 202 case)."""
+    exc = done.exception()
+    if exc is not None:
+        _loguru_logger.opt(exception=exc).error("Background send to agent failed")
+
+
 def _send_message_endpoint(agent_id: str) -> Response:
-    """Send a message to an agent."""
+    """Send a message to an agent.
+
+    The send is bounded: ``send_message_to_agent`` auto-starts a STOPPED agent and
+    waits for it to be ready before delivering (``is_start_desired=True``). A warm
+    agent completes in well under a second, but a *cold* one -- especially codex,
+    whose resume replays the whole rollout and polls a tmux banner for readiness --
+    can take far longer than the ingress proxy's request timeout. Blocking the HTTP
+    request on that slow start is exactly what cut the connection mid-flight and
+    surfaced to the user as a "failed to send: null" / "unknown error". So we run the
+    send on a worker thread and wait only up to ``_SEND_SYNC_BUDGET_SECONDS`` (chosen
+    below the proxy timeout): if it finishes in time we return the real result
+    (unchanged behavior); if it is still starting we return a fast accepted-for-
+    delivery ok and let the worker finish delivering in the background. No message is
+    dropped and the request never hangs.
+    """
     agent_info = _find_agent(agent_id)
     if agent_info is None:
         return _agent_not_found_response(agent_id)
@@ -362,14 +397,32 @@ def _send_message_endpoint(agent_id: str) -> Response:
     send_message_request = SendMessageRequest.model_validate(request.get_json())
 
     agent_manager: AgentManager = get_state().agent_manager
-    success = agent_manager.send_message_to_agent(AgentId(agent_info.id), send_message_request.message)
-    if not success:
-        error = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}' (0 successful agents)")
-        return _json_response(error.model_dump(), status_code=500)
+
+    # Run the (possibly slow, auto-starting) send off the request thread so a slow
+    # cold-start cannot block us past the proxy timeout. A background failure -- one
+    # that lands after we have already returned a 202 -- is logged via the callback.
+    future = _SEND_EXECUTOR.submit(
+        agent_manager.send_message_to_agent, AgentId(agent_info.id), send_message_request.message
+    )
+    future.add_done_callback(_log_send_failure)
+
+    try:
+        success = future.result(timeout=_SEND_SYNC_BUDGET_SECONDS)
+    except FuturesTimeoutError:
+        still_starting = True
+    else:
+        # A send that raised re-raises here and is handled by the app's error handler
+        # -> a clean 500, never a cut connection.
+        still_starting = False
+        if not success:
+            failure = ErrorResponse(detail=f"Failed to send message to agent '{agent_info.name}' (0 successful agents)")
+            return _json_response(failure.model_dump(), status_code=500)
 
     # Record which client (and layout) the message came from, so agents can
     # attribute requests to a client via ``layout.py context``. Legacy callers
-    # without client metadata (curl, older frontends) are simply not recorded.
+    # without client metadata (curl, older frontends) are simply not recorded. Done
+    # for the accepted-for-delivery case too: the message was accepted, and the
+    # background worker will deliver it once the agent is up.
     events_path = _client_activity_events_path()
     if events_path is not None and send_message_request.client_id:
         client_activity.append_message_event(
@@ -381,6 +434,16 @@ def _send_message_endpoint(agent_id: str) -> Response:
             agent_name=agent_info.name,
             message_text=send_message_request.message,
         )
+
+    if still_starting:
+        _loguru_logger.info(
+            "send to agent {} exceeded the {}s sync budget (cold start / resume); delivering in background",
+            agent_info.id,
+            _SEND_SYNC_BUDGET_SECONDS,
+        )
+        # 202: accepted for delivery. The frontend treats any 2xx as sent and its
+        # optimistic bubble reconciles when the message lands in the transcript.
+        return _json_response(SendMessageResponse(status="ok").model_dump(), status_code=202)
 
     return _json_response(SendMessageResponse(status="ok").model_dump())
 
