@@ -777,16 +777,16 @@ JSON built from variables, never string-interpolated shell.
 
 **Step 1b -- lock down the collaboration surface (unconditional -- never ask
 the user).** Immediately after the repo exists, close the surfaces where
-arbitrary, non-collaborator users could comment on or contribute to the
-inspiration. Turn **discussions OFF** and **forking OFF**. Both are settable
-via the "Update a repository" endpoint (`PATCH /repos/<owner>/<repo>`), NOT the
-create call above -- that is why this is a follow-up call. Do NOT touch
-`has_issues`: **issues stay enabled** so collaborators can still file them.
+arbitrary, non-collaborator users could comment on the inspiration. Turn
+**discussions OFF** via the "Update a repository" endpoint (`PATCH
+/repos/<owner>/<repo>`), NOT the create call above -- that is why this is a
+follow-up call. Do NOT touch `has_issues`: **issues stay enabled** so
+collaborators can still file them.
 
 ```bash
 latchkey curl -X PATCH "https://api.github.com/repos/<owner>/<repo_name>" \
     -H 'Content-Type: application/json' \
-    -d '{"has_discussions": false, "allow_forking": false}'
+    -d '{"has_discussions": false}'
 ```
 
 `<owner>` is the `.owner.login` you took from step 1's response; `<repo_name>`
@@ -802,15 +802,22 @@ Why this is unconditional (the skill never asks the user about it): a published
 inspiration is meant to be adapted by other minds, not turned into a public
 forum on the author's account. Private-by-default -- the visibility default --
 is what makes issues and PRs collaborators-only: on a private repo only
-collaborators can open or comment on them at all. Turning discussions off and
-forking off closes the two remaining arbitrary-comment / fork-PR surfaces, so
-they stay closed even if the repo is later made public. The one honest
-limitation: GitHub has NO native "collaborators-only issues" setting for a
-PUBLIC repo -- short of disabling issues (which we deliberately keep on for
-collaborators), anyone with a GitHub account can open an issue on a public
-repo. So if the user chose PUBLIC visibility, briefly tell them this in chat
-(inform them -- do NOT ask permission), and note that keeping the repo private
-(the default) fully guarantees collaborators-only.
+collaborators can open or comment on them at all, and it cannot be forked by
+outsiders. Turning discussions off closes the remaining arbitrary-comment
+surface even if the repo is later made public. Two honest limitations to
+surface if the user chooses PUBLIC visibility (inform them -- do NOT ask
+permission):
+
+- **Issues**: GitHub has NO native "collaborators-only issues" setting for a
+  public repo -- short of disabling issues (which we deliberately keep on for
+  collaborators), anyone with a GitHub account can open an issue on it.
+- **Forking**: forking CANNOT be disabled on a personal public repo (GitHub only
+  allows `allow_forking: false` on org-owned repos, and private repos already
+  cannot be forked by outsiders). So on a personal public inspiration, forking
+  stays on; do not attempt to PATCH it off.
+
+Keeping the repo private (the default) fully guarantees collaborators-only and
+no outside forks.
 
 **Step 2 -- mint ONE snapshot commit and push it as `main` (git through the
 latchkey gateway):**
