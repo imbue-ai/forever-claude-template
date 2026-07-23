@@ -19,8 +19,10 @@ any other file is offered as a download.
    GitHub sync when the user has enabled the `github-sync` skill).
 
    Give each image a unique, descriptive filename, e.g.
-   `revenue-by-quarter-2026.png`. Served image URLs are cached immutably, so
-   reusing a filename would leave the user looking at the stale image.
+   `revenue-by-quarter-2026.png`. The chat freezes a per-message copy of each
+   referenced image, so reusing a filename cannot corrupt an already-posted
+   message -- but distinct names still make every image identifiable in the
+   lightbox title and as a download.
 
 2. Reference it by its **absolute** on-disk path with markdown image syntax:
 
@@ -47,6 +49,11 @@ markdown link (not image syntax):
 Clicking the link downloads the file. There is nothing else to do -- the system
 interface serves non-image files with a download disposition, so a plain link
 becomes a download. Use a clear label that says what the file is.
+
+As with images, the chat freezes a per-message copy of a linked file, so a
+link in an already-posted message keeps downloading the version that existed
+when the message was posted even if you later overwrite or delete the file. Use
+a fresh, descriptive filename per file rather than reusing one path.
 
 ## Embed an image from a public URL
 

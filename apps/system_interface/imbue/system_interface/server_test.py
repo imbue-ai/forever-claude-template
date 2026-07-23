@@ -1757,3 +1757,78 @@ def test_missing_non_image_path_is_not_a_download(client: FlaskClient, tmp_path:
     assert response.status_code == 200
     assert "text/html" in response.content_type
     assert "attachment" not in response.headers.get("Content-Disposition", "")
+
+
+# --- Chat file snapshot serving ---------------------------------------------
+#
+# The frontend rewrites chat markdown image src and link href URLs to
+# /api/chat-files/<event_id>/<path>; the endpoint freezes the source file's
+# bytes on first fetch for that (event, path) pair and serves the frozen copy
+# thereafter (inline for images, as a download otherwise), so an already-posted
+# message never changes appearance when the file on disk does.
+
+
+def test_chat_file_snapshot_serves_frozen_image_after_source_changes(client: FlaskClient, tmp_path: Path) -> None:
+    image_path = tmp_path / "chart.png"
+    image_path.write_bytes(b"original-bytes")
+
+    url = f"/api/chat-files/event-1{image_path}"
+    first = client.get(url)
+    assert first.status_code == 200
+    assert first.content_type == "image/png"
+    assert first.data == b"original-bytes"
+    # Immutable caching is genuinely correct here: the bytes are frozen.
+    assert first.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+
+    image_path.write_bytes(b"changed-bytes")
+    second = client.get(url)
+    assert second.status_code == 200
+    assert second.data == b"original-bytes"
+
+    # A different event id sees the file's current content.
+    third = client.get(f"/api/chat-files/event-2{image_path}")
+    assert third.status_code == 200
+    assert third.data == b"changed-bytes"
+
+
+def test_chat_file_snapshot_serves_frozen_download_after_source_changes(client: FlaskClient, tmp_path: Path) -> None:
+    report_path = tmp_path / "report.pdf"
+    report_path.write_bytes(b"pdf-original")
+
+    url = f"/api/chat-files/event-1{report_path}"
+    first = client.get(url)
+    assert first.status_code == 200
+    assert first.data == b"pdf-original"
+    # Served as a download, under its original basename, cached immutably.
+    assert first.content_type == "application/octet-stream"
+    assert "attachment" in first.headers["Content-Disposition"]
+    assert "report.pdf" in first.headers["Content-Disposition"]
+    assert first.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert first.headers["X-Content-Type-Options"] == "nosniff"
+
+    report_path.write_bytes(b"pdf-changed")
+    second = client.get(url)
+    assert second.status_code == 200
+    assert second.data == b"pdf-original"
+
+    # A new message linking the same path downloads the current content.
+    third = client.get(f"/api/chat-files/event-2{report_path}")
+    assert third.status_code == 200
+    assert third.data == b"pdf-changed"
+
+
+def test_chat_file_snapshot_missing_source_returns_404(client: FlaskClient, tmp_path: Path) -> None:
+    response = client.get(f"/api/chat-files/event-1{tmp_path}/missing.png")
+    assert response.status_code == 404
+
+
+def test_chat_file_snapshot_svg_keeps_hardened_headers(client: FlaskClient, tmp_path: Path) -> None:
+    image_path = tmp_path / "plot.svg"
+    image_path.write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+
+    response = client.get(f"/api/chat-files/event-1{image_path}")
+
+    assert response.status_code == 200
+    assert response.content_type.startswith("image/svg+xml")
+    assert response.headers["Content-Security-Policy"] == "default-src 'none'; style-src 'unsafe-inline'"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"

@@ -1,0 +1,1 @@
+Update the show-files-in-chat skill to note that the chat now freezes a per-message copy of each referenced file, so reusing a filename cannot corrupt an already-posted message; agents should still give each file a fresh, descriptive filename so it stays identifiable in the lightbox and as a download.

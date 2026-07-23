@@ -171,7 +171,9 @@ export function ProgressBlock(): m.Component<ProgressBlockAttrs> {
           m("div.pv-timeline-nodes", timelineNodes),
         ]),
         trailing_reply.length > 0
-          ? trailing_reply.map((ev) => m("div.pv-final", m(MarkdownContent, { content: ev.text ?? "" })))
+          ? trailing_reply.map((ev) =>
+              m("div.pv-final", m(MarkdownContent, { content: ev.text ?? "", eventId: ev.event_id })),
+            )
           : null,
       ]);
     },

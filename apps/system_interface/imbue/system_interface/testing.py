@@ -30,8 +30,10 @@ from flask import Flask
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.primitives import AgentId
 from imbue.system_interface.agent_discovery import MngrMessenger
+from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.app_context import SystemInterfaceState
+from imbue.system_interface.chat_file_snapshots import ChatFileSnapshotStore
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
@@ -96,6 +98,9 @@ def build_test_state(
         ),
         http_client=httpx.Client(follow_redirects=False, timeout=30.0),
         latchkey_http_client=latchkey_http_client if latchkey_http_client is not None else httpx.Client(timeout=30.0),
+        # Under the autouse test isolation fixture MNGR_HOST_DIR points at a
+        # fresh tmp dir, so each test gets its own empty snapshot store.
+        chat_file_snapshots=ChatFileSnapshotStore(get_host_dir() / "chat_file_snapshots"),
     )
 
 

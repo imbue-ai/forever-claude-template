@@ -40,6 +40,10 @@ from imbue.system_interface.attachments import resolve_upload_path
 from imbue.system_interface.attachments import store_uploaded_file
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
+from imbue.system_interface.file_serving import IMMUTABLE_CACHE_CONTROL
+from imbue.system_interface.file_serving import image_mime_type_for_path
+from imbue.system_interface.file_serving import serve_download
+from imbue.system_interface.file_serving import serve_inline_image
 from imbue.system_interface.file_serving import try_serve_file
 from imbue.system_interface.layout_ops import LayoutMutex
 from imbue.system_interface.layout_ops import allocate_next_terminal_name
@@ -436,6 +440,30 @@ def _serve_attachment(relative_path: str) -> Response:
         error = ErrorResponse(detail=f"Attachment '{relative_path}' not found")
         return _json_response(error.model_dump(), status_code=404)
     return send_file(resolved_path)
+
+
+def _serve_chat_file(event_id: str, file_path: str) -> Response:
+    """Serve the frozen copy of a file as it was when ``event_id`` referenced it.
+
+    The frontend rewrites chat markdown image ``src`` and link ``href`` URLs to
+    this route so each message's files are immutable per message: the first
+    fetch (or the eager pass in the session watcher fan-out) copies the source
+    file's current bytes, and every later fetch serves that copy even if the
+    file on disk has since changed. An image is served inline; any other file
+    is served as a download under its original basename. 404s when the pair has
+    no snapshot and the source file is missing, matching the broken-image /
+    dead-link behavior of the direct path route.
+    """
+    source_path = "/" + file_path
+    snapshot_path = get_state().chat_file_snapshots.snapshot(event_id, source_path)
+    if snapshot_path is None:
+        return Response(status=404)
+    image_mime_type = image_mime_type_for_path(source_path)
+    if image_mime_type is not None:
+        return serve_inline_image(snapshot_path, image_mime_type)
+    return serve_download(
+        snapshot_path, download_name=Path(source_path).name, cache_control=IMMUTABLE_CACHE_CONTROL
+    )
 
 
 def _delete_attachment(relative_path: str) -> Response:
@@ -1518,6 +1546,11 @@ def create_application(state: SystemInterfaceState) -> Flask:
         view_func=_delete_attachment,
         methods=["DELETE"],
         endpoint="_delete_attachment",
+    )
+    application.add_url_rule(
+        "/api/chat-files/<event_id>/<path:file_path>",
+        view_func=_serve_chat_file,
+        methods=["GET"],
     )
     application.add_url_rule("/api/agents/<agent_id>/interrupt", view_func=_interrupt_agent_endpoint, methods=["POST"])
     application.add_url_rule("/api/layouts", view_func=_list_layouts_endpoint, methods=["GET"])
