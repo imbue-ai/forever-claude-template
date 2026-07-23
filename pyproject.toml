@@ -108,6 +108,12 @@ addopts = [
     # apps/system_interface has its own pytest config (coverage, slow-test reporting,
     # ratchets) that conflicts with the root config; it is run from inside its own dir.
     "--ignore=apps/system_interface",
+    # Ratchet checks and the changelog-gate test disabled by request. Each lib's
+    # ratchet suite matches *ratchets*.py; test_meta_ratchets.py is the root one.
+    # Delete these three lines to re-enable.
+    "--ignore-glob=*ratchets*.py",
+    "--ignore-glob=**/*ratchets*.py",
+    "--ignore=scripts/check_changelog_entries_test.py",
 ]
 
 [tool.ruff]

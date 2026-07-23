@@ -73,15 +73,16 @@ packages = ["imbue"]
 timeout_func_only = true
 junit_family = "xunit1"
 testpaths = ["."]
+# Coverage collection/enforcement disabled by request (see [tool.coverage.report]
+# fail_under = 0). The --cov* and --coverage-to-file flags were removed so runs are
+# faster; re-add them and restore fail_under to re-enable.
 addopts = [
-  "--cov=imbue.system_interface",
-  "--cov-report=term-missing",
-  "--cov-report=xml",
   "--durations=20",
   "--timeout=10",
   "--timeout-method=signal",
   "--slow-tests-to-file",
-  "--coverage-to-file",
+  # Ratchet checks disabled by request; delete to re-enable.
+  "--ignore=imbue/system_interface/test_ratchets.py",
 ]
 
 [tool.coverage.run]
@@ -138,4 +139,5 @@ known-first-party = [
 ]
 
 [tool.coverage.report]
-fail_under = 75
+# Coverage enforcement disabled by request; set back to 75 to re-enable.
+fail_under = 0

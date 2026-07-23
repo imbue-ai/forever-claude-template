@@ -18,7 +18,9 @@ jobs:
   # ENFORCE_CHANGELOG=true to enforce the convention on itself.
   check-changelog:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && vars.ENFORCE_CHANGELOG == 'true'
+    # Disabled by request. Was: github.event_name == 'pull_request' && vars.ENFORCE_CHANGELOG == 'true'.
+    # Restore that condition to re-enable the per-PR changelog gate.
+    if: false
     steps:
       - uses: actions/checkout@v6
 

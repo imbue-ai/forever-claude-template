@@ -25,6 +25,44 @@ The default target is the **latest stable `minds-v*` tag** (released,
 already-tested), not `origin/main`. The user may override to a specific tag or to
 `main`.
 
+## 0. OpenHost app-update mode (check this first)
+
+This mind may run as an OpenHost app. When OpenHost redeploys a newer version,
+its entrypoint stages the new commit into this workspace as a **local git ref**
+and writes a pending-update marker; the system interface then messages you to
+run this skill. In that case you reconcile from the **container-local repo**,
+NOT from GitHub upstream.
+
+Detect it:
+
+```bash
+[ -n "${OPENHOST_UPDATE_PENDING_PATH:-}" ] && [ -f "$OPENHOST_UPDATE_PENDING_PATH" ] \
+    && echo "openhost-update-mode: $(cat "$OPENHOST_UPDATE_PENDING_PATH")"
+```
+
+If that prints a version, you are in OpenHost app-update mode. Changes from the
+default flow below:
+
+- **Target ref.** Skip §2's `upstream`-remote resolution entirely. Your target
+  is the already-fetched local ref in `$OPENHOST_TEMPLATE_INCOMING_REF`
+  (default `refs/openhost/incoming`). Set `REF="$OPENHOST_TEMPLATE_INCOMING_REF"`
+  and use it wherever the flow below references `$REF` (merge-base diff, the
+  worker's `target_ref`). Do **not** add or fetch the GitHub `upstream` remote --
+  the source is local and already present.
+- **Preview** with `git diff --name-status "$(git merge-base HEAD "$REF")" "$REF"`
+  exactly as below (it is ref-agnostic).
+- **On successful reveal**, record the reconcile so the next boot does not
+  re-prompt:
+
+  ```bash
+  python3 scripts/openhost_template_update.py mark-reconciled \
+      --version "$(git rev-parse "$OPENHOST_TEMPLATE_INCOMING_REF")"
+  ```
+
+Everything else (backup, single-flight, worker dispatch, validation, approval
+gate, reveal) is identical. Proceed through the sections below with `$REF` set as
+above.
+
 ## 1. Preconditions
 
 **Back up first.** Before dispatching anything, capture a restore point of the

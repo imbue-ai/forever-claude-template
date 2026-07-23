@@ -54,12 +54,19 @@ from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
 from imbue.system_interface.oom_prioritizer import ChatOomPrioritizer
+from imbue.system_interface.template_update_prompter import TemplateUpdatePrompter
 from imbue.system_interface.welcome_resend import resolve_initial_chat_agent_id
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
 _APPLICATIONS_TOML_BASENAME = "applications.toml"
 _DEFAULT_MNGR_BINARY = "mngr"
+# Host-env vars the OpenHost entrypoint writes to steer the template-update
+# reconcile (see scripts/openhost_entrypoint.sh). Absent off OpenHost, which
+# disables the prompt entirely (the marker path never exists).
+_UPDATE_PENDING_PATH_ENV_VAR = "OPENHOST_UPDATE_PENDING_PATH"
+_INCOMING_REF_ENV_VAR = "OPENHOST_TEMPLATE_INCOMING_REF"
+_DEFAULT_INCOMING_REF = "refs/openhost/incoming"
 # The production messenger: a stateless, frozen value whose discover/send are the
 # real mngr calls, so one shared instance is the default for every built manager.
 _DEFAULT_MESSENGER: Final[MngrMessenger] = MngrMessenger()
@@ -342,6 +349,9 @@ class AgentManager:
     # -- the delivery relaunches the agent and its reply surfaces the restart in
     # the chat. Fed from the same observe stream as everything else.
     _chat_reviver: ChatReviver
+    # Prompts the mind (once per boot) to run update-self when the OpenHost
+    # entrypoint staged a newer deployed version. None off OpenHost.
+    _template_update_prompter: TemplateUpdatePrompter | None
 
     @classmethod
     def build(
@@ -350,6 +360,7 @@ class AgentManager:
         messenger: MngrMessenger = _DEFAULT_MESSENGER,
         mngr_binary: str = _DEFAULT_MNGR_BINARY,
         chat_reviver: ChatReviver | None = None,
+        template_update_prompter: TemplateUpdatePrompter | None = None,
     ) -> "AgentManager":
         """Build an AgentManager with the given broadcaster.
 
@@ -399,6 +410,19 @@ class AgentManager:
                 initial_chat_agent_id=resolve_initial_chat_agent_id(),
             )
         manager._chat_reviver = chat_reviver
+        if template_update_prompter is None:
+            pending_path = os.environ.get(_UPDATE_PENDING_PATH_ENV_VAR, "")
+            # Only built when the entrypoint declared a marker path (OpenHost).
+            if pending_path:
+                template_update_prompter = TemplateUpdatePrompter(
+                    send_message=lambda agent_id, message: manager.send_message_to_agent(
+                        AgentId(agent_id), message
+                    ),
+                    resolve_initial_chat_agent_id=resolve_initial_chat_agent_id,
+                    pending_marker_path=Path(pending_path),
+                    incoming_ref=os.environ.get(_INCOMING_REF_ENV_VAR, _DEFAULT_INCOMING_REF),
+                )
+        manager._template_update_prompter = template_update_prompter
         return manager
 
     def start(self) -> None:
@@ -410,6 +434,11 @@ class AgentManager:
         # startup (e.g. after a container reboot) are revived without waiting
         # for the first observe event.
         self._chat_reviver.on_agent_snapshot(self.get_agents())
+        # If the entrypoint staged a newer deployed version, ask the mind to
+        # reconcile it now (once per boot). No-op off OpenHost or when nothing
+        # is pending.
+        if self._template_update_prompter is not None:
+            self._template_update_prompter.check_and_prompt()
 
     def start_without_observe(self) -> None:
         """Start with initial discovery only, no observe subprocess. For testing."""

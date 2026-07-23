@@ -269,7 +269,10 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # +1 for chat_reviver.ChatReviver.__init__. Same category again: a
     # ``threading.Condition``/``Event``/worker ``Thread``, schedule dicts
     # mutated under the condition's lock, and injected callables.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(7))
+    # +1 for template_update_prompter.TemplateUpdatePrompter.__init__. Holds a
+    # mutable one-shot guard flag plus injected callables and paths -- runtime
+    # state, not a natural Pydantic model.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(8))
 
 
 def test_prevent_cast_usage() -> None:

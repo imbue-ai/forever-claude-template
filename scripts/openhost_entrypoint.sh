@@ -30,15 +30,31 @@ if [ -d /mngr ] && [ ! -L /mngr ]; then
 fi
 ln -sfn "$mngr_root" /mngr
 
+# On an app update OpenHost rebuilds the image (new deployed commit) and starts
+# a fresh container, but the persistent /mngr/ volume keeps the old workspace.
+# Before the seed cleans up /docker_build_code, stage the new commit into the
+# live workspace as refs/openhost/incoming so update-self can merge it (see
+# scripts/openhost_template_update.py). No-op on first boot (no workspace yet)
+# and on warm restarts (versions match). Must run BEFORE the seed.
+if [ -e /mngr/code/.git ]; then
+    python3 /mngr/code/scripts/openhost_template_update.py capture || true
+fi
+
 # Seed /mngr/code from the image on first boot (no-op on warm boots; never
 # overwrites agent edits).
 default-workspace-template-seed
 
-# The workspace is a git repo the agents commit into; the image copy ships
-# without .git (excluded via .dockerignore), so initialize on first boot.
+# The workspace is a git repo the agents commit into. The image now ships the
+# deployed .git (see .dockerignore), so a seeded workspace already has it;
+# initialize only in the unexpected case it is missing.
 if [ ! -e /mngr/code/.git ]; then
     git -C /mngr/code init -b main -q
 fi
+
+# Adopt the deployed commit as this workspace's update baseline if it has none
+# (fresh install, or a legacy workspace created before this mechanism). Only
+# genuine later updates -- a differing stored SHA -- then trigger a reconcile.
+python3 /mngr/code/scripts/openhost_template_update.py init-baseline || true
 
 # Host env file: mngr auto-sources it (set -a) into every agent shell, and
 # bootstrap/supervisord inherit it. mngr rewrites this file as plain KEY=VALUE
@@ -62,6 +78,13 @@ set_host_env ANTHROPIC_BASE_URL "$OPENHOST_ROUTER_URL/api/services/v2/call/llm/a
 set_host_env ANTHROPIC_AUTH_TOKEN "$OPENHOST_APP_TOKEN"
 set_host_env LATCHKEY_GATEWAY "$OPENHOST_ROUTER_URL/api/services/v2/call/latchkey"
 set_host_env SYSTEM_INTERFACE_HOST 0.0.0.0
+
+# Template-update wiring: the system_interface watches the pending marker to
+# prompt the mind to reconcile, and update-self records completion against the
+# stored-version file and the incoming ref. Kept here so both read one source.
+set_host_env OPENHOST_UPDATE_PENDING_PATH /mngr/openhost_update_pending
+set_host_env OPENHOST_TEMPLATE_VERSION_PATH /mngr/openhost_template_version
+set_host_env OPENHOST_TEMPLATE_INCOMING_REF refs/openhost/incoming
 
 # The create templates' [commands.create].host_env__extend (see
 # template/.mngr/settings.toml) only applies when mngr creates a NEW host; the

@@ -518,7 +518,14 @@ class LiveBrowser(MutableModel):
             # browser_use. We deliberately do NOT set storage_state (it would
             # overwrite the live profile).
             user_data_dir=str(profile_dir),
-            args=["--disable-dev-shm-usage"],
+            # --password-store=basic (cross-platform) + --use-mock-keychain (macOS)
+            # keep Chromium off the OS credential store. Without them Chromium tries
+            # to unlock "Chromium Safe Storage" in the macOS Keychain (and
+            # gnome-keyring/kwallet on Linux) at startup, which pops a blocking
+            # password prompt on a dev Mac and hangs headless where no keyring
+            # exists. These automation profiles store no real passwords, so an
+            # in-memory basic store is strictly correct here.
+            args=["--disable-dev-shm-usage", "--password-store=basic", "--use-mock-keychain"],
             chromium_sandbox=chromium_sandbox,
             keep_alive=True,
             # Pin a fixed viewport + window so every site renders at the same

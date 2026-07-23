@@ -110,7 +110,13 @@ def browser_type_launch_args(pytestconfig: pytest.Config) -> dict[str, Any]:
     # Do not add `device` here -- that's a context-level option consumed by
     # browser_context_args in upstream, not a valid kwarg for
     # browser_type.launch(), which would raise TypeError.
-    launch_options: dict[str, Any] = {}
+    # Keep Chromium off the OS credential store: without these it tries to
+    # unlock "Chromium Safe Storage" in the macOS Keychain (gnome-keyring/kwallet
+    # on Linux) at launch, popping a blocking password prompt on a dev machine
+    # and hanging headless where no keyring exists. The e2e profiles hold no real
+    # passwords, so a basic in-memory store is correct. Mirrors the product
+    # launch args in browser/session.py.
+    launch_options: dict[str, Any] = {"args": ["--password-store=basic", "--use-mock-keychain"]}
     headed = pytestconfig.getoption("--headed", default=False)
     if headed:
         launch_options["headless"] = False

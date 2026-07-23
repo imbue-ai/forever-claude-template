@@ -87,8 +87,20 @@ RUN chmod +x /usr/local/bin/default-workspace-template-install-dependencies && d
 # End pre-COPY manifest layer. Source-changing layers begin below.
 # ============================================================================
 
-# copy in all of our code:
+# copy in all of our code, including .git (see .dockerignore -- the OpenHost
+# build intentionally keeps it). The build context is the repo OpenHost checked
+# out and updates, so /mngr/code/.git is that exact history and its HEAD is the
+# deployed commit. This is what lets an OpenHost app update reach an existing
+# workspace: the workspace is seeded from this history (shared ancestry), so
+# update-self can cleanly 3-way merge a newer deployed commit into the mind's
+# local edits (see scripts/openhost_template_update.py).
 COPY . /mngr/code/
+
+# Record the deployed commit SHA at a stable image-layer path (outside /mngr/,
+# so the runtime volume mount does not shadow it, and outside /docker_build_code,
+# which the seed cleans up). The boot check compares this against the copy the
+# workspace stored on its last reconcile to decide whether the app was updated.
+RUN git -C /mngr/code rev-parse HEAD > /opt/openhost-template-version
 
 # Build the workspace from full source. Shared verbatim with the Lima provider.
 RUN bash /mngr/code/scripts/build_workspace.sh

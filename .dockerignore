@@ -350,10 +350,11 @@ apps/system_interface/frontend/src/permission-demo.ts
 # test_meta_ratchets.py::test_dockerignore_covers_gitignore enforces that
 # every active .gitignore pattern stays present here.
 # ============================================================================
-# The workspace is git-inited fresh on first boot by the OpenHost entrypoint;
-# baking the clone's history into the image would bloat it and the seeded app
-# data.
-.git
-**/.git
+# NOTE: we intentionally do NOT exclude .git here. The build context is the repo
+# OpenHost checked out and updates, so shipping /mngr/code/.git gives the seeded
+# workspace shared history with the deployed commit -- the prerequisite for
+# update-self to cleanly merge a newer deployed version into the mind's local
+# edits (see scripts/openhost_template_update.py and openhost_entrypoint.sh).
+#
 # The OpenHost harness test project (own venv/lock); not part of the workspace.
 tests/openhost/
