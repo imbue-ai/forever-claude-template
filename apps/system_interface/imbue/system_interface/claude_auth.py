@@ -69,6 +69,7 @@ from typing import Any
 from typing import Final
 
 import pexpect
+import pyte
 from loguru import logger as _loguru_logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -116,13 +117,12 @@ _OSC8_HYPERLINK_REGEX = re.compile(r"\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]+)(?:\x07
 _OAUTH_URL_CHARSET = r"[A-Za-z0-9%&=?_.~/:+#-]"
 _OAUTH_URL_STRICT_REGEX = re.compile(rf"https://{_OAUTH_URL_CHARSET}*oauth/authorize{_OAUTH_URL_CHARSET}*")
 _OAUTH_URL_CONTINUATION_REGEX = re.compile(rf"^{_OAUTH_URL_CHARSET}+$")
-# Every terminal escape sequence (CSI, OSC, and stray two-byte escapes like
-# cursor save/restore) plus non-newline control bytes. Replacing these with
-# newlines -- instead of deleting them like `strip_ansi` -- keeps adjacent
-# render fragments from being glued into one bogus run of text.
-_TERMINAL_ESCAPE_OR_CONTROL_REGEX = re.compile(
-    r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.|[\x00-\x08\x0b-\x1f\x7f]"
-)
+# The PTY geometry used for `claude setup-token`. Pinned explicitly on the
+# spawn AND used to replay the stream through the terminal emulator during
+# extraction -- the two must match or the reconstructed screen's wrapping
+# would not correspond to what the CLI rendered.
+_PTY_LINES: Final = 24
+_PTY_COLUMNS: Final = 80
 # The long-lived token `claude setup-token` prints on completion. Like the
 # URL regex, only a trigger -- extraction re-assembles the possibly
 # width-wrapped token from the drained stream.
@@ -153,6 +153,9 @@ _OAUTH_URL_WAIT_SECONDS: Final = 30.0
 _SETUP_TOKEN_POLL_SECONDS: Final = 0.2
 _SETUP_TOKEN_CODE_WAIT_SECONDS: Final = 30.0
 _MNGR_COMMAND_TIMEOUT_SECONDS: Final = 60.0
+# A real `claude -p` round-trip against the freshly written credentials;
+# generous because it includes model inference on a short prompt.
+_CREDENTIAL_VALIDATION_TIMEOUT_SECONDS: Final = 120.0
 # A fused `mngr start --restart` call stops, starts, readiness-waits, and
 # (for previously-RUNNING agents) messages a whole batch of agents. It runs
 # on the background restart thread, so the generous ceiling costs nothing
@@ -197,7 +200,12 @@ def _default_command_runner(command: list[str], timeout: float, env: Mapping[str
 
 
 def _default_pexpect_spawner(executable: str, args: list[str], timeout: float) -> Any:
-    return pexpect.spawn(executable, args, timeout=timeout, encoding="utf-8")
+    # Dimensions pinned to the geometry the extraction replays the stream
+    # at (see _render_final_screen) -- these are pexpect's defaults, made
+    # explicit so the two can never drift apart.
+    return pexpect.spawn(
+        executable, args, timeout=timeout, encoding="utf-8", dimensions=(_PTY_LINES, _PTY_COLUMNS)
+    )
 
 
 class AuthMode(str, Enum):
@@ -240,8 +248,9 @@ class AuthStatus(FrozenModel):
 
 
 class RestartPhase(str, Enum):
-    """Lifecycle of the background agent restart that follows an auth change."""
+    """Lifecycle of the background credential apply that follows an auth change."""
 
+    VALIDATING = "validating"
     RESTARTING = "restarting"
     FINISHING = "finishing"
     DONE = "done"
@@ -496,52 +505,22 @@ def _safe_close(process: Any) -> None:
 
 
 @pure
-def _split_into_render_fragments(raw_output: str) -> list[str]:
-    """Split raw PTY output into visible-text fragments.
+def _render_final_screen(raw_output: str) -> list[str]:
+    """Replay the raw PTY stream through a terminal emulator; return the screen rows.
 
-    Escape sequences and control bytes become fragment boundaries (rather
-    than being deleted, which would glue adjacent fragments into one bogus
-    run of text -- the CLI's Ink renderer emits diff-based frames full of
-    cursor-positioning escapes between fragments).
+    The CLI's Ink renderer emits diff-based frames full of cursor
+    positioning, so the raw stream's byte order does not correspond to the
+    visual layout -- regex/fragment heuristics on the stream mis-assemble
+    wrapped values. Replaying into a real terminal emulator at the exact
+    PTY geometry recovers the final screen, where a wrapped value's rows
+    are physically adjacent. Rows come back space-padded to the full width
+    (pyte's display invariant), which the extraction relies on to detect
+    wrapping.
     """
-    return _TERMINAL_ESCAPE_OR_CONTROL_REGEX.sub("\n", raw_output).split("\n")
-
-
-@pure
-def _join_wrapped_fragments(
-    fragments: list[str],
-    start_idx: int,
-    start_col: int,
-    continuation_regex: re.Pattern[str],
-) -> tuple[str, bool]:
-    """Re-assemble a value hard-wrapped across terminal rows.
-
-    A wrapped row runs to the full terminal width, so every row of the value
-    except the last is as wide as the widest fragment in the capture. Join
-    the following fragment (leading indentation stripped) only while the
-    current row ran full-width and the next fragment is charset-pure.
-
-    Also reports whether the value provably *ended*: its last row stopped
-    short of full width, or the following fragment broke the charset. A
-    full-width row with nothing after it may still be mid-stream.
-    """
-    width = max(len(fragment) for fragment in fragments)
-    value = fragments[start_idx][start_col:]
-    idx = start_idx
-    while len(fragments[idx]) == width:
-        # Line endings and escape sequences leave empty fragments between
-        # rendered rows; skip them to find the actual next row.
-        next_idx = idx + 1
-        while next_idx < len(fragments) and fragments[next_idx] == "":
-            next_idx += 1
-        if next_idx >= len(fragments):
-            return value, False
-        candidate = fragments[next_idx].lstrip()
-        if continuation_regex.match(candidate) is None:
-            return value, True
-        value += candidate
-        idx = next_idx
-    return value, True
+    screen = pyte.Screen(_PTY_COLUMNS, _PTY_LINES)
+    stream = pyte.Stream(screen)
+    stream.feed(raw_output)
+    return list(screen.display)
 
 
 @pure
@@ -551,20 +530,36 @@ def _extract_wrapped_value(
     continuation_regex: re.Pattern[str],
     is_termination_required: bool,
 ) -> str | None:
-    """Find `start_regex` in the visible PTY text, de-wrapping across rows.
+    """Find `start_regex` on the rendered screen, de-wrapping across rows.
 
-    With `is_termination_required`, a value whose end is not yet provable
-    (the stream may still be mid-value) yields None so the caller keeps
+    A value hard-wrapped by the renderer occupies its row through the last
+    column and continues on the next row; a row with trailing blank space
+    is the value's final row. With `is_termination_required`, a value whose
+    last row runs to the screen edge with no non-continuation row after it
+    yields None (the stream may still be mid-value) so the caller keeps
     draining.
     """
-    fragments = _split_into_render_fragments(raw_output)
-    for idx, fragment in enumerate(fragments):
-        match = start_regex.search(fragment)
-        if match is not None:
-            value, is_terminated = _join_wrapped_fragments(fragments, idx, match.start(), continuation_regex)
-            if is_termination_required and not is_terminated:
-                return None
-            return value
+    rows = _render_final_screen(raw_output)
+    for idx, row in enumerate(rows):
+        match = start_regex.search(row)
+        if match is None:
+            continue
+        value = row[match.start() :].rstrip()
+        row_idx = idx
+        # A row whose last column is occupied wrapped onto the next row.
+        while rows[row_idx].rstrip() and len(rows[row_idx].rstrip()) == len(rows[row_idx]):
+            candidate = rows[row_idx + 1].strip() if row_idx + 1 < len(rows) else ""
+            if candidate == "":
+                # A full-width row with nothing under it is ambiguous: the
+                # continuation may simply not have been drawn yet. Only
+                # non-continuation *content* under the row proves the value
+                # ended at the screen edge.
+                return None if is_termination_required else value
+            if continuation_regex.match(candidate) is None:
+                return value
+            value += candidate
+            row_idx += 1
+        return value
     return None
 
 
@@ -881,27 +876,16 @@ class ClaudeAuthService(MutableModel):
         with self._restart_state_lock:
             return self._restart_progress
 
-    def _ensure_no_restart_in_flight(self) -> None:
-        """Raises if the background restart from a previous change is still running.
+    def start_background_apply(self, managed_env: Mapping[str, str], on_complete: Callable[[], None] | None) -> None:
+        """Validate, write, and apply new credentials on a background thread.
 
-        Called before writing new credentials so a rejected submit leaves
-        the settings env untouched (`start_background_restart` re-checks
-        under the same lock as the authoritative guard).
-        """
-        with self._restart_state_lock:
-            if self._restart_thread is not None and self._restart_thread.is_alive():
-                raise ClaudeAuthError(
-                    "An agent restart from a previous credential change is still in progress; "
-                    "wait a moment and try again."
-                )
-
-    def start_background_restart(self, on_complete: Callable[[], None] | None) -> None:
-        """Kick the post-auth agent restart onto a background thread.
-
-        The submit endpoints call this after writing the settings env and
-        return immediately; the frontend follows the restart through the
-        `restart_*` fields on the status endpoint. `on_complete` runs after
-        a successful restart (used for the welcome-resend check, which
+        The submit endpoints call this and return immediately; the frontend
+        follows the apply through the `restart_*` fields on the status
+        endpoint. The credentials are probed against Anthropic with a real
+        request BEFORE any agent restarts, so a rejected credential fails
+        visibly (with the previous settings restored) instead of tearing
+        agents down onto dead auth and reporting success. `on_complete`
+        runs after a successful restart (the welcome-resend check, which
         needs the chat agent back up).
         """
         with self._restart_state_lock:
@@ -911,27 +895,57 @@ class ClaudeAuthService(MutableModel):
                     "wait a moment and try again."
                 )
             self._restart_progress = RestartProgress(
-                phase=RestartPhase.RESTARTING, detail="Preparing to restart agents", error=None
+                phase=RestartPhase.VALIDATING, detail="Checking the credential with Anthropic", error=None
             )
             thread = threading.Thread(
-                target=self._run_restart_in_background, args=(on_complete,), name="claude-auth-restart", daemon=True
+                target=self._run_apply_in_background,
+                args=(dict(managed_env), on_complete),
+                name="claude-auth-apply",
+                daemon=True,
             )
             self._restart_thread = thread
             thread.start()
 
-    def _run_restart_in_background(self, on_complete: Callable[[], None] | None) -> None:
-        # Thread entry point: this is the top-level handler for the restart
+    def _validate_written_credentials(self) -> None:
+        """Probe Anthropic through a real `claude -p` round-trip.
+
+        A fresh claude process reads the just-written settings env exactly
+        like a restarted agent would, so a passing probe means the agents
+        will come back working. Raises ClaudeAuthError on rejection, with
+        the CLI's own error text (e.g. `API Error: 401 Invalid bearer
+        token`, or a litellm budget rejection) so the modal shows the real
+        reason.
+        """
+        result = self.command_runner(
+            ["claude", "-p", "Reply with exactly: OK"], _CREDENTIAL_VALIDATION_TIMEOUT_SECONDS
+        )
+        stdout = result.stdout.strip() if isinstance(result.stdout, str) else ""
+        stderr = result.stderr.strip() if isinstance(result.stderr, str) else ""
+        if result.returncode != 0 or not stdout:
+            raise ClaudeAuthError(f"The credential did not work: {stderr or stdout or 'claude produced no output'}")
+
+    def _run_apply_in_background(self, managed_env: dict[str, str], on_complete: Callable[[], None] | None) -> None:
+        # Thread entry point: this is the top-level handler for the apply
         # thread, so any escaping exception is caught, logged, and surfaced
         # to the frontend through the FAILED progress phase instead of
         # dying silently.
         try:
+            previous_env = self._read_managed_env_tolerant()
+            write_managed_auth_env(managed_env)
+            try:
+                self._validate_written_credentials()
+            except Exception:
+                # Restore-on-failure guard, not error handling: the settings
+                # must never keep a credential that failed validation.
+                write_managed_auth_env(previous_env)
+                raise
             self.restart_all_claude_agents()
             self._set_restart_progress(RestartPhase.FINISHING, "Resuming your agent", None)
             if on_complete is not None:
                 on_complete()
             self._set_restart_progress(RestartPhase.DONE, None, None)
         except Exception as e:
-            logger.opt(exception=e).error("Background agent restart failed")
+            logger.opt(exception=e).error("Background credential apply failed")
             self._set_restart_progress(RestartPhase.FAILED, None, str(e))
 
     def submit_credentials(self, pasted_text: str, on_restart_complete: Callable[[], None] | None) -> AuthStatus:
@@ -947,9 +961,7 @@ class ClaudeAuthService(MutableModel):
         status carries its initial `restart_*` progress fields.
         """
         managed_env = parse_credential_lines(pasted_text)
-        self._ensure_no_restart_in_flight()
-        write_managed_auth_env(managed_env)
-        self.start_background_restart(on_restart_complete)
+        self.start_background_apply(managed_env, on_restart_complete)
         return self.get_auth_status(extra_env=managed_env)
 
     def _spawn_setup_token_and_parse_url(self) -> tuple[Any, str, str]:
@@ -1058,12 +1070,10 @@ class ClaudeAuthService(MutableModel):
         return None
 
     def _complete_setup_token_locked(self, token: str, on_restart_complete: Callable[[], None] | None) -> AuthStatus:
-        """Write the minted token to settings env, start the restart, drop the session."""
+        """Hand the minted token to the background apply, drop the session."""
         self._drop_current_session_locked()
         managed_env = {CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR: token}
-        self._ensure_no_restart_in_flight()
-        write_managed_auth_env(managed_env)
-        self.start_background_restart(on_restart_complete)
+        self.start_background_apply(managed_env, on_restart_complete)
         return self.get_auth_status(extra_env=managed_env)
 
     def poll_setup_token(

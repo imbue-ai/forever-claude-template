@@ -15,6 +15,7 @@ dependencies = [
     "pexpect>=4.9",
     "pluggy>=1.5",
     "pydantic-settings>=2.13.1",
+    "pyte>=0.8",
     "simple-websocket>=1.0",
     "tk-command-parsing",
     "watchdog>=4.0",

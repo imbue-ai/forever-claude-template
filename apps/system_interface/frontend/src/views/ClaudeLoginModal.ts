@@ -789,17 +789,19 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     ];
   }
 
-  // The step checklist shown while the background agent restart runs. The
-  // credentials are already saved by the time this screen appears; the
-  // remaining steps track the status endpoint's restart_phase.
+  // The step checklist shown while the background credential apply runs,
+  // tracking the status endpoint's restart_phase: validate against
+  // Anthropic first, then restart agents, then resume.
   function renderApplying(): m.Vnode {
-    const phase = applyingStatus?.restart_phase ?? "restarting";
+    const phase = applyingStatus?.restart_phase ?? "validating";
     const detail = applyingStatus?.restart_detail ?? null;
-    const steps: { label: string; state: "done" | "active" | "pending" }[] = [
-      { label: "Credentials saved", state: "done" },
-      { label: "Restarting agents", state: phase === "restarting" ? "active" : "done" },
-      { label: "Resuming your agent", state: phase === "finishing" ? "active" : phase === "restarting" ? "pending" : "done" },
-    ];
+    const phaseOrder = ["validating", "restarting", "finishing"];
+    const activeIdx = Math.max(0, phaseOrder.indexOf(phase));
+    const labels = ["Checking credentials", "Restarting agents", "Resuming your agent"];
+    const steps: { label: string; state: "done" | "active" | "pending" }[] = labels.map((label, idx) => ({
+      label,
+      state: idx < activeIdx ? "done" : idx === activeIdx ? "active" : "pending",
+    }));
     return m("div.claude-login-applying", [
       m(
         "ul.claude-login-checklist",
