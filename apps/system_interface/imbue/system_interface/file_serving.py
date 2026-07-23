@@ -25,11 +25,16 @@ from pathlib import Path
 from flask import Response
 from flask import send_file
 
-# Long-lived caching for inline images: agents are instructed (see the
-# show-files-in-chat skill) to give each image a unique filename, so a served
-# image URL never changes content. A one-year max-age plus ``immutable`` lets
-# the browser skip revalidation entirely while a conversation is re-rendered.
+# Long-lived caching for inline images served from this direct-path route,
+# which remains for non-chat fetches (e.g. opening an image URL in a tab):
+# agents are instructed (see the show-files-in-chat skill) to give each image
+# a unique filename, so a one-year max-age plus ``immutable`` lets the browser
+# skip revalidation. Chat markdown images are rewritten by the frontend to the
+# change-detecting route (see ``chat_image_timestamps``), which serves with
+# caching disabled instead.
 _IMAGE_CACHE_MAX_AGE_SECONDS = 31_536_000
+
+IMMUTABLE_IMAGE_CACHE_CONTROL = f"public, max-age={_IMAGE_CACHE_MAX_AGE_SECONDS}, immutable"
 
 # Image extensions served inline, each mapped to an explicit Content-Type so the
 # wire result does not depend on the host's mimetypes registry (macOS and Linux
@@ -61,19 +66,50 @@ def image_mime_type_for_path(url_path: str) -> str | None:
     return _IMAGE_EXTENSION_TO_MIME_TYPE.get(suffix)
 
 
-def _serve_inline_image(file_path: Path, mime_type: str) -> Response:
-    """Stream an image so it renders inline in the chat."""
+def serve_inline_image(
+    file_path: Path, mime_type: str, cache_control: str = IMMUTABLE_IMAGE_CACHE_CONTROL
+) -> Response:
+    """Stream an image so it renders inline in the chat.
+
+    Public because the chat-image change-detection endpoint (``server``)
+    serves the same files with the same hardening but caching disabled, so a
+    message's image is refetched -- and re-verified -- on every render.
+    """
     response = send_file(file_path, mimetype=mime_type)
-    # send_file's default cache policy is conservative; override it so the
-    # browser caches aggressively (image filenames are unique by convention).
-    response.headers["Cache-Control"] = f"public, max-age={_IMAGE_CACHE_MAX_AGE_SECONDS}, immutable"
+    response.headers["Cache-Control"] = cache_control
     if file_path.suffix.lower() == _SVG_EXTENSION:
         response.headers["Content-Security-Policy"] = _SVG_CONTENT_SECURITY_POLICY
         response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 
-def _serve_download(file_path: Path) -> Response:
+# HTTP status the chat-image change-detection endpoint returns when a referenced
+# file has changed after its message was posted. Deliberately NOT an image: the
+# frontend catches the resulting <img> load error, re-fetches to read this
+# status, and swaps the image for a plain text notice. Serving an image
+# placeholder instead would make the notice itself an openable/downloadable
+# image, which it must never be.
+CHANGED_FILE_STATUS = 409
+
+# The user-facing notice. Returned as the 409 body so the frontend can render
+# the backend's exact wording (single source of truth) rather than duplicating
+# it, falling back to its own copy only if the body is empty.
+CHANGED_FILE_MESSAGE = "This file has been changed. Please revert your workspace or ask your agent to recover it."
+
+
+def serve_changed_file_notice() -> Response:
+    """Return the non-image response marking a chat file that has changed.
+
+    Carries ``CHANGED_FILE_STATUS`` and a plain-text body, never image bytes, so
+    the changed state can only ever render as a non-interactive notice.
+    """
+    response = Response(CHANGED_FILE_MESSAGE, status=CHANGED_FILE_STATUS, mimetype="text/plain")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def serve_download(file_path: Path, cache_control: str | None = None) -> Response:
     """Stream a non-image file as a download rather than rendering it.
 
     ``Content-Disposition: attachment`` makes the browser save the file instead
@@ -81,9 +117,14 @@ def _serve_download(file_path: Path) -> Response:
     stop content-type sniffing that could re-enable inline execution (e.g. a
     ``.html`` or scripted file). ``send_file`` derives the download filename from
     the path's basename.
+
+    ``cache_control`` is set when given; the change-detection endpoint passes
+    ``no-store`` so every click re-runs the change check on the live file.
     """
     response = send_file(file_path, mimetype="application/octet-stream", as_attachment=True)
     response.headers["X-Content-Type-Options"] = "nosniff"
+    if cache_control is not None:
+        response.headers["Cache-Control"] = cache_control
     return response
 
 
@@ -107,8 +148,8 @@ def try_serve_file(url_path: str) -> Response | None:
     if image_mime_type is not None:
         if not file_path.is_file():
             return Response(status=404)
-        return _serve_inline_image(file_path, image_mime_type)
+        return serve_inline_image(file_path, image_mime_type)
 
     if file_path.is_file():
-        return _serve_download(file_path)
+        return serve_download(file_path)
     return None

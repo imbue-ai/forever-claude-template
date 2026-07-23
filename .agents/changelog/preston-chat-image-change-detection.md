@@ -1,0 +1,1 @@
+Update the show-files-in-chat skill to note that the chat now detects when a referenced file changes after a message is posted and replaces the stale image or download link with an explicit "file has been changed" notice, so agents should give each file a fresh, descriptive filename rather than reusing a path.

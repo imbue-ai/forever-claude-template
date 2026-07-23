@@ -66,7 +66,7 @@ export function StableUserMessage(): m.Component<{ event: UserMessageEvent }> {
         bubbleChildren.push(m("div", { class: "message-content whitespace-pre-wrap" }, visibleText));
       }
       if (attachmentBlock !== null) {
-        bubbleChildren.push(m(MarkdownContent, { content: attachmentBlock }));
+        bubbleChildren.push(m(MarkdownContent, { content: attachmentBlock, eventId: event.event_id }));
       }
       return m("div", { class: "message-user-bubble" }, bubbleChildren);
     },
