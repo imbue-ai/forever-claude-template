@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ToolCall, TranscriptEvent } from "../models/Response";
-import { buildToolResultsWithSkillExpansions, renderSubagentCard } from "./message-renderers";
+import { buildToolResultsWithSkillExpansions, renderSubagentCard, renderToolCallBlock } from "./message-renderers";
 import { isSkillExpansionUserMessage, parsePermissionResolution } from "./message-classification";
 
 // Avoid importing the heavy/DOM-dependent module graph (dockview, dompurify) at test time;
@@ -301,6 +301,29 @@ describe("renderSubagentCard", () => {
     const text = allText(renderSubagentCard(toolCall, "agent-1", false));
     expect(text).toContain("from metadata");
     expect(text).toContain("View conversation");
+  });
+});
+
+describe("renderToolCallBlock header", () => {
+  // A real codex code-mode call: tool_name is always "exec"; the operation is buried
+  // in the JS input as tools.<fn>(...). The header should surface what it ran.
+  const execCall: ToolCall = {
+    tool_call_id: "c1",
+    tool_name: "exec",
+    input_preview: 'const r = await tools.exec_command({"cmd":"ls -la ."}); text(r.output);',
+  };
+
+  it("names a codex code-mode exec by its inner operation, keeping the raw JS in the body", () => {
+    const text = allText(renderToolCallBlock(execCall, null, "codex"));
+    // claude-style "Tool: <name>" header, but the real operation, not the opaque wrapper.
+    expect(text).toContain("Tool: exec_command");
+    // preserve-raw: the JS program is still shown in the block body.
+    expect(text).toContain("tools.exec_command");
+  });
+
+  it("keeps the generic 'Tool: <name>' header for claude tools", () => {
+    const bash: ToolCall = { tool_call_id: "c2", tool_name: "Bash", input_preview: "ls -la" };
+    expect(allText(renderToolCallBlock(bash, null, "claude"))).toContain("Tool: Bash");
   });
 });
 

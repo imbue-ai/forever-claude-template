@@ -74,6 +74,20 @@ function labelForMcp(fn: string): string | null {
   return `Running ${toolPart.replace(/_/g, " ")}`;
 }
 
+/**
+ * The tool *name* to show in a transcript block header for a codex call. Code mode
+ * names every operation ``exec``; the meaningful operation is the inner ``tools.<fn>``
+ * (``exec_command``, ``apply_patch``, ...). Surfacing that keeps the header in claude's
+ * ``Tool: <name>`` form instead of an opaque ``Tool: exec``. Falls back to the raw
+ * ``tool_name`` when the input isn't a recognizable code-mode call (or isn't ``exec``
+ * at all, e.g. the synthesized ``web_search`` block).
+ */
+export function codexToolName(tc: ToolCall): string {
+  if (tc.tool_name !== "exec") return tc.tool_name;
+  const match = CODE_MODE_CALL.exec(tc.input_preview);
+  return match !== null ? match[1] : tc.tool_name;
+}
+
 export function codexToolLabel(tc: ToolCall): string {
   // Every codex tool in code mode is `exec`; anything else is unexpected -> generic.
   if (tc.tool_name !== "exec") return "Running tool…";

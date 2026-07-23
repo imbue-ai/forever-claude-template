@@ -10,6 +10,8 @@ import { openSubagentTab } from "./DockviewWorkspace";
 import type { PermissionResolution } from "./message-classification";
 import { isPermissionRequestCall, isSkillExpansionUserMessage } from "./message-classification";
 import { PermissionCard } from "./permission-card";
+import { codexToolName } from "./codexCaption";
+import { getAgentById } from "../models/AgentManager";
 
 // Per-kind user_message rendering lives in user-message-display.ts (the display
 // half of the classify/display split). Re-exported here so existing importers --
@@ -250,8 +252,17 @@ export function renderSubagentCard(toolCall: ToolCall, agentId: string, isRunnin
   ]);
 }
 
-export function renderToolCallBlock(toolCall: ToolCall, toolResult: ToolResultEvent | null): m.Vnode {
-  const headerText = `Tool: ${toolCall.tool_name}`;
+export function renderToolCallBlock(
+  toolCall: ToolCall,
+  toolResult: ToolResultEvent | null,
+  harness: string = "claude",
+): m.Vnode {
+  // Codex code mode names every operation `exec`; surface the inner `tools.<fn>`
+  // operation (`exec_command`, `apply_patch`, ...) so the header reads like claude's
+  // `Tool: <name>` instead of an opaque `Tool: exec`. The raw JS program stays in the
+  // block body below (preserve-raw). Claude tools keep their own name.
+  const displayName = harness === "codex" ? codexToolName(toolCall) : toolCall.tool_name;
+  const headerText = `Tool: ${displayName}`;
   const inputText = toolCall.input_preview || "";
   const outputText = toolResult?.output || "";
   const isError = toolResult?.is_error === true;
@@ -293,6 +304,7 @@ export function renderAssistantMessageChildren(
 ): m.Children[] {
   const textContent = event.text || "";
   const toolCalls = event.tool_calls || [];
+  const harness = getAgentById(agentId)?.harness ?? "claude";
 
   const children: m.Children[] = [];
   if (textContent) {
@@ -319,7 +331,7 @@ export function renderAssistantMessageChildren(
       children.push(m(PermissionCard, { toolCall, toolResult: result, resolution: permissionResolution }));
       continue;
     }
-    children.push(renderToolCallBlock(toolCall, result));
+    children.push(renderToolCallBlock(toolCall, result, harness));
   }
   return children;
 }
