@@ -25,14 +25,19 @@ from pathlib import Path
 from flask import Response
 from flask import send_file
 
-# Long-lived caching for inline images. Chat markdown images are rewritten by
-# the frontend to the per-message snapshot route (see ``chat_image_snapshots``),
+# Long-lived caching for inline images. Chat markdown files are rewritten by
+# the frontend to the per-message snapshot route (see ``chat_file_snapshots``),
 # whose URLs are immutable by construction; this direct-path route remains for
 # non-chat fetches (e.g. opening an image URL in a tab), where agents are
 # instructed (see the show-files-in-chat skill) to give each image a unique
 # filename. A one-year max-age plus ``immutable`` lets the browser skip
 # revalidation entirely while a conversation is re-rendered.
 _IMAGE_CACHE_MAX_AGE_SECONDS = 31_536_000
+
+# Cache-Control for content that can never change behind its URL -- a per-message
+# snapshot blob. Reused by the snapshot endpoint for both inline images and
+# downloads so a re-render (or re-click) never re-fetches.
+IMMUTABLE_CACHE_CONTROL = f"public, max-age={_IMAGE_CACHE_MAX_AGE_SECONDS}, immutable"
 
 # Image extensions served inline, each mapped to an explicit Content-Type so the
 # wire result does not depend on the host's mimetypes registry (macOS and Linux
@@ -67,31 +72,40 @@ def image_mime_type_for_path(url_path: str) -> str | None:
 def serve_inline_image(file_path: Path, mime_type: str) -> Response:
     """Stream an image so it renders inline in the chat.
 
-    Public because the chat-image snapshot endpoint (``server``) serves its
-    frozen copies with exactly the same headers -- and for snapshots the
+    Public because the chat-file snapshot endpoint (``server``) serves its
+    frozen image copies with exactly the same headers -- and for snapshots the
     ``immutable`` cache policy is true by construction, not by convention.
     """
     response = send_file(file_path, mimetype=mime_type)
     # send_file's default cache policy is conservative; override it so the
     # browser caches aggressively (image filenames are unique by convention).
-    response.headers["Cache-Control"] = f"public, max-age={_IMAGE_CACHE_MAX_AGE_SECONDS}, immutable"
+    response.headers["Cache-Control"] = IMMUTABLE_CACHE_CONTROL
     if file_path.suffix.lower() == _SVG_EXTENSION:
         response.headers["Content-Security-Policy"] = _SVG_CONTENT_SECURITY_POLICY
         response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 
-def _serve_download(file_path: Path) -> Response:
+def serve_download(file_path: Path, download_name: str | None = None, cache_control: str | None = None) -> Response:
     """Stream a non-image file as a download rather than rendering it.
 
     ``Content-Disposition: attachment`` makes the browser save the file instead
     of interpreting it in the chat's own origin, and ``octet-stream`` + nosniff
     stop content-type sniffing that could re-enable inline execution (e.g. a
-    ``.html`` or scripted file). ``send_file`` derives the download filename from
-    the path's basename.
+    ``.html`` or scripted file).
+
+    ``download_name`` sets the saved filename; when omitted ``send_file`` derives
+    it from the path's basename (used by the direct-path route). The snapshot
+    endpoint passes the original basename so a content-hashed blob still
+    downloads under the name the agent referenced, and ``cache_control`` so the
+    frozen blob is cached immutably.
     """
-    response = send_file(file_path, mimetype="application/octet-stream", as_attachment=True)
+    response = send_file(
+        file_path, mimetype="application/octet-stream", as_attachment=True, download_name=download_name
+    )
     response.headers["X-Content-Type-Options"] = "nosniff"
+    if cache_control is not None:
+        response.headers["Cache-Control"] = cache_control
     return response
 
 
@@ -118,5 +132,5 @@ def try_serve_file(url_path: str) -> Response | None:
         return serve_inline_image(file_path, image_mime_type)
 
     if file_path.is_file():
-        return _serve_download(file_path)
+        return serve_download(file_path)
     return None

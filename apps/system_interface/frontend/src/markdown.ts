@@ -16,38 +16,48 @@ export function renderMarkdown(source: string): string {
   return DOMPurify.sanitize(rawHtml);
 }
 
-// Extensions the backend serves as inline images (mirrors
-// file_serving._IMAGE_EXTENSION_TO_MIME_TYPE); anything else is a download
-// link, which is not snapshotted.
-const INLINE_IMAGE_EXTENSION_PATTERN = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i;
+// App-route prefixes that share the absolute-path shape but are not on-disk
+// files, so their URLs must not be rewritten (mirrors the backend's guard in
+// chat_file_snapshots._RESERVED_URL_PREFIXES).
+const RESERVED_URL_PREFIXES = ["/api/", "/assets/", "/plugins/", "/service/", "/_"];
 
-/** Build the per-message snapshot URL for an absolute on-disk image path. */
-export function chatImageSnapshotUrl(sourcePath: string, eventId: string): string {
+/** Whether an attribute value is an absolute on-disk path we should snapshot. */
+function isSnapshottablePath(value: string): boolean {
+  if (!value.startsWith("/") || value.startsWith("//")) return false;
+  return !RESERVED_URL_PREFIXES.some((prefix) => value.startsWith(prefix));
+}
+
+/** Build the per-message snapshot URL for an absolute on-disk file path. */
+export function chatFileSnapshotUrl(sourcePath: string, eventId: string): string {
   const encodedPath = sourcePath.slice(1).split("/").map(encodeURIComponent).join("/");
-  return apiUrl(`/api/chat-images/${encodeURIComponent(eventId)}/${encodedPath}`);
+  return apiUrl(`/api/chat-files/${encodeURIComponent(eventId)}/${encodedPath}`);
 }
 
 /**
- * Point every inline chat image at its per-message snapshot.
+ * Point every chat-referenced file -- an inline image's src or a download
+ * link's href -- at its per-message snapshot.
  *
- * Chat markdown references an image by its absolute on-disk path, and the
- * backend serves that path with a one-year immutable cache policy -- so if the
- * file is later overwritten, a new message would show the browser's stale
- * cached copy and an old message re-fetched from a cold cache would show the
- * new content. Routing through /api/chat-images/<event_id>/<path> fixes both:
- * the backend freezes the file's bytes the first time each (event, path) pair
- * is seen, the event id makes the URL fresh for every new message, and an old
- * message's URL resolves to its frozen copy forever.
+ * Chat markdown references a file by its absolute on-disk path. Images are
+ * served with a one-year immutable cache, so an overwrite would leave a new
+ * message showing the browser's stale copy and an old message showing the new
+ * content; downloads revalidate, but clicking a link in an old message still
+ * hands over whatever is on disk now. Routing through
+ * /api/chat-files/<event_id>/<path> fixes both: the backend freezes the file's
+ * bytes the first time each (event, path) pair is seen, the event id makes the
+ * URL fresh for every new message, and an old message's URL resolves to its
+ * frozen copy forever.
  */
-function rewriteChatImageSources(container: HTMLElement, eventId: string): void {
+function rewriteChatFileSources(container: HTMLElement, eventId: string): void {
   for (const image of Array.from(container.querySelectorAll("img"))) {
     // The raw attribute, not image.src, which the browser resolves to a full URL.
     const src = image.getAttribute("src") ?? "";
-    // Only same-origin absolute on-disk paths are snapshotted: external URLs
-    // ("https://...", "//...") and app routes ("/api/...") pass through.
-    if (!src.startsWith("/") || src.startsWith("//") || src.startsWith("/api/")) continue;
-    if (!INLINE_IMAGE_EXTENSION_PATTERN.test(src)) continue;
-    image.setAttribute("src", chatImageSnapshotUrl(src, eventId));
+    if (!isSnapshottablePath(src)) continue;
+    image.setAttribute("src", chatFileSnapshotUrl(src, eventId));
+  }
+  for (const anchor of Array.from(container.querySelectorAll("a"))) {
+    const href = anchor.getAttribute("href") ?? "";
+    if (!isSnapshottablePath(href)) continue;
+    anchor.setAttribute("href", chatFileSnapshotUrl(href, eventId));
   }
 }
 
@@ -125,7 +135,7 @@ export const MarkdownContent: m.Component<{ content: string; eventId?: string }>
     element.innerHTML = renderMarkdown(vnode.attrs.content);
     wrapToolCallBlocks(element);
     if (vnode.attrs.eventId) {
-      rewriteChatImageSources(element, vnode.attrs.eventId);
+      rewriteChatFileSources(element, vnode.attrs.eventId);
     }
     // Clicking an inline image opens it full-screen. The listener is delegated
     // on the container, which mithril reuses across redraws, so it survives the
@@ -149,7 +159,7 @@ export const MarkdownContent: m.Component<{ content: string; eventId?: string }>
     element.innerHTML = renderMarkdown(vnode.attrs.content);
     wrapToolCallBlocks(element);
     if (vnode.attrs.eventId) {
-      rewriteChatImageSources(element, vnode.attrs.eventId);
+      rewriteChatFileSources(element, vnode.attrs.eventId);
     }
     restoreExpandedState(element, expanded);
   },

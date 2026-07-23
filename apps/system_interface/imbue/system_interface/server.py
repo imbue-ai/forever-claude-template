@@ -40,7 +40,9 @@ from imbue.system_interface.attachments import resolve_upload_path
 from imbue.system_interface.attachments import store_uploaded_file
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
+from imbue.system_interface.file_serving import IMMUTABLE_CACHE_CONTROL
 from imbue.system_interface.file_serving import image_mime_type_for_path
+from imbue.system_interface.file_serving import serve_download
 from imbue.system_interface.file_serving import serve_inline_image
 from imbue.system_interface.file_serving import try_serve_file
 from imbue.system_interface.layout_ops import LayoutMutex
@@ -440,25 +442,28 @@ def _serve_attachment(relative_path: str) -> Response:
     return send_file(resolved_path)
 
 
-def _serve_chat_image_snapshot(event_id: str, image_path: str) -> Response:
-    """Serve the frozen copy of an image as it was when ``event_id`` referenced it.
+def _serve_chat_file(event_id: str, file_path: str) -> Response:
+    """Serve the frozen copy of a file as it was when ``event_id`` referenced it.
 
-    The frontend rewrites chat markdown image URLs to this route so each
-    message's images are immutable per message: the first fetch (or the eager
-    pass in the session watcher fan-out) copies the source file's current
-    bytes, and every later fetch serves that copy even if the file on disk has
-    since changed. 404s when the pair has no snapshot and the source file is
-    missing (or is not an inline-image path), matching the broken-image
-    behavior of the direct path route.
+    The frontend rewrites chat markdown image ``src`` and link ``href`` URLs to
+    this route so each message's files are immutable per message: the first
+    fetch (or the eager pass in the session watcher fan-out) copies the source
+    file's current bytes, and every later fetch serves that copy even if the
+    file on disk has since changed. An image is served inline; any other file
+    is served as a download under its original basename. 404s when the pair has
+    no snapshot and the source file is missing, matching the broken-image /
+    dead-link behavior of the direct path route.
     """
-    source_path = "/" + image_path
-    mime_type = image_mime_type_for_path(source_path)
-    if mime_type is None:
-        return Response(status=404)
-    snapshot_path = get_state().chat_image_snapshots.snapshot(event_id, source_path)
+    source_path = "/" + file_path
+    snapshot_path = get_state().chat_file_snapshots.snapshot(event_id, source_path)
     if snapshot_path is None:
         return Response(status=404)
-    return serve_inline_image(snapshot_path, mime_type)
+    image_mime_type = image_mime_type_for_path(source_path)
+    if image_mime_type is not None:
+        return serve_inline_image(snapshot_path, image_mime_type)
+    return serve_download(
+        snapshot_path, download_name=Path(source_path).name, cache_control=IMMUTABLE_CACHE_CONTROL
+    )
 
 
 def _delete_attachment(relative_path: str) -> Response:
@@ -1543,8 +1548,8 @@ def create_application(state: SystemInterfaceState) -> Flask:
         endpoint="_delete_attachment",
     )
     application.add_url_rule(
-        "/api/chat-images/<event_id>/<path:image_path>",
-        view_func=_serve_chat_image_snapshot,
+        "/api/chat-files/<event_id>/<path:file_path>",
+        view_func=_serve_chat_file,
         methods=["GET"],
     )
     application.add_url_rule("/api/agents/<agent_id>/interrupt", view_func=_interrupt_agent_endpoint, methods=["POST"])
