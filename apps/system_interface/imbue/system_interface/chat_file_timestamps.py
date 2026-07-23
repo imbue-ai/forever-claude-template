@@ -1,20 +1,21 @@
-"""Detect when a chat-referenced image changed after its message was posted.
+"""Detect when a chat-referenced file changed after its message was posted.
 
-Chat markdown references an image by its absolute on-disk path (see
-``file_serving.py``). Nothing stops an agent from later overwriting that file,
-which would silently change what an already-posted message shows -- and, with
-long-lived browser caching, could leave a *new* message showing stale cached
-bytes.
+Chat markdown references a file by its absolute on-disk path (see
+``file_serving.py``): ``![chart](/.../chart.png)`` renders an image inline and
+``[report](/.../report.pdf)`` becomes a download link. Nothing stops an agent
+from later overwriting a referenced file, which would silently change what an
+already-posted message shows (or downloads) -- and, for images with long-lived
+browser caching, could leave a *new* message showing stale cached bytes.
 
-This module fixes both without copying any files. The frontend rewrites an
-image's URL to ``/api/chat-images/<event_id>/<path>``; the store records the
-source file's modification time and size the first time each
-``(event_id, source_path)`` pair is seen (eagerly when the session watcher
-emits the event -- as close to post time as the server can get -- and lazily
-on first fetch as a fallback). The endpoint serves the live file with caching
-disabled, so every render refetches; if the file no longer matches its
-recorded fingerprint, a placeholder image is served instead telling the user
-the file has changed and how to get it back.
+This module detects that without copying any files. The frontend rewrites the
+URL -- an image ``src`` or a link ``href`` -- to ``/api/chat-files/<event_id>/
+<path>``; the store records the source file's modification time and size the
+first time each ``(event_id, source_path)`` pair is seen (eagerly when the
+session watcher emits the event -- as close to post time as the server can get
+-- and lazily on first fetch as a fallback). The endpoint serves the live file
+with caching disabled, so every render refetches; if the file no longer matches
+its recorded fingerprint, the endpoint reports it changed and the frontend
+replaces the image or link with a plain notice that the file is stale.
 
 Records are appended to ``index.jsonl`` under the store directory.
 """
@@ -29,26 +30,38 @@ from typing import Any
 
 from loguru import logger
 
-from imbue.system_interface.file_serving import image_mime_type_for_path
+# Matches the target of markdown image or link syntax when it is an absolute
+# on-disk path: ``![alt](/some/path.png)`` or ``[label](/some/report.pdf)``.
+# The optional leading ``!`` covers both; the target must start with ``/``.
+_MARKDOWN_REFERENCE_PATH_PATTERN = re.compile(r"!?\[[^\]]*\]\(\s*(/[^)\s]+)\s*\)")
 
-# Matches the target of markdown image syntax when it is an absolute on-disk
-# path: ``![alt](/some/path.png)``. Whether the path is actually an inline
-# image (by extension) is decided by ``image_mime_type_for_path``, not here.
-_MARKDOWN_IMAGE_PATH_PATTERN = re.compile(r"!\[[^\]]*\]\(\s*(/[^)\s]+)\s*\)")
+# App routes that share the absolute-path shape but are not on-disk files, so
+# they must never be change-checked (mirrors the frontend's rewrite guard).
+_RESERVED_URL_PREFIXES = ("/api/", "/assets/", "/plugins/", "/service/", "/_")
 
 
-def extract_image_paths(markdown_text: str) -> list[str]:
-    """Return the absolute inline-image paths referenced by ``markdown_text``."""
+def _is_change_checkable_path(path: str) -> bool:
+    if path.startswith("//"):
+        return False
+    return not path.startswith(_RESERVED_URL_PREFIXES)
+
+
+def extract_referenced_paths(markdown_text: str) -> list[str]:
+    """Return the absolute on-disk file paths referenced by ``markdown_text``.
+
+    Covers both inline images (``![alt](/path)``) and download links
+    (``[label](/path)``); app-route paths (``/api/...`` etc.) are excluded.
+    """
     paths: list[str] = []
-    for match in _MARKDOWN_IMAGE_PATH_PATTERN.finditer(markdown_text):
+    for match in _MARKDOWN_REFERENCE_PATH_PATTERN.finditer(markdown_text):
         path = match.group(1)
-        if image_mime_type_for_path(path) is not None:
+        if _is_change_checkable_path(path):
             paths.append(path)
     return paths
 
 
-class ChatImageStatus(Enum):
-    """Whether an image still matches the fingerprint recorded for its message."""
+class ChatFileStatus(Enum):
+    """Whether a file still matches the fingerprint recorded for its message."""
 
     # The file exists and matches the recorded (or just-recorded) fingerprint.
     UNCHANGED = "unchanged"
@@ -56,12 +69,13 @@ class ChatImageStatus(Enum):
     # message (including the file having been deleted after being recorded).
     CHANGED = "changed"
     # No fingerprint is recorded and the file does not exist, so there is
-    # nothing to compare -- e.g. a typo'd path (renders as a broken image).
+    # nothing to compare -- e.g. a typo'd path (renders as a broken image /
+    # dead link).
     UNKNOWN = "unknown"
 
 
-class ChatImageTimestampStore:
-    """Per-message fingerprints (mtime + size) of chat-referenced images.
+class ChatFileTimestampStore:
+    """Per-message fingerprints (mtime + size) of chat-referenced files.
 
     Thread-safe: the request threads (lazy record on fetch) and the worker
     thread (eager record on new events) both go through the one lock. The
@@ -79,7 +93,7 @@ class ChatImageTimestampStore:
         self._worker: threading.Thread | None = None
 
     def enqueue_events(self, events: list[dict[str, Any]]) -> None:
-        """Queue eager fingerprint records for every image referenced by ``events``.
+        """Queue eager fingerprint records for every file referenced by ``events``.
 
         Accepts the session watcher's parsed event dicts; assistant messages
         carry their markdown in ``text`` and user messages in ``content``.
@@ -94,13 +108,13 @@ class ChatImageTimestampStore:
             for field in ("text", "content"):
                 value = event.get(field)
                 if isinstance(value, str) and value:
-                    for path in extract_image_paths(value):
+                    for path in extract_referenced_paths(value):
                         pending.append((event_id, path))
         if not pending:
             return
         with self._lock:
             if self._worker is None:
-                self._worker = threading.Thread(target=self._run_worker, daemon=True, name="chat-image-timestamps")
+                self._worker = threading.Thread(target=self._run_worker, daemon=True, name="chat-file-timestamps")
                 self._worker.start()
         for item in pending:
             self._work_queue.put(item)
@@ -115,7 +129,7 @@ class ChatImageTimestampStore:
         self._work_queue.put(None)
         worker.join(timeout=5.0)
 
-    def check(self, event_id: str, source_path: str) -> ChatImageStatus:
+    def check(self, event_id: str, source_path: str) -> ChatFileStatus:
         """Compare the file behind ``source_path`` to the fingerprint for ``event_id``.
 
         The first call for an unseen pair records the file's current
@@ -124,8 +138,6 @@ class ChatImageTimestampStore:
         report CHANGED once the file's mtime or size no longer matches, or
         once the file is gone.
         """
-        if image_mime_type_for_path(source_path) is None:
-            return ChatImageStatus.UNKNOWN
         with self._lock:
             index = self._ensure_index_loaded_locked()
             key = (event_id, source_path)
@@ -133,12 +145,12 @@ class ChatImageTimestampStore:
             recorded = index.get(key)
             if recorded is None:
                 if current is None:
-                    return ChatImageStatus.UNKNOWN
+                    return ChatFileStatus.UNKNOWN
                 self._append_record_locked(index, key, current)
-                return ChatImageStatus.UNCHANGED
+                return ChatFileStatus.UNCHANGED
             if current == recorded:
-                return ChatImageStatus.UNCHANGED
-            return ChatImageStatus.CHANGED
+                return ChatFileStatus.UNCHANGED
+            return ChatFileStatus.CHANGED
 
     def record(self, event_id: str, source_path: str) -> None:
         """Record the file's current fingerprint for ``event_id`` if unseen.
@@ -147,8 +159,6 @@ class ChatImageTimestampStore:
         untouched, and a missing file records nothing (the lazy path in
         :meth:`check` will pick it up if the file appears before first fetch).
         """
-        if image_mime_type_for_path(source_path) is None:
-            return
         with self._lock:
             index = self._ensure_index_loaded_locked()
             key = (event_id, source_path)
@@ -192,7 +202,7 @@ class ChatImageTimestampStore:
                 except json.JSONDecodeError:
                     # A torn final line from a crash mid-append; the pair it
                     # described will simply be re-recorded on next use.
-                    logger.warning("Skipping unparseable chat image timestamp index line: {}", line)
+                    logger.warning("Skipping unparseable chat file timestamp index line: {}", line)
                     continue
                 index[(entry["event_id"], entry["source_path"])] = (entry["mtime_ns"], entry["size"])
         self._fingerprint_by_key = index
@@ -207,4 +217,4 @@ class ChatImageTimestampStore:
             except OSError as e:
                 # Eager recording is best-effort; the serve endpoint records
                 # lazily on first fetch.
-                logger.warning("Eager chat image fingerprint record failed for {}: {}", source_path, e)
+                logger.warning("Eager chat file fingerprint record failed for {}: {}", source_path, e)

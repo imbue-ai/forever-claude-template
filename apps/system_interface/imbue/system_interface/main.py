@@ -10,7 +10,7 @@ from flask import Flask
 from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.agent_manager import AgentManager
 from imbue.system_interface.app_context import SystemInterfaceState
-from imbue.system_interface.chat_image_timestamps import ChatImageTimestampStore
+from imbue.system_interface.chat_file_timestamps import ChatFileTimestampStore
 from imbue.system_interface.app_context import get_state
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
@@ -79,9 +79,9 @@ def build_production_state(
         # forwarding layer; a separate one for the latchkey catalog proxy.
         http_client=httpx.Client(follow_redirects=False, timeout=30.0),
         latchkey_http_client=httpx.Client(timeout=30.0),
-        # Per-message fingerprints of chat-referenced images live alongside
+        # Per-message fingerprints of chat-referenced files live alongside
         # the rest of the host-level mngr state so they survive restarts.
-        chat_image_timestamps=ChatImageTimestampStore(get_host_dir() / "chat_image_timestamps"),
+        chat_file_timestamps=ChatFileTimestampStore(get_host_dir() / "chat_file_timestamps"),
     )
 
 

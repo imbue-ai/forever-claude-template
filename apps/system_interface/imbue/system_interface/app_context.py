@@ -10,7 +10,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_manager import AgentManager
-from imbue.system_interface.chat_image_timestamps import ChatImageTimestampStore
+from imbue.system_interface.chat_file_timestamps import ChatFileTimestampStore
 from imbue.system_interface.claude_auth import ClaudeAuthService
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
@@ -52,7 +52,7 @@ class SystemInterfaceState(MutableModel):
     welcome_resender: WelcomeResender
     http_client: httpx.Client
     latchkey_http_client: httpx.Client
-    chat_image_timestamps: ChatImageTimestampStore
+    chat_file_timestamps: ChatFileTimestampStore
     watchers: dict[str, AgentSessionWatcher] = {}
     latchkey_catalog_cache: dict[str, Any] = {}
 
@@ -99,10 +99,10 @@ class SystemInterfaceState(MutableModel):
                 # via the REST /events endpoint; storing them in the in-memory
                 # replay buffer would grow unboundedly for the agent's lifetime.
                 self.event_queues.broadcast_all_ignored(agent_id, events)
-                # Fingerprint any images the new messages reference as close
+                # Fingerprint any files the new messages reference as close
                 # to post time as possible (the stat happens on the store's own
                 # worker thread, so the fan-out is not blocked on file I/O).
-                self.chat_image_timestamps.enqueue_events(events)
+                self.chat_file_timestamps.enqueue_events(events)
                 # Recompute per-agent activity state from the full transcript.
                 # The watcher's incremental ``events`` argument only contains the
                 # newest lines, but the activity tracker needs the full
@@ -142,7 +142,7 @@ class SystemInterfaceState(MutableModel):
         self.broadcaster.shutdown()
         self.agent_manager.stop()
         self.stop_all_watchers()
-        self.chat_image_timestamps.stop()
+        self.chat_file_timestamps.stop()
         try:
             self.http_client.close()
         except (httpx.HTTPError, RuntimeError) as e:

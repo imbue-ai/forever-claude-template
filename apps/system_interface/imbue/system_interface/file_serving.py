@@ -109,7 +109,7 @@ def serve_changed_file_notice() -> Response:
     return response
 
 
-def _serve_download(file_path: Path) -> Response:
+def serve_download(file_path: Path, cache_control: str | None = None) -> Response:
     """Stream a non-image file as a download rather than rendering it.
 
     ``Content-Disposition: attachment`` makes the browser save the file instead
@@ -117,9 +117,14 @@ def _serve_download(file_path: Path) -> Response:
     stop content-type sniffing that could re-enable inline execution (e.g. a
     ``.html`` or scripted file). ``send_file`` derives the download filename from
     the path's basename.
+
+    ``cache_control`` is set when given; the change-detection endpoint passes
+    ``no-store`` so every click re-runs the change check on the live file.
     """
     response = send_file(file_path, mimetype="application/octet-stream", as_attachment=True)
     response.headers["X-Content-Type-Options"] = "nosniff"
+    if cache_control is not None:
+        response.headers["Cache-Control"] = cache_control
     return response
 
 
@@ -146,5 +151,5 @@ def try_serve_file(url_path: str) -> Response | None:
         return serve_inline_image(file_path, image_mime_type)
 
     if file_path.is_file():
-        return _serve_download(file_path)
+        return serve_download(file_path)
     return None

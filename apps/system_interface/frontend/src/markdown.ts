@@ -16,37 +16,44 @@ export function renderMarkdown(source: string): string {
   return DOMPurify.sanitize(rawHtml);
 }
 
-// Extensions the backend serves as inline images (mirrors
-// file_serving._IMAGE_EXTENSION_TO_MIME_TYPE); anything else is a download
-// link, which is not change-checked.
-const INLINE_IMAGE_EXTENSION_PATTERN = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i;
+// App-route prefixes that share the absolute-path shape but are not on-disk
+// files, so their URLs must not be change-checked (mirrors the backend guard in
+// chat_file_timestamps._RESERVED_URL_PREFIXES).
+const RESERVED_URL_PREFIXES = ["/api/", "/assets/", "/plugins/", "/service/", "/_"];
 
-/** Build the per-message change-checking URL for an absolute on-disk image path. */
-export function chatImageUrl(sourcePath: string, eventId: string): string {
+/** Whether an attribute value is an absolute on-disk path we should change-check. */
+function isChangeCheckablePath(value: string): boolean {
+  if (!value.startsWith("/") || value.startsWith("//")) return false;
+  return !RESERVED_URL_PREFIXES.some((prefix) => value.startsWith(prefix));
+}
+
+/** Build the per-message change-checking URL for an absolute on-disk file path. */
+export function chatFileUrl(sourcePath: string, eventId: string): string {
   const encodedPath = sourcePath.slice(1).split("/").map(encodeURIComponent).join("/");
-  return apiUrl(`/api/chat-images/${encodeURIComponent(eventId)}/${encodedPath}`);
+  return apiUrl(`/api/chat-files/${encodeURIComponent(eventId)}/${encodedPath}`);
 }
 
 // HTTP status the backend returns when a referenced file has changed since its
-// message was posted (mirrors file_serving.CHANGED_FILE_STATUS). It is not an
-// image, so the <img> load fails; we detect that status and swap in a notice.
+// message was posted (mirrors file_serving.CHANGED_FILE_STATUS). It is not the
+// file, so an image's <img> load fails and a link's download would be wrong; we
+// detect that status and swap in a stale notice instead.
 const CHAT_FILE_CHANGED_STATUS = 409;
 const CHAT_FILE_CHANGED_FALLBACK =
   "This file has been changed. Please revert your workspace or ask your agent to recover it.";
 
 /**
- * Replace a changed image with a plain, non-interactive text notice.
+ * Replace a changed image or link with a plain, non-interactive text notice.
  *
  * A div -- not an img and not a link -- so the notice can never be clicked to
- * enlarge (the lightbox only acts on <img>) or opened/downloaded. This is the
- * whole point of returning a non-image status for a changed file: the "file has
- * been changed" message must not itself masquerade as the file.
+ * enlarge, open, or download. This is the whole point of the change check: once
+ * a file is stale, the message must not keep offering it as if it were still
+ * the version that was posted.
  */
-function replaceWithChangedNotice(image: HTMLImageElement, message: string): void {
+function replaceWithChangedNotice(element: Element, message: string): void {
   const notice = document.createElement("div");
   notice.className = "chat-file-changed";
   notice.textContent = message;
-  image.replaceWith(notice);
+  element.replaceWith(notice);
 }
 
 /**
@@ -73,30 +80,54 @@ function handleChatImageLoadError(image: HTMLImageElement): void {
 }
 
 /**
- * Point every inline chat image at its per-message change-checking URL.
+ * Proactively replace a changed download link with the stale notice.
  *
- * Chat markdown references an image by its absolute on-disk path, and the
- * backend serves that path with a one-year immutable cache policy -- so if the
- * file is later overwritten, a new message would show the browser's stale
- * cached copy and an old message would silently change appearance. Routing
- * through /api/chat-images/<event_id>/<path> fixes both: the backend records
- * the file's mtime+size the first time each (event, path) pair is seen and
- * serves the file uncached, so every render refetches; once the file no longer
- * matches, the fetch fails with a changed-file status and the image is replaced
- * by a non-interactive "file has been changed" notice.
+ * A link has no auto-load to fail on, so -- unlike an image -- we check its
+ * status on render (a HEAD, which the endpoint answers from a cheap stat) and
+ * swap in the notice when the file has changed. A 200 (unchanged) leaves the
+ * link as a normal download; a 404 (typo'd path) leaves it alone as a dead
+ * link.
  */
-function rewriteChatImageSources(container: HTMLElement, eventId: string): void {
+function checkChatLinkFreshness(anchor: HTMLAnchorElement, url: string): void {
+  void fetch(url, { method: "HEAD" })
+    .then((response) => {
+      if (response.status === CHAT_FILE_CHANGED_STATUS) {
+        replaceWithChangedNotice(anchor, CHAT_FILE_CHANGED_FALLBACK);
+      }
+    })
+    .catch(() => {
+      // Network error checking status: leave the link as-is.
+    });
+}
+
+/**
+ * Point every chat-referenced file -- an inline image's src or a download
+ * link's href -- at its per-message change-checking URL.
+ *
+ * Chat markdown references a file by its absolute on-disk path. The backend
+ * records the file's mtime+size the first time each (event, path) pair is seen
+ * and serves it uncached, so every render re-checks. Once the file no longer
+ * matches, the backend reports it changed: an image's load fails and is
+ * replaced by a non-interactive stale notice; a link's render-time check
+ * replaces it with the same notice, so a stale file is never silently shown or
+ * downloaded.
+ */
+function rewriteChatFileSources(container: HTMLElement, eventId: string): void {
   for (const image of Array.from(container.querySelectorAll("img"))) {
     // The raw attribute, not image.src, which the browser resolves to a full URL.
     const src = image.getAttribute("src") ?? "";
-    // Only same-origin absolute on-disk paths are change-checked: external URLs
-    // ("https://...", "//...") and app routes ("/api/...") pass through.
-    if (!src.startsWith("/") || src.startsWith("//") || src.startsWith("/api/")) continue;
-    if (!INLINE_IMAGE_EXTENSION_PATTERN.test(src)) continue;
+    if (!isChangeCheckablePath(src)) continue;
     // Attach the error handler before pointing at the new URL so a changed
     // file's failed load is caught and turned into the notice.
     image.addEventListener("error", () => handleChatImageLoadError(image), { once: true });
-    image.setAttribute("src", chatImageUrl(src, eventId));
+    image.setAttribute("src", chatFileUrl(src, eventId));
+  }
+  for (const anchor of Array.from(container.querySelectorAll("a"))) {
+    const href = anchor.getAttribute("href") ?? "";
+    if (!isChangeCheckablePath(href)) continue;
+    const url = chatFileUrl(href, eventId);
+    anchor.setAttribute("href", url);
+    checkChatLinkFreshness(anchor, url);
   }
 }
 
@@ -174,7 +205,7 @@ export const MarkdownContent: m.Component<{ content: string; eventId?: string }>
     element.innerHTML = renderMarkdown(vnode.attrs.content);
     wrapToolCallBlocks(element);
     if (vnode.attrs.eventId) {
-      rewriteChatImageSources(element, vnode.attrs.eventId);
+      rewriteChatFileSources(element, vnode.attrs.eventId);
     }
     // Clicking an inline image opens it full-screen. The listener is delegated
     // on the container, which mithril reuses across redraws, so it survives the
@@ -198,7 +229,7 @@ export const MarkdownContent: m.Component<{ content: string; eventId?: string }>
     element.innerHTML = renderMarkdown(vnode.attrs.content);
     wrapToolCallBlocks(element);
     if (vnode.attrs.eventId) {
-      rewriteChatImageSources(element, vnode.attrs.eventId);
+      rewriteChatFileSources(element, vnode.attrs.eventId);
     }
     restoreExpandedState(element, expanded);
   },

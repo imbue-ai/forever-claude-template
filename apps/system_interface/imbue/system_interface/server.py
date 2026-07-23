@@ -40,9 +40,10 @@ from imbue.system_interface.attachments import resolve_upload_path
 from imbue.system_interface.attachments import store_uploaded_file
 from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
-from imbue.system_interface.chat_image_timestamps import ChatImageStatus
+from imbue.system_interface.chat_file_timestamps import ChatFileStatus
 from imbue.system_interface.file_serving import image_mime_type_for_path
 from imbue.system_interface.file_serving import serve_changed_file_notice
+from imbue.system_interface.file_serving import serve_download
 from imbue.system_interface.file_serving import serve_inline_image
 from imbue.system_interface.file_serving import try_serve_file
 from imbue.system_interface.layout_ops import LayoutMutex
@@ -442,30 +443,31 @@ def _serve_attachment(relative_path: str) -> Response:
     return send_file(resolved_path)
 
 
-def _serve_chat_image(event_id: str, image_path: str) -> Response:
-    """Serve a chat image, verifying it is still the file ``event_id`` referenced.
+def _serve_chat_file(event_id: str, file_path: str) -> Response:
+    """Serve a chat file, verifying it is still the file ``event_id`` referenced.
 
-    The frontend rewrites chat markdown image URLs to this route. The file's
-    mtime and size are recorded the first time each (event, path) pair is seen
-    (eagerly in the session watcher fan-out, lazily here on first fetch); the
-    live file is served with caching disabled so every render refetches and
-    re-verifies. Once the file no longer matches its recorded fingerprint --
-    overwritten or deleted after the message was posted -- a non-image
-    ``CHANGED_FILE_STATUS`` response is returned; the frontend catches the
-    resulting image load error and renders a plain, non-openable notice in
-    place of the image. 404s when there is no record and no file (e.g. a typo'd
-    path), matching the broken-image behavior of the direct path route.
+    The frontend rewrites chat markdown image ``src`` and link ``href`` URLs to
+    this route. The file's mtime and size are recorded the first time each
+    (event, path) pair is seen (eagerly in the session watcher fan-out, lazily
+    here on first fetch); the live file is served with caching disabled so every
+    render (or download) re-runs the check. Once the file no longer matches its
+    recorded fingerprint -- overwritten or deleted after the message was posted
+    -- a non-image ``CHANGED_FILE_STATUS`` response is returned; the frontend
+    replaces the image or link with a plain "file is stale" notice. Unchanged
+    files are served inline when they are images and as downloads otherwise.
+    404s when there is no record and no file (e.g. a typo'd path), matching the
+    broken-image / dead-link behavior of the direct path route.
     """
-    source_path = "/" + image_path
-    mime_type = image_mime_type_for_path(source_path)
-    if mime_type is None:
+    source_path = "/" + file_path
+    status = get_state().chat_file_timestamps.check(event_id, source_path)
+    if status is ChatFileStatus.UNKNOWN:
         return Response(status=404)
-    status = get_state().chat_image_timestamps.check(event_id, source_path)
-    if status is ChatImageStatus.UNKNOWN:
-        return Response(status=404)
-    if status is ChatImageStatus.CHANGED:
+    if status is ChatFileStatus.CHANGED:
         return serve_changed_file_notice()
-    return serve_inline_image(Path(source_path), mime_type, cache_control="no-store")
+    image_mime_type = image_mime_type_for_path(source_path)
+    if image_mime_type is not None:
+        return serve_inline_image(Path(source_path), image_mime_type, cache_control="no-store")
+    return serve_download(Path(source_path), cache_control="no-store")
 
 
 def _delete_attachment(relative_path: str) -> Response:
@@ -1550,8 +1552,8 @@ def create_application(state: SystemInterfaceState) -> Flask:
         endpoint="_delete_attachment",
     )
     application.add_url_rule(
-        "/api/chat-images/<event_id>/<path:image_path>",
-        view_func=_serve_chat_image,
+        "/api/chat-files/<event_id>/<path:file_path>",
+        view_func=_serve_chat_file,
         methods=["GET"],
     )
     application.add_url_rule("/api/agents/<agent_id>/interrupt", view_func=_interrupt_agent_endpoint, methods=["POST"])

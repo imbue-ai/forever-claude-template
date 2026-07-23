@@ -1759,15 +1759,16 @@ def test_missing_non_image_path_is_not_a_download(client: FlaskClient, tmp_path:
     assert "attachment" not in response.headers.get("Content-Disposition", "")
 
 
-# --- Chat image change detection ------------------------------------------
+# --- Chat file change detection -------------------------------------------
 #
-# The frontend rewrites chat markdown image URLs to
-# /api/chat-images/<event_id>/<path>; the endpoint records the source file's
+# The frontend rewrites chat markdown image src and link href URLs to
+# /api/chat-files/<event_id>/<path>; the endpoint records the source file's
 # mtime+size on first fetch for that (event, path) pair, serves the live file
-# with caching disabled, and returns a non-image 409 once the file no longer
-# matches, so an already-posted message never silently changes appearance when
-# the file on disk does. The 409 is deliberately not an image, so the frontend
-# renders a plain notice the user cannot open or download.
+# with caching disabled (inline for images, as a download otherwise), and
+# returns a non-image 409 once the file no longer matches, so an already-posted
+# message never silently shows or downloads a stale file. The 409 is
+# deliberately not the file, so the frontend renders a plain notice the user
+# cannot open or download.
 
 
 def _rewind_mtime(path: Path) -> None:
@@ -1776,11 +1777,11 @@ def _rewind_mtime(path: Path) -> None:
     os.utime(path, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns - 1_000_000_000))
 
 
-def test_chat_image_serves_live_bytes_uncached(client: FlaskClient, tmp_path: Path) -> None:
+def test_chat_file_serves_live_image_uncached(client: FlaskClient, tmp_path: Path) -> None:
     image_path = tmp_path / "chart.png"
     image_path.write_bytes(b"original-bytes")
 
-    response = client.get(f"/api/chat-images/event-1{image_path}")
+    response = client.get(f"/api/chat-files/event-1{image_path}")
     assert response.status_code == 200
     assert response.content_type == "image/png"
     assert response.data == b"original-bytes"
@@ -1788,11 +1789,23 @@ def test_chat_image_serves_live_bytes_uncached(client: FlaskClient, tmp_path: Pa
     assert response.headers["Cache-Control"] == "no-store"
 
 
-def test_chat_image_changed_file_returns_non_image_notice(client: FlaskClient, tmp_path: Path) -> None:
+def test_chat_file_serves_live_download_uncached(client: FlaskClient, tmp_path: Path) -> None:
+    report_path = tmp_path / "report.pdf"
+    report_path.write_bytes(b"pdf-original")
+
+    response = client.get(f"/api/chat-files/event-1{report_path}")
+    assert response.status_code == 200
+    assert response.content_type == "application/octet-stream"
+    assert "attachment" in response.headers["Content-Disposition"]
+    assert response.data == b"pdf-original"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_chat_file_changed_image_returns_non_file_notice(client: FlaskClient, tmp_path: Path) -> None:
     image_path = tmp_path / "chart.png"
     image_path.write_bytes(b"original-bytes")
 
-    url = f"/api/chat-images/event-1{image_path}"
+    url = f"/api/chat-files/event-1{image_path}"
     assert client.get(url).status_code == 200
 
     _rewind_mtime(image_path)
@@ -1807,16 +1820,33 @@ def test_chat_image_changed_file_returns_non_image_notice(client: FlaskClient, t
     assert response.headers["Cache-Control"] == "no-store"
 
     # A new message referencing the same path sees the file's current content.
-    fresh = client.get(f"/api/chat-images/event-2{image_path}")
+    fresh = client.get(f"/api/chat-files/event-2{image_path}")
     assert fresh.status_code == 200
     assert fresh.data == b"changed-bytes!"
 
 
-def test_chat_image_deleted_file_returns_non_image_notice(client: FlaskClient, tmp_path: Path) -> None:
+def test_chat_file_changed_download_returns_non_file_notice(client: FlaskClient, tmp_path: Path) -> None:
+    report_path = tmp_path / "report.pdf"
+    report_path.write_bytes(b"pdf-original")
+
+    url = f"/api/chat-files/event-1{report_path}"
+    assert client.get(url).status_code == 200
+
+    _rewind_mtime(report_path)
+    report_path.write_bytes(b"pdf-changed")
+    response = client.get(url)
+    # Not the download either -- a plain notice, so a stale file is never handed over.
+    assert response.status_code == 409
+    assert response.content_type.startswith("text/plain")
+    assert "attachment" not in response.headers.get("Content-Disposition", "")
+    assert b"This file has been changed." in response.data
+
+
+def test_chat_file_deleted_file_returns_non_file_notice(client: FlaskClient, tmp_path: Path) -> None:
     image_path = tmp_path / "chart.png"
     image_path.write_bytes(b"original-bytes")
 
-    url = f"/api/chat-images/event-1{image_path}"
+    url = f"/api/chat-files/event-1{image_path}"
     assert client.get(url).status_code == 200
 
     image_path.unlink()
@@ -1826,13 +1856,6 @@ def test_chat_image_deleted_file_returns_non_image_notice(client: FlaskClient, t
     assert b"This file has been changed." in response.data
 
 
-def test_chat_image_never_seen_missing_file_returns_404(client: FlaskClient, tmp_path: Path) -> None:
-    response = client.get(f"/api/chat-images/event-1{tmp_path}/missing.png")
-    assert response.status_code == 404
-
-
-def test_chat_image_non_image_path_returns_404(client: FlaskClient, tmp_path: Path) -> None:
-    file_path = tmp_path / "notes.txt"
-    file_path.write_text("hello")
-    response = client.get(f"/api/chat-images/event-1{file_path}")
+def test_chat_file_never_seen_missing_file_returns_404(client: FlaskClient, tmp_path: Path) -> None:
+    response = client.get(f"/api/chat-files/event-1{tmp_path}/missing.png")
     assert response.status_code == 404
