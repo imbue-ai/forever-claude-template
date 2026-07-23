@@ -1,3 +1,13 @@
+- **Adopting an inspiration is now gated and verified.** Before the merge path
+  pulls a third-party inspiration into a mind, `use-inspiration` requires the
+  user to confirm they trust the source -- stating plainly that Imbue has not
+  verified it and it could contain malicious code -- and does nothing (no fetch,
+  merge, or execution) until they agree. The merge itself now happens in an
+  isolated worktree with a boot smoke-check, and only a clean, bootable result
+  is fast-forwarded into the live tree, so a broken or hostile inspiration can
+  never clobber the mind. A mind created directly FROM an inspiration is treated
+  as already trusted (creating it was the trust decision).
+
 - New **`update-version`** skill owns the workspace's version ledger end to end:
   the `VERSION_HISTORY.md` format, seeding the "created from" line, appending a
   `## Workspace` line when a template update lands, appending an

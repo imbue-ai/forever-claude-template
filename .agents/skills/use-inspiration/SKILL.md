@@ -43,42 +43,105 @@ here) and go straight to reading the manifest.
 inspiration into the *current* mind at the repo root, then adapt it. Do step 1
 below to merge it in.
 
-## 1. Bring in the inspiration (merge path only)
+## 0. Trust gate — confirm before merging in (merge path B only)
 
-Bring the inspiration's tree into the current mind at the repo root.
+An inspiration is code published by ANOTHER mind's user, in a repo outside
+Imbue's control. **Imbue does not review, verify, or vouch for inspirations.**
+Adopting one runs its code in this mind -- its services, skills, and scripts --
+and it could contain mistakes or malicious code (data exfiltration, destructive
+commands, hidden network calls). You cannot detect that by reading it, so the
+only safeguard is the user's informed consent.
+
+On the **merge path (B)**, BEFORE any fetch, merge, or execution in §1, tell the
+user in plain language that you are about to pull third-party code that **Imbue
+has not verified and that could be malicious** into their mind; name the repo
+URL; and ask them to confirm they trust that source and want to proceed. Do NOT
+fetch, merge, or run anything from the inspiration until they reply yes. If they
+decline, stop here. This is informed consent, not a security guarantee -- you
+are telling the user you cannot vouch for the code, not certifying it is safe.
+
+The **template path (A)** needs no such gate: creating a mind from an
+inspiration repo WAS the trust decision, so a mind already built from one is
+treated as trusted -- go straight to adapting it.
+
+## 1. Bring in the inspiration, verified in a worktree (merge path only)
+
+Only after the trust gate (§0). The inspiration is unverified third-party code,
+so NEVER merge it straight into the live tree: do the merge in an ISOLATED
+worktree, confirm it went well there, and only then bring the verified result
+into `/code`. This mirrors how `update-self` validates an upstream merge off the
+live tree before landing it.
 
 Do NOT use `git subtree add --prefix=.` — subtree does not support the repo root
-as its prefix and errors out. Instead, fetch the inspiration's branch and merge it
-with unrelated histories, so both trees coexist at the root:
+as its prefix and errors out. First fetch the inspiration's branch (fetch only
+moves objects into the local store; it changes no working tree):
 
 ```bash
 git remote add inspiration <git-url>        # or a uniquely-named remote if 'inspiration' is taken
 git fetch inspiration <branch>              # branch from the inspiration repo (default: main)
-git merge --allow-unrelated-histories --no-edit FETCH_HEAD
 ```
 
-This preserves both trees at the root. The inspiration's `inspiration-<slug>.md`
-manifest(s) and their `.svg` thumbnails land at the repo root alongside anything
-this mind already had.
-
-If the repo is private, the anonymous fetch above fails with an auth error.
-Route git through the latchkey gateway instead (it proxies GitHub's git
-endpoints with the credential injected server-side; needs the `github-git` /
-`github-git-read` permission -- initiate it yourself like any other latchkey
-permission request, see the `latchkey` skill). Fetch the URL directly rather
-than persisting a gateway-URL remote:
+If the repo is private, the anonymous fetch fails with an auth error. Route git
+through the latchkey gateway instead (it proxies GitHub's git endpoints with the
+credential injected server-side; needs the `github-git` / `github-git-read`
+permission -- initiate it yourself like any other latchkey permission request,
+see the `latchkey` skill). Fetch the URL directly rather than persisting a
+gateway-URL remote:
 
 ```bash
 git -c "http.extraHeader=X-Latchkey-Gateway-Password: $LATCHKEY_GATEWAY_PASSWORD" \
     -c "http.extraHeader=X-Latchkey-Gateway-Permissions-Override: $LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE" \
     fetch "$LATCHKEY_GATEWAY/gateway/https://github.com/<owner>/<repo>.git" <branch>
-git merge --allow-unrelated-histories --no-edit FETCH_HEAD
 ```
 
-If the merge reports conflicts, do NOT try to resolve them mechanically. Each
-conflict is a **hole**: a place where the inspiration and this mind's existing
-tree disagree. Surface it to the user in plain, non-technical language (step 4)
-and resolve it interactively.
+Now do the merge in a throwaway worktree branched off `HEAD`, and check it there
+before it can touch the live tree:
+
+```bash
+WT="$(mktemp -d)"
+git worktree add -q "$WT" HEAD
+( cd "$WT" && git merge --allow-unrelated-histories --no-edit FETCH_HEAD )
+```
+
+**Check the merge went well, in the worktree:**
+
+- **Merge conflicts** are HOLES, not a hard failure: they mark where the
+  inspiration and this mind's tree disagree. Do NOT resolve them mechanically or
+  land a half-merged tree -- remove the worktree (`git worktree remove --force
+  "$WT"`), tell the user what conflicts (step 4, plain language), and only then
+  redo the merge in `/code` and resolve it interactively with them.
+- **Boot smoke-check** the merged worktree -- validate `supervisord.conf` WITHOUT
+  launching the daemon (never `supervisord -t`, which launches it):
+
+  ```bash
+  ( cd "$WT" && python3 - <<'PYEOF'
+  import sys
+  try:
+      from supervisor.options import ServerOptions
+  except Exception:
+      sys.exit(0)  # supervisor lib unavailable -- skip the check
+  o = ServerOptions(); o.configfile = "supervisord.conf"
+  o.realize(args=[]); o.process_config(do_usage=False)
+  PYEOF
+  )
+  ```
+
+  If this fails, the merged tree does not boot -- the inspiration broke this
+  mind (a wiring mistake, or something hostile). STOP: tell the user plainly,
+  remove the worktree, and do NOT bring it into `/code`.
+
+**Land the verified result.** Only once the merge is clean and the boot check
+passes, fast-forward `/code` onto the exact commit you checked, then remove the
+worktree:
+
+```bash
+git merge --ff-only "$(git -C "$WT" rev-parse HEAD)"
+git worktree remove --force "$WT"
+```
+
+This preserves both trees at the root. The inspiration's `inspiration-<slug>.md`
+manifest(s) and their `.svg` thumbnails land at the repo root alongside anything
+this mind already had.
 
 This merge path does not touch `parent.toml` — provenance is read-only reference
 (the inspiration records only a link to the default-workspace-template base it was
