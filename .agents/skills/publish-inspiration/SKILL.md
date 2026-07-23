@@ -1087,11 +1087,12 @@ What it does, in order (see the script for the exact commands):
 9. Overwrites the snapshot's `welcome/SKILL.md` with a generated
    inspiration-specific welcome describing the
    newly-published inspiration.
-10. Resets `VERSION_HISTORY.md` in the snapshot to the pristine starter ledger
-    (written inline, byte-identical to the one the template ships and to the
-    copy in the `update-version` skill): that ledger is the SOURCE workspace's
-    own record of what it came from and everything it has published, and none of
-    it belongs in the published repo. Runs after the no-diff guard, so it can
+10. Removes `VERSION_HISTORY.md` from the snapshot entirely: that ledger is a
+    WORKSPACE artifact -- the SOURCE mind's own record of what it came from and
+    everything it has published -- and never belongs in a published inspiration.
+    A mind created from this inspiration grows its own ledger on demand (the
+    `update-version` skill writes the starter the first time it is needed), so
+    nothing is lost by omitting it. Runs after the no-diff guard, so it can
     never make an empty include set look publishable.
 11. Validates `supervisord.conf` WITHOUT starting the daemon (never
     `supervisord -t`), then makes a single commit for the assembled snapshot.

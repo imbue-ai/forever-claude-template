@@ -54,7 +54,8 @@
   to the rule that the live workspace is untouched after assembly. An
   unpublished inspiration is never recorded.
 
-- A published snapshot no longer carries the publisher's own version history:
-  the assembled tree's `VERSION_HISTORY.md` is reset to the pristine starter, so
-  the slugs, repo URLs, and source commits of a mind's other inspirations never
-  ship inside one it publishes.
+- A published inspiration never ships version history at all: `VERSION_HISTORY.md`
+  is a workspace artifact, so the assembled snapshot drops it entirely (rather
+  than shipping an empty copy). The slugs, repo URLs, and source commits of a
+  mind's other inspirations therefore never appear inside one it publishes, and a
+  mind created from the inspiration grows its own ledger on demand.

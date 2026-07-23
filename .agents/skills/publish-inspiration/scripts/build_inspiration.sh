@@ -8,7 +8,7 @@
 #
 # The dev `create-new-mind-repo` recipe is NOT available in the VM, so this is
 # self-contained. It does the assembly + secret scan + manifest/thumbnail +
-# /welcome rewrite + version-history reset + boot smoke-check + single commit.
+# /welcome rewrite + version-history removal + boot smoke-check + single commit.
 # It does NOT create the
 # GitHub repo or push, and it deliberately leaves two things unfinished for the
 # worker to complete before reporting done: the manifest's FILL-IN blocks (real
@@ -577,32 +577,19 @@ Each \`inspiration-<slug>.md\` is the full manifest for that inspiration: what
 it is, how it works, the prerequisites it needs, and how to adapt it.
 README_EOF
 
-# --- 8.6 reset the version history so the publisher's ledger never ships -----
+# --- 8.6 remove the version history so it never ships in an inspiration ------
 
-# VERSION_HISTORY.md is the SOURCE workspace's own ledger: where that mind came
-# from, and every inspiration it has ever published (slugs, repo URLs, source
-# commits). None of that belongs to this snapshot -- and after an update-self,
-# BASE_REF's tree carries an accumulated copy of it -- so replace it with the
-# pristine starter ledger, which a mind created from this inspiration then seeds
-# for itself. Deterministic and self-contained, like the /welcome and README
-# writes above -- no external program. This runs AFTER the no-diff guard so it
-# can never make an empty include set look like it had something to publish.
-#
-# The text below must stay BYTE-IDENTICAL to the VERSION_HISTORY.md the template
-# ships at its repo root (and to the copy in the `update-version` skill, which
-# owns the ledger's format).
-cat > VERSION_HISTORY.md <<'VERSION_HISTORY_EOF'
-# Version history
-
-Where this workspace came from and what it has published. Entries are appended
-automatically -- by `update-self` when it lands a template update, and by
-`publish-inspiration` when it publishes -- and earlier lines are never
-rewritten. Each line ends in the commit it was cut from.
-
-## Workspace
-
-## Inspirations
-VERSION_HISTORY_EOF
+# VERSION_HISTORY.md is a WORKSPACE artifact, not an inspiration one: it records
+# where a mind came from and every inspiration it has published (slugs, repo
+# URLs, source commits). None of that belongs in a published inspiration -- and
+# after an update-self, BASE_REF's tree can carry an accumulated copy of it --
+# so drop it from the snapshot entirely. A mind created from this inspiration
+# grows its OWN ledger when it first runs update-self or publishes (the
+# `update-version` skill writes the starter on demand if the file is absent), so
+# nothing is lost by omitting it here. `rm -f` is safe whether or not the base
+# tree carried the file. This runs AFTER the no-diff guard so it can never make
+# an empty include set look like it had something to publish.
+rm -f VERSION_HISTORY.md
 
 # --- 9. boot smoke-check WITHOUT side effects, then single commit -------------
 
