@@ -49,4 +49,4 @@ def test_trigger_dir_that_is_a_file_does_not_count(tmp_path: Path) -> None:
 def test_capabilities_model_defaults() -> None:
     capabilities = BackupCapabilities(method=SnapshotMethod.DIRECT)
     assert capabilities.outer_helper_timeout_seconds == 120.0
-    assert capabilities.max_local_snapshots == 5
+    assert capabilities.max_local_snapshots == 0

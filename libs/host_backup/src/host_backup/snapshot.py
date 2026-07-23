@@ -7,9 +7,9 @@ Each mechanism implements the same `SnapshotTakerInterface` contract:
   should read.
 - `cleanup_after_backup()` reclaims snapshots after restic has read them and
   returns the snapshot paths it deleted (for event logging). For
-  `outer_trigger` this retains the newest `max_local_snapshots` and deletes
-  the rest; for `btrfs_local` it deletes the single `current` snapshot; for
-  `direct` it is a no-op.
+  `outer_trigger` this retains the newest `max_local_snapshots` (default 0, so
+  every local snapshot is deleted) and deletes the rest; for `btrfs_local` it
+  deletes the single `current` snapshot; for `direct` it is a no-op.
 
 The three concrete implementations are selected from `BackupCapabilities.method`
 (detected in memory at service startup; see `host_backup.capabilities`).

@@ -96,12 +96,20 @@ class BackupCapabilities(FrozenModel):
         description="Hard cap on how long to wait for the outer helper's result.json",
     )
     max_local_snapshots: int = Field(
-        default=5,
-        ge=1,
+        default=0,
+        ge=0,
         description=(
-            "outer_trigger only: how many on-host btrfs snapshots to retain. "
-            "Each tick creates a new timestamped snapshot and deletes the "
-            "oldest beyond this count. Ignored by btrfs_local and direct."
+            "outer_trigger only: how many on-host btrfs snapshots to retain "
+            "between ticks. Each tick creates a new timestamped snapshot for "
+            "restic to read, then deletes the oldest beyond this count. The "
+            "default is 0: after restic has read it, every local snapshot is "
+            "deleted (matching btrfs_local's delete-after-each), so retained "
+            "read-only snapshots never pin the blocks of files deleted since "
+            "they were taken. Nothing consumes retained local snapshots -- "
+            "restore reads from the remote restic repo, not from these -- so "
+            "keeping any is pure overhead. Retained as a knob (and to keep the "
+            "boot-time constructor signature stable) rather than removed. "
+            "Ignored by btrfs_local and direct."
         ),
     )
 

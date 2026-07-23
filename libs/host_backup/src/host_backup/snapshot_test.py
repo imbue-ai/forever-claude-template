@@ -313,6 +313,27 @@ def test_cleanup_after_backup_deletes_oldest_beyond_cap(tmp_path: Path) -> None:
         helper.join(timeout=2.0)
 
 
+def test_cleanup_after_backup_deletes_all_at_default_zero_cap(tmp_path: Path) -> None:
+    """The default max_local_snapshots=0 deletes every local snapshot after restic reads it."""
+    capabilities = _gc_capabilities(tmp_path, max_local_snapshots=0)
+    names = (
+        "2026-06-12T00:00:00.000000Z",
+        "2026-06-12T01:00:00.000000Z",
+        "2026-06-12T02:00:00.000000Z",
+    )
+    _make_snapshot_dirs(tmp_path / "snapshots", names)
+    stop = threading.Event()
+    helper = _start_fake_outer_helper(tmp_path / "trigger", stop_event=stop)
+    try:
+        taker = OuterTriggerSnapshotTaker(capabilities=capabilities)
+        deleted = taker.cleanup_after_backup()
+        # Every snapshot is deleted; none is retained between ticks.
+        assert deleted == tuple(f"/mngr-btrfs/snapshots/{name}" for name in names)
+    finally:
+        stop.set()
+        helper.join(timeout=2.0)
+
+
 def test_cleanup_after_backup_is_noop_when_at_or_under_cap(tmp_path: Path) -> None:
     capabilities = _gc_capabilities(tmp_path, max_local_snapshots=5)
     _make_snapshot_dirs(

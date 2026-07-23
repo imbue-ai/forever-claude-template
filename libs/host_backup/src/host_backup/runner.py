@@ -301,9 +301,9 @@ def _take_snapshot(*, state: _LoopState) -> SnapshotResult | None:
 def _cleanup_snapshot(*, state: _LoopState, snapshot: SnapshotResult) -> None:
     """Reclaim snapshots after the backup; emit one SNAPSHOT_DELETED per deletion.
 
-    For outer_trigger this prunes old snapshots down to max_local_snapshots; for
-    btrfs_local it deletes the single `current` snapshot; for direct it is a
-    no-op (and emits nothing).
+    For outer_trigger this prunes snapshots down to max_local_snapshots (default
+    0, i.e. deletes all of them); for btrfs_local it deletes the single
+    `current` snapshot; for direct it is a no-op (and emits nothing).
     """
     try:
         taker = make_snapshot_taker(state.capabilities)

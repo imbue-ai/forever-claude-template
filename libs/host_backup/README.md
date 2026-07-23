@@ -50,8 +50,12 @@ an encrypted restic repo on cheaper object storage.
     sandbox's file gofer a reused path serves a stale, deleted subvolume, so
     only the first post-boot backup would capture data; unique names avoid
     that. After the backup, the oldest snapshots beyond `max_local_snapshots`
-    (default 5) are deleted by name via a `cleanup` request that carries the
-    snapshot name as `target`.
+    (default 0) are deleted by name via a `cleanup` request that carries the
+    snapshot name as `target` -- so by default every local snapshot is deleted
+    once restic has read it, exactly like `btrfs_local`. Nothing consumes
+    retained local snapshots (restore reads from the remote restic repo), and
+    a read-only btrfs snapshot pins the blocks of every file deleted since it
+    was taken, so retaining them only wastes space on the workspace volume.
   - `direct`: no snapshot; restic reads `/mngr/` directly (plain docker;
     intended for testing).
 - Restic is run with `--exclude` for each entry in `backup.toml`'s
