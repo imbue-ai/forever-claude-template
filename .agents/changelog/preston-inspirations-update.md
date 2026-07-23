@@ -32,16 +32,17 @@
   adopter on the other method knows to switch the model calls, and a hardcoded
   path is also listed as a Hole.
 
-- **Published inspiration repos are locked down on creation.** Right after the
-  repo is created, discussions are turned off, unconditionally and without
-  asking. Issues stay enabled so collaborators can still file them;
-  private-by-default is what makes issues and PRs collaborators-only and keeps
-  the repo unforkable by outsiders. This closes the surfaces where arbitrary,
-  non-collaborator users could comment on someone's inspiration. Two limits are
-  surfaced to the user if they choose public visibility: GitHub has no
-  collaborators-only-issues setting for a public repo, and forking cannot be
-  disabled on a personal public repo (GitHub only allows that on org-owned
-  repos) -- keeping the inspiration private avoids both.
+- **Published inspiration repos are locked down on creation** -- as far as
+  GitHub allows for the chosen visibility, unconditionally and without asking.
+  Discussions are always turned off. A private inspiration (the default) is a
+  full lockdown on its own: outsiders have no access, so issues and PRs are
+  collaborators-only and it cannot be forked; issues stay enabled there so
+  collaborators keep a channel. A public inspiration also gets issues disabled
+  (a public repo has no collaborators-only-issues setting, so that is the
+  strongest available lockdown), and the skill tells the user the two limits it
+  cannot close on a public repo: pull requests cannot be disabled at all, and
+  forking cannot be disabled on a personal public repo (GitHub allows that only
+  on org-owned repos). Keeping the inspiration private avoids both.
 
 - **Published manifests now carry a version and a recipe.** Each
   `inspiration-<slug>.md` records `version: v1` and a "Recipe" section: the

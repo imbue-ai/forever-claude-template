@@ -776,17 +776,28 @@ already validated `repo_name` against `^[A-Za-z0-9._-]+$` in §6; keep the
 JSON built from variables, never string-interpolated shell.
 
 **Step 1b -- lock down the collaboration surface (unconditional -- never ask
-the user).** Immediately after the repo exists, close the surfaces where
-arbitrary, non-collaborator users could comment on the inspiration. Turn
-**discussions OFF** via the "Update a repository" endpoint (`PATCH
+the user).** Immediately after the repo exists, close every surface a
+non-collaborator could use to comment on the inspiration, as far as GitHub
+allows for the chosen visibility. Always turn **discussions OFF**. On a
+**public** inspiration, ALSO turn **issues OFF** -- a public repo has no
+"collaborators-only issues" setting, so anyone with a GitHub account could open
+one; the strongest available lockdown is to disable them. On a **private**
+inspiration (the default) leave issues **ON**: there they are already
+collaborators-only, outsiders have no access at all, and collaborators keep a
+useful channel. Set this via the "Update a repository" endpoint (`PATCH
 /repos/<owner>/<repo>`), NOT the create call above -- that is why this is a
-follow-up call. Do NOT touch `has_issues`: **issues stay enabled** so
-collaborators can still file them.
+follow-up call.
 
 ```bash
+# private (the default): discussions off; issues stay collaborators-only
 latchkey curl -X PATCH "https://api.github.com/repos/<owner>/<repo_name>" \
     -H 'Content-Type: application/json' \
     -d '{"has_discussions": false}'
+
+# public: also disable issues (the best lockdown a public repo allows)
+latchkey curl -X PATCH "https://api.github.com/repos/<owner>/<repo_name>" \
+    -H 'Content-Type: application/json' \
+    -d '{"has_discussions": false, "has_issues": false}'
 ```
 
 `<owner>` is the `.owner.login` you took from step 1's response; `<repo_name>`
@@ -800,24 +811,16 @@ so the comment surface is still closed.
 
 Why this is unconditional (the skill never asks the user about it): a published
 inspiration is meant to be adapted by other minds, not turned into a public
-forum on the author's account. Private-by-default -- the visibility default --
-is what makes issues and PRs collaborators-only: on a private repo only
-collaborators can open or comment on them at all, and it cannot be forked by
-outsiders. Turning discussions off closes the remaining arbitrary-comment
-surface even if the repo is later made public. Two honest limitations to
-surface if the user chooses PUBLIC visibility (inform them -- do NOT ask
-permission):
-
-- **Issues**: GitHub has NO native "collaborators-only issues" setting for a
-  public repo -- short of disabling issues (which we deliberately keep on for
-  collaborators), anyone with a GitHub account can open an issue on it.
-- **Forking**: forking CANNOT be disabled on a personal public repo (GitHub only
-  allows `allow_forking: false` on org-owned repos, and private repos already
-  cannot be forked by outsiders). So on a personal public inspiration, forking
-  stays on; do not attempt to PATCH it off.
-
-Keeping the repo private (the default) fully guarantees collaborators-only and
-no outside forks.
+forum on the author's account. **Private-by-default is a full lockdown on its
+own** -- on a private repo only collaborators can open or comment on issues and
+PRs at all, and outsiders cannot fork it, so the discussions-off PATCH is all it
+needs. A **public** inspiration cannot be fully locked down, and you should
+surface that to the user if they chose public (inform them -- do NOT ask
+permission): disabling issues closes that surface, but **pull requests cannot be
+disabled at all** (GitHub has no setting for it) and **forking cannot be
+disabled on a personal public repo** (GitHub only allows `allow_forking: false`
+on org-owned repos), so an outsider can still fork it and open a PR. Keeping the
+inspiration private is the only way to fully guarantee collaborators-only.
 
 **Step 2 -- mint ONE snapshot commit and push it as `main` (git through the
 latchkey gateway):**
