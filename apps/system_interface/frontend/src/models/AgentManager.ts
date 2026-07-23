@@ -191,6 +191,14 @@ function connect(): void {
     // A successful connection resets the backoff so the next disconnect
     // starts from the base delay again.
     reconnectBackoff.reset();
+    // A fresh connection replays the full snapshot: agents_updated,
+    // applications_updated, and a proto_agent_created for every
+    // still-pending proto agent. proto_agent_completed is NOT replayed,
+    // so a proto that finished while we were disconnected would linger
+    // forever (a panel stuck on "Creating agent..."), and the replayed
+    // created-events would duplicate entries we already hold. Dropping
+    // the local set here lets the replay rebuild it exactly.
+    protoAgents = [];
     // Register this browser's identity + active layout with the server so
     // layout-targeted ops can find it. During startup the active layout may
     // not be chosen yet; DockviewWorkspace re-reports once it is.
@@ -227,6 +235,53 @@ function scheduleReconnect(): void {
     reconnectTimer = null;
     connect();
   }, reconnectBackoff.nextDelay());
+}
+
+// The live-updates WebSocket rides an SSH tunnel from this webview (on the
+// user's machine) to the workspace's system_interface (in the container). When
+// the machine sleeps, that tunnel dies but the browser never fires ``onclose``
+// -- the socket is left in a phantom "OPEN" state, so the ``onclose``-driven
+// reconnect above never runs and the view silently shows pre-sleep state (a
+// Caretaker run that started overnight, say, never surfaces). Nothing on the
+// client can distinguish a live socket from a dead one, so we treat "the user
+// came back" as the signal: on wake / refocus / network-restore we drop
+// whatever socket we hold and open a fresh one, whose replayed snapshot brings
+// the view current (see ``connect``'s onopen for how the proto-agent set
+// survives the swap).
+let wakeReconnectScheduled = false;
+
+function reconnectOnWake(): void {
+  // A single wake fires visibilitychange + focus + online in the same tick;
+  // coalesce them into one reconnect (the flag clears on the next macrotask).
+  if (wakeReconnectScheduled) {
+    return;
+  }
+  wakeReconnectScheduled = true;
+  setTimeout(() => {
+    wakeReconnectScheduled = false;
+  }, 0);
+  if (ws !== null) {
+    // Detach handlers before closing so this dead socket's late ``onclose``
+    // can't null out the replacement we open below (which would also schedule
+    // a duplicate reconnect against the fresh socket).
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.close();
+    ws = null;
+  }
+  connect();
+}
+
+function registerWakeReconnect(): void {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      reconnectOnWake();
+    }
+  });
+  window.addEventListener("focus", reconnectOnWake);
+  window.addEventListener("online", reconnectOnWake);
 }
 
 function handleEvent(event: WsEvent): void {
@@ -345,6 +400,7 @@ export function reportClientState(previousLayoutSlug?: string): void {
 
 export function initAgentManager(): void {
   connect();
+  registerWakeReconnect();
 }
 
 export function isConnected(): boolean {
