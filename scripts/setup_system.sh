@@ -22,6 +22,7 @@ provision_skip_if_done setup_system
 : "${MODAL_VERSION:=1.4.2}"
 : "${NODE_MAJOR:=20}"
 : "${LATCHKEY_VERSION:=2.21.0}"
+: "${RESTIC_VERSION:=0.18.1}"
 
 # System packages (tini for signal handling; supervisor runs our background
 # services; earlyoom is the OOM-prevention daemon that sheds memory under
@@ -46,6 +47,25 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl disable --now supervisor 2>/dev/null || true
     systemctl mask supervisor 2>/dev/null || true
 fi
+
+# The distro restic (bookworm ships 0.14) predates `restic restore --delete`,
+# which the minds in-place backup restore requires (restic >= 0.17). Install
+# the pinned release (sha256-verified, from the official SHA256SUMS) at
+# /usr/local/bin so it shadows the apt binary and the whole workspace --
+# including the hourly host-backup service -- runs the same pinned version
+# minds bundles on the desktop side. The apt package above stays as a
+# fallback for anything resolving /usr/bin/restic explicitly.
+restic_arch="$(uname -m)"
+case "${restic_arch}" in
+    x86_64) restic_goarch="amd64"; restic_sha256="680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d" ;;
+    aarch64) restic_goarch="arm64"; restic_sha256="87f53fddde38764095e9c058a3b31834052c37e5826d2acf34e18923c006bd45" ;;
+    *) echo "Unsupported architecture for restic: ${restic_arch}" >&2; exit 1 ;;
+esac
+curl -fsSL "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${restic_goarch}.bz2" -o /tmp/restic.bz2
+echo "${restic_sha256}  /tmp/restic.bz2" | sha256sum -c -
+bunzip2 -c /tmp/restic.bz2 > /usr/local/bin/restic
+chmod +x /usr/local/bin/restic
+rm /tmp/restic.bz2
 
 # ttyd (terminal-over-web) binary from GitHub releases (not in apt).
 ttyd_arch="$(uname -m)"
