@@ -107,6 +107,10 @@ _SCREENCAST_MAX_HEIGHT = 800
 # _MAX_SESSIONS headless Chromiums render concurrently).
 _RENDER_MAX_WIDTH = 1920
 _RENDER_MAX_HEIGHT = 1080
+# Floor for the clamp -- small enough that a typical (sub-1280) panel actually
+# tracks its size instead of pinning to a too-big minimum, but not degenerate.
+_RENDER_MIN_WIDTH = 640
+_RENDER_MIN_HEIGHT = 480
 # Every frame: the first frame after a tab switch arrives sooner, so clicking a
 # tab feels snappier. Slightly more bandwidth than skipping frames.
 _SCREENCAST_EVERY_NTH_FRAME = 1
@@ -996,6 +1000,7 @@ class LiveBrowser(MutableModel):
             # the "aspect locked during agent control" freeze, for free.
             async with self._control_lock:
                 if not self._input_enabled.is_set():
+                    logger.info("browser {} resize ignored: input not enabled (an agent controls it)", self.browser_id)
                     return
                 await self._apply_resize(message)
         elif kind in ("mouse", "key", "tab", "navigate", "back", "forward", "reload"):
@@ -1030,8 +1035,13 @@ class LiveBrowser(MutableModel):
         [floor .. cap]. Reached only while input is enabled (human owns it), so an
         agent's cached `state` indices never shift mid-task. Reuses _set_active_page,
         which re-applies the new size to the device-metrics override + screencast."""
-        w = max(_SCREENCAST_MAX_WIDTH, min(_RENDER_MAX_WIDTH, int(message.get("width", 0))))
-        h = max(_SCREENCAST_MAX_HEIGHT, min(_RENDER_MAX_HEIGHT, int(message.get("height", 0))))
+        raw_w, raw_h = int(message.get("width", 0)), int(message.get("height", 0))
+        w = max(_RENDER_MIN_WIDTH, min(_RENDER_MAX_WIDTH, raw_w))
+        h = max(_RENDER_MIN_HEIGHT, min(_RENDER_MAX_HEIGHT, raw_h))
+        logger.info(
+            "browser {} resize request {}x{} -> clamped {}x{} (was {}x{}, headless={})",
+            self.browser_id, raw_w, raw_h, w, h, self._render_w, self._render_h, _HEADLESS,
+        )
         if (w, h) == (self._render_w, self._render_h) or self._active_page is None:
             return
         self._render_w, self._render_h = w, h
