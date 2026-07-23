@@ -257,3 +257,47 @@ def test_check_and_resend_welcome_returns_false_when_skill_unreadable(
         skill_path=tmp_path / "missing.md",
     )
     assert resender.check_and_resend_welcome() is False
+
+
+def test_never_welcomed_agent_name_returns_name_when_welcome_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transcript without the welcome names the agent for resume-message suppression."""
+    skill = _write_welcome_skill(tmp_path / "SKILL.md")
+    _set_up_host(tmp_path, _AGENT_ID, monkeypatch)
+    resender = WelcomeResender(
+        resolve_agent=lambda _id: _agent_info(name="fresh-chat"),
+        read_assistant_transcript=lambda _agent: "Not logged in",
+        send_message_fn=lambda _agent_id, _message: True,
+        skill_path=skill,
+    )
+    assert resender.never_welcomed_agent_name() == "fresh-chat"
+
+
+def test_never_welcomed_agent_name_none_when_welcome_already_shown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent whose transcript shows the welcome is a normal agent: it may be resumed."""
+    skill = _write_welcome_skill(tmp_path / "SKILL.md")
+    _set_up_host(tmp_path, _AGENT_ID, monkeypatch)
+    resender = WelcomeResender(
+        resolve_agent=lambda _id: _agent_info(),
+        read_assistant_transcript=lambda _agent: "### Welcome to Minds\n\nhello",
+        send_message_fn=lambda _agent_id, _message: True,
+        skill_path=skill,
+    )
+    assert resender.never_welcomed_agent_name() is None
+
+
+def test_never_welcomed_agent_name_none_when_target_unresolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no persisted initial-agent id there is no suppression target."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    resender = WelcomeResender(
+        resolve_agent=lambda _id: _agent_info(),
+        read_assistant_transcript=lambda _agent: None,
+        send_message_fn=lambda _agent_id, _message: True,
+        skill_path=_write_welcome_skill(tmp_path / "SKILL.md"),
+    )
+    assert resender.never_welcomed_agent_name() is None

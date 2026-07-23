@@ -379,6 +379,59 @@ def test_restart_issues_one_fused_batched_call_per_behavior_group(
     assert not (isolated_claude_config / ".claude.json").exists()
 
 
+def test_restart_demotes_never_welcomed_agent_to_no_resume(isolated_claude_config: Path) -> None:
+    """A never-welcomed chat agent restarts idle even when it snapshots as RUNNING.
+
+    A fresh workspace's failed pre-auth /welcome ends in an API error that
+    fires no Stop hook, stranding the `active` marker -- so the idle agent
+    snapshots as RUNNING and would get the "please continue" resume message,
+    sending it hunting for nonexistent work. Naming it demotes it to the
+    --no-resume group; the post-restart welcome resend is its resumption.
+    """
+    command_log: list[tuple[str, ...]] = []
+    service = _build_restart_recording_service(command_log)
+
+    restarted = service.restart_all_claude_agents(never_welcomed_agent_name="chat-1")
+
+    assert set(restarted) == {"chat-1", "worker-1", "chat-2"}
+    mngr_calls = [cmd for cmd in command_log if cmd[0] == "mngr" and cmd[1] != "list"]
+    assert mngr_calls == [
+        (
+            "mngr",
+            "start",
+            "--restart",
+            "--resume-message",
+            claude_auth.RESTART_CONTINUE_MESSAGE,
+            "worker-1",
+        ),
+        ("mngr", "start", "--restart", "--no-resume", "chat-2", "chat-1"),
+    ]
+
+
+def test_background_apply_consults_never_welcomed_resolver(isolated_claude_config: Path) -> None:
+    """The apply thread resolves the never-welcomed agent and suppresses its resume message."""
+    command_log: list[tuple[str, ...]] = []
+
+    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        command_log.append(tuple(cmd))
+        if cmd[1] == "list":
+            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
+        return FakeFinishedProcess(returncode=0, stdout='{"loggedIn": true}')
+
+    service = claude_auth.ClaudeAuthService(
+        command_runner=_runner,
+        resolve_never_welcomed_agent_name=lambda: "chat-1",
+    )
+    service.submit_credentials("ANTHROPIC_API_KEY=sk-ant-fresh", None)
+    progress = wait_for_background_apply(service)
+
+    assert progress.phase is claude_auth.RestartPhase.DONE
+    resume_calls = [cmd for cmd in command_log if "--resume-message" in cmd]
+    no_resume_calls = [cmd for cmd in command_log if "--no-resume" in cmd]
+    assert all("chat-1" not in cmd for cmd in resume_calls)
+    assert any("chat-1" in cmd for cmd in no_resume_calls)
+
+
 def test_restart_raises_when_start_fails(isolated_claude_config: Path) -> None:
     def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
         if cmd[1] == "list":

@@ -55,6 +55,10 @@ def build_production_state(
     """
     broadcaster = WebSocketBroadcaster()
     agent_manager = AgentManager.build(broadcaster)
+    welcome_resender = WelcomeResender(
+        resolve_agent=agent_manager.get_agent_info_by_id,
+        send_message_fn=agent_manager.send_message_to_agent,
+    )
     return SystemInterfaceState(
         config=config,
         provider_names=provider_names,
@@ -68,11 +72,13 @@ def build_production_state(
         layout_mutex=LayoutMutex(),
         # One long-lived ClaudeAuthService per app so the in-flight OAuth
         # subprocess survives between the /start and /submit-code requests.
-        claude_auth_service=ClaudeAuthService(),
-        welcome_resender=WelcomeResender(
-            resolve_agent=agent_manager.get_agent_info_by_id,
-            send_message_fn=agent_manager.send_message_to_agent,
+        # The service consults the resender before an auth-apply restart so a
+        # never-welcomed chat agent restarts idle (the welcome resend is its
+        # resumption) instead of receiving the "please continue" message.
+        claude_auth_service=ClaudeAuthService(
+            resolve_never_welcomed_agent_name=welcome_resender.never_welcomed_agent_name,
         ),
+        welcome_resender=welcome_resender,
         # Single shared synchronous httpx client for the /service/<name>/
         # forwarding layer; a separate one for the latchkey catalog proxy.
         http_client=httpx.Client(follow_redirects=False, timeout=30.0),

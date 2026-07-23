@@ -841,6 +841,14 @@ class ClaudeAuthService(MutableModel):
 
     command_runner: CommandRunner = _default_command_runner
     pexpect_spawner: PexpectSpawner = _default_pexpect_spawner
+    # Consulted just before an auth-apply restart: the name of the initial
+    # chat agent when it has never rendered the welcome (see
+    # WelcomeResender.never_welcomed_agent_name), or None. Such an agent is
+    # restarted idle even when it snapshots as RUNNING -- its only "work" is
+    # the failed pre-auth /welcome (whose API-error ending strands the active
+    # marker), and the post-restart welcome resend is its real resumption.
+    # None (the default) disables the suppression (tests, minimal setups).
+    resolve_never_welcomed_agent_name: Callable[[], str | None] | None = None
 
     # Only one setup-token flow can be live at a time per instance, which
     # matches the single-mind / single-user deployment model. The lock and
@@ -977,7 +985,7 @@ class ClaudeAuthService(MutableModel):
             snapshots.append(AgentSnapshot(name=name, state=state if isinstance(state, str) else ""))
         return snapshots
 
-    def restart_all_claude_agents(self) -> list[str]:
+    def restart_all_claude_agents(self, never_welcomed_agent_name: str | None = None) -> list[str]:
         """Restart every live claude-binary agent via fused `mngr start --restart` calls.
 
         Snapshots agent states first, then issues one batched call per
@@ -985,17 +993,31 @@ class ClaudeAuthService(MutableModel):
         `--resume-message` so the auth-aware continue message is delivered
         by mngr's readiness-aware resume machinery, and previously-WAITING
         agents restart with `--no-resume` so they come back idle. STOPPED
-        agents are left stopped. Nothing outside the settings env block is
-        touched: settings-env credentials do not trip Claude Code's
-        API-key challenge (verified empirically on the pinned version),
-        and the onboarding dismissals are guaranteed by mngr's claude
-        plugin at agent-creation time.
+        agents are left stopped. (The API-key challenge the restarted
+        claudes would otherwise hit is pre-empted by the approval the apply
+        records; see ``record_api_key_approval``.)
+
+        ``never_welcomed_agent_name`` names the initial chat agent when it
+        has never rendered the welcome: it restarts idle even if it
+        snapshots as RUNNING. Its only turn is typically the failed
+        pre-auth ``/welcome``, whose API-error ending fires no Stop hook
+        and strands the ``active`` marker, so the snapshot says RUNNING
+        while the agent sits at an idle prompt -- and a "please continue"
+        resume message would send a fresh agent hunting for nonexistent
+        work. The post-restart welcome resend is its real resumption.
 
         Returns the list of agent names that were restarted.
         """
         snapshots = self.snapshot_claude_binary_agents()
         running = [s.name for s in snapshots if s.state == _AGENT_STATE_RUNNING]
         waiting = [s.name for s in snapshots if s.state == _AGENT_STATE_WAITING]
+        if never_welcomed_agent_name is not None and never_welcomed_agent_name in running:
+            logger.info(
+                "Agent {} has never rendered the welcome; restarting it idle instead of resuming",
+                never_welcomed_agent_name,
+            )
+            running.remove(never_welcomed_agent_name)
+            waiting.append(never_welcomed_agent_name)
         if running:
             self._set_restart_progress(
                 RestartPhase.RESTARTING, f"Restarting {len(running)} active agent(s)", None
@@ -1083,7 +1105,10 @@ class ClaudeAuthService(MutableModel):
             # Must precede the restart: a restarted interactive claude blocks
             # on the custom-API-key challenge for any unapproved key.
             record_api_key_approval(managed_env)
-            self.restart_all_claude_agents()
+            never_welcomed = (
+                self.resolve_never_welcomed_agent_name() if self.resolve_never_welcomed_agent_name else None
+            )
+            self.restart_all_claude_agents(never_welcomed_agent_name=never_welcomed)
             self._set_restart_progress(RestartPhase.FINISHING, "Resuming your agent", None)
             if on_complete is not None:
                 on_complete()

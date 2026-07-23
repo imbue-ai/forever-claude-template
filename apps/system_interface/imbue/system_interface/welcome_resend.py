@@ -206,6 +206,50 @@ class WelcomeResender(FrozenModel):
     read_assistant_transcript: TranscriptReadFn = _default_read_assistant_transcript
     skill_path: Path | None = None
 
+    def _resolve_never_welcomed_agent(self) -> AgentInfo | None:
+        """The initial chat agent, when its transcript lacks the welcome; else None.
+
+        The single resolution behind both the post-restart resend and the
+        pre-restart resume-message suppression, so the two decisions cannot
+        drift. Returns None when the target is unresolvable, the skill is
+        unreadable, or the transcript already shows the welcome.
+        """
+        agent_id = _resolve_initial_chat_agent_id()
+        if agent_id is None:
+            logger.warning("Could not resolve the initial chat agent id; skipping welcome check")
+            return None
+
+        agent = self.resolve_agent(agent_id)
+        if agent is None:
+            logger.warning("Initial chat agent {} not found; skipping welcome check", agent_id)
+            return None
+
+        try:
+            opening_line = read_welcome_opening_line(self.skill_path)
+        except (OSError, WelcomeResendError) as e:
+            logger.warning("Could not read welcome skill opening line: {}", e)
+            return None
+
+        transcript = self.read_assistant_transcript(agent)
+        if _transcript_shows_welcome(transcript, opening_line):
+            logger.debug("Agent {} transcript already shows welcome", agent_id)
+            return None
+        return agent
+
+    def never_welcomed_agent_name(self) -> str | None:
+        """Name of the initial chat agent when it has never rendered the welcome, else None.
+
+        The auth-apply restart consults this before restarting: a
+        never-welcomed agent has nothing to "continue" (its only turn is
+        typically the failed pre-auth `/welcome`, whose API-error ending
+        strands the `active` marker so the agent snapshots as RUNNING), so it
+        is restarted idle and the post-restart `/welcome` resend is its real
+        resumption -- instead of a "please continue what you were working on"
+        message that sends a fresh agent hunting for nonexistent work.
+        """
+        agent = self._resolve_never_welcomed_agent()
+        return None if agent is None else agent.name
+
     def check_and_resend_welcome(self) -> bool:
         """If the initial chat agent's transcript lacks the welcome, dispatch `/welcome`.
 
@@ -214,30 +258,13 @@ class WelcomeResender(FrozenModel):
         id. Returns True when a resend was issued, False when it was skipped (target
         unresolved, skill unreadable, or transcript already shows the welcome).
         """
-        agent_id = _resolve_initial_chat_agent_id()
-        if agent_id is None:
-            logger.warning("Could not resolve the initial chat agent id; skipping welcome resend")
-            return False
-
-        agent = self.resolve_agent(agent_id)
+        agent = self._resolve_never_welcomed_agent()
         if agent is None:
-            logger.warning("Initial chat agent {} not found; skipping welcome resend", agent_id)
             return False
 
-        try:
-            opening_line = read_welcome_opening_line(self.skill_path)
-        except (OSError, WelcomeResendError) as e:
-            logger.warning("Could not read welcome skill opening line: {}", e)
-            return False
-
-        transcript = self.read_assistant_transcript(agent)
-        if _transcript_shows_welcome(transcript, opening_line):
-            logger.debug("Agent {} transcript already shows welcome; skipping resend", agent_id)
-            return False
-
-        logger.info("Resending /welcome to agent {} (transcript missing opening line)", agent_id)
+        logger.info("Resending /welcome to agent {} (transcript missing opening line)", agent.id)
         sent = self.send_message_fn(AgentId(agent.id), _WELCOME_COMMAND)
         if not sent:
-            logger.warning("Failed to dispatch /welcome to agent {}", agent_id)
+            logger.warning("Failed to dispatch /welcome to agent {}", agent.id)
             return False
         return True
