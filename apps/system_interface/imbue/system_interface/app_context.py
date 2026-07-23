@@ -29,11 +29,10 @@ AnySessionWatcher = AgentSessionWatcher | CodexSessionWatcher
 def _is_codex_agent(agent_info: AgentInfo) -> bool:
     """True if this agent should be watched by the codex (common-transcript) watcher.
 
-    mngr_codex provisions a CODEX_HOME at ``<agent_state_dir>/plugin/codex/home``
-    for every codex agent -- a directory a claude agent never has -- so its presence
-    is a reliable harness probe.
+    Reads the authoritative ``harness`` (mngr's ``AgentDetails.type``, set at launch
+    by the create template) -- no filesystem probing.
     """
-    return (agent_info.agent_state_dir / "plugin" / "codex" / "home").is_dir()
+    return agent_info.harness == "codex"
 
 
 # Key under which the single SystemInterfaceState is stored on ``app.config`` so

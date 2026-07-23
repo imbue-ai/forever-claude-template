@@ -54,6 +54,21 @@ def test_turn_aborted_emits_marker() -> None:
     assert events[0]["type"] == "turn_aborted"
 
 
+def test_task_markers_become_turn_lifecycle_events() -> None:
+    """task_started/task_complete are surfaced as turn_started/turn_completed markers
+    (the codex activity latch), not dropped."""
+    started = parse_codex_rollout_line(
+        {"timestamp": "2026-07-19T10:00:00Z", "type": "event_msg", "payload": {"type": "task_started"}}, 1, {}
+    )
+    assert len(started) == 1
+    assert started[0]["type"] == "turn_started"
+    completed = parse_codex_rollout_line(
+        {"timestamp": "2026-07-19T10:00:02Z", "type": "event_msg", "payload": {"type": "task_complete"}}, 2, {}
+    )
+    assert len(completed) == 1
+    assert completed[0]["type"] == "turn_completed"
+
+
 def test_assistant_message_id_dedups_reserialised_copies() -> None:
     """Codex re-serialises history; each copy keeps the message id, so the event id
     keys on it (stable across the physical line it is re-read at)."""

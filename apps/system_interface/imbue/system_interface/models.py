@@ -93,6 +93,15 @@ class AgentStateItem(FrozenModel):
     state: str = Field(description="The agent's lifecycle state")
     labels: dict[str, str] = Field(description="Agent labels (e.g., user_created, chat_parent_id)")
     work_dir: str | None = Field(description="The agent's working directory path")
+    harness: str = Field(
+        default="claude",
+        description=(
+            "The agent's harness/type (e.g. 'claude', 'codex'), sourced from mngr's "
+            "``AgentDetails.type`` (set at launch by the create template). Drives the "
+            "harness-specific activity derivation and caption routing. Defaults to "
+            "'claude' when a snapshot has not yet reported the agent's type."
+        ),
+    )
     activity_state: str | None = Field(
         default=None,
         description=(

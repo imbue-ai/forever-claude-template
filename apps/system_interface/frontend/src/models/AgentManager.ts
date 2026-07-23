@@ -15,6 +15,9 @@ export interface AgentState {
   state: string;
   labels: Record<string, string>;
   work_dir: string | null;
+  // The agent's harness ("claude", "codex", ...), from the backend. Routes the
+  // harness-specific activity caption. Defaults to "claude" if absent.
+  harness?: string;
   // Per-agent chat activity. THINKING/TOOL_RUNNING/IDLE, or null when the
   // system interface has no per-agent activity tracking available (e.g.
   // remote agents whose state directory is not present on this host,

@@ -1,21 +1,17 @@
-"""Per-agent activity state surfaced on the chat panel.
+"""Shared primitives for per-agent activity state surfaced on the chat panel.
 
-The state is derived from three inputs:
-- the agent's mngr lifecycle state (RUNNING, STOPPED, etc.) -- a non-running
-  agent is always IDLE regardless of the other signals, which prevents a
-  STOPPED agent from appearing as "Thinking..." due to stale transcript data
-- the parsed transcript events from the agent's session JSONL files
-- the mtime of the ``claude_process_started`` marker (touched by mngr on every
-  startup/resume) -- a transcript tail older than the current process is left
-  over from a turn this process never ran, so it must not show "Thinking..."
+Holds the common building blocks both harnesses use: the ``ActivityState`` enum,
+the transcript walkers (``has_unmatched_tool_use``, ``last_event_type``,
+``last_event_timestamp``), the timestamp parser, and the ``is_transcript_tail_stale``
+restart guard. The actual IDLE / THINKING / TOOL_RUNNING *derivation* lives in the
+two harness peers -- :mod:`claude_activity_state` (lifecycle + transcript tail) and
+:mod:`codex_activity_state` (the ``task_started`` / ``task_complete`` turn latch) --
+and the harness dispatch is in ``agent_manager._recompute_activity_state``.
 
-We deliberately do *not* consult the legacy ``active`` marker file: it can
-become stale (e.g. when Claude exits abnormally and the ``Stop`` hook never
-runs to clear it), which would falsely show "Thinking..." indefinitely. The
-transcript is authoritative for IDLE / THINKING / TOOL_RUNNING *within* the
-current process; the ``claude_process_started`` boundary guards against a
-transcript abandoned mid-turn by a prior process (e.g. a container restart),
-which the transcript alone cannot distinguish from work still in flight.
+The ``*_process_started`` marker (touched by mngr on every startup/resume) is the
+boundary the stale-tail guard compares against: a transcript tail older than the
+current process is left over from a turn this process never ran and must not show
+"Thinking..." indefinitely after a mid-turn restart.
 """
 
 from collections.abc import Sequence
@@ -130,47 +126,3 @@ def is_transcript_tail_stale(
     if tail_event_at is None or process_started_at is None:
         return False
     return tail_event_at < process_started_at
-
-
-@pure
-def derive_activity_state(
-    *,
-    is_agent_running: bool,
-    has_pending_tool_use: bool,
-    tail_event_type: str | None,
-    tail_event_at: float | None = None,
-    process_started_at: float | None = None,
-) -> ActivityState:
-    """Derive an ``ActivityState`` from lifecycle state and transcript signals.
-
-    ``is_agent_running`` reflects the mngr lifecycle state: ``True`` when the
-    agent is in a running state (RUNNING, RUNNING_UNKNOWN_AGENT_TYPE), ``False``
-    otherwise (STOPPED, WAITING, REPLACED, DONE, etc.). A non-running agent is
-    always IDLE regardless of transcript contents, which prevents a STOPPED agent
-    from appearing as "Thinking..." due to stale transcript data.
-
-    ``tail_event_type`` is the cached result of :func:`last_event_type` for the
-    agent's current transcript (named distinctly from the helper to avoid
-    shadowing it in this scope). ``tail_event_at`` and ``process_started_at`` feed
-    :func:`is_transcript_tail_stale` (see there): together they detect a tail left
-    over from before the current process started, which a running-but-idle agent
-    would otherwise show as "Thinking..." indefinitely after a mid-turn restart.
-
-    Priority:
-      0. agent not running -> IDLE.
-      1. transcript tail predates the current process (stale) -> IDLE.
-      2. unmatched ``tool_use`` -> TOOL_RUNNING.
-      3. last transcript event is ``user_message`` or ``tool_result`` -> THINKING
-         (Claude has been handed input but hasn't replied yet).
-      4. otherwise (last event is ``assistant_message`` or transcript is empty)
-         -> IDLE.
-    """
-    if not is_agent_running:
-        return ActivityState.IDLE
-    if is_transcript_tail_stale(tail_event_at=tail_event_at, process_started_at=process_started_at):
-        return ActivityState.IDLE
-    if has_pending_tool_use:
-        return ActivityState.TOOL_RUNNING
-    if tail_event_type in ("user_message", "tool_result"):
-        return ActivityState.THINKING
-    return ActivityState.IDLE

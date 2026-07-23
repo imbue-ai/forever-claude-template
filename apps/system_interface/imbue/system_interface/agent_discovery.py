@@ -51,6 +51,10 @@ class AgentInfo(FrozenModel):
     claude_config_dir: Path = Field(description="Path to the Claude config directory for this agent")
     labels: dict[str, str] = Field(default_factory=dict, description="Agent labels")
     work_dir: str | None = Field(default=None, description="Agent working directory path")
+    harness: str = Field(
+        default="claude",
+        description="The agent's harness/type from mngr's AgentDetails.type ('claude', 'codex', ...).",
+    )
 
 
 def _get_mngr_context() -> tuple[MngrContext, ConcurrencyGroup]:
@@ -166,6 +170,7 @@ def discover_agents(
                 claude_config_dir=claude_config_dir,
                 labels=dict(agent_details.labels),
                 work_dir=str(agent_details.work_dir),
+                harness=str(agent_details.type),
             )
         )
 

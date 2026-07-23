@@ -775,7 +775,11 @@ export function ChatPanel(): m.Component<{ agentId: string; isVisible?: boolean 
                 m(EmptySlot, { name: "conversation-before-input" }),
                 isConversationNotFound(agentId)
                   ? null
-                  : m(ActivityIndicator, { agentId, events: getEventsForAgent(agentId) }),
+                  : m(ActivityIndicator, {
+                      agentId,
+                      events: getEventsForAgent(agentId),
+                      harness: getAgentById(agentId)?.harness ?? "claude",
+                    }),
                 m(MessageInput, { agentId }),
                 m("div", { class: "chat-agent-terminal-link" }, [
                   m(

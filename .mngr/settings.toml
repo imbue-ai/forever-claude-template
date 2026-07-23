@@ -178,6 +178,12 @@ check_installation = false
 # regardless of any [memories] settings.)
 [agent_types.codex.config_overrides.features]
 memories = false
+# Pin the stable code-mode host on so codex always drives tools through the exec/JS
+# surface (`tools.<fn>({...})`) -- the schema the activity caption parses. It is the
+# default already; pinning guarantees it can't drift. (Verified stable + recognized
+# on codex-cli 0.144.6 via `codex features list`; NOT the under-development
+# `code_mode`/`code_mode_only` flags.)
+code_mode_host = true
 
 # --- Provider configurations ---
 

@@ -2,9 +2,6 @@ from typing import Any
 
 import pytest
 
-from imbue.system_interface.activity_state import ActivityState
-from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
-from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
 from imbue.system_interface.activity_state import is_transcript_tail_stale
 from imbue.system_interface.activity_state import last_event_timestamp
@@ -83,73 +80,6 @@ def test_last_event_type(events: list[dict[str, Any]], expected: str | None) -> 
 
 
 @pytest.mark.parametrize(
-    "has_pending_tool_use, tail_event_type, expected",
-    [
-        pytest.param(
-            True,
-            "assistant_message",
-            ActivityState.TOOL_RUNNING,
-            id="tool_running_when_unmatched_tool_use",
-        ),
-        pytest.param(
-            False,
-            "user_message",
-            ActivityState.THINKING,
-            id="thinking_when_last_event_is_user_message",
-        ),
-        pytest.param(
-            False,
-            "tool_result",
-            ActivityState.THINKING,
-            id="thinking_when_last_event_is_tool_result",
-        ),
-        pytest.param(
-            False,
-            "assistant_message",
-            ActivityState.IDLE,
-            id="idle_when_last_event_is_assistant_message",
-        ),
-        pytest.param(
-            False,
-            None,
-            ActivityState.IDLE,
-            id="idle_when_no_events",
-        ),
-    ],
-)
-def test_derive_activity_state(
-    has_pending_tool_use: bool,
-    tail_event_type: str | None,
-    expected: ActivityState,
-) -> None:
-    state = derive_activity_state(
-        is_agent_running=True,
-        has_pending_tool_use=has_pending_tool_use,
-        tail_event_type=tail_event_type,
-    )
-    assert state == expected
-
-
-@pytest.mark.parametrize(
-    "lifecycle_state",
-    [
-        pytest.param("STOPPED", id="stopped"),
-        pytest.param("WAITING", id="waiting"),
-        pytest.param("REPLACED", id="replaced"),
-        pytest.param("DONE", id="done"),
-    ],
-)
-def test_derive_activity_state_non_running_agent_is_always_idle(lifecycle_state: str) -> None:
-    assert lifecycle_state not in RUNNING_LIFECYCLE_STATES
-    state = derive_activity_state(
-        is_agent_running=False,
-        has_pending_tool_use=True,
-        tail_event_type="user_message",
-    )
-    assert state == ActivityState.IDLE
-
-
-@pytest.mark.parametrize(
     "events, expected",
     [
         pytest.param([], None, id="empty_transcript"),
@@ -196,40 +126,3 @@ def test_is_transcript_tail_stale(
     tail_event_at: float | None, process_started_at: float | None, expected: bool
 ) -> None:
     assert is_transcript_tail_stale(tail_event_at=tail_event_at, process_started_at=process_started_at) is expected
-
-
-@pytest.mark.parametrize(
-    "has_pending_tool_use, tail_event_type",
-    [
-        pytest.param(True, "assistant_message", id="would_be_tool_running"),
-        pytest.param(False, "tool_result", id="would_be_thinking"),
-        pytest.param(False, "user_message", id="would_be_thinking_user_message"),
-    ],
-)
-def test_derive_activity_state_stale_tail_overrides_to_idle(has_pending_tool_use: bool, tail_event_type: str) -> None:
-    """A transcript tail older than the current process is shown IDLE, not working.
-
-    This is the restarted-mid-turn case: the agent is running and the transcript
-    still ends on an unmatched tool_use / tool_result, but that turn was abandoned
-    by a prior process, so the indicator must not read "Thinking..." forever.
-    """
-    state = derive_activity_state(
-        is_agent_running=True,
-        has_pending_tool_use=has_pending_tool_use,
-        tail_event_type=tail_event_type,
-        tail_event_at=100.0,
-        process_started_at=200.0,
-    )
-    assert state == ActivityState.IDLE
-
-
-def test_derive_activity_state_fresh_tail_still_reports_working() -> None:
-    """A tail written after the current process started drives the normal state."""
-    state = derive_activity_state(
-        is_agent_running=True,
-        has_pending_tool_use=True,
-        tail_event_type="assistant_message",
-        tail_event_at=300.0,
-        process_started_at=200.0,
-    )
-    assert state == ActivityState.TOOL_RUNNING

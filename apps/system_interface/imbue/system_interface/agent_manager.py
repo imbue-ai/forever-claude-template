@@ -39,11 +39,13 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.name_generator import generate_agent_name
 from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
-from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
 from imbue.system_interface.activity_state import parse_iso_timestamp_to_epoch
+from imbue.system_interface.claude_activity_state import derive_claude
+from imbue.system_interface.codex_activity_state import codex_turn_open
+from imbue.system_interface.codex_activity_state import derive_codex
 from imbue.system_interface.agent_discovery import AgentInfo
 from imbue.system_interface.agent_discovery import MngrMessenger
 from imbue.system_interface.agent_discovery import discover_agents
@@ -347,6 +349,10 @@ class AgentManager:
     _host_dir: Path
     _activity_tracked_agents: set[str]
     _has_unmatched_tool_use_by_agent: dict[str, bool]
+    # Codex only: whether the latest turn marker in the transcript is an open turn
+    # (task_started with no task_complete/turn_aborted after it). Drives the codex
+    # activity latch. Absent/False for claude (its transcript has no turn markers).
+    _codex_turn_open_by_agent: dict[str, bool]
     _last_event_type_by_agent: dict[str, str | None]
     _last_event_timestamp_by_agent: dict[str, str | None]
     _activity_state_by_agent: dict[str, ActivityState]
@@ -401,6 +407,7 @@ class AgentManager:
         manager._host_dir = get_host_dir()
         manager._activity_tracked_agents = set()
         manager._has_unmatched_tool_use_by_agent = {}
+        manager._codex_turn_open_by_agent = {}
         manager._last_event_type_by_agent = {}
         manager._last_event_timestamp_by_agent = {}
         manager._activity_state_by_agent = {}
@@ -443,6 +450,7 @@ class AgentManager:
         with self._lock:
             self._activity_tracked_agents.clear()
             self._has_unmatched_tool_use_by_agent.clear()
+            self._codex_turn_open_by_agent.clear()
             self._last_event_type_by_agent.clear()
             self._activity_state_by_agent.clear()
 
@@ -508,6 +516,7 @@ class AgentManager:
             claude_config_dir=read_claude_config_dir_from_env_file(agent_state_dir),
             labels=agent_state.labels,
             work_dir=agent_state.work_dir,
+            harness=agent_state.harness,
         )
 
     def get_agent_matches_by_id(self, agent_id: str) -> list[AgentMatch]:
@@ -578,6 +587,7 @@ class AgentManager:
                     "state": a.state,
                     "labels": a.labels,
                     "work_dir": a.work_dir,
+                    "harness": a.harness,
                     "activity_state": a.activity_state,
                 }
                 for a in self._agents.values()
@@ -643,7 +653,7 @@ class AgentManager:
         labels = {"user_created": "true"}
         if "project" in parent_labels:
             labels["project"] = parent_labels["project"]
-        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels, "claude")
 
         return agent_id
 
@@ -684,7 +694,7 @@ class AgentManager:
         labels: dict[str, str] = {}
         if "project" in primary_labels:
             labels["project"] = primary_labels["project"]
-        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels, "claude")
 
         return agent_id
 
@@ -727,7 +737,7 @@ class AgentManager:
         labels: dict[str, str] = {}
         if "project" in primary_labels:
             labels["project"] = primary_labels["project"]
-        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels)
+        self._launch_creation_thread(agent_id, name, cmd, Path(work_dir), log_queue, labels, "codex")
 
         return agent_id
 
@@ -739,11 +749,12 @@ class AgentManager:
         work_dir: Path,
         log_queue: queue.Queue[str | None],
         labels: dict[str, str],
+        harness: str,
     ) -> None:
         """Start a background thread to run agent creation and stream logs."""
         self._creation_cg.start_new_thread(
             target=self._run_creation,
-            args=(agent_id, agent_name, cmd, work_dir, log_queue, labels),
+            args=(agent_id, agent_name, cmd, work_dir, log_queue, labels, harness),
             name=f"create-{agent_id[:8]}",
             is_checked=False,
         )
@@ -774,6 +785,7 @@ class AgentManager:
         work_dir: Path,
         log_queue: queue.Queue[str | None],
         labels: dict[str, str],
+        harness: str,
     ) -> None:
         """Run mngr create in the background, capture output, and always emit completion.
 
@@ -824,6 +836,7 @@ class AgentManager:
                         state="RUNNING",
                         labels=labels,
                         work_dir=str(work_dir),
+                        harness=harness,
                     )
         except Exception as e:
             # Force-demote success: the happy path sets success=True before
@@ -867,6 +880,7 @@ class AgentManager:
                         state=agent_info.state,
                         labels=agent_info.labels,
                         work_dir=agent_info.work_dir,
+                        harness=agent_info.harness,
                     )
                     self._agents[agent_info.id] = agent_state
                     # Treat assist chats that already exist at startup as already-handled
@@ -893,6 +907,7 @@ class AgentManager:
                     state=agent_info.state,
                     labels=agent_info.labels,
                     work_dir=agent_info.work_dir,
+                    harness=agent_info.harness,
                 )
 
             with self._lock:
@@ -1069,6 +1084,7 @@ class AgentManager:
                 state=agent.state.value,
                 labels=dict(agent.labels),
                 work_dir=str(agent.work_dir),
+                harness=str(agent.type),
             )
             new_matches[agent_id] = _build_agent_match(agent)
 
@@ -1087,6 +1103,7 @@ class AgentManager:
                         state=agent_state.state,
                         labels=agent_state.labels,
                         work_dir=agent_state.work_dir,
+                        harness=agent_state.harness,
                         activity_state=cached_state.value,
                     )
             self._agents = new_agents
@@ -1231,6 +1248,7 @@ class AgentManager:
         with self._lock:
             self._activity_tracked_agents.discard(agent_id)
             self._has_unmatched_tool_use_by_agent.pop(agent_id, None)
+            self._codex_turn_open_by_agent.pop(agent_id, None)
             self._last_event_type_by_agent.pop(agent_id, None)
             self._last_event_timestamp_by_agent.pop(agent_id, None)
             self._activity_state_by_agent.pop(agent_id, None)
@@ -1274,13 +1292,24 @@ class AgentManager:
             has_pending_tool = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
             cached_last_event_type = self._last_event_type_by_agent.get(agent_id)
             tail_event_at = parse_iso_timestamp_to_epoch(self._last_event_timestamp_by_agent.get(agent_id))
-            new_state = derive_activity_state(
-                is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
-                has_pending_tool_use=has_pending_tool,
-                tail_event_type=cached_last_event_type,
-                tail_event_at=tail_event_at,
-                process_started_at=process_started_at,
-            )
+            # Dispatch to the agent's harness peer. Codex uses its authoritative
+            # task_started/task_complete turn latch; claude uses the lifecycle +
+            # transcript-tail heuristic. Neither is a fallthrough default.
+            if agent_state.harness == "codex":
+                new_state = derive_codex(
+                    turn_open=self._codex_turn_open_by_agent.get(agent_id, False),
+                    has_pending_tool_use=has_pending_tool,
+                    tail_event_at=tail_event_at,
+                    process_started_at=process_started_at,
+                )
+            else:
+                new_state = derive_claude(
+                    is_agent_running=agent_state.state in RUNNING_LIFECYCLE_STATES,
+                    has_pending_tool_use=has_pending_tool,
+                    tail_event_type=cached_last_event_type,
+                    tail_event_at=tail_event_at,
+                    process_started_at=process_started_at,
+                )
             old_state = self._activity_state_by_agent.get(agent_id)
             if old_state == new_state and agent_state.activity_state == new_state.value:
                 return
@@ -1291,6 +1320,7 @@ class AgentManager:
                 state=agent_state.state,
                 labels=agent_state.labels,
                 work_dir=agent_state.work_dir,
+                harness=agent_state.harness,
                 activity_state=new_state.value,
             )
 
@@ -1309,16 +1339,19 @@ class AgentManager:
         stale callbacks for an agent that was just destroyed).
         """
         new_pending = has_unmatched_tool_use(events)
+        new_turn_open = codex_turn_open(events)
         new_last_type = last_event_type(events)
         new_last_timestamp = last_event_timestamp(events)
         with self._lock:
             if agent_id not in self._activity_tracked_agents:
                 return
             old_pending = self._has_unmatched_tool_use_by_agent.get(agent_id, False)
+            old_turn_open = self._codex_turn_open_by_agent.get(agent_id, False)
             old_last_type = self._last_event_type_by_agent.get(agent_id)
-            if old_pending == new_pending and old_last_type == new_last_type:
+            if old_pending == new_pending and old_turn_open == new_turn_open and old_last_type == new_last_type:
                 return
             self._has_unmatched_tool_use_by_agent[agent_id] = new_pending
+            self._codex_turn_open_by_agent[agent_id] = new_turn_open
             self._last_event_type_by_agent[agent_id] = new_last_type
             # Refreshed alongside the type so the stale-tail check sees the
             # current tail's time. This sits under the same short-circuit above:
@@ -1339,8 +1372,9 @@ class AgentManager:
         activity state stays pinned at TOOL_RUNNING / THINKING until the user
         sends another message. The restart is a backend action that the
         transcript never records, so the backend must reset the derived signals
-        explicitly: clearing the unmatched-tool-use flag and the cached last
-        event type makes :func:`derive_activity_state` settle on IDLE.
+        explicitly: clearing the unmatched-tool-use flag, the codex turn-open
+        latch, and the cached last event type makes the harness derive settle on
+        IDLE.
 
         No-op for agents not being tracked for activity (remote agents, or a
         callback racing with destruction).
@@ -1349,6 +1383,7 @@ class AgentManager:
             if agent_id not in self._activity_tracked_agents:
                 return
             self._has_unmatched_tool_use_by_agent[agent_id] = False
+            self._codex_turn_open_by_agent[agent_id] = False
             self._last_event_type_by_agent[agent_id] = None
             self._last_event_timestamp_by_agent[agent_id] = None
         self._recompute_activity_state(agent_id, broadcast_on_change=True)
