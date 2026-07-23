@@ -664,6 +664,37 @@ def test_oauth_login_fast_path_completes_without_restart(isolated_claude_config:
     assert not (isolated_claude_config / "settings.json").exists()
 
 
+def test_oauth_login_fast_path_clears_stale_failed_restart_progress(isolated_claude_config: Path) -> None:
+    """A FAILED restart left by an earlier credential change (which emptied
+    the managed env, so this sign-in takes the fast path) must not leak into
+    the fast-path completion status: the frontend routes restart_phase
+    'failed' to the error screen, misreporting the successful sign-in."""
+
+    def _runner(cmd: list[str], _timeout: float, _env: object = None) -> FakeFinishedProcess:
+        if cmd[1] == "list":
+            return FakeFinishedProcess(stdout=_LIST_PAYLOAD)
+        if cmd[1] == "start":
+            return FakeFinishedProcess(returncode=1, stderr="start broke")
+        return FakeFinishedProcess(
+            returncode=0, stdout='{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "Max"}'
+        )
+
+    fake_process = FakePexpectProcess([(0, _FAKE_URL), (0, "Login successful.\r\n")])
+    service = claude_auth.ClaudeAuthService(command_runner=_runner, pexpect_spawner=lambda *_a, **_k: fake_process)
+    # A subscription-switch apply clears the managed env, then its restart fails.
+    service.start_background_apply({}, None, claude_auth.RestartReason.SUBSCRIPTION_SWITCH)
+    progress = _wait_for_background_apply(service)
+    assert progress.phase is claude_auth.RestartPhase.FAILED
+
+    start = service.start_oauth_login(claude_auth.OAuthProvider.CLAUDEAI)
+    complete = service.poll_oauth_login(start.session_id, None)
+    assert complete.is_complete is True
+    assert complete.status is not None
+    assert complete.status.auth_mode is claude_auth.AuthMode.SUBSCRIPTION
+    assert complete.status.restart_phase is None
+    assert complete.status.restart_error is None
+
+
 def test_oauth_login_with_managed_keys_clears_them_and_restarts(isolated_claude_config: Path) -> None:
     """The switching case: active managed keys outrank the fresh credential,
     so they are cleared and the agents restarted in the background."""

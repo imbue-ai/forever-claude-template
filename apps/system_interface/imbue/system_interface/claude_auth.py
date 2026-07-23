@@ -966,6 +966,20 @@ class ClaudeAuthService(MutableModel):
         with self._restart_state_lock:
             return self._restart_progress
 
+    def _clear_terminal_restart_progress(self) -> None:
+        """Drop restart progress left over from a previous, finished apply.
+
+        The subscription fast path performs no restart, so a stale terminal
+        phase (DONE or FAILED) from an earlier credential change must not
+        leak into the status it returns -- the frontend routes a "failed"
+        phase to the error screen, which would misreport the successful
+        sign-in. An apply that is genuinely still running keeps its
+        progress (its thread is alive), so the status stays truthful.
+        """
+        with self._restart_state_lock:
+            if self._restart_thread is None or not self._restart_thread.is_alive():
+                self._restart_progress = None
+
     def start_background_apply(
         self,
         managed_env: Mapping[str, str],
@@ -1312,6 +1326,7 @@ class ClaudeAuthService(MutableModel):
         self._drop_current_session_locked()
         managed_env = self._read_managed_env_tolerant()
         if provider is OAuthProvider.CLAUDEAI and not managed_env:
+            self._clear_terminal_restart_progress()
             status = self.get_auth_status()
             if on_restart_complete is not None:
                 on_restart_complete()
