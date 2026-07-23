@@ -18,7 +18,7 @@ Workspace Claude auth moved off mngr host env vars, with the in-UI sign-in modal
 
 - LiteLLM budget/auth rejection patterns were added to the transcript auth-error detection, so an exhausted daily budget also surfaces the modal.
 
-- The `use-ai-integration` skill's keyed path now resolves credentials from the shared settings at call time (`read_workspace_ai_credentials()` in `claude_p.py`) instead of `os.environ`, so services pick up auth changes without restarts.
+- The `use-ai-integration` skill's keyed path now resolves credentials through `read_workspace_ai_credentials()` in `claude_p.py` instead of `os.environ`: the setup-time `runtime/secrets/anthropic.env` snapshot first (pinning built services to the key they were set up with), then the shared settings env, then the process env.
 
 - **MIGRATION (existing workspaces):** run `uv run python scripts/migrate_claude_auth.py` from the repo root (from the workspace terminal or an agent -- the restart phase runs detached, so an agent invoking it on itself still completes). It moves any host-env Claude credentials into the settings env block, scrubs them from `$MNGR_HOST_DIR/env`, and restarts claude agents. Subscription-based workspaces need no migration.
 
