@@ -328,6 +328,28 @@ def _service_session_suffix(url: Any) -> str:
     return f"?{_BROWSER_SESSION_QUERY_KEY}={session_values[0]}"
 
 
+def is_sessionless_browser_ref(ref: Any) -> bool:
+    """True if ``ref`` addresses the browser fleet viewer with no ``?session=<name>``.
+
+    A browser pane must name a specific fleet browser
+    (``service:browser?session=<name>``); the bare ``service:browser`` opens a
+    session-less viewer bound to nothing (the dead "Open a browser from the +
+    menu" placeholder). The open/split broadcast handler rejects it so agents
+    can't erroneously spawn an orphan pane -- the fleet's own pane-pull always
+    carries a session, so it is unaffected.
+    """
+    if not isinstance(ref, str):
+        return False
+    prefix = "service:"
+    if not ref.startswith(prefix):
+        return False
+    name, _, query = ref[len(prefix) :].partition("?")
+    if name != "browser":
+        return False
+    session_values = urllib.parse.parse_qs(query).get(_BROWSER_SESSION_QUERY_KEY, [])
+    return not any(value for value in session_values)
+
+
 def _resolve_ref(
     panel_id: str,
     params: dict[str, Any] | None,

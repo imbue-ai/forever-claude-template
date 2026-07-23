@@ -199,9 +199,12 @@ def _pull_in_pane(browser_name: str) -> None:
         return
     if _layout("split", ref, "--relative-to", "self", "--direction", "right", "--new-group", quiet=True):
         return
-    _err(f"browser {browser_name} is running, but I couldn't open its live pane here. "
-         'If you are the workspace\'s main agent, open it from the "+" menu; a background '
-         "or sub-agent can't show panes (have the main agent drive the browser).")
+    # Not an error -- the browser is up and fully drivable from the CLI; the pane is
+    # only a live-view convenience. Optimistic: the split lands when a client is
+    # watching this agent's chat, and otherwise (background/sub-agent, no chat in
+    # view) we just offer the manual route without implying anything broke.
+    _out(f"browser {browser_name} is ready. To watch it live, open it from the "
+         '"+" menu (New browser -> ' + f"{browser_name}) in the side panel.")
 
 
 # --- commands -----------------------------------------------------------------

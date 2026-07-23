@@ -935,6 +935,33 @@ def test_layout_broadcast_mutating_op_without_matching_client_is_412(app: Flask)
     assert "No connected client has layout" in response.get_json()["detail"]
 
 
+def test_layout_broadcast_sessionless_browser_is_rejected(app: Flask) -> None:
+    """A bare ``service:browser`` open (no ``?session=<name>``) is a 400 -- it would spawn
+    the orphan session-less viewer pane. A session-qualified ref goes through."""
+    matching_queue = _register_fake_client(app, "client-1", "desktop")
+    client = app.test_client()
+    # Bare browser ref -> rejected with a guiding message (fires before the layout checks).
+    bare = client.post(
+        "/api/layout/broadcast",
+        json={"op": "open", "args": {"ref": "service:browser", "layout": "desktop"}, "agent_id": "agent-42"},
+    )
+    assert bare.status_code == 400
+    assert "needs a specific browser name" in bare.get_json()["detail"]
+    assert matching_queue.empty()  # nothing broadcast
+    # A session-qualified browser ref is allowed and reaches the client.
+    ok = client.post(
+        "/api/layout/broadcast",
+        json={
+            "op": "open",
+            "args": {"ref": "service:browser?session=alex-smith", "layout": "desktop"},
+            "agent_id": "agent-42",
+        },
+    )
+    assert ok.status_code == 200
+    msg = _next_broadcast_message(matching_queue)
+    assert msg["args"]["ref"] == "service:browser?session=alex-smith"
+
+
 def test_layout_broadcast_mutating_op_unknown_layout_is_404(app: Flask) -> None:
     client = app.test_client()
     response = client.post(

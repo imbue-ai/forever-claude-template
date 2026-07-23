@@ -49,6 +49,7 @@ from imbue.system_interface.layout_ops import is_broadcasting_op
 from imbue.system_interface.layout_ops import is_destroyable_terminal_session
 from imbue.system_interface.layout_ops import is_known_op
 from imbue.system_interface.layout_ops import is_mutating_op
+from imbue.system_interface.layout_ops import is_sessionless_browser_ref
 from imbue.system_interface.layout_ops import layout_inspect
 from imbue.system_interface.layout_ops import layout_list
 from imbue.system_interface.layout_ops import parse_tmux_sessions_output
@@ -1404,6 +1405,22 @@ def _layout_broadcast_endpoint() -> Response:
     # in the HTTP response. Every other ref kind either dedups against
     # the existing panel set or is discoverable via a subsequent
     # ``inspect``.
+    # A browser pane must name a specific fleet browser. Reject a session-less
+    # ``service:browser`` open/split before it broadcasts, so an agent can't spawn
+    # the orphan "Open a browser from the + menu" placeholder pane. Guides the caller
+    # to the right form rather than erroring opaquely. The fleet's own pane-pull
+    # always carries ``?session=<name>``, so it is unaffected.
+    if op in {"open", "split"} and is_sessionless_browser_ref(args_raw.get("ref")):
+        error = ErrorResponse(
+            detail=(
+                "A browser pane needs a specific browser name: use "
+                "'service:browser?session=<name>', or the agentic-browser-fleet 'new'/'task' "
+                "commands, which open the pane for you. The bare 'service:browser' opens a "
+                "viewer bound to no browser."
+            )
+        )
+        return _json_response(error.model_dump(), status_code=400)
+
     allocated_ref: str | None = None
     if op in {"open", "split"} and args_raw.get("ref") == "service:terminal":
         panel_id, allocated_ref = allocate_terminal_panel_id()
