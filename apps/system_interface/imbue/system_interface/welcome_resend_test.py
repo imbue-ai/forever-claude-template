@@ -97,14 +97,14 @@ def test_transcript_shows_welcome_false_when_only_auth_errors() -> None:
 def test_resolve_initial_chat_agent_id_reads_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The resend target is the id the bootstrap persisted next to the host metadata."""
     _set_up_host(tmp_path, _AGENT_ID, monkeypatch)
-    assert welcome_resend._resolve_initial_chat_agent_id() == _AGENT_ID
+    assert welcome_resend.resolve_initial_chat_agent_id() == _AGENT_ID
 
 
 def test_resolve_initial_chat_agent_id_none_when_sidecar_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
-    assert welcome_resend._resolve_initial_chat_agent_id() is None
+    assert welcome_resend.resolve_initial_chat_agent_id() is None
 
 
 def test_check_and_resend_welcome_resends_when_transcript_missing_welcome(

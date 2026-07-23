@@ -49,10 +49,12 @@ from imbue.system_interface.agent_discovery import MngrMessenger
 from imbue.system_interface.agent_discovery import discover_agents
 from imbue.system_interface.agent_discovery import get_host_dir
 from imbue.system_interface.agent_discovery import read_claude_config_dir_from_env_file
+from imbue.system_interface.chat_reviver import ChatReviver
 from imbue.system_interface.models import AgentCreationError
 from imbue.system_interface.models import AgentStateItem
 from imbue.system_interface.models import ApplicationEntry
 from imbue.system_interface.oom_prioritizer import ChatOomPrioritizer
+from imbue.system_interface.welcome_resend import resolve_initial_chat_agent_id
 from imbue.system_interface.ws_broadcaster import WebSocketBroadcaster
 
 _APPLICATIONS_TOML_FILENAME = "runtime/applications.toml"
@@ -335,6 +337,11 @@ class AgentManager:
     # revived process is ready (and its pid is registered before that), and the
     # frontend posts activity only after the send returns.
     _oom_prioritizer: ChatOomPrioritizer
+    # Revives chat agents whose claude process died (crash, OOM shed, container
+    # restart) by sending them a restart notice through the normal message path
+    # -- the delivery relaunches the agent and its reply surfaces the restart in
+    # the chat. Fed from the same observe stream as everything else.
+    _chat_reviver: ChatReviver
 
     @classmethod
     def build(
@@ -342,6 +349,7 @@ class AgentManager:
         broadcaster: WebSocketBroadcaster,
         messenger: MngrMessenger = _DEFAULT_MESSENGER,
         mngr_binary: str = _DEFAULT_MNGR_BINARY,
+        chat_reviver: ChatReviver | None = None,
     ) -> "AgentManager":
         """Build an AgentManager with the given broadcaster.
 
@@ -349,7 +357,8 @@ class AgentManager:
         real mngr discover/send. Tests pass one whose ``discover``/``send`` are
         fakes to avoid touching mngr. ``mngr_binary`` is the path or name of the
         mngr executable used for the stream-events observe subprocess and for
-        agent-creation commands.
+        agent-creation commands. ``chat_reviver`` defaults to one wired to this
+        manager's send path; tests may inject one with fake collaborators.
         """
         manager = cls.__new__(cls)
         manager._broadcaster = broadcaster
@@ -384,12 +393,23 @@ class AgentManager:
             resolve_pid=lookup_pid_by_agent_id,
             set_adj=set_oom_score_adj,
         )
+        if chat_reviver is None:
+            chat_reviver = ChatReviver(
+                send_message=lambda agent_id, message: manager.send_message_to_agent(AgentId(agent_id), message),
+                initial_chat_agent_id=resolve_initial_chat_agent_id(),
+            )
+        manager._chat_reviver = chat_reviver
         return manager
 
     def start(self) -> None:
         """Start the observe subprocess and perform initial agent discovery."""
         self._initial_discover()
         self._start_observe()
+        self._chat_reviver.start()
+        # Seed the reviver with the discovery snapshot so chats already dead at
+        # startup (e.g. after a container reboot) are revived without waiting
+        # for the first observe event.
+        self._chat_reviver.on_agent_snapshot(self.get_agents())
 
     def start_without_observe(self) -> None:
         """Start with initial discovery only, no observe subprocess. For testing."""
@@ -398,6 +418,7 @@ class AgentManager:
     def stop(self) -> None:
         """Stop the observe subprocess, file watchers, and creation threads."""
         self._shutdown_event.set()
+        self._chat_reviver.stop()
 
         if self._observe_cg is not None:
             self._observe_cg.shutdown()
@@ -1058,6 +1079,10 @@ class AgentManager:
             appeared_agent_state = new_agents.get(agent_id)
             if appeared_agent_state is not None:
                 self._maybe_auto_open_assist(appeared_agent_state)
+
+        # Let the reviver see the updated view, so a chat whose process just
+        # died (state now STOPPED/DONE) gets a revival scheduled.
+        self._chat_reviver.on_agent_snapshot(list(new_agents.values()))
 
     def _maybe_auto_open_assist(self, agent_state: AgentStateItem) -> None:
         """Auto-open ``agent_state``'s tab if it is an assist chat we have not opened yet.

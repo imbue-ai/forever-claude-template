@@ -134,7 +134,7 @@ def read_welcome_opening_line(skill_path: Path | None = None) -> str:
     raise WelcomeResendError(f"Could not find a verbatim opening line in welcome skill at {path}")
 
 
-def _resolve_initial_chat_agent_id() -> str | None:
+def resolve_initial_chat_agent_id() -> str | None:
     """Read the initial chat agent's id from `$MNGR_HOST_DIR/initial_chat_agent_id`.
 
     The bootstrap (`bootstrap/manager.py`) persists the created chat agent's id
@@ -209,12 +209,12 @@ class WelcomeResender(FrozenModel):
     def check_and_resend_welcome(self) -> bool:
         """If the initial chat agent's transcript lacks the welcome, dispatch `/welcome`.
 
-        Resolves the target agent itself (id from `_resolve_initial_chat_agent_id`,
+        Resolves the target agent itself (id from `resolve_initial_chat_agent_id`,
         then `AgentInfo` via `resolve_agent`) rather than trusting a caller-supplied
         id. Returns True when a resend was issued, False when it was skipped (target
         unresolved, skill unreadable, or transcript already shows the welcome).
         """
-        agent_id = _resolve_initial_chat_agent_id()
+        agent_id = resolve_initial_chat_agent_id()
         if agent_id is None:
             logger.warning("Could not resolve the initial chat agent id; skipping welcome resend")
             return False
