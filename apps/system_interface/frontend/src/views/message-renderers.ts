@@ -296,7 +296,7 @@ export function renderAssistantMessageChildren(
 
   const children: m.Children[] = [];
   if (textContent) {
-    children.push(m(MarkdownContent, { content: textContent }));
+    children.push(m(MarkdownContent, { content: textContent, eventId: event.event_id }));
   }
   for (const toolCall of toolCalls) {
     // Render the rich card as soon as we have the Agent call's description (from the tool

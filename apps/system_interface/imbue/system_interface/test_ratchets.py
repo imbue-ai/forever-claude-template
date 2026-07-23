@@ -266,7 +266,10 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
     # holds a ``threading.Lock``, mutable presence sets, a recency-timestamp
     # dict mutated under that lock, and injected callables -- runtime state
     # that is not a natural fit for a Pydantic model.
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(6))
+    # +1 for chat_image_snapshots.ChatImageSnapshotStore.__init__. Same
+    # category: a ``threading.Lock``, a work queue, a lazily-started worker
+    # thread, and an index dict mutated under the lock.
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(7))
 
 
 def test_prevent_cast_usage() -> None:

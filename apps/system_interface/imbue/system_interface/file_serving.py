@@ -25,10 +25,13 @@ from pathlib import Path
 from flask import Response
 from flask import send_file
 
-# Long-lived caching for inline images: agents are instructed (see the
-# show-files-in-chat skill) to give each image a unique filename, so a served
-# image URL never changes content. A one-year max-age plus ``immutable`` lets
-# the browser skip revalidation entirely while a conversation is re-rendered.
+# Long-lived caching for inline images. Chat markdown images are rewritten by
+# the frontend to the per-message snapshot route (see ``chat_image_snapshots``),
+# whose URLs are immutable by construction; this direct-path route remains for
+# non-chat fetches (e.g. opening an image URL in a tab), where agents are
+# instructed (see the show-files-in-chat skill) to give each image a unique
+# filename. A one-year max-age plus ``immutable`` lets the browser skip
+# revalidation entirely while a conversation is re-rendered.
 _IMAGE_CACHE_MAX_AGE_SECONDS = 31_536_000
 
 # Image extensions served inline, each mapped to an explicit Content-Type so the
@@ -61,8 +64,13 @@ def image_mime_type_for_path(url_path: str) -> str | None:
     return _IMAGE_EXTENSION_TO_MIME_TYPE.get(suffix)
 
 
-def _serve_inline_image(file_path: Path, mime_type: str) -> Response:
-    """Stream an image so it renders inline in the chat."""
+def serve_inline_image(file_path: Path, mime_type: str) -> Response:
+    """Stream an image so it renders inline in the chat.
+
+    Public because the chat-image snapshot endpoint (``server``) serves its
+    frozen copies with exactly the same headers -- and for snapshots the
+    ``immutable`` cache policy is true by construction, not by convention.
+    """
     response = send_file(file_path, mimetype=mime_type)
     # send_file's default cache policy is conservative; override it so the
     # browser caches aggressively (image filenames are unique by convention).
@@ -107,7 +115,7 @@ def try_serve_file(url_path: str) -> Response | None:
     if image_mime_type is not None:
         if not file_path.is_file():
             return Response(status=404)
-        return _serve_inline_image(file_path, image_mime_type)
+        return serve_inline_image(file_path, image_mime_type)
 
     if file_path.is_file():
         return _serve_download(file_path)
