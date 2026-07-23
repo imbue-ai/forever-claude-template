@@ -172,7 +172,8 @@ class ClaudeAuthStatusResponse(FrozenModel):
     )
     auth_mode: str = Field(
         default="none",
-        description="Mode derived from the shared settings env: 'subscription', 'imbue', 'api_key', or 'none'",
+        description="Effective auth mode: 'subscription', 'console', 'imbue', 'api_key', or 'none'. Derived from "
+        "the managed settings-env keys when any are present, otherwise folded from `claude auth status`.",
     )
     masked_key_suffix: str | None = Field(
         default=None, description="Last few characters of the managed key/token, for display"
