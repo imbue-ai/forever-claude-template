@@ -63,6 +63,9 @@ class _RecordingRunner(mod.Runner):
     calls: list[list[str]] = field(default_factory=list)
     _responses: dict[tuple[str, ...], object] = field(default_factory=dict)
     killed_pgroups: list[int] = field(default_factory=list)
+    # Pids reported as still-alive by ``process_group_alive`` (default: none, so a
+    # just-killed process reads as gone immediately -- the common refresh path).
+    alive_pids: set[int] = field(default_factory=set)
 
     def respond(self, prefix: tuple[str, ...], result: object) -> None:
         self._responses[prefix] = result
@@ -87,6 +90,9 @@ class _RecordingRunner(mod.Runner):
 
     def killed_pgroup(self, pid: int) -> bool:
         return pid in self.killed_pgroups
+
+    def process_group_alive(self, pid: int) -> bool:
+        return pid in self.alive_pids
 
 
 class _FakeHttp(mod.HttpClient):
@@ -394,6 +400,94 @@ def test_down_tears_down_servers_and_services(tmp_path: Path) -> None:
     assert "demo-app" in removed
     assert "demo-preview" in removed
     assert not state_dir.exists()
+
+
+# --- refresh (in-place inner reboot) ----------------------------------------
+
+
+def _refresh(
+    tmp_path: Path,
+    *,
+    runner: _RecordingRunner | None = None,
+    http: _FakeHttp | None = None,
+    spawner: _FakeSpawner | None = None,
+) -> int:
+    return mod.refresh(
+        _NAME,
+        tmp_path,
+        runner=runner or _RecordingRunner(),
+        http=http or _FakeHttp(_all_healthy),
+        spawner=spawner or _FakeSpawner(),
+        sleeper=lambda _seconds: None,
+    )
+
+
+def test_refresh_reboots_inner_on_same_port_leaving_wrapper_and_services(
+    tmp_path: Path,
+) -> None:
+    # Stand up a preview (inner pid 4242, wrapper pid 4243, two services), then
+    # refresh it with a distinct spawner so the new inner pid (5555) is
+    # distinguishable from the old.
+    up_spawner = _FakeSpawner()
+    assert _up_preview(tmp_path, spawner=up_spawner) == 0
+    inner_port = json.loads(_state_path(tmp_path).read_text())["inner"]["port"]
+
+    runner = _RecordingRunner()
+    spawner = _FakeSpawner(detached_pid=5555)
+    code = _refresh(tmp_path, runner=runner, spawner=spawner)
+
+    assert code == 0
+    # The old inner server was killed; the wrapper (second spawn) was left alone.
+    assert runner.killed_pgroup(4242)
+    assert not runner.killed_pgroup(4243)
+    # Exactly the inner command was relaunched -- on the SAME port, no new wrapper.
+    assert spawner.detached_spawns == [_LAUNCH]
+    assert spawner.detached_envs[0][_PORT_ENV] == str(inner_port)
+    # Services were never deregistered (the tab keeps routing to the same port).
+    assert not runner.ran(*mod.FORWARD_PORT_CMD, "--remove", "--name")
+    # State now points at the new inner pid; the wrapper pid is preserved.
+    state = json.loads(_state_path(tmp_path).read_text())
+    assert state["pids"] == [5555, 4243]
+    assert state["services"] == ["demo-app", "demo-preview"]
+
+
+def test_refresh_without_state_is_an_error(tmp_path: Path) -> None:
+    assert _refresh(tmp_path) == 1
+
+
+def test_refresh_aborts_when_old_server_will_not_exit(tmp_path: Path) -> None:
+    # The old inner server never dies, so its port stays held -- refresh must not
+    # respawn (a bind clash), and must report failure.
+    assert _up_preview(tmp_path) == 0
+    runner = _RecordingRunner(alive_pids={4242})
+    spawner = _FakeSpawner(detached_pid=5555)
+
+    code = _refresh(tmp_path, runner=runner, spawner=spawner)
+
+    assert code == 1
+    assert runner.killed_pgroup(4242)  # we did try to stop it
+    assert not spawner.detached_spawns  # but never respawned
+
+
+def test_refresh_reports_unhealthy_reboot_but_records_new_pid(tmp_path: Path) -> None:
+    # The rebooted inner never gets healthy: refresh fails, but the new pid is
+    # recorded so a later ``down`` still kills it (no leaked server).
+    assert _up_preview(tmp_path) == 0
+    runner = _RecordingRunner()
+    spawner = _FakeSpawner(detached_pid=5555)
+    http = _FakeHttp(lambda _url: None)
+
+    code = _refresh(tmp_path, runner=runner, http=http, spawner=spawner)
+
+    assert code == 1
+    assert json.loads(_state_path(tmp_path).read_text())["pids"][0] == 5555
+
+
+def test_main_routes_refresh(tmp_path: Path) -> None:
+    # No state -> refresh returns 1, but it routed through refresh() (exit 1, not
+    # an argparse error).
+    code = mod.main(["refresh", "--name", _NAME, "--repo-root", str(tmp_path)])
+    assert code == 1
 
 
 def test_down_without_state_is_a_noop_success(tmp_path: Path) -> None:

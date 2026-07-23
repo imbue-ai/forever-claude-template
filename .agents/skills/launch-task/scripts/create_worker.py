@@ -340,6 +340,7 @@ def launch(
     task_file: Path,
     state_dir: Path | None = None,
     runner: Runner | None = None,
+    branch: str | None = None,
 ) -> int:
     """Run the worker-creation lifecycle. Returns the process exit code.
 
@@ -361,6 +362,16 @@ def launch(
     converter at ``<state_dir>/commands/common_transcript.sh`` is flushed
     before the task message lands so the worker's first transcript read
     sees fresh events.
+
+    ``branch`` is an optional mngr ``--branch`` spec. The default (``None``)
+    keeps mngr's own default (branch ``mngr/<name>`` from the current HEAD). Pass
+    an existing branch name (e.g. ``mngr/update-<slug>``) to have the worker
+    *check out that branch directly* instead of branching anew -- so its commits
+    extend the branch the lead already built up, rather than starting from the
+    lead's current HEAD. (This is the ``[BASE]`` form with no ``:NEW``; see
+    ``mngr create --branch``.) The caller is responsible for the branch not being
+    checked out in another worktree at create time -- git forbids the same branch
+    in two worktrees.
     """
     runner = runner or Runner()
 
@@ -422,22 +433,22 @@ def launch(
         )
         return 2
 
-    runner.run(
-        [
-            "mngr",
-            "create",
-            name,
-            "-t",
-            template,
-            # Marks this as an agent-created (worker) agent so the OOM
-            # agent-tagging hook puts it in the worker-agent band -- shed before
-            # user-created agents (but after every agent's subprocesses) under
-            # memory pressure.
-            "--label",
-            "agent_created=true",
-        ],
-        check=True,
-    )
+    create_argv = [
+        "mngr",
+        "create",
+        name,
+        "-t",
+        template,
+        # Marks this as an agent-created (worker) agent so the OOM
+        # agent-tagging hook puts it in the worker-agent band -- shed before
+        # user-created agents (but after every agent's subprocesses) under
+        # memory pressure.
+        "--label",
+        "agent_created=true",
+    ]
+    if branch is not None:
+        create_argv += ["--branch", branch]
+    runner.run(create_argv, check=True)
 
     rsync_dir(name, runtime_dir, runner)
     if artifacts_dir is not None:
@@ -677,6 +688,7 @@ def launch_sync(
     clock: Callable[[], float] = time.monotonic,
     out: TextIO | None = None,
     result_path: Path | None = None,
+    branch: str | None = None,
 ) -> int:
     """Launch a worker, wait for its report in the *foreground*, emit JSON, destroy.
 
@@ -705,6 +717,7 @@ def launch_sync(
         task_file=task_file,
         state_dir=state_dir,
         runner=runner,
+        branch=branch,
     )
     if launch_rc != 0:
         return launch_rc
@@ -772,6 +785,7 @@ def _run_launch(args: argparse.Namespace, runner: Runner | None) -> int:
         task_file=args.task_file,
         state_dir=state_dir,
         runner=runner,
+        branch=args.branch,
     )
 
 
@@ -812,6 +826,7 @@ def _run_launch_sync(args: argparse.Namespace, runner: Runner | None) -> int:
         state_dir=state_dir,
         runner=runner,
         result_path=args.result_json,
+        branch=args.branch,
     )
 
 
@@ -847,6 +862,15 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
         required=True,
         type=Path,
         help="Markdown task file (must already exist; typically inside --runtime-dir).",
+    )
+    launch_parser.add_argument(
+        "--branch",
+        default=None,
+        help="Optional mngr --branch spec. Omit to branch mngr/<name> from the "
+        "current HEAD (the default). Pass an existing branch (e.g. "
+        "mngr/update-<slug>) to have the worker check it out directly and extend "
+        "it, instead of branching anew. The branch must not be checked out in "
+        "another worktree at create time.",
     )
 
     await_parser = subparsers.add_parser(
@@ -932,6 +956,12 @@ def main(argv: Sequence[str] | None = None, runner: Runner | None = None) -> int
         default=None,
         help="Also write the result JSON to this path (the machine-readable "
         "contract for programmatic callers; stdout still carries it too).",
+    )
+    launch_sync_parser.add_argument(
+        "--branch",
+        default=None,
+        help="Optional mngr --branch spec (see `launch --branch`). Omit for the "
+        "default (branch mngr/<name> from the current HEAD).",
     )
 
     destroy_parser = subparsers.add_parser(

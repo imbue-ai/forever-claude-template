@@ -30,24 +30,30 @@ npm run dev
 
 The deployed system interface is the live web UI the user is looking at, so
 changes are not applied in place. The canonical flow is the
-`update-system-interface` agent skill: a change is delegated to a worker, tested
-in isolation (including Playwright against an isolated instance) and run through
-the review gates; then **previewed** to the user as a tab before merging; and,
-once approved, merged and revealed. See
-`.agents/skills/update-system-interface/SKILL.md`.
+`update-system-interface` agent skill -- the system-interface specialization of
+`update-service`'s "live loop first, ratify at turn-end" pattern. The lead edits
+an **isolated worktree**, builds, and refreshes a labeled **preview tab** in
+place, iterating live with the user (seconds per round, not a full harden pass);
+once the user approves the shape, a background worker runs the full test + review
+gate on that same branch; then the change is merged and **revealed** to the live
+UI with auto-rollback. See `.agents/skills/update-system-interface/SKILL.md`.
 
-The same `reveal_system_interface.py` script owns the deterministic setup/teardown
-on both sides of that user gate, as sub-commands:
+The `reveal_system_interface.py` script owns the deterministic parts of that flow
+as sub-commands:
 
-- `preview --slug <name> --work-dir <worker-work-dir>` boots the worker's
-  already-built work_dir (a local worktree-agent folder in this same container)
-  on a free port and registers it as the `si-preview-app` service, then boots a
-  small wrapper page that embeds it in a labeled "preview" frame and registers
-  that as the user-facing `si-preview` service -- so the proxied tab reads as a
-  clearly-marked proposed change rather than a nested clone of the live UI. No
-  fetch, no re-checkout, no rebuild, and without merging or touching the served
-  tree. (Resolve the work_dir from
+- `preview --slug <name> --work-dir <work-dir>` boots an already-built work_dir
+  (the lead's editing worktree during the live loop, or a worker's work_dir for a
+  final pre-merge preview) on a free port and registers it as the `si-preview-app`
+  service, then boots a small wrapper page that embeds it in a labeled "preview"
+  frame and registers that as the user-facing `si-preview` service -- so the
+  proxied tab reads as a clearly-marked proposed change rather than a nested clone
+  of the live UI. No fetch, no re-checkout, no rebuild, and without merging or
+  touching the served tree. (For a worker's work_dir, resolve it from
   `mngr ls --include 'name=="<name>"' --format json` -> `agents[0].work_dir`.)
+- `preview-refresh --slug <name>` re-boots the preview's inner app on its existing
+  port to pick up a backend edit/rebuild during the live loop, without disturbing
+  the wrapper frame or the user's tab (a frontend-only round needs no bounce --
+  just rebuild and `layout.py refresh si-preview`).
 - `unpreview --slug <name>` tears that down -- kill both servers, deregister both
   services (idempotent).
 - `reveal --rollback-to <sha>` reveals the merged change (below).
