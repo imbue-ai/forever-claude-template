@@ -1,0 +1,5 @@
+Fix persistent terminal tabs (terminal-N) sticking at a stale tmux window size -- most visibly the "one letter per line" 2x1 birth collapse when a tab's iframe loads hidden, and a dot-filled unused region after resizing without focusing the terminal.
+
+tmux's `window-size latest` policy only re-evaluates a window's size on client INPUT activity, not on a bare pty resize -- and a dockview terminal tab resizes without input all the time (hidden iframes grow when the tab is shown; sash drags resize without focus). Clicking into the terminal finally counted as activity, which is why focusing "fixed" it.
+
+New global client-attached/client-resized hooks in `scripts/terminal_tmux.conf` run `scripts/fit_terminal_window.sh`, which resizes a terminal-N session's window to its live client size -- read fresh at act time and re-checked after a short settle, so overlapping hook instances from a resize burst always converge on the final size. Agent sessions are excluded; mngr's own fit hooks already own them.

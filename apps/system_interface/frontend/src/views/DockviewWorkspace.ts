@@ -15,6 +15,7 @@ import {
 import { ChatPanel } from "./ChatPanel";
 import { AgentTerminalPanel } from "./AgentTerminalPanel";
 import { IframePanel, IFRAME_PANEL_PANEL_ID_ATTR, reloadIframesForService } from "./IframePanel";
+import { wireTerminalIframeRefit } from "./terminalResize";
 import { TerminalBanner } from "./TerminalBanner";
 import { SubagentView } from "./SubagentView";
 import { CreateAgentModal } from "./CreateAgentModal";
@@ -249,6 +250,11 @@ function createMithrilRenderer(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   component: m.ComponentTypes<any, any>,
   attrs: Record<string, unknown>,
+  // Terminal panels (AgentTerminalPanel) opt in so their ttyd iframe is refit
+  // from the host on panel resize/reveal -- the in-iframe refit trigger dies
+  // during websocket reconnects (see terminalResize.ts). Other panel kinds
+  // leave it off so non-terminal iframes get no resize churn.
+  options: { refitTerminalOnResize?: boolean } = {},
 ): IContentRenderer {
   const element = document.createElement("div");
   element.style.width = "100%";
@@ -266,11 +272,15 @@ function createMithrilRenderer(
   // so a component mounted without a panel api behaves as before.
   let panelVisible = true;
   let visibilityDisposable: { dispose: () => void } | null = null;
+  let terminalRefit: { dispose: () => void } | null = null;
 
   return {
     element,
     init(parameters) {
       panelVisible = parameters.api.isVisible;
+      if (options.refitTerminalOnResize) {
+        terminalRefit = wireTerminalIframeRefit(element, parameters.api);
+      }
       visibilityDisposable = parameters.api.onDidVisibilityChange((event) => {
         panelVisible = event.isVisible;
         // Redraw so the component re-runs its lifecycle hooks with the new
@@ -287,6 +297,10 @@ function createMithrilRenderer(
       if (visibilityDisposable !== null) {
         visibilityDisposable.dispose();
         visibilityDisposable = null;
+      }
+      if (terminalRefit !== null) {
+        terminalRefit.dispose();
+        terminalRefit = null;
       }
       m.mount(element, null);
     },
@@ -2406,9 +2420,13 @@ function createReactiveTerminalRenderer(panelId: string): IContentRenderer {
   element.style.flexDirection = "column";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const iframePanelComponent: m.ComponentTypes<any, any> = IframePanel;
+  let terminalRefit: { dispose: () => void } | null = null;
   return {
     element,
-    init() {
+    init(parameters) {
+      // Host-driven refit on panel resize/reveal; the ttyd client's own refit
+      // trigger dies during websocket reconnects (see terminalResize.ts).
+      terminalRefit = wireTerminalIframeRefit(element, parameters.api);
       m.mount(element, {
         view: () => {
           const p = panelParams.get(panelId);
@@ -2428,6 +2446,10 @@ function createReactiveTerminalRenderer(panelId: string): IContentRenderer {
       });
     },
     dispose() {
+      if (terminalRefit !== null) {
+        terminalRefit.dispose();
+        terminalRefit = null;
+      }
       m.mount(element, null);
     },
   };
@@ -2627,11 +2649,15 @@ function initializeDockview(parentElement: HTMLElement): void {
           }
           const isAgentTerminal = iframeUrl.startsWith(getTerminalUrl()) && iframeUrl.includes("arg=agent");
           if (isAgentTerminal) {
-            return createMithrilRenderer(AgentTerminalPanel, {
-              agentId: params.agentId,
-              url: iframeUrl,
-              title: params.title ?? "Tab",
-            });
+            return createMithrilRenderer(
+              AgentTerminalPanel,
+              {
+                agentId: params.agentId,
+                url: iframeUrl,
+                title: params.title ?? "Tab",
+              },
+              { refitTerminalOnResize: true },
+            );
           }
           // Pull live values out of ``panelParams`` on every redraw so an
           // agent-driven ``replace-url`` (which mutates the stored
