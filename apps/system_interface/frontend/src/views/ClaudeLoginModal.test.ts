@@ -10,7 +10,7 @@ vi.hoisted(() => {
     setTimeout(() => cb(0), 0) as unknown as number) as typeof globalThis.requestAnimationFrame;
 });
 
-import { ClaudeLoginModal, computeDesktopAppOrigin } from "./ClaudeLoginModal";
+import { ClaudeLoginModal } from "./ClaudeLoginModal";
 
 type VnodeLike = {
   attrs?: Record<string, unknown>;
@@ -158,16 +158,104 @@ describe("ClaudeLoginModal", () => {
   });
 });
 
-describe("computeDesktopAppOrigin", () => {
-  it("drops the agent label from a workspace .localhost hostname", () => {
-    expect(computeDesktopAppOrigin("agent-abc123.localhost", "8420", "http:")).toBe("http://localhost:8420");
+describe("the Open-the-Imbue-key-page relay handshake", () => {
+  // The workspace page cannot know the desktop app's backend origin, so the
+  // mint link posts a `minds:open-ai-keys-page` window message for the
+  // desktop shell's content relay, which acks; with no ack (plain browser /
+  // share tunnel) the modal falls back to an explanatory alert.
+
+  type MessageListener = (event: { source: unknown; data: unknown }) => void;
+
+  // A minimal `window` stand-in for the node test env: records posted
+  // messages, holds the single "message" listener the handshake registers,
+  // and spies on alert.
+  function makeWindowStub() {
+    const posted: unknown[] = [];
+    return {
+      posted,
+      messageListener: null as MessageListener | null,
+      alert: vi.fn(),
+      addEventListener(type: string, listener: unknown): void {
+        if (type === "message") this.messageListener = listener as MessageListener;
+      },
+      removeEventListener(type: string, listener: unknown): void {
+        if (type === "message" && this.messageListener === listener) this.messageListener = null;
+      },
+      postMessage(message: unknown): void {
+        posted.push(message);
+      },
+    };
+  }
+
+  // The mint link is an anchor (not a button), so clickButtonByText cannot
+  // reach it; find it by its rendered text and fire its onclick with a stub
+  // event (the handler only calls preventDefault).
+  function clickMintLink(modal: { render: () => unknown }): void {
+    for (const vnode of walk(modal.render())) {
+      const onclick = vnode.attrs?.onclick;
+      const tag = (vnode as { tag?: unknown }).tag;
+      if (
+        typeof onclick === "function" &&
+        typeof tag === "string" &&
+        tag.startsWith("a") &&
+        JSON.stringify(vnode.children ?? "").includes("Open the Imbue key page")
+      ) {
+        (onclick as (event: unknown) => void)({ preventDefault: () => {} });
+        return;
+      }
+    }
+    throw new Error("No mint-page link found");
+  }
+
+  function openImbueFormAndClickLink(): ReturnType<typeof makeWindowStub> {
+    const stub = makeWindowStub();
+    vi.stubGlobal("window", stub);
+    const modal = makeModal();
+    const toggle = findByClass(modal.render(), "claude-login-alts-toggle");
+    (toggle?.attrs?.onclick as () => void)();
+    clickButtonByText(modal.render(), "Sign in with Imbue");
+    clickMintLink(modal);
+    return stub;
+  }
+
+  it("posts the open request for the shell relay", () => {
+    vi.useFakeTimers();
+    try {
+      const stub = openImbueFormAndClickLink();
+      expect(stub.posted).toEqual([{ type: "minds:open-ai-keys-page", hostId: "" }]);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 
-  it("keeps a bare localhost hostname", () => {
-    expect(computeDesktopAppOrigin("localhost", "8420", "http:")).toBe("http://localhost:8420");
+  it("stays quiet when the relay acks (the shell opens the page)", () => {
+    vi.useFakeTimers();
+    try {
+      const stub = openImbueFormAndClickLink();
+      expect(stub.messageListener).not.toBeNull();
+      stub.messageListener?.({ source: stub, data: { type: "minds:open-ai-keys-ack" } });
+      vi.advanceTimersByTime(10_000);
+      expect(stub.alert).not.toHaveBeenCalled();
+      // The handshake tore itself down: the listener was removed on ack.
+      expect(stub.messageListener).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 
-  it("returns null for remote (tunneled) hostnames", () => {
-    expect(computeDesktopAppOrigin("web--agent--user.example.com", "", "https:")).toBeNull();
+  it("falls back to the desktop-app explanation when no relay acks", () => {
+    vi.useFakeTimers();
+    try {
+      const stub = openImbueFormAndClickLink();
+      vi.advanceTimersByTime(10_000);
+      expect(stub.alert).toHaveBeenCalledTimes(1);
+      expect(String(stub.alert.mock.calls[0]?.[0])).toContain("desktop app");
+      expect(stub.messageListener).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -7,10 +7,12 @@
  *   running claudes re-read on their next API call, so a fresh workspace
  *   signs in with NO agent restart; when managed settings-env keys are
  *   active they are cleared and the agents restarted (the switching case).
- * - Sign in with Imbue: link to the desktop app's key-mint page (keyed by
- *   this workspace's host id), then paste the copied env-style blob into a
- *   textarea. Clicking the link while the workspace is opened remotely
- *   pops an alert to do it from the desktop client instead.
+ * - Sign in with Imbue: ask the desktop shell (via a `minds:open-ai-keys-page`
+ *   window message to its content relay, keyed by this workspace's host id)
+ *   to open its key-mint page over this window, then paste the copied
+ *   env-style blob into a textarea. The relay acks the message; with no ack
+ *   (plain browser / share tunnel) an alert explains that the desktop app
+ *   is required.
  * - Raw API key: paste a `sk-ant-...` value (wrapped into an env-style
  *   line client-side).
  * - Get a long-lived token: `claude setup-token` mints a 1-year token
@@ -92,19 +94,11 @@ export interface ClaudeLoginModalAttrs {
   onDismiss: () => void;
 }
 
-// Compute the desktop client's main-app origin from the workspace's own
-// origin. Workspaces are served at `<agent-id>.localhost:<port>` by the
-// desktop client, whose own UI lives at `localhost:<port>` -- so dropping
-// the leading agent label yields the main app. Returns null when the
-// workspace is NOT being accessed through the local desktop client (e.g.
-// via its Cloudflare tunnel), in which case the mint page is unreachable
-// from this browser.
-export function computeDesktopAppOrigin(hostname: string, port: string, protocol: string): string | null {
-  if (hostname !== "localhost" && !hostname.endsWith(".localhost")) return null;
-  const baseHost = hostname === "localhost" ? hostname : hostname.split(".").slice(1).join(".");
-  const portSuffix = port ? `:${port}` : "";
-  return `${protocol}//${baseHost}${portSuffix}`;
-}
+// How long to wait for the desktop shell's relay to acknowledge an
+// open-the-Imbue-key-page request (see openImbueMintPage). The relay acks
+// immediately on receipt, so anything beyond a few event-loop turns means no
+// relay is listening -- this page is not being viewed inside the desktop app.
+const MINT_PAGE_ACK_TIMEOUT_MS = 300;
 
 export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   let mode: Mode = "select_provider";
@@ -126,6 +120,10 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
   // fallback block so the user can still select and copy the link by hand.
   let urlCopyFailed = false;
   let urlCopiedResetHandle: ReturnType<typeof setTimeout> | null = null;
+  // Pending ack handshake for the "Open the Imbue key page" relay request
+  // (see openImbueMintPage). Cleared on ack, timeout, or modal teardown.
+  let mintAckTimer: ReturnType<typeof setTimeout> | null = null;
+  let mintAckListener: ((event: MessageEvent) => void) | null = null;
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   // Status polling for the "applying" screen: the background agent restart
@@ -490,23 +488,45 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     m.redraw();
   }
 
+  // Tear down a pending open-the-Imbue-key-page handshake (ack listener +
+  // fallback timer). Called on ack, on timeout, on a re-click, and on modal
+  // teardown so a stale timer can never fire the alert later.
+  function clearMintAckWait(): void {
+    if (mintAckTimer !== null) {
+      clearTimeout(mintAckTimer);
+      mintAckTimer = null;
+    }
+    if (mintAckListener !== null) {
+      window.removeEventListener("message", mintAckListener);
+      mintAckListener = null;
+    }
+  }
+
   function openImbueMintPage(): void {
-    const desktopOrigin = computeDesktopAppOrigin(
-      window.location.hostname,
-      window.location.port,
-      window.location.protocol,
-    );
-    if (desktopOrigin === null) {
-      // Reached via the Cloudflare tunnel (or any non-local route): the
-      // desktop client's own UI is not reachable from this browser.
+    // The mint page is served by the Minds desktop app, whose origin this
+    // workspace page cannot know (the app's backend listens on a random
+    // per-run port). Ask the desktop shell to open it over this window via
+    // the content-relay postMessage channel; the relay acks immediately, so
+    // a missing ack means this page is not being viewed inside the desktop
+    // app (plain browser or the share tunnel) and the mint page is
+    // unreachable from this browser.
+    clearMintAckWait();
+    const onAck = (event: MessageEvent): void => {
+      if (event.source !== window) return;
+      const data: unknown = event.data;
+      if (typeof data !== "object" || data === null) return;
+      if ((data as { type?: unknown }).type !== "minds:open-ai-keys-ack") return;
+      clearMintAckWait();
+    };
+    mintAckListener = onAck;
+    window.addEventListener("message", onAck);
+    mintAckTimer = setTimeout(() => {
+      clearMintAckWait();
       window.alert(
         "The Imbue key page is part of the Minds desktop app. Open this workspace from the desktop app on your computer to mint a key, then paste it here.",
       );
-      return;
-    }
-    const hostId = currentStatus?.workspace_host_id ?? "";
-    const target = `${desktopOrigin}/settings/ai-keys${hostId ? `?workspace=${encodeURIComponent(hostId)}` : ""}`;
-    window.open(target, "_blank", "noopener,noreferrer");
+    }, MINT_PAGE_ACK_TIMEOUT_MS);
+    window.postMessage({ type: "minds:open-ai-keys-page", hostId: currentStatus?.workspace_host_id ?? "" }, "*");
   }
 
   // ----- Renderers -----
@@ -1061,6 +1081,7 @@ export function ClaudeLoginModal(): m.Component<ClaudeLoginModalAttrs> {
     onremove() {
       abortSetupTokenIfActive();
       stopApplyingPoll();
+      clearMintAckWait();
     },
 
     view() {
