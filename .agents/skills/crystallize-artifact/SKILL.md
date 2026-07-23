@@ -78,8 +78,8 @@ echo "$TICKET_ID" > runtime/harden/crystallize-$NAME/ticket_id.txt
 
 ## Step 3: Write the task file
 
-The frontmatter carries `operation: crystallize`, the `artifact`, the worker
-reporting fields (`lead_agent` / `finish_report_path` per
+The frontmatter carries `operation: crystallize`, the `artifact`,
+`finish_report_path` (the report destination the lead polls; see
 `.agents/shared/references/worker-reporting.md`), and an optional
 `source_artifacts_dir`. The body *describes* the work and -- for a skill
 reconstructed from the transcript -- anchors the worker's search with verbatim
@@ -92,7 +92,6 @@ flow steps, or argparse surfaces -- those are the worker's decisions.
 {
 cat << FRONTMATTER_EOF
 ---
-lead_agent: $MNGR_AGENT_NAME
 finish_report_path: runtime/harden/crystallize-$NAME/reports/report.md
 operation: crystallize
 artifact: skill

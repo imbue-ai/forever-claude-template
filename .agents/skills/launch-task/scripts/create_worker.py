@@ -229,6 +229,79 @@ def _read_finish_report_path(task_file: Path) -> Path:
     return Path(value)
 
 
+def _set_frontmatter_field(text: str, key: str, value: str) -> str:
+    """Return ``text`` with frontmatter ``key`` set to ``value``.
+
+    Replaces the existing ``key:`` line in place (preserving the rest of the
+    file verbatim) or, if absent, inserts it just after the opening ``---``.
+    Returns ``text`` unchanged when there is no frontmatter block.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return text
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return text
+    for i in range(1, end):
+        if lines[i].split(":", 1)[0].strip() == key:
+            lines[i] = f"{key}: {value}"
+            return "\n".join(lines)
+    lines.insert(1, f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def _ensure_lead_agent(task_file: Path) -> int | None:
+    """Stamp the launching agent as the report recipient in the task file.
+
+    The agent running ``launch`` *is* the lead that polls for the worker's
+    report, so its own ``MNGR_AGENT_NAME`` is the authoritative ``lead_agent`` --
+    we fill it in (overwriting whatever the file holds) from the environment
+    rather than trusting the task file. That frees task-file authors from setting
+    the field at all and eliminates a silent-failure class: a literal,
+    unexpanded ``$MNGR_AGENT_NAME`` (or a stale/omitted value) used to leave the
+    worker with no valid address, so it could not rsync its report back and the
+    lead's poll waited forever.
+
+    When ``MNGR_AGENT_NAME`` is unset -- i.e. ``launch`` is running outside an
+    mngr agent, as in a manual invocation or a test -- the file's existing value
+    is used as a fallback; an unresolved value (missing, blank, or an unexpanded
+    ``$...``) in that case is fatal (exit 2) rather than launching an
+    unaddressable worker.
+
+    Returns exit code ``2`` on unrecoverable misconfiguration; otherwise
+    ``None``.
+    """
+    try:
+        frontmatter, _body = _split_frontmatter(task_file.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return None  # malformed YAML surfaces later via _read_source_artifacts_dir
+    if frontmatter is None:
+        return None
+    current = frontmatter.get("lead_agent")
+    lead_name = os.environ.get("MNGR_AGENT_NAME")
+    if lead_name:
+        if current == lead_name:
+            return None
+        fixed = _set_frontmatter_field(task_file.read_text(encoding="utf-8"), "lead_agent", lead_name)
+        task_file.write_text(fixed, encoding="utf-8")
+        print(
+            f"create_worker: set lead_agent to {lead_name!r} (was {current!r})",
+            file=sys.stderr,
+        )
+        return None
+    # No launcher identity in the environment: fall back to the file's own value.
+    resolved = isinstance(current, str) and current.strip() and "$" not in current
+    if resolved:
+        return None
+    print(
+        "create_worker: lead_agent is unresolved "
+        f"({current!r}) and MNGR_AGENT_NAME is unset -- the worker would have no "
+        "address to send its report to.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 class Runner:
     """Indirection over ``subprocess.run`` so tests can intercept commands.
 
@@ -421,6 +494,13 @@ def launch(
             file=sys.stderr,
         )
         return 2
+
+    # Stamp the lead agent (this launcher) into the task file before creating
+    # the worker, so the report has a valid return address and an unaddressable
+    # case fails fast rather than after provisioning.
+    lead_rc = _ensure_lead_agent(task_file)
+    if lead_rc is not None:
+        return lead_rc
 
     runner.run(
         [

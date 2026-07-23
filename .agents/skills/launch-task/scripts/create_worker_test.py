@@ -438,6 +438,142 @@ def test_malformed_frontmatter_does_not_abort_launch(tmp_path: Path) -> None:
     ]
 
 
+def test_lead_agent_stamped_from_env_over_literal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A literal, unexpanded ``$MNGR_AGENT_NAME`` is replaced with the launching
+    agent's real name so the worker has a valid address to send its report to."""
+    runtime, task, _ = _make_layout(tmp_path)
+    task.write_text("---\nlead_agent: $MNGR_AGENT_NAME\n---\n\nbody\n")
+    monkeypatch.setenv("MNGR_AGENT_NAME", "real-lead")
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        runner=runner,
+    )
+
+    assert rc == 0
+    body = task.read_text()
+    assert "lead_agent: real-lead" in body
+    assert "$MNGR_AGENT_NAME" not in body
+    assert ["mngr", "create", "demo-worker", "-t", "worker", "--label", "workspace=ws-1"] in [
+        c.argv for c in runner.calls
+    ]
+
+
+def test_lead_agent_env_overrides_resolved_file_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The launcher's own identity is authoritative: even a plain, resolved
+    file value is overwritten with MNGR_AGENT_NAME (the agent that polls for the
+    report). The file value is never trusted when the env names the launcher."""
+    runtime, task, _ = _make_layout(tmp_path)  # lead_agent: lead
+    monkeypatch.setenv("MNGR_AGENT_NAME", "real-lead")
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert "lead_agent: real-lead" in task.read_text()
+
+
+def test_lead_agent_injected_when_field_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A task file that omits lead_agent entirely still gets it filled in from
+    the environment -- authors no longer need to set it."""
+    runtime, task, _ = _make_layout(tmp_path)
+    task.write_text("---\nfinish_report_path: r/report.md\n---\n\nbody\n")
+    monkeypatch.setenv("MNGR_AGENT_NAME", "real-lead")
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        runner=runner,
+    )
+
+    assert rc == 0
+    body = task.read_text()
+    assert "lead_agent: real-lead" in body
+    assert "finish_report_path: r/report.md" in body  # sibling field preserved
+
+
+def test_unresolved_lead_agent_without_env_is_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If the launcher cannot name itself (no MNGR_AGENT_NAME) and the file value
+    is unresolved, fail before provisioning rather than launch an unaddressable
+    worker."""
+    runtime, task, _ = _make_layout(tmp_path)
+    task.write_text("---\nlead_agent: $MNGR_AGENT_NAME\n---\n\nbody\n")
+    monkeypatch.delenv("MNGR_AGENT_NAME", raising=False)
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        runner=runner,
+    )
+
+    assert rc == 2
+    assert runner.calls == []  # no worker created
+    assert "lead_agent is unresolved" in capsys.readouterr().err
+
+
+def test_resolved_lead_agent_used_as_fallback_without_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside an mngr agent (no MNGR_AGENT_NAME), a plain author-set value is
+    accepted as a fallback so manual/test invocations still work."""
+    runtime, task, _ = _make_layout(tmp_path)  # lead_agent: lead
+    monkeypatch.delenv("MNGR_AGENT_NAME", raising=False)
+    runner = _RecordingRunner()
+
+    rc = create_worker_mod.launch(
+        name="demo-worker",
+        template="worker",
+        runtime_dir=runtime,
+        task_file=task,
+        workspace="ws-1",
+        runner=runner,
+    )
+
+    assert rc == 0
+    assert "lead_agent: lead" in task.read_text()
+
+
+def test_set_frontmatter_field_replaces_inserts_and_ignores_bodyless() -> None:
+    replaced = create_worker_mod._set_frontmatter_field(
+        "---\nlead_agent: old\nx: 1\n---\nbody\n", "lead_agent", "new"
+    )
+    assert "lead_agent: new" in replaced
+    assert "lead_agent: old" not in replaced
+    assert "x: 1" in replaced  # sibling fields preserved
+    inserted = create_worker_mod._set_frontmatter_field("---\nx: 1\n---\nbody\n", "lead_agent", "new")
+    assert "lead_agent: new" in inserted
+    assert "x: 1" in inserted
+    assert create_worker_mod._set_frontmatter_field("just body", "lead_agent", "new") == "just body"
+
+
 def test_runtime_dir_must_exist(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
