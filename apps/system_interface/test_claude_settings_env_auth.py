@@ -92,7 +92,7 @@ class _CaptureServer:
 
             do_GET = do_POST
 
-            def log_message(self, *_args: object) -> None:
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - matches BaseHTTPRequestHandler
                 pass
 
         self._server = HTTPServer(("127.0.0.1", 0), _Handler)

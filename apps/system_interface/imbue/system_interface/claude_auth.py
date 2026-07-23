@@ -82,6 +82,7 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.subprocess_utils import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
@@ -863,17 +864,14 @@ class ClaudeAuthService(MutableModel):
         derived_mode = derive_auth_mode(managed_env)
         if derived_mode is AuthMode.NONE and status.logged_in and status.auth_method == "claude.ai":
             derived_mode = AuthMode.SUBSCRIPTION if status.subscription_type else AuthMode.CONSOLE
-        return AuthStatus(
-            **{
-                **status.model_dump(),
-                "auth_mode": derived_mode,
-                "masked_key_suffix": masked_credential_suffix(managed_env),
-                "workspace_host_id": read_workspace_host_id(),
-                "restart_phase": progress.phase.value if progress is not None else None,
-                "restart_detail": progress.detail if progress is not None else None,
-                "restart_error": progress.error if progress is not None else None,
-                "restart_reason": progress.reason.value if progress is not None else None,
-            }
+        return status.model_copy_update(
+            to_update(status.field_ref().auth_mode, derived_mode),
+            to_update(status.field_ref().masked_key_suffix, masked_credential_suffix(managed_env)),
+            to_update(status.field_ref().workspace_host_id, read_workspace_host_id()),
+            to_update(status.field_ref().restart_phase, progress.phase.value if progress is not None else None),
+            to_update(status.field_ref().restart_detail, progress.detail if progress is not None else None),
+            to_update(status.field_ref().restart_error, progress.error if progress is not None else None),
+            to_update(status.field_ref().restart_reason, progress.reason.value if progress is not None else None),
         )
 
     def snapshot_claude_binary_agents(self) -> list[AgentSnapshot]:

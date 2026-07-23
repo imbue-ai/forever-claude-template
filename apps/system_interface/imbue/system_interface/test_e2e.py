@@ -169,6 +169,18 @@ def _running_e2e_server(
     agent_info, session_file = _make_agent_fixture(tmp_path, session_events=session_events)
     agents = [agent_info]
 
+    # A fake logged-in `claude` on PATH: the workspace UI auto-opens the
+    # sign-in modal whenever the status probe reports logged-out (as it
+    # would here, with no real claude binary), and the modal's overlay
+    # would then swallow every click these layout tests make.
+    fake_bin_dir = tmp_path / "fake-bin"
+    fake_bin_dir.mkdir(exist_ok=True)
+    fake_claude = fake_bin_dir / "claude"
+    fake_claude.write_text(
+        '#!/bin/sh\necho \'{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "Max"}\'\n'
+    )
+    fake_claude.chmod(0o755)
+
     # Isolate the workspace environment: point MNGR_HOST_DIR at the fixture's
     # tmp tree so the session endpoint (_find_agent) resolves the fixture agent's
     # state dir + env file, and set MNGR_AGENT_ID per ``primary_agent_id`` so
@@ -176,7 +188,14 @@ def _running_e2e_server(
     # never the real workspace's layout state. This overrides the autouse
     # _isolate_system_interface_tests fixture's env for the duration of the test.
     with (
-        patch.dict(os.environ, {"MNGR_HOST_DIR": str(tmp_path), "MNGR_AGENT_ID": primary_agent_id}),
+        patch.dict(
+            os.environ,
+            {
+                "MNGR_HOST_DIR": str(tmp_path),
+                "MNGR_AGENT_ID": primary_agent_id,
+                "PATH": f"{fake_bin_dir}:{os.environ.get('PATH', '')}",
+            },
+        ),
         patch("imbue.system_interface.server.discover_agents", return_value=agents),
     ):
         # Seed the agent into a manager and inject it; the manager is never started,
