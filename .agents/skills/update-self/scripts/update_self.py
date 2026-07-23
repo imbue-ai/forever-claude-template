@@ -24,6 +24,20 @@ validation depth, reveal by change class). This script owns the parts that are
     List ``changelog/`` entries newly added between two refs -- the raw input for
     the worker's "what's new" report.
 
+``bootstrap-skill``
+    Stage the copy of the update-self skill (SKILL.md, references, scripts) that
+    the rest of the pass runs, at a single fixed path, and report whether it
+    differs from the local copy. Normally that staged copy is the target ref's
+    *own* copy (extracted from the already-fetched object); when the ref predates
+    the skill it is the local copy instead. Either way the fixed path is left
+    populated with a runnable flow, so the lead and worker can dispatch against it
+    by literal path without carrying any value across shell invocations. This is
+    what lets the flow, after resolving the target, hand off to the update-self
+    process *as it exists at the version being updated to* -- so fixes to the
+    update flow itself are applied live rather than being gated on the
+    possibly-stale local copy. ``differs`` gates only which SKILL.md prose the
+    lead follows, not the path.
+
 Impact analysis -- which services and skills depend on a changed file -- is
 deliberately NOT scripted here: it requires open-ended exploration (imports,
 shelled-out scripts, API-surface coupling) that a deterministic helper would
@@ -38,12 +52,20 @@ The git-touching subcommands are thin wrappers over the pure functions below
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from typing import NamedTuple, Sequence
+
+# The repo-relative directory holding the update-self skill (SKILL.md,
+# references/, scripts/). Used by ``bootstrap-skill`` to extract the target
+# ref's own copy of the flow.
+SKILL_DIR_REL = ".agents/skills/update-self"
 
 # --- Target resolution -----------------------------------------------------
 
@@ -404,6 +426,77 @@ def _cmd_changelog_entries(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bootstrap_skill(args: argparse.Namespace) -> int:
+    repo_root = _repo_root(args).resolve()
+    dest = Path(args.dest)
+    dest_root = (dest if dest.is_absolute() else repo_root / dest).resolve()
+    staged_skill = dest_root / SKILL_DIR_REL
+
+    # Always stage into a clean dir. The flow runs the skill from ``staged_skill``
+    # unconditionally (a single fixed path the lead and worker both reference by
+    # literal -- no state carried across shell invocations), so this command must
+    # leave a runnable copy there in *every* case, including the ref-predates-skill
+    # fallback below.
+    if dest_root.exists():
+        shutil.rmtree(dest_root)
+    dest_root.mkdir(parents=True)
+
+    exists = subprocess.run(
+        ["git", "cat-file", "-e", f"{args.ref}:{SKILL_DIR_REL}"],
+        cwd=repo_root,
+        capture_output=True,
+    )
+    if exists.returncode != 0:
+        # The target ref predates the skill, so there is no target copy to hand
+        # off to: stage the *local* copy at the fixed path (so the worker still
+        # finds the flow there) and report ``differs=False`` -- the caller stays
+        # on the local flow. Skip ``__pycache__`` so an imported-script artifact
+        # never rides along.
+        shutil.copytree(
+            repo_root / SKILL_DIR_REL,
+            staged_skill,
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        print(
+            json.dumps(
+                {"skill_dir": str(staged_skill), "differs": False, "ref": args.ref}
+            )
+        )
+        return 0
+
+    # Extract the ref's own copy of the skill via ``git archive`` (reads the
+    # already-fetched object, no network, no working-tree mutation). The archive
+    # lays the tree down under ``SKILL_DIR_REL``.
+    archive = subprocess.run(
+        ["git", "archive", args.ref, SKILL_DIR_REL],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+    )
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(dest_root, filter="data")
+
+    # Whether the ref's skill differs from the local working-tree copy. Let git
+    # do the compare: ``git diff`` ignores untracked files, so the ``__pycache__/
+    # *.pyc`` that importing the script drops into ``scripts/`` never registers as
+    # a spurious difference. ``--quiet`` exits 0 if identical, 1 on any
+    # difference; ``check_returncode`` surfaces any other code as a real git error.
+    diff = subprocess.run(
+        ["git", "diff", "--quiet", args.ref, "--", SKILL_DIR_REL],
+        cwd=repo_root,
+        capture_output=True,
+    )
+    if diff.returncode not in (0, 1):
+        diff.check_returncode()
+    differs = diff.returncode == 1
+    print(
+        json.dumps(
+            {"skill_dir": str(staged_skill), "differs": differs, "ref": args.ref}
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     # ``--repo-root`` lives on a shared parent parser so it is accepted both
     # before and after the subcommand (an option defined only on the top-level
@@ -471,6 +564,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     changelog_parser.add_argument("--base", required=True, help="Base ref.")
     changelog_parser.add_argument("--target", required=True, help="Target ref.")
     changelog_parser.set_defaults(func=_cmd_changelog_entries)
+
+    bootstrap_parser = sub.add_parser(
+        "bootstrap-skill",
+        help="Extract the target ref's own update-self skill into a staging dir "
+        "and report whether it differs from the local copy.",
+        parents=[common],
+    )
+    bootstrap_parser.add_argument(
+        "--ref", required=True, help="The resolved target ref to extract the skill from."
+    )
+    bootstrap_parser.add_argument(
+        "--dest",
+        default="runtime/update-self/skill-at-target",
+        help="Staging dir the skill is extracted into (default: "
+        "runtime/update-self/skill-at-target).",
+    )
+    bootstrap_parser.set_defaults(func=_cmd_bootstrap_skill)
 
     args = parser.parse_args(argv)
     return args.func(args)

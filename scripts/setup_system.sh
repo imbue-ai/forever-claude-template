@@ -23,6 +23,25 @@ provision_skip_if_done setup_system
 : "${NODE_MAJOR:=20}"
 : "${LATCHKEY_VERSION:=3.1.0}"
 
+# Install a downloaded binary atomically: fetch to a temp file beside the target,
+# then rename(2) it into place. A plain `curl -o <dest>` truncates <dest> in
+# place, which fails with ETXTBSY when <dest> is a currently-running executable --
+# e.g. re-provisioning a live workspace whose `terminal` service is running ttyd,
+# or whose cloudflared tunnel is active (this is what the update-self reveal flow
+# does, and `set -e` then aborts the whole script). rename(2) over a busy
+# executable is allowed: running processes keep the old inode while new execs pick
+# up the replacement, so download-then-mv is safe to re-run on a live host. The
+# temp file shares <dest>'s directory so the mv is a same-filesystem atomic rename,
+# and the explicit 0755 reproduces the old `curl -o` (0644) + `chmod +x` result.
+install_downloaded_binary() {
+    _url="$1"
+    _dest="$2"
+    _tmp="$(mktemp "${_dest}.XXXXXX")"
+    curl -fsSL "$_url" -o "$_tmp"
+    chmod 0755 "$_tmp"
+    mv -f "$_tmp" "$_dest"
+}
+
 # System packages (tini for signal handling; supervisor runs our background
 # services; earlyoom is the OOM-prevention daemon that sheds memory under
 # pressure before the kernel kills an arbitrary victim; the rest are
@@ -49,13 +68,11 @@ fi
 
 # ttyd (terminal-over-web) binary from GitHub releases (not in apt).
 ttyd_arch="$(uname -m)"
-curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${ttyd_arch}" -o /usr/local/bin/ttyd
-chmod +x /usr/local/bin/ttyd
+install_downloaded_binary "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${ttyd_arch}" /usr/local/bin/ttyd
 
 # cloudflared for Cloudflare tunnel support.
 cloudflared_arch="$(dpkg --print-architecture)"
-curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${cloudflared_arch}" -o /usr/local/bin/cloudflared
-chmod +x /usr/local/bin/cloudflared
+install_downloaded_binary "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${cloudflared_arch}" /usr/local/bin/cloudflared
 
 # GitHub CLI from its official apt repo.
 mkdir -p -m 755 /etc/apt/keyrings

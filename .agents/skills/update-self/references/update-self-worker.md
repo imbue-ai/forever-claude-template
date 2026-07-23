@@ -8,9 +8,14 @@ and report; the lead applies the update.
 
 The deterministic pieces (target resolution, merged-vs-pulled classification,
 changelog gathering) live in
-`.agents/skills/update-self/scripts/update_self.py` -- call it, don't
-reimplement. Impact analysis (who depends on a changed file) is deliberately
-*not* scripted; Step 4a is your recipe for it.
+`runtime/update-self/skill-at-target/.agents/skills/update-self/scripts/update_self.py`
+-- call it, don't reimplement. That
+`runtime/update-self/skill-at-target/.agents/skills/update-self` path is the copy
+of the update-self flow shipped with the version being updated to (the lead staged
+it and it was synced into this worktree with the runtime dir); running from it
+means you use the target version's flow, not this worktree's possibly-stale copy.
+Impact analysis (who depends on a changed file) is deliberately *not* scripted;
+Step 4a is your recipe for it.
 
 ## 1. Resolve inputs
 
@@ -18,7 +23,11 @@ reimplement. Impact analysis (who depends on a changed file) is deliberately
 eval "$(uv run .agents/shared/scripts/parse_task_frontmatter.py 'runtime/update-self/task.md')"
 ```
 
-Sets `LEAD_AGENT`, `FINISH_REPORT_PATH`, `TARGET_REF`. If the worktree has no
+Sets `LEAD_AGENT`, `FINISH_REPORT_PATH`, and `TARGET_REF`. Run every
+`update_self.py` call below from
+`runtime/update-self/skill-at-target/.agents/skills/update-self/scripts/` (a fixed
+path -- reference it by literal each time rather than stashing it in a shell
+variable, since each bash invocation starts a fresh shell). If the worktree has no
 `.venv`, `uv sync --all-packages` once. Ensure the ref is present:
 
 ```bash
@@ -34,7 +43,7 @@ renamed interface a local customization depends on, both sides rewriting the sam
 region) -- so you can frame a precise `question` before committing to the merge:
 
 ```bash
-python3 .agents/skills/update-self/scripts/update_self.py \
+python3 runtime/update-self/skill-at-target/.agents/skills/update-self/scripts/update_self.py \
     classify-merge --local HEAD --target "$TARGET_REF" --base "$BASE"
 ```
 
@@ -100,7 +109,7 @@ Split what upstream changed into the reconciled **merged** set (validate) vs the
 clean **pulled-in** set (trust as upstream-tested):
 
 ```bash
-python3 .agents/skills/update-self/scripts/update_self.py \
+python3 runtime/update-self/skill-at-target/.agents/skills/update-self/scripts/update_self.py \
     classify-merge --local HEAD^1 --target "$TARGET_REF"
 ```
 
@@ -315,7 +324,7 @@ and gate verdicts for your report.
 ## 5. Gather the "what's new" inputs
 
 ```bash
-python3 .agents/skills/update-self/scripts/update_self.py \
+python3 runtime/update-self/skill-at-target/.agents/skills/update-self/scripts/update_self.py \
     changelog-entries --base "$BASE" --target "$TARGET_REF"
 ```
 

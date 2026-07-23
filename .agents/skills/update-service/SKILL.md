@@ -147,6 +147,9 @@ process restarts:
   `supervisorctl reread && supervisorctl update`. The full program schema,
   the add/remove/inspect mechanics, and the `forward_port.py` wiring live
   in [`.agents/shared/references/service-processes.md`](../../shared/references/service-processes.md).
+  This surgical reload is for iterating on a single service. It is *not* the
+  path for landing an `update-self` merge -- that restarts the whole services
+  agent (`mngr start --restart system-services`) so `bootstrap` re-runs too.
 
 If it doesn't come back `RUNNING`, read
 `/var/log/supervisor/<name>-stderr.log` or
