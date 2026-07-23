@@ -1,3 +1,18 @@
+- New **`update-inspiration`** skill: the pathway for a publisher to update an
+  inspiration they already published (producing v2, v3, ...). It locates the
+  inspiration from the version ledger, shows what changed in the workspace since
+  the last publish, and ASKS the user which of those changes they want in the
+  update. It then launches a background worker to implement it -- and the core
+  safety rule is that it **re-assembles from the published tip, never from the
+  raw template base**, so the user's own customizations (the finished manifest
+  prose, the recipe, the bespoke thumbnail, the welcome, and adopters' adaptation
+  history) are preserved and only the approved changes are overlaid. The recipe's
+  exclusions and modification rules are re-applied, secrets are re-scanned, the
+  result is boot-checked, a `### v(n+1)` Publication-history entry is appended,
+  and exactly one clean commit is fast-forwarded onto the published repo (no
+  force). The workspace ledger records the new version only after the push
+  succeeds.
+
 - **Adopting an inspiration is now gated and verified.** Before the merge path
   pulls a third-party inspiration into a mind, `use-inspiration` requires the
   user to confirm they trust the source -- stating plainly that Imbue has not
