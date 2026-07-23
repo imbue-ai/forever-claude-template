@@ -1114,7 +1114,8 @@ class LiveBrowser(MutableModel):
                 return {"ok": False, "status": "error"}
             data, mime = await self._xclip_read()
         if data is None or mime is None:
-            return {"ok": True, "mime": None}  # nothing selected / empty clipboard
+            # nothing selected / empty clipboard
+            return {"ok": True, "mime": None}
         if mime.startswith("text/"):
             return {"ok": True, "mime": mime, "text": data.decode("utf-8", "replace")}
         return {"ok": True, "mime": mime, "data": base64.b64encode(data).decode("ascii")}

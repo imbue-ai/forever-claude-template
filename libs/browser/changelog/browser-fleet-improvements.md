@@ -1,0 +1,5 @@
+The live browser now fills its viewer pane instead of a fixed 1280x800 box: the viewer reports its size and the browser grows to fill it (clamped 640x480 .. 1920x1080), frozen while an agent is driving so its element numbers don't shift mid-task, and the resolution is reported back on resume so the agent knows to re-read the page if it changed.
+
+The fleet now runs headful under an Xvfb virtual display, which gives it a real OS clipboard: copy and paste -- text and images -- between your machine and the remote browser now work natively, driven by the real copy/paste/cut events (so any keybinding, right-click, or the Edit menu works), with a non-blocking "Pasting.../Copying..." indicator for larger transfers.
+
+When a background or sub-agent can't surface the browser's live pane, it now reports that the browser is ready and offers to open it from the "+" menu, rather than framing it as a failure -- the browser is fully drivable from the CLI either way; the pane is only a live-view convenience.

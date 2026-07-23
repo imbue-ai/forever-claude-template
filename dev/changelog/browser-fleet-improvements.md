@@ -1,0 +1,1 @@
+First-boot deferred install now also installs `xvfb` and `xclip`, and a new `xvfb` supervised service provides the virtual display the browser fleet now runs headful under (the browser service is pointed at it via `DISPLAY=:99`). This is the infrastructure that enables the live browser's native clipboard copy/paste.

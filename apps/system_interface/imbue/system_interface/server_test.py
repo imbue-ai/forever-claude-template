@@ -947,7 +947,8 @@ def test_layout_broadcast_sessionless_browser_is_rejected(app: Flask) -> None:
     )
     assert bare.status_code == 400
     assert "needs a specific browser name" in bare.get_json()["detail"]
-    assert matching_queue.empty()  # nothing broadcast
+    # nothing should have been broadcast to the client
+    assert matching_queue.empty()
     # A session-qualified browser ref is allowed and reaches the client.
     ok = client.post(
         "/api/layout/broadcast",

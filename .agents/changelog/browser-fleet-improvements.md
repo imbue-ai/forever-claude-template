@@ -1,0 +1,1 @@
+The `agentic-browser-fleet` skill now notes that, on resume after a human held the browser, the live view may have been resized and the page reflowed -- so every cached element number should be treated as stale and `state` re-run before acting.
