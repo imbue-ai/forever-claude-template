@@ -46,6 +46,18 @@ System-interface specifics:
   `## Real scenario` -- see below); point it at fixture data instead when you want
   an isolated, reproducible scene for a committed test.
 
+## Leave a built frontend in your work_dir (required, even for a backend-only change)
+
+Before you report `done`, your work_dir **must** contain a current frontend
+build (`cd apps/system_interface/frontend && npm ci && npm run build`, output in
+the gitignored `imbue/system_interface/static/`). This is **not** conditional on
+whether you touched the frontend: the lead previews your change by booting your
+work_dir directly, and the preview **refuses to boot a work_dir with no build**
+(it serves the backend's "Frontend not built" placeholder otherwise, which reads
+as a broken UI). A fresh worktree has no `node_modules` and no `static/`, so a
+backend-only change that skips the build leaves nothing to preview. Build it and
+confirm `imbue/system_interface/static/index.html` exists before reporting `done`.
+
 ## Real scenario: look at it firsthand, do not imagine it
 
 If the task names a real motivating conversation under `## Real scenario`, **LOOK
