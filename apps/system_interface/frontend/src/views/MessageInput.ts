@@ -60,11 +60,13 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
   let messageText = "";
   let currentAgentId: string | null = null;
   let messageTextareaElement: HTMLTextAreaElement | null = null;
-  // Shown instead of sending when the user types claude's /logout command:
-  // delivered to the TUI it would exit the agent's process and wipe shared
-  // onboarding state without actually signing the workspace out (auth lives
-  // in settings.json, managed by the agent-auth screen).
-  let isLogoutNoticeVisible = false;
+  // Set instead of sending when the user types one of claude's own auth
+  // commands. Delivered to the TUI, /logout would exit the agent's process
+  // and wipe shared onboarding state without actually signing the workspace
+  // out, and /login would start claude's interactive sign-in inside the
+  // agent's terminal -- both bypassing the managed agent-auth screen (auth
+  // lives in settings.json / claude's credential store, managed there).
+  let interceptedAuthCommand: "/login" | "/logout" | null = null;
   let fileInputElement: HTMLInputElement | null = null;
   let isInterruptInFlight = false;
 
@@ -137,8 +139,9 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         if (!agentId) {
           return;
         }
-        if (messageText.trim().toLowerCase() === "/logout") {
-          isLogoutNoticeVisible = true;
+        const trimmedCommand = messageText.trim().toLowerCase();
+        if (trimmedCommand === "/login" || trimmedCommand === "/logout") {
+          interceptedAuthCommand = trimmedCommand;
           m.redraw();
           return;
         }
@@ -258,8 +261,8 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         fileInputElement?.click();
       }
 
-      function dismissLogoutNotice(): void {
-        isLogoutNoticeVisible = false;
+      function dismissAuthCommandNotice(): void {
+        interceptedAuthCommand = null;
         messageText = "";
         if (agentId) {
           localStorage.removeItem(messageTextKey(agentId));
@@ -267,13 +270,20 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         m.redraw();
       }
 
-      function renderLogoutNotice(): m.Vnode {
+      function renderAuthCommandNotice(command: "/login" | "/logout"): m.Vnode {
+        const title = command === "/login" ? "Sign-in is managed here" : "Sign-out is managed here";
+        const explanation =
+          command === "/login"
+            ? "Sending /login to the agent would start Claude's own sign-in inside the agent's terminal, " +
+              "which would not sign the rest of the workspace in. Use the agent auth screen instead."
+            : "Sending /logout to the agent would shut it down without signing the workspace out. " +
+              "Use the agent auth screen to switch or remove credentials.";
         return m(
           "div.custom-url-dialog-overlay",
           {
             onclick(e: MouseEvent) {
               if ((e.target as HTMLElement).classList.contains("custom-url-dialog-overlay")) {
-                dismissLogoutNotice();
+                dismissAuthCommandNotice();
               }
             },
           },
@@ -285,20 +295,18 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
               },
             },
             [
-              m("h3.custom-url-dialog-title", "Sign-out is managed here"),
+              m("h3.custom-url-dialog-title", title),
               m(
                 "p.logout-notice-body",
-                "This workspace's Claude sign-in is managed by this interface. " +
-                  "Sending /logout to the agent would shut it down without signing the workspace out. " +
-                  "Use the agent auth screen to switch or remove credentials.",
+                `This workspace's Claude sign-in is managed by this interface. ${explanation}`,
               ),
               m("div.custom-url-dialog-actions", [
-                m("button.custom-url-dialog-cancel", { onclick: () => dismissLogoutNotice() }, "Cancel"),
+                m("button.custom-url-dialog-cancel", { onclick: () => dismissAuthCommandNotice() }, "Cancel"),
                 m(
                   "button.custom-url-dialog-open",
                   {
                     onclick: () => {
-                      dismissLogoutNotice();
+                      dismissAuthCommandNotice();
                       openLoginModal();
                     },
                   },
@@ -323,7 +331,7 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
       const isStopButtonVisible = isAgentWorking && !isInterruptInFlight;
 
       return m("div", { class: "message-input mx-auto w-full" }, [
-        isLogoutNoticeVisible ? renderLogoutNotice() : null,
+        interceptedAuthCommand !== null ? renderAuthCommandNotice(interceptedAuthCommand) : null,
         m("input", {
           type: "file",
           multiple: true,

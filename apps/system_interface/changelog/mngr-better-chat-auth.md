@@ -14,7 +14,7 @@ Workspace Claude auth moved off mngr host env vars, with the in-UI sign-in modal
 
 - A persistent "Agent auth" entry below the chat (next to "Open agent terminal") opens the modal any time, with a muted header showing how the workspace is currently signed in (including the account email for browser sign-ins). A page-load status check pops the modal on a freshly created (never signed-in) workspace, making sign-in the designed first-boot step.
 
-- Typing `/logout` into the chat is intercepted with a dialog pointing at the agent-auth screen instead of being delivered to the agent's TUI, where it would exit the agent's process and wipe shared onboarding state without cleanly signing the workspace out.
+- Typing `/logout` or `/login` into the chat is intercepted with a dialog pointing at the agent-auth screen instead of being delivered to the agent's TUI: `/logout` would exit the agent's process and wipe shared onboarding state without cleanly signing the workspace out, and `/login` would start Claude's own interactive sign-in inside the agent's terminal without signing the rest of the workspace in.
 
 - LiteLLM budget/auth rejection patterns were added to the transcript auth-error detection, so an exhausted daily budget also surfaces the modal.
 
