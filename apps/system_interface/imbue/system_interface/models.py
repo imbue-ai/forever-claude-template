@@ -45,6 +45,37 @@ class SendMessageResponse(FrozenModel):
     status: str = Field(description="Status of the send operation")
 
 
+class ModelOption(FrozenModel):
+    """A selectable Claude Code model shown in the composer model picker."""
+
+    id: str = Field(description="Value sent to Claude Code's /model command (e.g. 'opus[1m]', 'sonnet')")
+    label: str = Field(description="Human-readable model name shown in the picker")
+    supports_fast_mode: bool = Field(description="Whether fast mode applies to this model (Opus only)")
+
+
+class ModelSettingsResponse(FrozenModel):
+    """Response from GET /api/agents/{id}/model-settings."""
+
+    model: str = Field(description="The agent's currently configured model (raw settings.json value, e.g. 'opus[1m]')")
+    fast_mode: bool = Field(description="Whether fast mode is currently enabled for the agent")
+    fast_mode_supported: bool = Field(
+        description="Whether the current model supports fast mode (drives the toggle's visibility)"
+    )
+    options: tuple[ModelOption, ...] = Field(description="The selectable models, in display order")
+
+
+class SetModelRequest(FrozenModel):
+    """Request body for POST /api/agents/{id}/model."""
+
+    model: str = Field(description="Model id to switch to; must be one of the catalog option ids")
+
+
+class SetFastModeRequest(FrozenModel):
+    """Request body for POST /api/agents/{id}/fast."""
+
+    enabled: bool = Field(description="True to enable fast mode, False to disable it")
+
+
 class AttachmentUploadResponse(FrozenModel):
     """Response from the chat attachment upload endpoint."""
 

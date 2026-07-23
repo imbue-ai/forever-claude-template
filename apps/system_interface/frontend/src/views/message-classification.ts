@@ -93,6 +93,38 @@ function matchBrowserFleet(content: string): UserMessageClass | null {
   return m ? { kind: UserMessageKind.SystemChip, label: "Browser fleet", body: m[1].trim() } : null;
 }
 
+// The composer's model picker and fast-mode toggle drive Claude Code by sending
+// it `/model ...` and `/fast ...` slash commands (see MessageInput.ts +
+// ModelSettings.ts). Claude Code records each as a normalized command line
+// (rebuilt by the backend's _normalize_slash_command) plus a raw
+// `<local-command-stdout>` confirmation; neither is a conversational turn, so
+// both are hidden. The picker/toggle already reflect the resulting state, so
+// hiding these -- whether sent by the control or typed in the terminal -- keeps
+// the chat clean without losing anything the user needs.
+const MODEL_FAST_COMMAND_RE = /^\/(model|fast)\b/;
+
+/** A `/model` or `/fast` slash command the picker/toggle (or the user) sent. */
+function matchModelFastCommand(content: string): UserMessageClass | null {
+  return MODEL_FAST_COMMAND_RE.test(content.trim())
+    ? { kind: UserMessageKind.Hidden, label: null, body: content }
+    : null;
+}
+
+const LOCAL_COMMAND_STDOUT_OPEN = "<local-command-stdout>";
+// The confirmation lines Claude Code prints for the two commands the composer
+// sends ("Set model to ...", "Fast mode ON/OFF"). Scoped to those so other local
+// command outputs are unaffected.
+const MODEL_FAST_STDOUT_RE = /Set model to|Fast mode/;
+
+/** The `<local-command-stdout>` confirmation Claude Code emits after a `/model`
+ *  or `/fast` command. */
+function matchModelFastCommandOutput(content: string): UserMessageClass | null {
+  const trimmed = content.trimStart();
+  return trimmed.startsWith(LOCAL_COMMAND_STDOUT_OPEN) && MODEL_FAST_STDOUT_RE.test(content)
+    ? { kind: UserMessageKind.Hidden, label: null, body: content }
+    : null;
+}
+
 /** Claude Code's detector table, most-specific first. */
 const CLAUDE_USER_MESSAGE_DETECTORS: Array<(content: string) => UserMessageClass | null> = [
   matchWelcome,
@@ -100,6 +132,8 @@ const CLAUDE_USER_MESSAGE_DETECTORS: Array<(content: string) => UserMessageClass
   matchStopHook,
   matchTaskNotification,
   matchBrowserFleet,
+  matchModelFastCommand,
+  matchModelFastCommandOutput,
 ];
 
 /**

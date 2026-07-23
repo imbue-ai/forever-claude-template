@@ -52,6 +52,10 @@ from imbue.system_interface.layout_ops import is_mutating_op
 from imbue.system_interface.layout_ops import layout_inspect
 from imbue.system_interface.layout_ops import layout_list
 from imbue.system_interface.layout_ops import parse_tmux_sessions_output
+from imbue.system_interface.model_settings import MODEL_OPTIONS
+from imbue.system_interface.model_settings import is_valid_model_id
+from imbue.system_interface.model_settings import read_model_settings
+from imbue.system_interface.model_settings import supports_fast_mode
 from imbue.system_interface.models import ActivityRequest
 from imbue.system_interface.models import ActivityResponse
 from imbue.system_interface.models import AgentCreationError
@@ -65,9 +69,12 @@ from imbue.system_interface.models import CreateWorktreeRequest
 from imbue.system_interface.models import DestroyAgentResponse
 from imbue.system_interface.models import ErrorResponse
 from imbue.system_interface.models import InterruptAgentResponse
+from imbue.system_interface.models import ModelSettingsResponse
 from imbue.system_interface.models import RandomNameResponse
 from imbue.system_interface.models import SendMessageRequest
 from imbue.system_interface.models import SendMessageResponse
+from imbue.system_interface.models import SetFastModeRequest
+from imbue.system_interface.models import SetModelRequest
 from imbue.system_interface.models import StartAgentResponse
 from imbue.system_interface.models import TerminalSessionInfo
 from imbue.system_interface.plugins import get_plugin_manager
@@ -380,6 +387,79 @@ def _send_message_endpoint(agent_id: str) -> Response:
             agent_name=agent_info.name,
             message_text=send_message_request.message,
         )
+
+    return _json_response(SendMessageResponse(status="ok").model_dump())
+
+
+def _get_model_settings_endpoint(agent_id: str) -> Response:
+    """Return the agent's current model + fast-mode selection for the composer picker.
+
+    Reads the agent's Claude Code ``settings.json`` (the source of truth the
+    ``/model`` and ``/fast`` commands write to). ``fast_mode_supported`` reflects
+    the current model so the frontend knows whether to surface the fast toggle.
+    """
+    agent_info = _find_agent(agent_id)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    settings_path = agent_info.claude_config_dir / "settings.json"
+    model, fast_mode = read_model_settings(settings_path)
+    response = ModelSettingsResponse(
+        model=model,
+        fast_mode=fast_mode,
+        fast_mode_supported=supports_fast_mode(model),
+        options=MODEL_OPTIONS,
+    )
+    return _json_response(response.model_dump())
+
+
+def _set_model_endpoint(agent_id: str) -> Response:
+    """Switch the agent's Claude Code model by sending it a ``/model <id>`` command.
+
+    Delivered through the same interactive-send path as a chat message, so the
+    running session applies the change immediately and Claude Code persists it as
+    the agent's default (its ``settings.json`` ``model`` field). Returns 400 for
+    an unknown model id, 404 for an unknown agent, 500 if the command could not be
+    delivered.
+    """
+    agent_info = _find_agent(agent_id)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    set_model_request = SetModelRequest.model_validate(request.get_json())
+    if not is_valid_model_id(set_model_request.model):
+        error = ErrorResponse(detail=f"Unknown model '{set_model_request.model}'")
+        return _json_response(error.model_dump(), status_code=400)
+
+    agent_manager: AgentManager = get_state().agent_manager
+    success = agent_manager.send_message_to_agent(AgentId(agent_info.id), f"/model {set_model_request.model}")
+    if not success:
+        error = ErrorResponse(detail=f"Failed to switch model for agent '{agent_info.name}' (0 successful agents)")
+        return _json_response(error.model_dump(), status_code=500)
+
+    return _json_response(SendMessageResponse(status="ok").model_dump())
+
+
+def _set_fast_mode_endpoint(agent_id: str) -> Response:
+    """Toggle the agent's fast mode by sending it a ``/fast on|off`` command.
+
+    Same interactive-send path as ``_set_model_endpoint``; Claude Code persists
+    the choice to its ``settings.json`` ``fastMode`` field. Fast mode is an
+    Opus-only capability, so the frontend only surfaces the toggle for Opus; this
+    endpoint does not re-check the model, matching how ``/fast`` itself behaves.
+    """
+    agent_info = _find_agent(agent_id)
+    if agent_info is None:
+        return _agent_not_found_response(agent_id)
+
+    set_fast_mode_request = SetFastModeRequest.model_validate(request.get_json())
+    command = "/fast on" if set_fast_mode_request.enabled else "/fast off"
+
+    agent_manager: AgentManager = get_state().agent_manager
+    success = agent_manager.send_message_to_agent(AgentId(agent_info.id), command)
+    if not success:
+        error = ErrorResponse(detail=f"Failed to set fast mode for agent '{agent_info.name}' (0 successful agents)")
+        return _json_response(error.model_dump(), status_code=500)
 
     return _json_response(SendMessageResponse(status="ok").model_dump())
 
@@ -1510,6 +1590,11 @@ def create_application(state: SystemInterfaceState) -> Flask:
     application.add_url_rule("/api/agents/<agent_id>/events", view_func=_get_events, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/stream", view_func=_stream_events, methods=["GET"])
     application.add_url_rule("/api/agents/<agent_id>/message", view_func=_send_message_endpoint, methods=["POST"])
+    application.add_url_rule(
+        "/api/agents/<agent_id>/model-settings", view_func=_get_model_settings_endpoint, methods=["GET"]
+    )
+    application.add_url_rule("/api/agents/<agent_id>/model", view_func=_set_model_endpoint, methods=["POST"])
+    application.add_url_rule("/api/agents/<agent_id>/fast", view_func=_set_fast_mode_endpoint, methods=["POST"])
     application.add_url_rule("/api/activity", view_func=_activity_endpoint, methods=["POST"])
     application.add_url_rule("/api/uploads", view_func=_upload_attachment, methods=["POST"])
     application.add_url_rule("/api/uploads/<path:relative_path>", view_func=_serve_attachment, methods=["GET"])

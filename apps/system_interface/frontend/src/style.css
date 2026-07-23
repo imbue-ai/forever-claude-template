@@ -333,6 +333,46 @@ body {
   flex-shrink: 0;
 }
 
+/* Hover tooltips for the composer toolbar controls (model picker, fast-mode
+   toggle, attach, interrupt, send). Uses the shared CSS-tooltip pattern -- a
+   `::after` bubble fed by `data-tooltip` -- rather than native `title`, which is
+   unreliable in the desktop webview (see .pending-message-interrupt). The
+   toolbar sits at the composer's bottom, so the bubble points upward. */
+.message-input-toolbar [data-tooltip] {
+  position: relative;
+}
+
+.message-input-toolbar [data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  width: max-content;
+  max-width: 240px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--color-text-primary);
+  color: #fff;
+  font-family: var(--font-family-base);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.message-input-toolbar [data-tooltip]:hover::after,
+.message-input-toolbar [data-tooltip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
 .message-input-send-button {
   display: inline-flex;
   align-items: center;
@@ -638,35 +678,42 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-family: var(--font-family-mono);
-  font-size: 12px;
+  height: 30px;
+  font-family: var(--font-family-base);
+  font-size: 13px;
   color: var(--color-text-secondary);
-  background: var(--color-bg-sidebar);
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  padding: 4px 10px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 0 8px;
   cursor: pointer;
-  transition: border-color 120ms;
+  transition:
+    color 120ms,
+    background 120ms;
   user-select: none;
   white-space: nowrap;
 }
 
 .model-selector-trigger:hover {
-  border-color: var(--color-accent);
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
 }
 
 .model-selector-chevron {
-  font-size: 10px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-text-faint);
 }
 
 .model-selector-dropdown {
   --_option-height: 29px;
   --_dropdown-padding: 6px;
   position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  min-width: 100%;
+  bottom: calc(100% + 8px);
+  /* Anchored to the right edge: the picker sits on the right of the composer
+     toolbar, so a left-anchored menu would spill off the composer. */
+  right: 0;
+  min-width: 200px;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -676,6 +723,14 @@ body {
   padding: var(--_dropdown-padding);
   z-index: 100;
   overflow: hidden;
+}
+
+.model-selector-dropdown-header {
+  font-family: var(--font-family-base);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-faint);
+  padding: 4px 10px 6px;
 }
 
 .model-selector-dropdown-list {
@@ -695,8 +750,8 @@ body {
 }
 
 .model-selector-option {
-  font-family: var(--font-family-mono);
-  font-size: 12px;
+  font-family: var(--font-family-base);
+  font-size: 13px;
   color: var(--color-text-primary);
   height: var(--_option-height);
   display: flex;
@@ -719,6 +774,46 @@ body {
 }
 
 .model-selector-option--selected:hover {
+  background: var(--color-accent-light);
+}
+
+.model-selector-trigger:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.model-selector-trigger:disabled:hover {
+  color: var(--color-text-secondary);
+  background: none;
+}
+
+/* ── Composer fast-mode toggle (icon button in the toolbar) ── */
+.fast-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition:
+    color 120ms,
+    background 120ms;
+  flex-shrink: 0;
+}
+
+.fast-toggle:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
+}
+
+.fast-toggle--on,
+.fast-toggle--on:hover {
+  color: var(--color-accent);
   background: var(--color-accent-light);
 }
 

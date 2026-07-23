@@ -42,6 +42,8 @@ const STROKE_PATHS = {
   alert: '<path d="M12 6v7"/><path d="M12 17.5h0"/>',
   "chevron-down": '<path d="M6 9l6 6 6-6"/>',
   "chevron-right": '<path d="M9 6l6 6-6 6"/>',
+  // Lightning bolt for the composer fast-mode toggle.
+  zap: '<path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>',
   "external-link":
     '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/>',
 } as const;

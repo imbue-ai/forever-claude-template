@@ -6,6 +6,7 @@ from imbue.system_interface.activity_state import ActivityState
 from imbue.system_interface.activity_state import RUNNING_LIFECYCLE_STATES
 from imbue.system_interface.activity_state import derive_activity_state
 from imbue.system_interface.activity_state import has_unmatched_tool_use
+from imbue.system_interface.activity_state import is_non_turn_tail_event
 from imbue.system_interface.activity_state import is_transcript_tail_stale
 from imbue.system_interface.activity_state import last_event_timestamp
 from imbue.system_interface.activity_state import last_event_type
@@ -76,10 +77,75 @@ def test_has_unmatched_tool_use(events: list[dict[str, Any]], expected: bool) ->
             id="returns_final",
         ),
         pytest.param([{"foo": "bar"}], None, id="missing_type_key"),
+        # A model-picker change leaves the transcript ending on the three lines
+        # Claude writes for `/model sonnet`: an isMeta caveat, the command line,
+        # and its <local-command-stdout> confirmation. None is a genuine turn, so
+        # the tail type is the assistant turn before them -> IDLE downstream (not
+        # a spurious "Thinking..." pinned on the trailing user_message).
+        pytest.param(
+            [
+                {"type": "assistant_message", "tool_calls": []},
+                {"type": "user_message", "content": "<local-command-caveat>...", "is_meta": True},
+                {"type": "user_message", "content": "/model sonnet"},
+                {
+                    "type": "user_message",
+                    "content": "<local-command-stdout>Set model to Sonnet 5</local-command-stdout>",
+                },
+            ],
+            "assistant_message",
+            id="skips_model_command_tail",
+        ),
+        # The fast-mode toggle sends `/fast on` / `/fast off`, hidden the same way.
+        pytest.param(
+            [
+                {"type": "assistant_message", "tool_calls": []},
+                {"type": "user_message", "content": "/fast on"},
+                {"type": "user_message", "content": "<local-command-stdout>Fast mode ON</local-command-stdout>"},
+            ],
+            "assistant_message",
+            id="skips_fast_command_tail",
+        ),
+        # A genuine human turn that merely mentions the command is NOT skipped.
+        pytest.param(
+            [
+                {"type": "assistant_message", "tool_calls": []},
+                {"type": "user_message", "content": "why did /model switch on me?"},
+            ],
+            "user_message",
+            id="genuine_turn_mentioning_command_is_kept",
+        ),
     ],
 )
 def test_last_event_type(events: list[dict[str, Any]], expected: str | None) -> None:
     assert last_event_type(events) == expected
+
+
+@pytest.mark.parametrize(
+    "event, expected",
+    [
+        pytest.param({"type": "user_message", "content": "please rebase"}, False, id="genuine_prompt"),
+        pytest.param({"type": "assistant_message"}, False, id="assistant"),
+        pytest.param(
+            {"type": "user_message", "content": "<local-command-caveat>x", "is_meta": True}, True, id="is_meta_caveat"
+        ),
+        pytest.param({"type": "user_message", "content": "/model opus[1m]"}, True, id="model_command"),
+        pytest.param({"type": "user_message", "content": "/fast off"}, True, id="fast_command"),
+        pytest.param(
+            {"type": "user_message", "content": "<local-command-stdout>Set model to Opus 4.8</local-command-stdout>"},
+            True,
+            id="model_stdout",
+        ),
+        # A different slash command, or a stdout for an unrelated local command, is a real tail.
+        pytest.param({"type": "user_message", "content": "/clear"}, False, id="other_slash_command"),
+        pytest.param(
+            {"type": "user_message", "content": "<local-command-stdout>Compacted</local-command-stdout>"},
+            False,
+            id="unrelated_stdout",
+        ),
+    ],
+)
+def test_is_non_turn_tail_event(event: dict[str, Any], expected: bool) -> None:
+    assert is_non_turn_tail_event(event) is expected
 
 
 @pytest.mark.parametrize(

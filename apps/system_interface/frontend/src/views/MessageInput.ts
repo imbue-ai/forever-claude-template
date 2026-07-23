@@ -19,6 +19,13 @@ import {
   removePendingMessage,
 } from "../models/PendingMessages";
 import { describeRequestError } from "../models/request-error";
+import {
+  fetchModelSettings,
+  getModelSettings,
+  getSelectedOption,
+  setFastMode,
+  setModel,
+} from "../models/ModelSettings";
 import { isWorkingActivityState } from "./ActivityIndicator";
 import { icon, stopIcon } from "./icons";
 
@@ -61,9 +68,121 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
   let messageTextareaElement: HTMLTextAreaElement | null = null;
   let fileInputElement: HTMLInputElement | null = null;
   let isInterruptInFlight = false;
+  let isModelDropdownOpen = false;
+  let modelSelectorElement: HTMLElement | null = null;
 
   function focusMessageTextarea(): void {
     messageTextareaElement?.focus();
+  }
+
+  // Stable reference (defined once for the component's life) so the dropdown's
+  // add/removeEventListener pair to the same function -- a per-render closure
+  // would leak a listener each time the dropdown reopens.
+  function handleModelOutsideMousedown(event: MouseEvent): void {
+    if (modelSelectorElement !== null && !modelSelectorElement.contains(event.target as Node)) {
+      isModelDropdownOpen = false;
+      m.redraw();
+    }
+  }
+
+  // The model picker + fast-mode toggle live in the composer toolbar, alongside
+  // the attach and stop/send buttons. The current selection is read from the
+  // agent's Claude Code settings (fetched on agent switch); picking a model or
+  // flipping fast mode posts a `/model` / `/fast` command that the running
+  // session applies immediately (see ModelSettings.ts + server.py). The fast
+  // toggle is an icon button that only appears for a model that supports fast
+  // mode (Opus) and lights up while it is on. Returns the toolbar items (model
+  // pill first, then the fast toggle when applicable) for the caller to place.
+  function renderModelControls(agentId: string): m.Children[] {
+    const settings = getModelSettings(agentId);
+    const selected = getSelectedOption(agentId);
+    const triggerLabel = selected?.label ?? "Model";
+
+    const modelWrapper = m(
+      "div",
+      {
+        class: "model-selector-wrapper",
+        oncreate: (wrapperVnode: m.VnodeDOM) => {
+          modelSelectorElement = wrapperVnode.dom as HTMLElement;
+        },
+        onremove: () => {
+          modelSelectorElement = null;
+        },
+      },
+      [
+        m(
+          "button",
+          {
+            type: "button",
+            class: "model-selector-trigger",
+            disabled: settings === null,
+            "data-tooltip": "Select model",
+            onclick: (event: MouseEvent) => {
+              event.stopPropagation();
+              isModelDropdownOpen = !isModelDropdownOpen;
+            },
+          },
+          [
+            m("span", { class: "model-selector-label" }, triggerLabel),
+            m("span", { class: "model-selector-chevron" }, m.trust(icon("chevron-down", { size: 12 }))),
+          ],
+        ),
+        isModelDropdownOpen && settings !== null
+          ? m(
+              "div",
+              {
+                class: "model-selector-dropdown",
+                // Close on any click outside the picker while it is open.
+                oncreate: () => document.addEventListener("mousedown", handleModelOutsideMousedown),
+                onremove: () => document.removeEventListener("mousedown", handleModelOutsideMousedown),
+              },
+              [
+                m("div", { class: "model-selector-dropdown-header" }, "Model"),
+                m(
+                  "ul",
+                  { class: "model-selector-dropdown-list" },
+                  settings.options.map((option) =>
+                    m(
+                      "li",
+                      {
+                        key: option.id,
+                        class:
+                          "model-selector-option" +
+                          (selected?.id === option.id ? " model-selector-option--selected" : ""),
+                        onclick: () => {
+                          isModelDropdownOpen = false;
+                          if (selected?.id !== option.id) {
+                            setModel(agentId, option.id);
+                          }
+                        },
+                      },
+                      option.label,
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : null,
+      ],
+    );
+
+    const fastToggle =
+      settings !== null && settings.fast_mode_supported
+        ? m(
+            "button",
+            {
+              type: "button",
+              class: `fast-toggle${settings.fast_mode ? " fast-toggle--on" : ""}`,
+              "data-tooltip": settings.fast_mode ? "Disable fast mode" : "Enable fast mode",
+              "aria-label": settings.fast_mode ? "Disable fast mode" : "Enable fast mode",
+              "aria-pressed": settings.fast_mode ? "true" : "false",
+              onclick: () => setFastMode(agentId, !settings.fast_mode),
+            },
+            m.trust(icon("zap", { size: 16 })),
+          )
+        : null;
+
+    return [modelWrapper, fastToggle];
   }
 
   function renderComposerAttachment(agentId: string, attachment: ComposerAttachment): m.Vnode {
@@ -125,6 +244,10 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
         currentAgentId = agentId;
         messageText = localStorage.getItem(messageTextKey(agentId)) ?? "";
         isInterruptInFlight = false;
+        isModelDropdownOpen = false;
+        // Load this agent's model + fast-mode selection for the picker (cached
+        // per agent, so this is a no-op once loaded).
+        fetchModelSettings(agentId);
       }
 
       async function handleSend(): Promise<void> {
@@ -312,12 +435,13 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
               onpaste: handlePaste,
             }),
             m("div", { class: "message-input-toolbar" }, [
+              ...renderModelControls(agentId),
               m(
                 "button",
                 {
                   type: "button",
                   class: "message-input-attach-button",
-                  title: "Attach files",
+                  "data-tooltip": "Attach files",
                   "aria-label": "Attach files",
                   onclick: openFilePicker,
                 },
@@ -328,7 +452,8 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                     "button",
                     {
                       class: "message-input-stop-button",
-                      title: "Interrupt current turn",
+                      "data-tooltip": "Interrupt",
+                      "aria-label": "Interrupt",
                       onclick: handleInterrupt,
                     },
                     m.trust(stopIcon(14)),
@@ -339,6 +464,8 @@ export function MessageInput(): m.Component<{ agentId: string | null }> {
                     "button",
                     {
                       class: "message-input-send-button",
+                      "data-tooltip": "Send message",
+                      "aria-label": "Send message",
                       onclick: handleSend,
                     },
                     m.trust(icon("send", { size: 16, strokeWidth: 2.5 })),

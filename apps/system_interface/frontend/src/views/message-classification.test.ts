@@ -81,6 +81,36 @@ describe("classifyUserMessage", () => {
     expect(classifyUserMessage("what does Stop hook feedback: mean?").kind).toBe(UserMessageKind.UserPrompt);
     expect(classifyUserMessage("tell me about <task-notification> handling").kind).toBe(UserMessageKind.UserPrompt);
   });
+
+  it("hides the /model and /fast slash commands the composer picker/toggle send", () => {
+    // The backend normalizes the transcript's <command-name> expansion back to
+    // the typed command, which is what reaches the classifier.
+    expect(classifyUserMessage("/model opus[1m]").kind).toBe(UserMessageKind.Hidden);
+    expect(classifyUserMessage("/model sonnet").kind).toBe(UserMessageKind.Hidden);
+    expect(classifyUserMessage("/fast on").kind).toBe(UserMessageKind.Hidden);
+    expect(classifyUserMessage("/fast off").kind).toBe(UserMessageKind.Hidden);
+    // Bare invocation (no args) is hidden too.
+    expect(classifyUserMessage("/fast").kind).toBe(UserMessageKind.Hidden);
+  });
+
+  it("hides the <local-command-stdout> confirmation for /model and /fast", () => {
+    expect(
+      classifyUserMessage("<local-command-stdout>Set model to Opus 4.8 (1M context)</local-command-stdout>").kind,
+    ).toBe(UserMessageKind.Hidden);
+    expect(classifyUserMessage("<local-command-stdout>Fast mode ON</local-command-stdout>").kind).toBe(
+      UserMessageKind.Hidden,
+    );
+  });
+
+  it("does not hide a look-alike model/fast command or an unrelated local-command output", () => {
+    // A different slash command, or a word that merely starts with model/fast, is a real turn.
+    expect(classifyUserMessage("/models").kind).toBe(UserMessageKind.UserPrompt);
+    expect(classifyUserMessage("model the data for me").kind).toBe(UserMessageKind.UserPrompt);
+    // An unrelated local-command output is untouched (only /model, /fast outputs are hidden).
+    expect(classifyUserMessage("<local-command-stdout>Total cost: $1.23</local-command-stdout>").kind).toBe(
+      UserMessageKind.UserPrompt,
+    );
+  });
 });
 
 describe("semantic helpers", () => {
