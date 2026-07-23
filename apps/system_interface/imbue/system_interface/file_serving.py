@@ -83,25 +83,28 @@ def serve_inline_image(
     return response
 
 
-# Shown in place of a chat image whose file changed after its message was
-# posted (see the chat-image change-detection endpoint in ``server``). An SVG
-# so it needs no frontend error handling: the <img> simply renders the notice.
-_CHANGED_IMAGE_PLACEHOLDER_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="520" height="96" viewBox="0 0 520 96">'
-    '<rect width="519" height="95" x="0.5" y="0.5" rx="8" fill="#f8f8f8" stroke="#d0d0d0"/>'
-    '<text x="24" y="42" font-family="system-ui, sans-serif" font-size="15" fill="#444">'
-    "This file has been changed.</text>"
-    '<text x="24" y="66" font-family="system-ui, sans-serif" font-size="13" fill="#777">'
-    "Please revert your workspace or ask your agent to recover it.</text>"
-    "</svg>"
-)
+# HTTP status the chat-image change-detection endpoint returns when a referenced
+# file has changed after its message was posted. Deliberately NOT an image: the
+# frontend catches the resulting <img> load error, re-fetches to read this
+# status, and swaps the image for a plain text notice. Serving an image
+# placeholder instead would make the notice itself an openable/downloadable
+# image, which it must never be.
+CHANGED_FILE_STATUS = 409
+
+# The user-facing notice. Returned as the 409 body so the frontend can render
+# the backend's exact wording (single source of truth) rather than duplicating
+# it, falling back to its own copy only if the body is empty.
+CHANGED_FILE_MESSAGE = "This file has been changed. Please revert your workspace or ask your agent to recover it."
 
 
-def serve_changed_image_placeholder() -> Response:
-    """Serve the notice shown in place of a chat image whose file has changed."""
-    response = Response(_CHANGED_IMAGE_PLACEHOLDER_SVG, mimetype="image/svg+xml")
+def serve_changed_file_notice() -> Response:
+    """Return the non-image response marking a chat file that has changed.
+
+    Carries ``CHANGED_FILE_STATUS`` and a plain-text body, never image bytes, so
+    the changed state can only ever render as a non-interactive notice.
+    """
+    response = Response(CHANGED_FILE_MESSAGE, status=CHANGED_FILE_STATUS, mimetype="text/plain")
     response.headers["Cache-Control"] = "no-store"
-    response.headers["Content-Security-Policy"] = _SVG_CONTENT_SECURITY_POLICY
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 

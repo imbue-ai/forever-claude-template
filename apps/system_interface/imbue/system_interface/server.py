@@ -42,7 +42,7 @@ from imbue.system_interface.config import Config
 from imbue.system_interface.event_queues import AgentEventQueues
 from imbue.system_interface.chat_image_timestamps import ChatImageStatus
 from imbue.system_interface.file_serving import image_mime_type_for_path
-from imbue.system_interface.file_serving import serve_changed_image_placeholder
+from imbue.system_interface.file_serving import serve_changed_file_notice
 from imbue.system_interface.file_serving import serve_inline_image
 from imbue.system_interface.file_serving import try_serve_file
 from imbue.system_interface.layout_ops import LayoutMutex
@@ -450,10 +450,11 @@ def _serve_chat_image(event_id: str, image_path: str) -> Response:
     (eagerly in the session watcher fan-out, lazily here on first fetch); the
     live file is served with caching disabled so every render refetches and
     re-verifies. Once the file no longer matches its recorded fingerprint --
-    overwritten or deleted after the message was posted -- a placeholder image
-    is served telling the user the file has changed. 404s when there is no
-    record and no file (e.g. a typo'd path), matching the broken-image
-    behavior of the direct path route.
+    overwritten or deleted after the message was posted -- a non-image
+    ``CHANGED_FILE_STATUS`` response is returned; the frontend catches the
+    resulting image load error and renders a plain, non-openable notice in
+    place of the image. 404s when there is no record and no file (e.g. a typo'd
+    path), matching the broken-image behavior of the direct path route.
     """
     source_path = "/" + image_path
     mime_type = image_mime_type_for_path(source_path)
@@ -463,7 +464,7 @@ def _serve_chat_image(event_id: str, image_path: str) -> Response:
     if status is ChatImageStatus.UNKNOWN:
         return Response(status=404)
     if status is ChatImageStatus.CHANGED:
-        return serve_changed_image_placeholder()
+        return serve_changed_file_notice()
     return serve_inline_image(Path(source_path), mime_type, cache_control="no-store")
 
 

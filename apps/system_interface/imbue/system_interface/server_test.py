@@ -1764,9 +1764,10 @@ def test_missing_non_image_path_is_not_a_download(client: FlaskClient, tmp_path:
 # The frontend rewrites chat markdown image URLs to
 # /api/chat-images/<event_id>/<path>; the endpoint records the source file's
 # mtime+size on first fetch for that (event, path) pair, serves the live file
-# with caching disabled, and serves a "file has been changed" placeholder once
-# the file no longer matches, so an already-posted message never silently
-# changes appearance when the file on disk does.
+# with caching disabled, and returns a non-image 409 once the file no longer
+# matches, so an already-posted message never silently changes appearance when
+# the file on disk does. The 409 is deliberately not an image, so the frontend
+# renders a plain notice the user cannot open or download.
 
 
 def _rewind_mtime(path: Path) -> None:
@@ -1787,7 +1788,7 @@ def test_chat_image_serves_live_bytes_uncached(client: FlaskClient, tmp_path: Pa
     assert response.headers["Cache-Control"] == "no-store"
 
 
-def test_chat_image_changed_file_serves_placeholder(client: FlaskClient, tmp_path: Path) -> None:
+def test_chat_image_changed_file_returns_non_image_notice(client: FlaskClient, tmp_path: Path) -> None:
     image_path = tmp_path / "chart.png"
     image_path.write_bytes(b"original-bytes")
 
@@ -1797,12 +1798,13 @@ def test_chat_image_changed_file_serves_placeholder(client: FlaskClient, tmp_pat
     _rewind_mtime(image_path)
     image_path.write_bytes(b"changed-bytes!")
     response = client.get(url)
-    assert response.status_code == 200
-    assert response.content_type.startswith("image/svg+xml")
+    # A non-image 409, so the browser's <img> load fails and the frontend can
+    # render a notice the user cannot open or download.
+    assert response.status_code == 409
+    assert response.content_type.startswith("text/plain")
+    assert not response.content_type.startswith("image/")
     assert b"This file has been changed." in response.data
     assert response.headers["Cache-Control"] == "no-store"
-    assert response.headers["Content-Security-Policy"] == "default-src 'none'; style-src 'unsafe-inline'"
-    assert response.headers["X-Content-Type-Options"] == "nosniff"
 
     # A new message referencing the same path sees the file's current content.
     fresh = client.get(f"/api/chat-images/event-2{image_path}")
@@ -1810,7 +1812,7 @@ def test_chat_image_changed_file_serves_placeholder(client: FlaskClient, tmp_pat
     assert fresh.data == b"changed-bytes!"
 
 
-def test_chat_image_deleted_file_serves_placeholder(client: FlaskClient, tmp_path: Path) -> None:
+def test_chat_image_deleted_file_returns_non_image_notice(client: FlaskClient, tmp_path: Path) -> None:
     image_path = tmp_path / "chart.png"
     image_path.write_bytes(b"original-bytes")
 
@@ -1819,7 +1821,8 @@ def test_chat_image_deleted_file_serves_placeholder(client: FlaskClient, tmp_pat
 
     image_path.unlink()
     response = client.get(url)
-    assert response.status_code == 200
+    assert response.status_code == 409
+    assert response.content_type.startswith("text/plain")
     assert b"This file has been changed." in response.data
 
 

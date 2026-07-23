@@ -27,6 +27,51 @@ export function chatImageUrl(sourcePath: string, eventId: string): string {
   return apiUrl(`/api/chat-images/${encodeURIComponent(eventId)}/${encodedPath}`);
 }
 
+// HTTP status the backend returns when a referenced file has changed since its
+// message was posted (mirrors file_serving.CHANGED_FILE_STATUS). It is not an
+// image, so the <img> load fails; we detect that status and swap in a notice.
+const CHAT_FILE_CHANGED_STATUS = 409;
+const CHAT_FILE_CHANGED_FALLBACK =
+  "This file has been changed. Please revert your workspace or ask your agent to recover it.";
+
+/**
+ * Replace a changed image with a plain, non-interactive text notice.
+ *
+ * A div -- not an img and not a link -- so the notice can never be clicked to
+ * enlarge (the lightbox only acts on <img>) or opened/downloaded. This is the
+ * whole point of returning a non-image status for a changed file: the "file has
+ * been changed" message must not itself masquerade as the file.
+ */
+function replaceWithChangedNotice(image: HTMLImageElement, message: string): void {
+  const notice = document.createElement("div");
+  notice.className = "chat-file-changed";
+  notice.textContent = message;
+  image.replaceWith(notice);
+}
+
+/**
+ * On an image load error, tell a changed file apart from a broken path.
+ *
+ * The change-checking route returns the image (200) when unchanged, a non-image
+ * CHAT_FILE_CHANGED_STATUS when the file has changed, and 404 for a never-seen
+ * missing path; the first two both surface as an <img> error, so re-fetch to
+ * read the status. Only a changed file becomes the notice; a genuine 404 (a
+ * typo'd path) is left as the browser's broken-image icon.
+ */
+function handleChatImageLoadError(image: HTMLImageElement): void {
+  const url = image.getAttribute("src") ?? "";
+  if (!url) return;
+  void fetch(url)
+    .then(async (response) => {
+      if (response.status !== CHAT_FILE_CHANGED_STATUS) return;
+      const message = (await response.text()).trim() || CHAT_FILE_CHANGED_FALLBACK;
+      replaceWithChangedNotice(image, message);
+    })
+    .catch(() => {
+      // Network error re-checking status: leave the broken-image icon as-is.
+    });
+}
+
 /**
  * Point every inline chat image at its per-message change-checking URL.
  *
@@ -36,9 +81,9 @@ export function chatImageUrl(sourcePath: string, eventId: string): string {
  * cached copy and an old message would silently change appearance. Routing
  * through /api/chat-images/<event_id>/<path> fixes both: the backend records
  * the file's mtime+size the first time each (event, path) pair is seen and
- * serves the file uncached, so every render refetches; once the file no
- * longer matches, the backend serves a "file has been changed" notice image
- * in its place.
+ * serves the file uncached, so every render refetches; once the file no longer
+ * matches, the fetch fails with a changed-file status and the image is replaced
+ * by a non-interactive "file has been changed" notice.
  */
 function rewriteChatImageSources(container: HTMLElement, eventId: string): void {
   for (const image of Array.from(container.querySelectorAll("img"))) {
@@ -48,6 +93,9 @@ function rewriteChatImageSources(container: HTMLElement, eventId: string): void 
     // ("https://...", "//...") and app routes ("/api/...") pass through.
     if (!src.startsWith("/") || src.startsWith("//") || src.startsWith("/api/")) continue;
     if (!INLINE_IMAGE_EXTENSION_PATTERN.test(src)) continue;
+    // Attach the error handler before pointing at the new URL so a changed
+    // file's failed load is caught and turned into the notice.
+    image.addEventListener("error", () => handleChatImageLoadError(image), { once: true });
     image.setAttribute("src", chatImageUrl(src, eventId));
   }
 }

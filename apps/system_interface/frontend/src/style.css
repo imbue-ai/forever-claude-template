@@ -2985,6 +2985,20 @@ body {
   cursor: zoom-in;
 }
 
+/* Shown in place of a chat image whose file changed after the message was
+   posted. Deliberately inert -- plain text, no pointer cursor, not clickable --
+   so a changed file can never be enlarged or downloaded. */
+.chat-file-changed {
+  display: block;
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+  background: var(--color-bg-code);
+  color: var(--color-text-secondary);
+  font-size: 0.9em;
+}
+
 .image-lightbox-overlay {
   position: fixed;
   inset: 0;
